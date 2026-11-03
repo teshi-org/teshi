@@ -566,6 +566,7 @@ impl AcpAgentBackend {
                         tool_calls: None,
                         tool_call_id: None,
                         source: Some("agent_progress".into()),
+                        activity: None,
                     });
                 }
                 match &event {
@@ -587,6 +588,7 @@ impl AcpAgentBackend {
                                 tool_calls: None,
                                 tool_call_id: None,
                                 source: Some("acp_reasoning".into()),
+                                activity: None,
                             });
                         }
                     }
@@ -594,6 +596,7 @@ impl AcpAgentBackend {
                         tool_call_id,
                         title,
                         status,
+                        details,
                     } => {
                         let existing = tool_call_id.as_ref().and_then(|id| {
                             self.messages.iter_mut().rev().find(|m| {
@@ -609,6 +612,16 @@ impl AcpAgentBackend {
                             if let Some(status) = status {
                                 message.reasoning_content = Some(status.clone());
                             }
+                            let saved = message.activity.get_or_insert_default();
+                            if details.kind.is_some() {
+                                saved.kind.clone_from(&details.kind);
+                            }
+                            if details.input.is_some() {
+                                saved.input.clone_from(&details.input);
+                            }
+                            if !details.locations.is_empty() {
+                                saved.locations.clone_from(&details.locations);
+                            }
                         } else {
                             self.messages.push(AiChatMessage {
                                 role: AiRole::Assistant,
@@ -617,6 +630,7 @@ impl AcpAgentBackend {
                                 tool_calls: None,
                                 tool_call_id: tool_call_id.clone(),
                                 source: Some("acp_activity".into()),
+                                activity: Some(details.clone()),
                             });
                         }
                     }
@@ -631,6 +645,7 @@ impl AcpAgentBackend {
                                 reasoning_content: None,
                                 source: matches!(finish_reason.as_deref(), Some("cancelled"))
                                     .then(|| "agent_progress".into()),
+                                activity: None,
                             });
                         }
                         self.state = AgentBackendStatus::Completed;
@@ -1056,6 +1071,20 @@ fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>) ->
                 tool_call_id,
                 title,
                 status,
+                details: teshi_agent::backend::ToolActivityInfo {
+                    kind: update
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    input: update.get("rawInput").cloned(),
+                    locations: update
+                        .get("locations")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_owned))
+                        .collect(),
+                },
             })
         }
         AcpEvent::SessionUpdate(value)

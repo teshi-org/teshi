@@ -69,6 +69,12 @@ pub struct KeyContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Action {
+    /// Toggle the completed process of a user turn without moving input focus.
+    AiToggleTurn(usize),
+    /// Toggle one reasoning body; `usize::MAX` identifies live native reasoning.
+    AiToggleThought(usize),
+    /// Toggle one external tool group inside a turn's execution process.
+    AiToggleTools(usize),
     /// Rescan Feature files while preserving unsaved buffers.
     RefreshFeatures,
     /// Pan the focused Explore pane without moving keyboard focus.

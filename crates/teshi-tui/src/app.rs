@@ -39,6 +39,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("retry", "Continue an interrupted ACP task"),
     ("copy", "Copy last N assistant responses to clipboard"),
     ("details", "Expand or collapse thinking and tool details"),
+    ("unqueue", "Restore the latest queued message for editing"),
+    ("sendqueued", "Resume queued messages after a stopped turn"),
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("project", "Open or switch the active project"),
@@ -127,6 +129,8 @@ pub struct AgentThread {
     pub horizontal_scroll: usize,
     /// Whether supporting reasoning and tool titles are expanded in this conversation.
     pub activity_details_expanded: bool,
+    /// Conversation-local folding, queued drafts and live output feedback.
+    pub(crate) chat: crate::chat_state::ChatState,
     pub(crate) backend: teshi_agent_runtime::backend::AgentBackendRuntime,
     retiring_backends: Vec<teshi_agent_runtime::backend::AgentBackendRuntime>,
     /// Conversation-local ACP picker and hit regions.
@@ -210,6 +214,7 @@ impl AgentThread {
                 tool_call_id: None,
                 reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
                 source: Some("agent_progress".into()),
+                activity: None,
             });
         }
     }
@@ -279,6 +284,7 @@ impl AgentThread {
             scroll_offset: 0,
             horizontal_scroll: 0,
             activity_details_expanded: false,
+            chat: Default::default(),
             backend: teshi_agent_runtime::backend::AgentBackendRuntime::new(
                 kind,
                 teshi_agent_runtime::max_agent_iterations(),
@@ -337,10 +343,12 @@ impl AgentThread {
                 reasoning_content: (!self.backend.partial_reasoning().is_empty())
                     .then(|| self.backend.partial_reasoning().to_string()),
                 source: Some("agent_progress".into()),
+                activity: None,
             });
         }
         let snapshot = serde_json::to_string(&(
             &messages,
+            &self.chat.queue,
             self.backend_kind(),
             &self.selected_acp_id,
             &model,
@@ -354,6 +362,7 @@ impl AgentThread {
             .clone()
             .unwrap_or_else(|| crate::session::Session::from_messages(Vec::new(), model.clone()));
         session.messages = messages;
+        session.pending_messages = self.chat.queue.clone();
         session.message_count = session.messages.len();
         session.model_label = model;
         // Loading legacy history is not an assignment to the active project.
@@ -3049,6 +3058,7 @@ impl App {
     }
 
     fn cancel_agent_turn(&mut self) {
+        self.agent_mut().chat.queue_ready = false;
         let agent = self.agent_mut();
         agent.retain_partial_response();
         agent.backend.cancel();
@@ -3298,6 +3308,7 @@ impl App {
     /// The backend owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
         for agent in &mut self.agents {
+            agent.poll_shutdown();
             if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
                 let start = agent.task_started.get_or_insert_with(Instant::now);
                 agent.task_elapsed = start.elapsed();
@@ -3319,6 +3330,17 @@ impl App {
                         output_tokens,
                         finish_reason,
                     })) => {
+                        self.agents[i].chat.queue_ready = !matches!(
+                            finish_reason.as_deref(),
+                            Some(
+                                "cancelled"
+                                    | "refusal"
+                                    | "max_tokens"
+                                    | "length"
+                                    | "max_turn_requests"
+                            )
+                        );
+                        self.agents[i].chat.rate.clear();
                         self.agents[i].last_finish_reason = finish_reason;
                         let interrupted = matches!(
                             self.agents[i].last_finish_reason.as_deref(),
@@ -3340,6 +3362,7 @@ impl App {
                                 tool_call_id: None,
                                 reasoning_content: None,
                                 source: Some("agent_progress".into()),
+                                activity: None,
                             });
                         }
                         self.agents[i].status = AiStatus::Idle;
@@ -3426,6 +3449,7 @@ impl App {
                                         tool_call_id: Some(tool_call_id),
                                         reasoning_content: None,
                                         source: None,
+                                        activity: None,
                                     });
                                 }
                             }
@@ -3486,7 +3510,17 @@ impl App {
                         }
                     }
                     Ok(Some(AgentBackendEvent::Failed(message))) => {
+                        self.agents[i].chat.queue_ready = false;
                         self.agents[i].retain_partial_response();
+                        self.agents[i].messages_mut().push(AiChatMessage {
+                            role: AiRole::Assistant,
+                            content: format!("Error: {message}"),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                            source: Some("agent_progress".into()),
+                            activity: None,
+                        });
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
@@ -3496,6 +3530,8 @@ impl App {
                         }
                     }
                     Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status, .. })) => {
+                        self.agents[i].chat.rate.clear();
+                        self.agents[i].chat.last_activity = Some(Instant::now());
                         self.agents[i].tool_status = Some(match status {
                             Some(status) => format!("{title}: {status}"),
                             None => title,
@@ -3525,9 +3561,13 @@ impl App {
                         }
                     }
                     Ok(Some(
-                        AgentBackendEvent::MessageChunk { .. }
-                        | AgentBackendEvent::ReasoningChunk { .. },
-                    )) => {}
+                        AgentBackendEvent::MessageChunk { content }
+                        | AgentBackendEvent::ReasoningChunk { content },
+                    )) => {
+                        let now = Instant::now();
+                        self.agents[i].chat.last_activity = Some(now);
+                        self.agents[i].chat.rate.record(&content, now);
+                    }
                     Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.agents[i].retain_partial_response();
@@ -3539,6 +3579,24 @@ impl App {
                         }
                         break;
                     }
+                }
+            }
+        }
+        for i in 0..self.agents.len() {
+            if self.agents[i].status == AiStatus::Idle
+                && self.agents[i].chat.queue_ready
+                && !(self.agents[i].backend_kind()
+                    == teshi_agent::backend::AgentBackendKind::Native
+                    && self.generation_stage.is_human_review_gate())
+                && !self.agents[i].shutdown_pending()
+                && let Some(message) = self.agents[i].chat.queue.front().cloned()
+            {
+                match self.dispatch_user_message_for_agent(i, message, false) {
+                    Ok(true) => {
+                        self.agents[i].chat.queue.pop_front();
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.status = format!("Cannot send queued message: {error}"),
                 }
             }
         }
@@ -3960,24 +4018,52 @@ impl App {
     }
 
     fn dispatch_user_message(&mut self, user_msg: String) -> Result<()> {
-        if !self.start_agent_backend(self.selected_agent) {
+        self.dispatch_user_message_for_agent(self.selected_agent, user_msg, true)
+            .map(|_| ())
+    }
+
+    fn dispatch_user_message_for_agent(
+        &mut self,
+        agent_idx: usize,
+        user_msg: String,
+        restore_draft: bool,
+    ) -> Result<bool> {
+        self.agents[agent_idx].chat.queue_ready = false;
+        if !self.start_agent_backend(agent_idx) {
+            // An explicit queue resume may first have to reap the failed ACP process.
+            // Keep that one authorized resume pending until shutdown is acknowledged.
+            if !restore_draft && self.agents[agent_idx].shutdown_pending() {
+                self.agents[agent_idx].chat.queue_ready = true;
+                self.agents[agent_idx].status = AiStatus::Idle;
+            }
             // A rejected send must not reappear in a later restored provider
             // context. Keep it as an editable draft for an explicit retry.
-            self.agent_mut().input_cursor = user_msg.chars().count();
-            self.agent_mut().input = user_msg;
-            return Ok(());
+            if restore_draft {
+                self.agents[agent_idx].input_cursor = user_msg.chars().count();
+                self.agents[agent_idx].input = user_msg;
+            }
+            return Ok(false);
         }
-        self.agent_mut().last_finish_reason = None;
-        self.agent_mut().scroll_offset = 0;
-        self.agent_mut().messages_mut().push(AiChatMessage {
+        if !restore_draft && !self.agents[agent_idx].backend.is_connected() {
+            self.status = "Queued message paused: configure an Agent before /sendqueued".into();
+            return Ok(false);
+        }
+        self.agents[agent_idx].last_finish_reason = None;
+        self.agents[agent_idx].chat.queue_ready = false;
+        self.agents[agent_idx].chat.rate.clear();
+        self.agents[agent_idx].chat.last_activity = Some(Instant::now());
+        self.agents[agent_idx].task_started = Some(Instant::now());
+        self.agents[agent_idx].scroll_offset = 0;
+        self.agents[agent_idx].messages_mut().push(AiChatMessage {
             role: AiRole::User,
             content: user_msg.clone(),
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
-        if self.agent().title.starts_with("Agent ") {
+        if self.agents[agent_idx].title.starts_with("Agent ") {
             let name = user_msg
                 .chars()
                 .take(30)
@@ -3985,58 +4071,55 @@ impl App {
                 .trim()
                 .to_string();
             if !name.is_empty() {
-                self.agent_mut().title = name;
+                self.agents[agent_idx].title = name;
             }
         }
-        self.agent_mut().status = AiStatus::Waiting;
-        self.agent_mut().partial_response_mut().clear();
-        self.agent_mut().pending_acp_permission = None;
+        self.agents[agent_idx].status = AiStatus::Waiting;
+        self.agents[agent_idx].partial_response_mut().clear();
+        self.agents[agent_idx].pending_acp_permission = None;
         self.status = "Sending message to AI...".to_string();
 
-        if !self.agent().backend.is_connected() {
-            self.spawn_llm_if_configured();
-        }
-        if self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Native
+        if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Native
             && !crate::llm::is_configured()
         {
-            self.agent_mut().messages_mut().push(AiChatMessage {
+            self.agents[agent_idx].messages_mut().push(AiChatMessage {
                 role: AiRole::Assistant,
                 content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             });
-            self.agent_mut().status = AiStatus::Idle;
-            self.agent_mut().partial_response_mut().clear();
+            self.agents[agent_idx].status = AiStatus::Idle;
+            self.agents[agent_idx].partial_response_mut().clear();
             self.status = "AI not configured".to_string();
-        } else if self.agent().backend.is_connected() {
-            self.compact_context_if_needed(self.selected_agent);
-            let messages = self.build_chat_messages_for_agent(self.selected_agent);
-            let profile = self.agent_profile(self.selected_agent);
+        } else if self.agents[agent_idx].backend.is_connected() {
+            self.compact_context_if_needed(agent_idx);
+            let messages = self.build_chat_messages_for_agent(agent_idx);
+            let profile = self.agent_profile(agent_idx);
             let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
                 teshi_agent::definition::ToolPermission::All => None,
                 teshi_agent::definition::ToolPermission::None => Some(&[] as &[String]),
                 teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
             });
             let tools = Some(teshi_agent::get_tools(allowed));
-            let system = Some(self.ai_system_prompt(Some(&user_msg), self.selected_agent));
-            if let Err(error) = self
-                .agent_mut()
+            let system = Some(self.ai_system_prompt(Some(&user_msg), agent_idx));
+            if let Err(error) = self.agents[agent_idx]
                 .backend
                 .submit_turn(system, messages, tools)
             {
-                self.agent_mut().status = AiStatus::Error;
-                self.agent_mut().partial_response_mut().clear();
+                self.agents[agent_idx].status = AiStatus::Error;
+                self.agents[agent_idx].partial_response_mut().clear();
                 self.status = format!("AI error: {error}");
             }
         } else {
-            self.agent_mut().status = AiStatus::Error;
-            self.agent_mut().partial_response_mut().clear();
+            self.agents[agent_idx].status = AiStatus::Error;
+            self.agents[agent_idx].partial_response_mut().clear();
             self.status = "AI error: LLM handle not available".to_string();
         }
         self.quit_pending_confirm = false;
-        Ok(())
+        Ok(true)
     }
 
     /// Restores generation stage/sources/plan from disk without granting approvals.
@@ -4154,6 +4237,7 @@ impl App {
                     tool_call_id: None,
                     reasoning_content: None,
                     source: None,
+                    activity: None,
                 });
                 self.status = format!(
                     "Advanced to Scenario Planning with {} approved test point(s)",
@@ -4336,6 +4420,7 @@ impl App {
             tool_call_id: Some(tool_call_id),
             reasoning_content: None,
             source: None,
+            activity: None,
         });
         if self.has_agent_change_prompt() {
             return;
@@ -4426,6 +4511,7 @@ impl App {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
 
         // An explicit exploration task may create the first backend connection.
@@ -5169,9 +5255,17 @@ impl App {
                     tool_call_id: None,
                     reasoning_content: None,
                     source: Some("compacted".into()),
+                    activity: None,
                 },
             );
 
+            // Compression reindexes durable messages, so old row keys no longer
+            // identify the turns and tool groups the user originally opened.
+            let chat = &mut self.agents[agent_idx].chat;
+            chat.turns.clear();
+            chat.thoughts.clear();
+            chat.groups.clear();
+            chat.revision += 1;
             self.agents[agent_idx].last_input_tokens = None;
             self.status_message = Some(format!(
                 "Context compacted: {removed_count} message(s) → summary ({} token window)",
@@ -7971,6 +8065,7 @@ impl App {
                         tool_call_id: None,
                         reasoning_content: None,
                         source: Some("MindMap".into()),
+                        activity: None,
                     });
                     self.active_tab = MainTab::Ai;
                     self.agent_mut().status = AiStatus::Waiting;
@@ -7991,6 +8086,7 @@ impl App {
                                 tool_call_id: None,
                                 reasoning_content: None,
                                 source: None,
+                                activity: None,
                             });
                         self.agent_mut().status = AiStatus::Idle;
                         self.agent_mut().partial_response_mut().clear();
@@ -9237,9 +9333,18 @@ impl App {
                     self.status = "Input deactivated".to_string();
                     return Ok(());
                 }
-                if self.agent().status == AiStatus::Waiting
-                    && !self.agent().input.trim().starts_with('/')
+                if matches!(
+                    self.agent().status,
+                    AiStatus::Waiting | AiStatus::AwaitingApproval
+                ) && !self.agent().input.trim().starts_with('/')
                 {
+                    let message = std::mem::take(&mut self.agent_mut().input);
+                    self.agent_mut().input_cursor = 0;
+                    self.agent_mut().chat.queue.push_back(message);
+                    self.status = format!(
+                        "Message queued ({}) — /unqueue to edit",
+                        self.agent().chat.queue.len()
+                    );
                     return Ok(());
                 }
 
@@ -9346,6 +9451,27 @@ impl App {
                         .take_while(|c| *c != '\n')
                         .count();
                 self.quit_pending_confirm = false;
+            }
+            Action::AiToggleTurn(start) => {
+                self.agent_mut().chat.revision += 1;
+                let default = self.agent().activity_details_expanded;
+                let expanded = self.agent_mut().chat.turns.entry(start).or_insert(default);
+                *expanded = !*expanded;
+                self.clear_chat_selection();
+            }
+            Action::AiToggleTools(index) => {
+                self.agent_mut().chat.revision += 1;
+                if !self.agent_mut().chat.groups.remove(&index) {
+                    self.agent_mut().chat.groups.insert(index);
+                }
+                self.clear_chat_selection();
+            }
+            Action::AiToggleThought(index) => {
+                self.agent_mut().chat.revision += 1;
+                if !self.agent_mut().chat.thoughts.remove(&index) {
+                    self.agent_mut().chat.thoughts.insert(index);
+                }
+                self.clear_chat_selection();
             }
             Action::AiScrollUp => {
                 self.agent_mut().scroll_offset = self.agent().scroll_offset.saturating_add(5);
@@ -9488,6 +9614,7 @@ impl App {
                         tool_call_id: None,
                         reasoning_content: None,
                         source: Some("agent_progress".into()),
+                        activity: None,
                     });
                     self.status = "AI request cancelled".to_string();
                 }
@@ -9636,6 +9763,7 @@ impl App {
                             tool_call_id: None,
                             reasoning_content: None,
                             source: None,
+                            activity: None,
                         });
                         self.status = "AI request cancelled".to_string();
                     } else {
@@ -11034,6 +11162,17 @@ impl App {
         if chat_context && (in_chat_history || self.chat_selection_dragging) {
             match kind {
                 MouseEventKind::Down(MouseButton::Left) if in_chat_history => {
+                    if let Some(ClickableRegion::ActionButton { action, .. }) =
+                        self.hit_test(&pos).cloned()
+                        && matches!(
+                            action,
+                            Action::AiToggleTurn(_)
+                                | Action::AiToggleThought(_)
+                                | Action::AiToggleTools(_)
+                        )
+                    {
+                        return self.handle_action(action);
+                    }
                     self.ai_input_focused = false;
                     if self.active_tab == MainTab::MindMap {
                         self.mindmap_focus = MindMapFocus::AiPanel;
@@ -12407,9 +12546,31 @@ impl App {
         let command = command.trim();
         if command == "details" {
             let agent = self.agent_mut();
+            agent.chat.revision += 1;
             agent.activity_details_expanded = !agent.activity_details_expanded;
-            agent.scroll_offset = 0;
+            agent.chat.turns.clear();
+            agent.chat.thoughts.clear();
+            agent.chat.groups.clear();
             self.status = "Thinking and tool details toggled".into();
+            return Ok(());
+        }
+        if command == "unqueue" {
+            if !self.agent().input.is_empty() {
+                self.status =
+                    "Keep or clear the current draft before editing a queued message".into();
+            } else if let Some(message) = self.agent_mut().chat.queue.pop_back() {
+                self.agent_mut().input_cursor = message.chars().count();
+                self.agent_mut().input = message;
+                self.ai_input_focused = true;
+                self.status = "Queued message restored for editing".into();
+            } else {
+                self.status = "No queued messages".into();
+            }
+            return Ok(());
+        }
+        if command == "sendqueued" {
+            self.agent_mut().chat.queue_ready = true;
+            self.status = "Queued messages will send when this turn is ready".into();
             return Ok(());
         }
         if command == "settings" {
@@ -12566,6 +12727,7 @@ impl App {
         self.agent_mut().saved_session = None;
         self.agent_mut().last_session_snapshot.clear();
         self.agent_mut().messages_mut().clear();
+        self.agent_mut().chat = Default::default();
         self.agent_mut().partial_response_mut().clear();
         self.agent_mut().input.clear();
         self.agent_mut().input_cursor = 0;
@@ -12777,6 +12939,10 @@ impl App {
         agent.selected_acp_id = session.acp_agent_id.clone();
         agent.backend_selected = session.backend_kind.is_some();
         agent.acp_controls_ui = Default::default();
+        agent.chat = crate::chat_state::ChatState {
+            queue: session.pending_messages.clone(),
+            ..Default::default()
+        };
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
         agent.tool_status = None;
@@ -12894,6 +13060,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
             AiChatMessage {
                 role: AiRole::Assistant,
@@ -12902,6 +13069,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
             AiChatMessage {
                 role: AiRole::Assistant,
@@ -12910,6 +13078,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: Some("agent_progress".into()),
+                activity: None,
             },
             AiChatMessage {
                 role: AiRole::Assistant,
@@ -12918,6 +13087,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: Some("thinking only".into()),
                 source: None,
+                activity: None,
             },
             AiChatMessage {
                 role: AiRole::Assistant,
@@ -12926,6 +13096,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
         ];
 
@@ -13109,6 +13280,134 @@ mod tests {
         (app, project, store)
     }
 
+    #[test]
+    fn queued_drafts_preserve_order_and_can_be_reclaimed_without_touching_history() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        for input in ["first queued", "second queued"] {
+            app.agents[0].input = input.into();
+            app.handle_action(Action::AiSendMessage).unwrap();
+        }
+        assert_eq!(
+            app.agent()
+                .chat
+                .queue
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["first queued", "second queued"]
+        );
+        assert!(
+            app.agent().messages().is_empty(),
+            "queued prompts are not already model history"
+        );
+        assert!(app.agent().input.is_empty());
+        app.execute_slash_command("unqueue").unwrap();
+        assert_eq!(app.agent().input, "second queued");
+        assert_eq!(app.agent().input_cursor, "second queued".chars().count());
+        app.handle_action(Action::AiCancel).unwrap();
+        app.poll_llm_events();
+        assert_eq!(
+            app.agent().chat.queue.front().map(String::as_str),
+            Some("first queued")
+        );
+        assert!(!app.agent().chat.queue_ready);
+        assert_eq!(app.agent().input, "second queued");
+    }
+
+    #[test]
+    fn queued_messages_survive_checkpoint_and_restore_without_auto_sending() {
+        let (mut app, project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].messages_mut().push(super::AiChatMessage {
+            role: AiRole::User,
+            content: "original question".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        app.agents[0]
+            .chat
+            .queue
+            .push_back("unsent follow-up".into());
+        let root = tempdir().unwrap();
+        app.agents[0]
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        let path = root.path().join(format!(
+            "{}.json",
+            app.agent().saved_session.as_ref().unwrap().id
+        ));
+        let session = crate::session::Session::load_from_file(&path).unwrap();
+        assert_eq!(
+            session.pending_messages.front().map(String::as_str),
+            Some("unsent follow-up")
+        );
+        assert!(app.restore_session(session, false));
+        assert_eq!(
+            app.agent().chat.queue.front().map(String::as_str),
+            Some("unsent follow-up")
+        );
+        assert!(!app.agent().chat.queue_ready);
+        assert!(!app.agent().backend.is_connected());
+    }
+
+    #[test]
+    fn context_compression_invalidates_fold_keys_and_preserves_unsent_drafts() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        let limit = app.active_context_window();
+        for index in 0..6 {
+            app.agents[0].messages_mut().push(super::AiChatMessage {
+                role: if index % 2 == 0 {
+                    AiRole::User
+                } else {
+                    AiRole::Assistant
+                },
+                content: "x".repeat(limit as usize),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            });
+        }
+        app.agents[0].chat.turns.insert(0, true);
+        app.agents[0].chat.groups.insert(2);
+        app.agents[0].chat.thoughts.insert(1);
+        app.agents[0].chat.queue.push_back("unsent".into());
+        app.agents[0].last_input_tokens = Some(limit);
+        app.compact_context_if_needed(0);
+        assert_eq!(
+            app.agent().messages()[0].source.as_deref(),
+            Some("compacted")
+        );
+        assert!(
+            app.agent().chat.turns.is_empty()
+                && app.agent().chat.groups.is_empty()
+                && app.agent().chat.thoughts.is_empty()
+        );
+        assert_eq!(
+            app.agent().chat.queue.front().map(String::as_str),
+            Some("unsent")
+        );
+    }
+
     fn stop_fixture_agents(app: &mut App) {
         // Quiesce workers explicitly started by a fixture before switching projects.
         for agent in &mut app.agents {
@@ -13177,6 +13476,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             }],
             None,
         );
@@ -13881,6 +14181,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
         agent.partial_response_mut().push_str("unfinished");
         agent
@@ -13957,6 +14258,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
         let blocked = root.path().join("file");
         fs::write(&blocked, "not a directory").unwrap();
@@ -13987,6 +14289,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 source: None,
+                activity: None,
             });
             agent
                 .partial_response_mut()
@@ -14928,6 +15231,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
         app.agents[0].backend.start().unwrap();
         let messages = app.build_chat_messages_for_agent(0);
@@ -15116,6 +15420,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
         app.agents[0].backend.start().unwrap();
         let messages = app.build_chat_messages_for_agent(0);
@@ -15175,6 +15480,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: Some("inspect the page".into()),
                 source: None,
+                activity: None,
             },
             super::AiChatMessage {
                 role: super::AiRole::Tool,
@@ -15183,6 +15489,7 @@ mod tests {
                 tool_call_id: Some("observe-1".into()),
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
             super::AiChatMessage {
                 role: super::AiRole::User,
@@ -15191,6 +15498,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: Some("browser_visual_observation".into()),
+                activity: None,
             },
         ];
         app.agents[0].latest_visual_observation = Some(teshi_engine::BrowserScreenshot {
@@ -15228,6 +15536,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: Some("browser_visual_observation".into()),
+                activity: None,
             });
             app.agents[0].latest_visual_observation = Some(teshi_engine::BrowserScreenshot {
                 observation_id: format!("visual-{round}"),

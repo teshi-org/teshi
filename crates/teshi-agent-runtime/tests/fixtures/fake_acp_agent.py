@@ -246,7 +246,7 @@ for line in sys.stdin:
                     {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I will inspect the project"}},
                     {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Inspecting "}},
                     {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "the project"}},
-                    {"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read project", "status": "in_progress"},
+                    {"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read project", "status": "in_progress", "kind": "read", "rawInput": {"path": "src/sample.rs"}, "locations": [{"path": "src/sample.rs"}]},
                     {"sessionUpdate": "tool_call_update", "toolCallId": "read-1", "status": "completed"},
                 ]:
                     send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": update}})

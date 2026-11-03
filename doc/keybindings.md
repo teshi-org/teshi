@@ -396,3 +396,29 @@ still opens selection. ACP activity and controls now share one status row. On na
 screens, Agent names are clipped and option chips may be omitted; the settings chip
 (`⋯` when compact) or **Ctrl+,** opens the full settings picker. Errors, approval and
 interrupted-task recovery retain priority. These changes have not been runtime-tested.
+
+## Chat activity and follow-up messages
+
+Completed turns automatically collapse their execution process, keeping the question
+and final answer visible. Click a process header to expand just that turn. Its summary
+counts reads, searches, edits and commands; failed and interrupted calls remain in the
+summary even at narrow widths. Running, interrupted and unfinished turns stay open.
+`/details` toggles all process and reasoning details in the current conversation.
+
+Readable reasoning streams in a single line with a moving highlight and a preview of
+the latest text. Click the `Thinking` label to open the full reasoning body; clicking
+it again collapses it. These controls preserve the input focus. When a running turn
+has no text or tool animation to show, a breathing dot appears where its next output
+will arrive. Neither the wait indicator nor process controls enter copied messages.
+
+The input remains editable during a response or approval wait. **Enter** queues a
+follow-up, and successful completion submits queued messages in order. Failed or
+cancelled turns pause the queue; `/sendqueued` resumes it, and `/unqueue` returns the
+latest queued message to the input for editing. Unsent messages survive session
+checkpoints and are paused on restore. Queuing never approves tools or test points.
+
+The input border shows an approximate live output rate, such as `~42 tok/s`, while
+text or readable reasoning arrives. The estimate uses recent text, disappears during
+tool execution or after a streaming pause, and remains separate from provider-reported
+token usage and billing. Agents that omit tool details retain their original title;
+Teshi does not infer tool categories from free-form titles.

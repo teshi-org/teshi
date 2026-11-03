@@ -29,6 +29,9 @@ pub struct AiChatMessage {
     pub tool_call_id: Option<String>,
     pub reasoning_content: Option<String>,
     pub source: Option<String>,
+    /// Structured external tool details; older sessions omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<teshi_agent::backend::ToolActivityInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +298,7 @@ impl NativeAgentRuntime {
             tool_call_id: None,
             reasoning_content,
             source: None,
+            activity: None,
         });
         self.complete();
     }
@@ -318,6 +322,7 @@ impl NativeAgentRuntime {
             tool_call_id: None,
             reasoning_content,
             source: None,
+            activity: None,
         });
         Some(self.messages.len() - 1)
     }
@@ -330,6 +335,7 @@ impl NativeAgentRuntime {
             tool_call_id: Some(tool_call_id),
             reasoning_content: None,
             source: None,
+            activity: None,
         });
     }
 
@@ -380,6 +386,7 @@ impl NativeAgentRuntime {
                             tool_call_id: None,
                             reasoning_content: None,
                             source: Some("browser_visual_observation".into()),
+                            activity: None,
                         });
                     }
                 }

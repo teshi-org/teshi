@@ -50,6 +50,7 @@ struct ChatSourceRange {
 struct ChatProjectedLine {
     line: Line<'static>,
     source: Option<ChatSourceRange>,
+    action: Option<crate::keymap::Action>,
 }
 
 #[derive(Clone)]
@@ -64,12 +65,21 @@ struct ChatProjection {
     blocks: Vec<ChatBlock>,
 }
 
-type CachedActivity = (Vec<(String, Option<String>)>, bool, String, ChatProjection);
+type CachedActivity = (
+    Vec<(
+        String,
+        Option<String>,
+        Option<teshi_agent::backend::ToolActivityInfo>,
+    )>,
+    bool,
+    String,
+    ChatProjection,
+);
 
 /// Cached immutable message layouts, shared by drawing and pointer projection.
 #[derive(Default)]
 pub(crate) struct ChatLayoutCache {
-    context: (usize, usize, bool),
+    context: (usize, usize, bool, u64),
     activities: std::collections::HashMap<usize, CachedActivity>,
     entries: std::collections::HashMap<usize, (AiChatMessage, ChatProjection)>,
 }
@@ -128,7 +138,9 @@ fn find_display_source(
         || display_text.starts_with("Unconfirmed")
         || display_text.starts_with('✓')
         || display_text.starts_with('✗')
-        || display_text.starts_with('○');
+        || display_text.starts_with('○')
+        || display_text.starts_with('▸')
+        || display_text.starts_with('▾');
     if !has_display_prefix {
         return None;
     }
@@ -142,17 +154,20 @@ fn find_display_source(
 }
 
 fn append_unselectable(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>, lines: Vec<Line<'static>>) {
-    out.extend(
-        lines
-            .into_iter()
-            .map(|line| std::rc::Rc::new(ChatProjectedLine { line, source: None })),
-    );
+    out.extend(lines.into_iter().map(|line| {
+        std::rc::Rc::new(ChatProjectedLine {
+            line,
+            source: None,
+            action: None,
+        })
+    }));
 }
 
 fn append_blank(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>) {
     out.push(std::rc::Rc::new(ChatProjectedLine {
         line: Line::default(),
         source: None,
+        action: None,
     }));
 }
 
@@ -195,7 +210,11 @@ fn append_selectable_chunk(
         if let Some(source) = &source {
             source_cursor = source.end;
         }
-        out.push(std::rc::Rc::new(ChatProjectedLine { line, source }));
+        out.push(std::rc::Rc::new(ChatProjectedLine {
+            line,
+            source,
+            action: None,
+        }));
     }
 }
 
@@ -504,7 +523,8 @@ pub(super) fn render_chat_panel(
 
     let input_active = focused && app.ai_input_focused;
     let has_acp = app.agent().backend.acp_controls().is_some();
-    let status_height: u16 = 1;
+    let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 6);
+    let status_height: u16 = 1 + queue_height;
 
     // The input grows with its wrapped content but never takes more than a
     // third of the panel, so history always stays visible.
@@ -530,10 +550,40 @@ pub(super) fn render_chat_panel(
         .height
         .saturating_sub(status_height + sugg_height + input_height);
     let chat_area = shrink_left(Rect::new(inner.x, inner.y, inner.width, chat_height), 1);
-    let status_area = shrink_left(
-        Rect::new(inner.x, inner.y + chat_height, inner.width, status_height),
-        1,
-    );
+    let status_area = shrink_left(Rect::new(inner.x, inner.y + chat_height, inner.width, 1), 1);
+    if queue_height > 0 {
+        let count = app.agent().chat.queue.len();
+        let state = if matches!(
+            app.agent().status,
+            AiStatus::Waiting | AiStatus::AwaitingApproval
+        ) {
+            "Enter queues another"
+        } else {
+            "/sendqueued to resume"
+        };
+        let preview = app
+            .agent()
+            .chat
+            .queue
+            .front()
+            .map(String::as_str)
+            .unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                activity_summary(
+                    &format!("Queued {count}: {preview} · /unqueue to edit · {state}"),
+                    inner.width as usize,
+                ),
+                fg(theme::WARNING),
+            )),
+            Rect::new(
+                inner.x + 1,
+                inner.y + chat_height + 1,
+                inner.width.saturating_sub(1),
+                1,
+            ),
+        );
+    }
     let sugg_area = Rect::new(
         inner.x,
         inner.y + chat_height + status_height,
@@ -660,6 +710,24 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
     let visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
         .map(|index| projection.highlighted_line(index, selection))
         .collect();
+    for (row, projected) in projection.lines.iter().skip(start).take(height).enumerate() {
+        if let Some(action) = &projected.action {
+            app.clickable_regions.push(ClickableRegion::ActionButton {
+                rect: Rect::new(
+                    body.x,
+                    body.y + row as u16,
+                    if matches!(action, crate::keymap::Action::AiToggleThought(_)) {
+                        body.width.min(14)
+                    } else {
+                        body.width
+                    },
+                    1,
+                ),
+                action: action.clone(),
+                modal: false,
+            });
+        }
+    }
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
     render_scrollbar(frame, scrollbar, total, height, start);
 }
@@ -743,7 +811,12 @@ fn build_chat_projection(
 
     let messages = agent.messages();
     let mut cache = app.chat_layout_cache.borrow_mut();
-    let context = (app.selected_agent, width, agent.activity_details_expanded);
+    let context = (
+        app.selected_agent,
+        width,
+        agent.activity_details_expanded,
+        agent.chat.revision,
+    );
     if cache.context != context {
         cache.entries.clear();
         cache.activities.clear();
@@ -754,8 +827,58 @@ fn build_chat_projection(
     let last_user = messages
         .iter()
         .rposition(|message| message.role == AiRole::User);
+    let turns = crate::chat_state::turns(messages);
+    let mut turn_index = 0;
+    let mut folded_answer = None;
     let mut message_index = 0;
     while let Some(msg) = messages.get(message_index) {
+        while turns
+            .get(turn_index)
+            .is_some_and(|turn| message_index >= turn.end)
+        {
+            turn_index += 1;
+        }
+        if let Some(turn) = turns.get(turn_index)
+            && message_index == turn.start + 1
+            && let Some(answer) = turn.answer
+            && (turn_index + 1 < turns.len()
+                || (agent.status == AiStatus::Idle
+                    && !agent.task_interrupted()
+                    && !matches!(
+                        agent.last_finish_reason.as_deref(),
+                        Some("cancelled" | "length" | "max_tokens")
+                    )))
+            && (answer > message_index
+                || messages[answer]
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty()))
+        {
+            let expanded = agent
+                .chat
+                .turns
+                .get(&turn.start)
+                .copied()
+                .unwrap_or(agent.activity_details_expanded);
+            let summary = if messages[turn.start].source.as_deref() == Some("compacted") {
+                "Activity".into()
+            } else {
+                crate::chat_state::process_summary(&messages[turn.start + 1..turn.end])
+            };
+            let label = fit_activity_header(if expanded { "▾ " } else { "▸ " }, &summary, width);
+            out.push(std::rc::Rc::new(ChatProjectedLine {
+                line: Line::styled(label, muted()),
+                source: None,
+                action: Some(crate::keymap::Action::AiToggleTurn(turn.start)),
+            }));
+            if !expanded {
+                message_index = answer;
+                folded_answer = Some(answer);
+                if answer > turn.start + 1 {
+                    continue;
+                }
+            }
+        }
         if msg.source.as_deref() == Some("acp_activity") {
             let group_end = messages[message_index..]
                 .iter()
@@ -778,8 +901,10 @@ fn build_chat_projection(
                 && previous
                     .iter()
                     .zip(&group)
-                    .all(|((content, status), message)| {
-                        content == &message.content && status == &message.reasoning_content
+                    .all(|((content, status, details), message)| {
+                        content == &message.content
+                            && status == &message.reasoning_content
+                            && details == &message.activity
                     })
             {
                 out.extend(projection.lines.iter().cloned());
@@ -794,7 +919,7 @@ fn build_chat_projection(
                 &mut chunk,
                 &group,
                 width,
-                agent.activity_details_expanded,
+                agent.activity_details_expanded || agent.chat.groups.contains(&message_index),
                 active,
             );
             let source = group
@@ -804,13 +929,23 @@ fn build_chat_projection(
                 .collect::<Vec<_>>()
                 .join("\n");
             append_selectable_chunk(&mut out, &mut blocks, chunk, message_index, source);
+            if let Some(row) = out.get_mut(line_start) {
+                std::rc::Rc::make_mut(row).action =
+                    Some(crate::keymap::Action::AiToggleTools(message_index));
+            }
             append_blank(&mut out);
             cache.activities.insert(
                 message_index,
                 (
                     group
                         .iter()
-                        .map(|message| (message.content.clone(), message.reasoning_content.clone()))
+                        .map(|message| {
+                            (
+                                message.content.clone(),
+                                message.reasoning_content.clone(),
+                                message.activity.clone(),
+                            )
+                        })
                         .collect(),
                     active,
                     animation.to_owned(),
@@ -824,7 +959,12 @@ fn build_chat_projection(
             continue;
         }
         // Tool-call rows depend on live approval/result state and animation.
-        let cacheable = msg.tool_calls.as_ref().is_none_or(|calls| calls.is_empty());
+        let live_thought = agent.status == AiStatus::Waiting
+            && msg.source.as_deref() == Some("acp_reasoning")
+            && message_index + 1 == messages.len();
+        let cacheable = folded_answer != Some(message_index)
+            && !live_thought
+            && msg.tool_calls.as_ref().is_none_or(|calls| calls.is_empty());
         if cacheable
             && let Some((previous, projection)) = cache.entries.get(&message_index)
             && previous.role == msg.role
@@ -843,7 +983,15 @@ fn build_chat_projection(
         let mut chunk = Vec::new();
         match msg.role {
             AiRole::Tool => push_tool_result(&mut chunk, msg, width),
-            AiRole::User | AiRole::Assistant => push_message(&mut chunk, app, msg, width),
+            AiRole::User | AiRole::Assistant => push_message(
+                &mut chunk,
+                app,
+                msg,
+                width,
+                agent.activity_details_expanded || agent.chat.thoughts.contains(&message_index),
+                folded_answer != Some(message_index),
+                live_thought,
+            ),
         }
         append_selectable_chunk(
             &mut out,
@@ -852,6 +1000,18 @@ fn build_chat_projection(
             message_index,
             block_text_for_message(msg),
         );
+        if folded_answer != Some(message_index)
+            && (msg.source.as_deref() == Some("acp_reasoning")
+                || msg
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty()))
+            && msg.source.as_deref() != Some("acp_activity")
+            && let Some(row) = out.get_mut(line_start)
+        {
+            std::rc::Rc::make_mut(row).action =
+                Some(crate::keymap::Action::AiToggleThought(message_index));
+        }
         append_blank(&mut out);
         if cacheable {
             cache.entries.insert(
@@ -876,13 +1036,19 @@ fn build_chat_projection(
 
     if !agent.backend.partial_reasoning().is_empty() {
         let mut reasoning = Vec::new();
-        push_thinking(
+        push_thinking_state(
             &mut reasoning,
             agent.backend.partial_reasoning(),
             width,
-            agent.activity_details_expanded,
+            agent.activity_details_expanded || agent.chat.thoughts.contains(&usize::MAX),
+            true,
         );
+        let first = out.len();
         append_unselectable(&mut out, reasoning);
+        if let Some(row) = out.get_mut(first) {
+            std::rc::Rc::make_mut(row).action =
+                Some(crate::keymap::Action::AiToggleThought(usize::MAX));
+        }
     }
 
     if !agent.partial_response().is_empty() {
@@ -911,6 +1077,38 @@ fn build_chat_projection(
         append_blank(&mut out);
     }
 
+    let shows_thought = !agent.backend.partial_reasoning().is_empty()
+        || messages
+            .last()
+            .is_some_and(|m| m.source.as_deref() == Some("acp_reasoning"));
+    let shows_tool = messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role != AiRole::User)
+        .any(|m| {
+            m.source.as_deref() == Some("acp_activity")
+                && matches!(
+                    m.reasoning_content.as_deref(),
+                    Some("in_progress" | "pending")
+                )
+        });
+    if agent.status == AiStatus::Waiting
+        && agent.partial_response().is_empty()
+        && !shows_thought
+        && !shows_tool
+        && agent
+            .chat
+            .last_activity
+            .is_some_and(|time| time.elapsed() >= std::time::Duration::from_millis(350))
+    {
+        append_unselectable(
+            &mut out,
+            vec![Line::from(vec![
+                Span::styled(format!("{} ", thinking_pulse_frame()), fg(theme::ACCENT)),
+                Span::styled("Waiting for agent…", muted()),
+            ])],
+        );
+    }
     let mut permission = Vec::new();
     push_acp_permission_prompt(&mut permission, app, width);
     append_unselectable(&mut out, permission);
@@ -997,20 +1195,30 @@ fn push_railed(
     }
 }
 
-fn push_message(out: &mut Vec<Line<'static>>, app: &App, msg: &AiChatMessage, width: usize) {
+fn push_message(
+    out: &mut Vec<Line<'static>>,
+    app: &App,
+    msg: &AiChatMessage,
+    width: usize,
+    expanded: bool,
+    show_reasoning: bool,
+    live: bool,
+) {
     if msg.source.as_deref() == Some("acp_reasoning") {
-        push_thinking(
+        push_thinking_state(
             out,
             msg.reasoning_content.as_deref().unwrap_or_default(),
             width,
-            app.agent().activity_details_expanded,
+            expanded,
+            live,
         );
         return;
     }
     if let Some(reasoning) = &msg.reasoning_content
         && !reasoning.is_empty()
+        && show_reasoning
     {
-        push_thinking(out, reasoning, width, app.agent().activity_details_expanded);
+        push_thinking_state(out, reasoning, width, expanded, live);
     }
     let progress = msg.source.as_deref() == Some("agent_progress")
         || msg
@@ -1062,31 +1270,105 @@ fn activity_summary(text: &str, width: usize) -> String {
     result
 }
 
-fn push_thinking(out: &mut Vec<Line<'static>>, text: &str, width: usize, expanded: bool) {
-    let mut body = vec![Line::styled(
-        if width < 42 && expanded {
-            "▾ Thinking"
-        } else if width < 42 {
-            "▸ Thinking"
-        } else if expanded {
-            "▾ Thinking · /details to collapse"
-        } else {
-            "▸ Thinking · /details to expand"
+/// Keep failure and interruption outcomes visible before clipping less useful details.
+fn fit_activity_header(prefix: &str, summary: &str, width: usize) -> String {
+    let (body, tail) = summary.split(" · ").fold(
+        (String::new(), String::new()),
+        |(mut body, mut tail), part| {
+            if part.ends_with(" failed") || part.ends_with(" interrupted") || part == "Failed" {
+                tail.push_str(&format!(" · {part}"));
+            } else {
+                if !body.is_empty() {
+                    body.push_str(" · ");
+                }
+                body.push_str(part);
+            }
+            (body, tail)
         },
-        muted(),
-    )];
+    );
+    let room = width.saturating_sub(tail.width());
+    let head = activity_summary(&format!("{prefix}{body}"), room);
+    activity_summary(&format!("{head}{tail}"), width)
+}
+
+#[cfg(test)]
+fn push_thinking(out: &mut Vec<Line<'static>>, text: &str, width: usize, expanded: bool) {
+    push_thinking_state(out, text, width, expanded, false);
+}
+
+fn push_thinking_state(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    expanded: bool,
+    live: bool,
+) {
+    let available = rail_body_width(width) as usize;
+    let header = if expanded {
+        "▾ Thinking"
+    } else {
+        "▸ Thinking: "
+    };
     if expanded {
+        let mut body = vec![Line::styled(activity_summary(header, available), muted())];
         body.extend(
             text.lines()
                 .map(|line| Line::styled(line.to_owned(), muted())),
         );
-    } else if !text.is_empty() {
-        body.push(Line::styled(
-            activity_summary(text, rail_body_width(width) as usize),
-            muted(),
-        ));
+        push_railed(out, body, theme::MUTED, width);
+        return;
     }
-    push_railed(out, body, theme::MUTED, width);
+    // Read only a bounded slice even when a provider streams a very long thought.
+    let preview = if live {
+        text.chars()
+            .rev()
+            .take(512)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>()
+    } else {
+        text.chars().take(512).collect()
+    };
+    let room = available.saturating_sub(header.width());
+    let normalized = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = if live && normalized.width() > room && room > 0 {
+        let mut cells = 1;
+        let tail: String = normalized
+            .chars()
+            .rev()
+            .take_while(|ch| {
+                let size = ch.width().unwrap_or(0);
+                if cells + size > room {
+                    false
+                } else {
+                    cells += size;
+                    true
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("…{tail}")
+    } else {
+        activity_summary(&normalized, room)
+    };
+    let mut heading = activity_summary(header, available);
+    if !preview.is_empty() {
+        heading.push(' ');
+    }
+    let mut spans = vec![Span::styled(heading, muted())];
+    let phase = frame_index(120, preview.chars().count().max(1) + 8);
+    for (index, ch) in preview.chars().enumerate() {
+        let style = if live && index <= phase && phase - index < 6 {
+            fg(theme::ACCENT)
+        } else {
+            muted()
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+    }
+    push_railed(out, vec![Line::from(spans)], theme::MUTED, width);
 }
 
 fn push_activity_group(
@@ -1110,15 +1392,52 @@ fn push_activity_group(
     } else {
         theme::WARNING
     };
+    let summary = if group.len() == 1 {
+        let message = group[0];
+        let state = match message.reasoning_content.as_deref() {
+            Some("completed") => "Done",
+            Some("failed") => "Failed",
+            Some("in_progress") if active => "Running",
+            _ if !active => "Unconfirmed",
+            _ => "Pending",
+        };
+        format!("{state}  {}", crate::chat_state::external_summary(message))
+    } else {
+        crate::chat_state::process_summary(&group.iter().map(|m| (*m).clone()).collect::<Vec<_>>())
+    };
     let mut body = vec![Line::styled(
-        format!(
-            "{} Tools ({done}/{}){}",
-            if expanded { "▾" } else { "▸" },
-            group.len(),
-            if width < 42 { "" } else { " · /details" }
+        fit_activity_header(
+            if expanded { "▾ " } else { "▸ " },
+            &summary,
+            rail_body_width(width) as usize,
         ),
         fg(color),
     )];
+    if !expanded {
+        if active
+            && group.len() > 1
+            && let Some(message) = group.iter().rev().find(|m| {
+                matches!(
+                    m.reasoning_content.as_deref(),
+                    Some("in_progress" | "pending")
+                )
+            })
+        {
+            body.push(Line::styled(
+                activity_summary(
+                    &format!(
+                        "{} {}",
+                        tool_spinner_frame(),
+                        crate::chat_state::external_summary(message)
+                    ),
+                    rail_body_width(width) as usize,
+                ),
+                fg(theme::WARNING),
+            ));
+        }
+        push_railed(out, body, color, width);
+        return;
+    }
     for msg in group {
         let (icon, status, tint) = match msg.reasoning_content.as_deref() {
             Some("completed") => ("✓", "Done", theme::SUCCESS),
@@ -1129,7 +1448,7 @@ fn push_activity_group(
         };
         let prefix = format!("{icon} {status}  ");
         let label = activity_summary(
-            &msg.content,
+            &crate::chat_state::external_summary(msg),
             (rail_body_width(width) as usize).saturating_sub(prefix.width()),
         );
         let show_full_title = expanded && (msg.content.contains('\n') || label != msg.content);
@@ -1169,7 +1488,10 @@ fn tool_call_line(app: &App, tc: &ToolCall) -> Line<'static> {
     };
     let mut spans = vec![
         Span::styled(icon, fg(color).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {}", tc.name), muted()),
+        Span::styled(
+            format!(" {}", crate::chat_state::native_summary(tc)),
+            muted(),
+        ),
     ];
     if let Some(ms) = tc.execution_duration_ms {
         let duration = if ms >= 1000 {
@@ -1459,10 +1781,20 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         .map_or(agent.task_elapsed, |start| start.elapsed())
         .as_secs();
     let runtime = format!("{}m{:02}s", seconds / 60, seconds % 60);
-    let label = if area.width >= 75 {
-        format!("{runtime} · {context} · {usage}")
+    let speed = if agent.status == AiStatus::Waiting {
+        agent
+            .chat
+            .rate
+            .per_second(std::time::Instant::now())
+            .map(|rate| format!("~{rate:.0} tok/s · "))
+            .unwrap_or_default()
     } else {
-        format!("{runtime} · {context}")
+        String::new()
+    };
+    let label = if area.width >= 75 {
+        format!("{speed}{runtime} · {context} · {usage}")
+    } else {
+        format!("{speed}{runtime} · {context}")
     };
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -1482,7 +1814,13 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
 
     let display: Text<'static> = if agent.input.is_empty() {
         if active {
-            Text::from(Line::styled("Type your message...", muted()))
+            let placeholder =
+                if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
+                    "Type a follow-up · Enter queues it"
+                } else {
+                    "Type your message..."
+                };
+            Text::from(Line::styled(placeholder, muted()))
         } else {
             Text::default()
         }
@@ -1493,14 +1831,11 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
                 .collect::<Vec<_>>(),
         )
     };
-    let text_style = match agent.status {
-        AiStatus::Waiting => muted(),
-        _ => Style::default(),
-    };
+    let text_style = Style::default();
     frame.render_widget(Paragraph::new(display).style(text_style), inner);
 
     // Show a visible cursor at the insertion point, accounting for wrapping.
-    if active && agent.status != AiStatus::Waiting {
+    if active {
         frame.set_cursor_position((inner.x + cursor.1, inner.y + cursor.0 - scroll));
     }
 }
@@ -1660,6 +1995,148 @@ fn build_row(cells: Vec<(char, Style)>, width: usize, pad_style: Option<Style>) 
 
 #[cfg(test)]
 mod tests {
+    fn message(role: AiRole, content: &str, source: Option<&str>) -> AiChatMessage {
+        AiChatMessage {
+            role,
+            content: content.into(),
+            source: source.map(str::to_owned),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            activity: None,
+        }
+    }
+
+    #[test]
+    fn completed_turns_fold_independently_and_keep_failed_call_counts() {
+        let (mut app, _project, _store) = activity_test_app();
+        let mut tool = message(AiRole::Assistant, "hidden_tool_title", Some("acp_activity"));
+        tool.reasoning_content = Some("failed".into());
+        tool.activity = Some(teshi_agent::backend::ToolActivityInfo {
+            kind: Some("read".into()),
+            input: Some(serde_json::json!({"path":"src/hidden.rs"})),
+            locations: vec![],
+        });
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "First question", None),
+            tool.clone(),
+            message(AiRole::Assistant, "First answer", None),
+            message(AiRole::User, "Second question", None),
+            tool,
+            message(AiRole::Assistant, "Second answer", None),
+        ]);
+        let folded = row_texts(&build_chat_lines(&app, 64, 40, ChatPlacement::Tab)).join("\n");
+        assert!(
+            folded.contains("First answer") && folded.contains("Second answer"),
+            "{folded}"
+        );
+        assert_eq!(folded.matches("1 failed").count(), 2, "{folded}");
+        assert!(!folded.contains("src/hidden.rs"));
+        app.ai_input_focused = true;
+        app.handle_action(crate::keymap::Action::AiToggleTurn(0))
+            .unwrap();
+        assert!(
+            app.ai_input_focused,
+            "opening process must keep the composer's focus"
+        );
+        let opened = row_texts(&build_chat_lines(&app, 64, 40, ChatPlacement::Tab)).join("\n");
+        assert_eq!(opened.matches("Read src/hidden.rs").count(), 1, "{opened}");
+        assert!(opened.contains("First answer") && opened.contains("Second answer"));
+        for width in [22, 36, 64] {
+            let label = fit_activity_header(
+                "▸ ",
+                "12 tool calls: 8 reads · 4 commands · 2 failed",
+                width,
+            );
+            assert!(label.contains("2 failed"), "{label}");
+            assert!(label.width() <= width);
+        }
+    }
+
+    #[test]
+    fn a_final_answer_with_embedded_reasoning_remains_visible_when_folded() {
+        let (mut app, _project, _store) = activity_test_app();
+        let mut answer = message(AiRole::Assistant, "FINAL_ANSWER", None);
+        answer.reasoning_content = Some("FIRST_THOUGHT\nSECOND_THOUGHT".into());
+        app.agents[0]
+            .messages_mut()
+            .extend([message(AiRole::User, "Question", None), answer]);
+        let folded = row_texts(&build_chat_lines(&app, 60, 30, ChatPlacement::Tab)).join("\n");
+        assert!(
+            folded.contains("FINAL_ANSWER") && !folded.contains("FIRST_THOUGHT"),
+            "{folded}"
+        );
+        app.handle_action(crate::keymap::Action::AiToggleTurn(0))
+            .unwrap();
+        app.handle_action(crate::keymap::Action::AiToggleThought(1))
+            .unwrap();
+        let opened = row_texts(&build_chat_lines(&app, 60, 30, ChatPlacement::Tab)).join("\n");
+        assert!(
+            opened.contains("SECOND_THOUGHT") && opened.contains("FINAL_ANSWER"),
+            "{opened}"
+        );
+    }
+
+    #[test]
+    fn live_reasoning_takes_one_row_and_wait_chrome_is_not_copyable_content() {
+        let (mut app, _project, _store) = activity_test_app();
+        for width in [18, 32, 80] {
+            let mut rows = Vec::new();
+            push_thinking_state(
+                &mut rows,
+                "中文推理\nA second line with more detail",
+                width,
+                false,
+                true,
+            );
+            assert_eq!(rows.len(), 1, "{width}: {rows:?}");
+            assert!(rows[0].width() <= width);
+        }
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0].chat.last_activity =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let projection = build_chat_projection(&app, 80, 30, ChatPlacement::Tab);
+        assert!(
+            projection
+                .lines
+                .iter()
+                .any(|row| line_text(&row.line).contains("Waiting for agent"))
+        );
+        assert!(
+            projection
+                .blocks
+                .iter()
+                .all(|block| !block.text.contains("Waiting for agent"))
+        );
+        app.agents[0]
+            .partial_response_mut()
+            .push_str("REPLY_STREAM");
+        let rows = row_texts(&build_chat_lines(&app, 80, 30, ChatPlacement::Tab)).join("\n");
+        assert!(
+            rows.contains("REPLY_STREAM") && !rows.contains("Waiting for agent"),
+            "{rows}"
+        );
+    }
+
+    #[test]
+    fn unfinished_or_cancelled_processes_are_not_automatically_folded() {
+        let (mut app, _project, _store) = activity_test_app();
+        for state in [
+            AiStatus::Waiting,
+            AiStatus::AwaitingApproval,
+            AiStatus::Error,
+        ] {
+            *app.agents[0].messages_mut() = vec![
+                message(AiRole::User, "Question", None),
+                message(AiRole::Assistant, "PROGRESS_DETAIL", Some("agent_progress")),
+                message(AiRole::Assistant, "incomplete", Some("agent_progress")),
+            ];
+            app.agents[0].status = state;
+            let rows = row_texts(&build_chat_lines(&app, 80, 30, ChatPlacement::Tab)).join("\n");
+            assert!(rows.contains("PROGRESS_DETAIL"), "{state:?}: {rows}");
+        }
+    }
+
     #[test]
     fn activity_layout_reuses_completed_groups_and_tracks_updates() {
         let (mut app, _project, _store) = activity_test_app();
@@ -1671,6 +2148,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: Some("completed".into()),
                 source: Some("acp_activity".into()),
+                activity: None,
             });
         }
         let started = std::time::Instant::now();
@@ -1687,7 +2165,7 @@ mod tests {
             changed
                 .lines
                 .iter()
-                .any(|line| line_text(&line.line).contains("Failed"))
+                .any(|line| line_text(&line.line).contains("1 failed"))
         );
         app.agents[0].messages_mut().clear();
         build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
@@ -1705,6 +2183,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             });
         }
         let started = std::time::Instant::now();
@@ -1817,6 +2296,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
 
         let narrow = build_chat_projection(&app, 24, 20, ChatPlacement::Tab);
@@ -1876,6 +2356,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
             AiChatMessage {
                 role: AiRole::Assistant,
@@ -1884,6 +2365,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
         ]);
 
@@ -1941,6 +2423,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
             AiChatMessage {
                 role: AiRole::Assistant,
@@ -1949,6 +2432,7 @@ mod tests {
                 tool_call_id: None,
                 reasoning_content: None,
                 source: None,
+                activity: None,
             },
         ]);
 
@@ -2164,7 +2648,7 @@ mod tests {
                     .unwrap();
                 let tool = rows
                     .iter()
-                    .position(|row| row.contains("Done  Read project"))
+                    .position(|row| row.contains("Done Read project"))
                     .unwrap();
                 assert!(progress < tool, "{rows:?}");
                 assert_eq!(
@@ -2282,6 +2766,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
             source: None,
+            activity: None,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
@@ -2324,6 +2809,7 @@ mod tests {
         )
         .unwrap();
         let thought = AiChatMessage {
+            activity: None,
             role: AiRole::Assistant,
             content: "Answer".into(),
             reasoning_content: Some("Inspecting the project".into()),
@@ -2332,6 +2818,7 @@ mod tests {
             tool_call_id: None,
         };
         let tool = AiChatMessage {
+            activity: None,
             role: AiRole::Assistant,
             content: "Read project".into(),
             reasoning_content: Some("completed".into()),
@@ -2368,8 +2855,7 @@ mod tests {
             "Thinking",
             "Inspecting the project",
             "Answer",
-            "Tools (1/1)",
-            "Done  Read project",
+            "Done Read project",
             "Live reasoning before completion",
         ] {
             assert!(screen.contains(expected), "Missing {expected}: {screen}");
@@ -2380,6 +2866,7 @@ mod tests {
     fn compact_activity_keeps_status_and_expands_full_unicode_title() {
         let title = "Read 项目目录 with a very long command and all its arguments";
         let tool = AiChatMessage {
+            activity: None,
             role: AiRole::Assistant,
             content: title.into(),
             reasoning_content: Some("failed".into()),
@@ -2399,7 +2886,7 @@ mod tests {
         assert!(row_texts(&expanded).join("\n").contains(title));
         let mut thoughts = Vec::new();
         push_thinking(&mut thoughts, "First line\nSecond line", 72, false);
-        assert_eq!(thoughts.len(), 2);
+        assert_eq!(thoughts.len(), 1);
         assert!(
             thoughts
                 .iter()

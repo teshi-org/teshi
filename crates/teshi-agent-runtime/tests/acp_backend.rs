@@ -113,6 +113,16 @@ fn acp_activity_retains_thoughts_and_merges_partial_tool_updates() {
     assert_eq!(messages[0].source.as_deref(), Some("agent_progress"));
     assert_eq!(messages[1].source.as_deref(), Some("acp_reasoning"));
     assert_eq!(messages[2].source.as_deref(), Some("acp_activity"));
+    let details = messages[2]
+        .activity
+        .as_ref()
+        .expect("initial tool metadata survives a status-only update");
+    assert_eq!(details.kind.as_deref(), Some("read"));
+    assert_eq!(details.input.as_ref().unwrap()["path"], "src/sample.rs");
+    assert_eq!(details.locations, ["src/sample.rs"]);
+    let saved = serde_json::to_string(&messages[2]).unwrap();
+    let restored: teshi_agent_runtime::AiChatMessage = serde_json::from_str(&saved).unwrap();
+    assert_eq!(restored.activity, messages[2].activity);
     assert_eq!(messages.last().unwrap().content, "Inspection finished");
     assert!(messages.last().unwrap().source.is_none());
 }

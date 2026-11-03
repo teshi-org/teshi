@@ -6,6 +6,7 @@ mod app;
 mod auth;
 mod authoring_tab;
 mod bdd_nav;
+mod chat_state;
 mod cli;
 mod config;
 mod diff;

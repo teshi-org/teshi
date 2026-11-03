@@ -25,6 +25,9 @@ pub struct Session {
     /// Installed ACP agent ID used for this conversation.
     #[serde(default)]
     pub acp_agent_id: Option<String>,
+    /// Unsent drafts survive restart, but are never automatically sent on restore.
+    #[serde(default)]
+    pub pending_messages: std::collections::VecDeque<String>,
 }
 
 impl Session {
@@ -60,6 +63,7 @@ impl Session {
             project_root: None,
             backend_kind: None,
             acp_agent_id: None,
+            pending_messages: Default::default(),
         }
     }
 

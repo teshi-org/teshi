@@ -40,6 +40,18 @@ pub struct PermissionChoice {
     pub kind: Option<String>,
 }
 
+/// Optional structured facts supplied by an external tool, without guessing from its title.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolActivityInfo {
+    /// ACP tool kind, such as `read`, `search`, `edit`, or `execute`.
+    pub kind: Option<String>,
+    /// Tool arguments when the agent elects to expose them.
+    pub input: Option<serde_json::Value>,
+    /// Paths explicitly reported by the tool's locations.
+    #[serde(default)]
+    pub locations: Vec<String>,
+}
+
 impl PermissionChoice {
     /// Best available display text for a frontend list.
     pub fn display_label(&self) -> &str {
@@ -81,6 +93,7 @@ pub enum AgentBackendEvent {
         tool_call_id: Option<String>,
         title: String,
         status: Option<String>,
+        details: ToolActivityInfo,
     },
     Failed(String),
     Ignored,
