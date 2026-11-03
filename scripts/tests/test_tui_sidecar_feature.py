@@ -236,6 +236,11 @@ class ProjectSwitchTemplateTests(unittest.TestCase):
                 self.assertEqual(original, source.resolve())
                 self.assertEqual(relative, Path("features/case.feature"))
                 self.assertFalse(relative.is_absolute())
+            if os.name == "nt":
+                for requested in (str(source), "\\\\?\\" + str(source)):
+                    original, relative = adapter.fixture_feature_paths(project, requested)
+                    self.assertEqual(original, source.resolve())
+                    self.assertEqual(relative, Path("features/case.feature"))
             with self.assertRaises(ValueError):
                 adapter.fixture_feature_paths(project, str(project.parent / "outside.feature"))
 

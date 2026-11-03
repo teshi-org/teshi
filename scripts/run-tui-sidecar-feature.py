@@ -786,8 +786,19 @@ def verify_runner_shutdown(root: Path, evidence_path: Path | None = None) -> dic
 
 def fixture_feature_paths(project_root: Path, requested_path: str) -> tuple[Path, Path]:
     """Keep an absolute CLI source path from overriding the fixture root."""
-    original = (project_root / requested_path).resolve()
-    relative = original.relative_to(project_root.resolve())
+    def comparable(path: Path) -> Path:
+        value = str(path.resolve())
+        # Rust canonicalization uses extended Windows paths. Python preserves
+        # that prefix, so normalize both sides before the containment check.
+        if os.name == "nt":
+            if value.startswith("\\\\?\\UNC\\"):
+                value = "\\\\" + value[8:]
+            elif value.startswith("\\\\?\\"):
+                value = value[4:]
+        return Path(value)
+
+    original = comparable(project_root / requested_path)
+    relative = original.relative_to(comparable(project_root))
     return original, relative
 
 
@@ -917,6 +928,11 @@ def main() -> int:
             child_request["cases"] = [{**case, "feature_path": feature_path.as_posix()}]
             child_request["meta"] = dict(request.get("meta", {}))
             child_request["meta"]["project_root"] = str(temp_root)
+            if child_request["meta"].get("evidence_run_directory"):
+                # The CLI owns this run's evidence directory under its project.
+                # Keep that ownership while executing the isolated source copy.
+                child_request["meta"]["project_root"] = str(original_root)
+                child_request["cases"][0]["feature_path"] = str(target_feature)
             child_request["meta"]["artifacts_dir"] = str(temp_root / "artifacts")
             original_files = project_fixture_files(temp_root) if key_name == "tui_project_switch.feature" else None
             unrelated = None
