@@ -104,6 +104,51 @@ fn choices(raw: &Value, group: Option<String>) -> Vec<ConfigChoice> {
 }
 
 impl SessionConfig {
+    /// Find approval selectors, falling back to agent-advertised session modes.
+    ///
+    /// ACP has no universal approval category. Match explicit approval/permission
+    /// identifiers or names before considering modes, without inventing values.
+    pub fn approval_options(&self) -> Vec<&ConfigOption> {
+        fn approval_key(key: &str) -> bool {
+            let key: String = key
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            matches!(
+                key.as_str(),
+                "approval"
+                    | "approvals"
+                    | "approvalmode"
+                    | "approvalpolicy"
+                    | "permission"
+                    | "permissions"
+                    | "permissionmode"
+                    | "permissionpolicy"
+            )
+        }
+        let explicit: Vec<_> = self
+            .options
+            .iter()
+            .filter(|o| {
+                approval_key(&o.id)
+                    || approval_key(&o.name)
+                    || o.category.as_deref().is_some_and(approval_key)
+            })
+            .collect();
+        if !explicit.is_empty() {
+            return explicit;
+        }
+        self.options
+            .iter()
+            .filter(|o| {
+                o.category.as_deref() == Some("mode")
+                    || o.id == "mode"
+                    || o.route == ConfigRoute::Mode
+            })
+            .collect()
+    }
+
     /// Read settings from a new/load session response.
     pub fn from_response(response: &Value) -> Self {
         let mut state = Self::default();
@@ -248,6 +293,36 @@ impl SessionConfig {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_options_prefer_explicit_settings_and_keep_multiple_controls() {
+        let state = SessionConfig::from_response(&json!({"configOptions":[
+            {"id":"opaque-1","name":"Approval Policy","type":"select","currentValue":"ask","options":[{"value":"ask","name":"Ask"}]},
+            {"id":"permissionMode","type":"boolean","currentValue":false},
+            {"id":"permission-model","category":"model","type":"boolean","currentValue":false},
+            {"id":"mode","category":"mode","type":"boolean","currentValue":false}]}));
+        assert_eq!(
+            state
+                .approval_options()
+                .iter()
+                .map(|o| o.id.as_str())
+                .collect::<Vec<_>>(),
+            ["opaque-1", "permissionMode"]
+        );
+    }
+
+    #[test]
+    fn approval_options_fall_back_to_advertised_modes_only() {
+        let modern = SessionConfig::from_response(&json!({"configOptions":[
+            {"id":"mode","type":"boolean","currentValue":false}]}));
+        assert_eq!(modern.approval_options()[0].id, "mode");
+        let legacy = SessionConfig::from_response(&json!({"modes":{"currentModeId":"ask",
+            "availableModes":[{"id":"ask","name":"Ask"}]}}));
+        assert_eq!(legacy.approval_options()[0].route, ConfigRoute::Mode);
+        let unavailable = SessionConfig::from_response(&json!({"configOptions":[
+            {"id":"model","category":"model","type":"boolean","currentValue":false}]}));
+        assert!(unavailable.approval_options().is_empty());
+    }
 
     #[test]
     fn grouped_boolean_unknown_and_legacy_options_are_retained() {

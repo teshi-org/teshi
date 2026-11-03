@@ -351,7 +351,8 @@ Agent mode settings and Teshi approval modes remain separate controls.
 | `/models` | Native model profiles or ACP model settings |
 | `/sessions`, `/sessions legacy` | Project conversations / explicitly unassigned legacy history |
 | `/project`, `/project <directory>` | Project picker / direct project switch |
-| `/approval` | Approval modes |
+| `/approval` | ACP agent approval settings; native backend approval modes |
+| `/approval local` | Teshi permission-response policy (Manual/Auto/Bypass) |
 | `/agent` | Session agent backend |
 | `/acp` | Installed ACP agents and registry |
 | `/settings` | ACP model, mode, thinking, and other advertised settings |

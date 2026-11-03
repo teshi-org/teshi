@@ -11,16 +11,25 @@ mode = sys.argv[1]
 model = "a"
 fast = False
 prompt_count = 0
+approval = "ask"
 
 
 def config_options():
-    return [
+    options = [
         {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
          "options": [{"value": "a", "name": "Alpha"}, {"value": "b", "name": "Beta"}, {"value": "reject", "name": "Rejected"}]},
         {"id": "effort", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": "high" if model == "a" else "low",
          "options": [{"value": "high" if model == "a" else "low", "name": "High" if model == "a" else "Low"}]},
         {"id": "fast", "name": "Fast", "type": "boolean", "currentValue": fast},
     ]
+    if mode.startswith("settings_approval"):
+        options.append({"id": "approval_policy", "name": "Approval Policy", "type": "select", "currentValue": approval,
+                        "options": [{"value": "ask", "name": "Ask before changes"},
+                                    {"value": "auto", "name": "Auto approve changes"},
+                                    {"value": "reject", "name": "Rejected policy"}]})
+    if mode == "settings_approval_multiple":
+        options.append({"id": "permissions", "name": "Permissions", "type": "boolean", "currentValue": fast})
+    return options
 
 if len(sys.argv) > 2:
     marker = Path(sys.argv[2])
@@ -49,8 +58,14 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "session rejected"}})
         else:
             result = {"sessionId": "fake-session"}
+            if mode == "settings_approval_delayed":
+                time.sleep(0.3)
             if mode.startswith("settings"):
                 result["configOptions"] = config_options()
+            if mode == "approval_legacy":
+                result["modes"] = {"currentModeId": approval, "availableModes": [
+                    {"id": "ask", "name": "Ask before changes"},
+                    {"id": "auto", "name": "Auto approve changes"}]}
             send({"jsonrpc": "2.0", "id": message["id"], "result": result})
             if mode == "settings_idle":
                 model = "b"
@@ -66,10 +81,18 @@ for line in sys.stdin:
         if params["configId"] == "model":
             assert isinstance(params["value"], str)
             model = params["value"]
-        elif params["configId"] == "fast":
+        elif params["configId"] == "approval_policy":
+            approval = params["value"]
+        elif params["configId"] in ("fast", "permissions"):
             assert params["type"] == "boolean" and isinstance(params["value"], bool)
             fast = params["value"]
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"configOptions": config_options()}})
+    elif method == "session/set_mode":
+        assert mode == "approval_legacy" and message["params"]["sessionId"] == "fake-session"
+        approval = message["params"]["modeId"]
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": {
+            "sessionUpdate": "current_mode_update", "currentModeId": approval}}})
     elif method == "session/prompt":
         prompt_count += 1
         if mode == "refusal_once":

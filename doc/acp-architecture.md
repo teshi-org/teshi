@@ -118,6 +118,13 @@ discover confirmed values. Settings are not persisted by Teshi.
 
 Agent modes and Teshi approvals are independent. Approvals control Teshi's
 responses to tool permission requests, not the external agent's sandbox.
+In ACP conversations, `/approval` (also `/approve` or `/app`) opens the agent's
+advertised approval/permission settings, falling back to advertised session modes.
+Changes use `session/set_config_option`, or `session/set_mode` for legacy modes,
+on the current session. If no such settings exist, the picker explains that the
+capability is unavailable. Agent rejection retains the last confirmed value.
+Use `/approval local` or the approval badge for Teshi's Manual/Auto/Bypass policy;
+in native conversations `/approval` still opens that local policy picker.
 Changing approvals updates future requests; an already pending request still
 requires an explicit answer. `TESHI_ACP_PERMISSION_POLICY=auto` overrides the
 user selection and the badge displays the effective policy. Test-point review

@@ -15,6 +15,10 @@ mod tests {
     }
 
     fn configured_app(connect: bool) -> (App, tempfile::TempDir, tempfile::TempDir) {
+        configured_mode(connect, "settings")
+    }
+
+    fn configured_mode(connect: bool, mode: &str) -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         teshi_engine::initialize_requirement_store(store.path()).unwrap();
@@ -37,7 +41,7 @@ mod tests {
             .configure_acp(teshi_agent_runtime::backend::AcpBackendConfig::new(
                 teshi_acp::AcpAgentCommand {
                     program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
-                    args: vec![script.display().to_string(), "settings".into()],
+                    args: vec![script.display().to_string(), mode.into()],
                     cwd: project.path().to_path_buf(),
                     env: HashMap::new(),
                 },
@@ -53,6 +57,169 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         (app, project, store)
+    }
+
+    fn wait_for_setting(app: &App) -> teshi_agent_runtime::AcpControls {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = app.agent().backend.acp_controls().unwrap();
+            if !state.pending {
+                return state;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn approval_command_changes_remote_policy_and_retains_rejected_value() {
+        let (mut app, _project, _store) = configured_mode(true, "settings_approval");
+        let original = app.agent().backend.acp_controls().unwrap();
+        app.execute_slash_command("approval").unwrap();
+        assert!(!app.approval_panel_active);
+        let picker = app.agent().acp_controls_ui.picker.as_ref().unwrap();
+        assert_eq!(picker.option.as_ref().unwrap().id, "approval_policy");
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let changed = wait_for_setting(&app);
+        assert_eq!(changed.config.approval_options()[0].current, "auto");
+        assert_eq!(changed.session_id, original.session_id);
+        assert_eq!(changed.policy, original.policy);
+        assert_eq!(
+            app.approval_mode,
+            teshi_agent::approval::ApprovalMode::Manual
+        );
+        app.execute_slash_command("approval").unwrap();
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let rejected = wait_for_setting(&app);
+        assert_eq!(rejected.config.approval_options()[0].current, "auto");
+        assert!(
+            rejected
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("setting rejected")
+        );
+    }
+
+    #[test]
+    fn approval_command_supports_legacy_modes() {
+        let (mut app, _project, _store) = configured_mode(true, "approval_legacy");
+        app.execute_slash_command("approve").unwrap();
+        assert_eq!(
+            app.agent()
+                .acp_controls_ui
+                .picker
+                .as_ref()
+                .unwrap()
+                .option
+                .as_ref()
+                .unwrap()
+                .route,
+            teshi_acp::session_config::ConfigRoute::Mode
+        );
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            wait_for_setting(&app).config.approval_options()[0].current,
+            "auto"
+        );
+    }
+
+    #[test]
+    fn approval_command_waits_for_discovery_and_multiple_options_stay_filtered() {
+        let (mut app, _project, _store) = configured_mode(false, "settings_approval_delayed");
+        app.execute_slash_command("approval").unwrap();
+        assert!(
+            app.agent()
+                .acp_controls_ui
+                .picker
+                .as_ref()
+                .unwrap()
+                .option
+                .is_none()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app
+            .agent()
+            .acp_controls_ui
+            .picker
+            .as_ref()
+            .unwrap()
+            .option
+            .is_none()
+        {
+            assert!(Instant::now() < deadline);
+            app.discover_visible_acp_controls();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.agent()
+                .acp_controls_ui
+                .picker
+                .as_ref()
+                .unwrap()
+                .option
+                .as_ref()
+                .unwrap()
+                .id,
+            "approval_policy"
+        );
+        let (mut app, _project, _store) = configured_mode(true, "settings_approval_multiple");
+        app.execute_slash_command("app").unwrap();
+        let picker = app.agent().acp_controls_ui.picker.as_ref().unwrap();
+        assert!(picker.option.is_none());
+        assert_eq!(
+            picker
+                .scope
+                .options(&app.agent().backend.acp_controls().unwrap().config)
+                .len(),
+            2
+        );
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.agent()
+                .acp_controls_ui
+                .picker
+                .as_ref()
+                .unwrap()
+                .option
+                .as_ref()
+                .unwrap()
+                .id,
+            "permissions"
+        );
+    }
+
+    #[test]
+    fn unavailable_remote_approval_is_visible_and_local_policy_remains_accessible() {
+        let (mut app, _project, _store) = app_with_agent();
+        app.execute_slash_command("approval").unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render_picker(frame, &mut app))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("does not advertise approval"), "{content}");
+        assert!(!app.approval_panel_active);
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.execute_slash_command("approval local").unwrap();
+        assert!(app.approval_panel_active);
+        app.approval_panel_active = false;
+        app.agent_mut().backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Native,
+            1,
+        );
+        app.execute_slash_command("approval").unwrap();
+        assert!(app.approval_panel_active);
     }
 
     #[test]
@@ -231,7 +398,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
-use teshi_acp::session_config::ConfigOption;
+use teshi_acp::session_config::{ConfigOption, SessionConfig};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{app::App, theme};
@@ -246,7 +413,23 @@ enum Target {
 }
 
 #[derive(Debug, Clone)]
+enum PickerScope {
+    Settings,
+    Approvals,
+}
+
+impl PickerScope {
+    fn options<'a>(&self, config: &'a SessionConfig) -> Vec<&'a ConfigOption> {
+        match self {
+            Self::Settings => config.options.iter().collect(),
+            Self::Approvals => config.approval_options(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Picker {
+    scope: PickerScope,
     option: Option<ConfigOption>,
     revision: u64,
     selected: usize,
@@ -284,6 +467,7 @@ impl App {
         {
             self.connect_acp_controls();
         }
+        self.refresh_acp_approval_picker();
     }
 
     pub(crate) fn effective_approval_mode(&self) -> teshi_agent::approval::ApprovalMode {
@@ -333,11 +517,56 @@ impl App {
             .and_then(|o| o.choices.iter().position(|c| c.value == o.current))
             .unwrap_or(0);
         self.agent_mut().acp_controls_ui.picker = Some(Picker {
+            scope: PickerScope::Settings,
             option,
             revision: state.revision,
             selected,
             error: None,
         });
+    }
+
+    /// Open the current ACP session's advertised approval settings.
+    pub(crate) fn open_acp_approvals(&mut self) {
+        self.open_acp_controls(None);
+        if let Some(picker) = &mut self.agent_mut().acp_controls_ui.picker {
+            picker.scope = PickerScope::Approvals;
+        }
+        self.refresh_acp_approval_picker();
+    }
+
+    fn refresh_acp_approval_picker(&mut self) {
+        if !self
+            .agent()
+            .acp_controls_ui
+            .picker
+            .as_ref()
+            .is_some_and(|p| matches!(p.scope, PickerScope::Approvals) && p.option.is_none())
+        {
+            return;
+        }
+        let Some(state) = self.agent().backend.acp_controls() else {
+            return;
+        };
+        let Some(picker) = &mut self.agent_mut().acp_controls_ui.picker else {
+            return;
+        };
+        if !state.ready || state.pending {
+            return;
+        }
+        // Discovery is asynchronous; keep /approval's intent until the agent's
+        // confirmed options arrive, including when it was the first command.
+        let options = state.config.approval_options();
+        picker.revision = state.revision;
+        if let [option] = options.as_slice() {
+            picker.selected = option
+                .choices
+                .iter()
+                .position(|c| c.value == option.current)
+                .unwrap_or(0);
+            picker.option = Some((*option).clone());
+        } else {
+            picker.selected = picker.selected.min(options.len().saturating_sub(1));
+        }
     }
 
     pub(crate) fn sync_acp_policy(&mut self) {
@@ -396,9 +625,12 @@ impl App {
                         }
                     }
                 } else if let Some(state) = self.agent().backend.acp_controls()
-                    && let Some(option) = state.config.options.get(index)
+                    && let Some(option) = picker.scope.options(&state.config).get(index)
                 {
                     self.open_acp_controls(Some(option.id.clone()));
+                    if let Some(current) = &mut self.agent_mut().acp_controls_ui.picker {
+                        current.scope = picker.scope;
+                    }
                 }
             }
         }
@@ -437,7 +669,7 @@ impl App {
                 self.agent()
                     .backend
                     .acp_controls()
-                    .map_or(0, |s| s.config.options.len())
+                    .map_or(0, |s| picker.scope.options(&s.config).len())
             });
         let selected = picker.selected;
         let top = event.code == KeyCode::Home
@@ -698,10 +930,10 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let screen = frame.area();
-    let count = picker
-        .option
-        .as_ref()
-        .map_or(state.config.options.len(), |o| o.choices.len());
+    let count = picker.option.as_ref().map_or_else(
+        || picker.scope.options(&state.config).len(),
+        |o| o.choices.len(),
+    );
     let width = screen.width.min(60);
     let height = screen.height.min((count.saturating_add(6).min(20)) as u16);
     if width < 4 || height < 5 {
@@ -713,10 +945,12 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         width,
         height,
     );
-    let title = picker
-        .option
-        .as_ref()
-        .map_or("ACP settings", |o| o.name.as_str());
+    let title = match (&picker.scope, &picker.option) {
+        (PickerScope::Approvals, Some(o)) => format!("ACP approvals: {}", o.name),
+        (PickerScope::Approvals, None) => "ACP approvals".into(),
+        (PickerScope::Settings, Some(o)) => o.name.clone(),
+        (PickerScope::Settings, None) => "ACP settings".into(),
+    };
     let block = theme::popup_block(format!(" {title} "));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -742,10 +976,10 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
             })
             .collect()
     } else {
-        state
-            .config
-            .options
-            .iter()
+        picker
+            .scope
+            .options(&state.config)
+            .into_iter()
             .map(|o| {
                 format!(
                     "{}: {}{}",
@@ -795,7 +1029,13 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
     } else if !state.ready {
         format!("{} Loading agent settings...", loading_frame(elapsed))
     } else if rows.is_empty() {
-        "No editable settings advertised by this agent".into()
+        if picker.option.is_some() {
+            "This agent setting uses an unsupported type".into()
+        } else if matches!(picker.scope, PickerScope::Approvals) {
+            "This ACP agent does not advertise approval settings or modes".into()
+        } else {
+            "No editable settings advertised by this agent".into()
+        }
     } else {
         "↑/↓ select · Enter apply · ← settings · Esc close".into()
     };

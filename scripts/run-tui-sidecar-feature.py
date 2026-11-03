@@ -35,6 +35,8 @@ CANONICAL = {
     "ACP权限拒绝对话.feature": "tui_acp_permission_reject.feature",
     "tui_acp_settings.feature": "tui_acp_settings.feature",
     "ACP会话设置.feature": "tui_acp_settings.feature",
+    "tui_acp_approval.feature": "tui_acp_approval.feature",
+    "ACP斜杠审批.feature": "tui_acp_approval.feature",
     "tui_acp_wrapped_chat.feature": "tui_acp_wrapped_chat.feature",
     "ACP换行对话.feature": "tui_acp_wrapped_chat.feature",
     "tui_editor.feature": "tui_editor.feature",
@@ -218,7 +220,7 @@ def launch(root: Path, teshi: str, *, mode: str, cols: int, rows: int) -> dict:
                 env_pair(root, "TESHI_ACP_ARGS_JSON", json.dumps([str(fixture)])),
             ]
         )
-    elif mode == "settings":
+    elif mode == "settings" or mode.startswith("approval-"):
         fixture = ROOT / "crates/teshi-agent-runtime/tests/fixtures/fake_acp_agent.py"
         values.extend(
             [
@@ -227,7 +229,7 @@ def launch(root: Path, teshi: str, *, mode: str, cols: int, rows: int) -> dict:
                 env_pair(
                     root,
                     "TESHI_ACP_ARGS_JSON",
-                    json.dumps([str(fixture), "settings"]),
+                    json.dumps([str(fixture), mode.removeprefix("approval-")]),
                 ),
             ]
         )
@@ -308,6 +310,8 @@ def launch(root: Path, teshi: str, *, mode: str, cols: int, rows: int) -> dict:
 
 
 def background_actions(canonical_name: str, root: Path, teshi: str) -> list[list[dict]]:
+    if canonical_name == "tui_acp_approval.feature":
+        return []
     if canonical_name == "tui_codebuddy_live_conversation.feature":
         return [[launch(root, teshi, mode="codebuddy", cols=100, rows=30), expect("Explore")]]
     if canonical_name == "tui_editor.feature":
@@ -334,6 +338,25 @@ def background_actions(canonical_name: str, root: Path, teshi: str) -> list[list
 
 
 def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi: str) -> list[list[dict]]:
+    if canonical_name == "tui_acp_approval.feature":
+        fixture_mode = {2: "approval_legacy", 3: "settings"}.get(scenario_index, "settings_approval")
+        setup = [launch(root, teshi, mode=f"approval-{fixture_mode}", cols=120, rows=30), expect("Explore")]
+        command = "/approval local" if scenario_index == 4 else "/approval"
+        open_chat = [key("3"), expect("Welcome to AI Chat!"), key("Enter"), write(command), key("Enter")]
+        quit_chat = [key("Escape"), key("Escape"), key("ctrl+q")]
+        if scenario_index == 1:
+            return [setup, open_chat,
+                    [expect("Rejected policy"), key("End"), key("Enter"), expect("Error")],
+                    [write("/approval"), key("Enter"), expect("ACP setting change failed"), expect("rejected"), expect("● Ask before changes")],
+                    quit_chat, [exit_expect()]]
+        if scenario_index == 3:
+            return [setup, open_chat, [expect("does not advertise approval settings or"), expect("modes")], quit_chat, [exit_expect()]]
+        if scenario_index == 4:
+            return [setup, open_chat, [expect("Approval Mode"), key("Down"), key("Enter")],
+                    [write("/approval"), key("Enter"), expect("● Ask before changes")], quit_chat, [exit_expect()]]
+        return [setup, open_chat, [expect("ACP approvals"), expect("Ask before changes"), expect("Auto approve changes")],
+                [key("Down"), key("Enter"), expect("Settings")],
+                [write("/approval"), key("Enter"), expect("● Auto approve changes")], quit_chat, [exit_expect()]]
     if canonical_name == "tui_codebuddy_live_conversation.feature":
         actions = [[key("3"), expect("Welcome to AI Chat!"), key("Enter")]]
         for turn in range(1, 11):

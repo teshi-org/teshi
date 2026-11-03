@@ -42,7 +42,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("project", "Open or switch the active project"),
-    ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
+    (
+        "approval",
+        "Agent approval settings (/approval local for Teshi policy)",
+    ),
     ("agent", "Select session Agent (Native or installed ACP)"),
     ("acp", "Manage installed ACP Agents"),
     (
@@ -12421,6 +12424,13 @@ impl App {
             return self.cmd_project(Some(argument));
         }
         if command == "approval" || command == "approve" || command == "app" {
+            if self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+                self.open_acp_approvals();
+                return Ok(());
+            }
+            return self.execute_slash_command("approval local");
+        }
+        if command == "approval local" {
             self.approval_panel_active = true;
             self.approval_panel_selection = teshi_agent::approval::ApprovalMode::ALL
                 .iter()
