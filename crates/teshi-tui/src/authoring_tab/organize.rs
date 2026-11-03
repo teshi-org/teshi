@@ -684,7 +684,18 @@ impl AuthoringUiState {
     }
 
     /// Loads the organization and builds the Folders view.
+    ///
+    /// A project that has no identity yet has no folders either. Keep the normal
+    /// empty state instead of surfacing a store-level ID validation error, which
+    /// would hide the artifact list and the create hint.
     pub(super) fn rebuild_folders_tree(&mut self, project: &str) {
+        if project.is_empty() {
+            self.tree_items = Vec::new();
+            self.tree_labels.clear();
+            self.organization = None;
+            self.project_identity_error = None;
+            return;
+        }
         match load_requirement_organization(&self.requirements_root, project) {
             Ok(org) => {
                 if self
@@ -721,6 +732,9 @@ impl AuthoringUiState {
         let RequirementProjectFilter::Project(project) = &self.project_filter else {
             return;
         };
+        if project.is_empty() {
+            return;
+        }
         let org_error = self
             .project_identity_error
             .as_deref()

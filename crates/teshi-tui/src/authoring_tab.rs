@@ -1552,6 +1552,11 @@ impl AuthoringUiState {
             });
         self.rebuild_tree();
         self.select_document_by_id(&id);
+        // A fresh draft starts below its H1 so the first keystroke writes content
+        // instead of rewriting the title.
+        self.cursor_row = self.buffer.line_count().saturating_sub(1);
+        self.cursor_col = self.buffer.line_len_chars(self.cursor_row);
+        self.desired_col = self.cursor_col;
         self.buffer_dirty = true;
         self.draft_document_id = Some(id.clone());
         Ok(id)
@@ -1682,6 +1687,47 @@ impl AuthoringUiState {
         if let Some(tp) = self.filtered_linked_test_points().get(next) {
             self.highlight_test_point_id = Some(tp.id.clone());
         }
+    }
+
+    /// Jumps to the first or last document row, skipping folder and query headers.
+    ///
+    /// Home/End in the tree are document jumps; group rows only matter while
+    /// walking the tree one row at a time.
+    pub fn select_document_boundary(&mut self, end: bool) {
+        let mut rows = Vec::new();
+        collect_visible_requirement_rows(
+            &self.tree_items,
+            &mut Vec::new(),
+            self.tree_state.opened(),
+            &mut rows,
+        );
+        let target = if end {
+            rows.iter().rev().find(|path| {
+                path.last()
+                    .is_some_and(|node| node.starts_with(TREE_DOC_PREFIX))
+            })
+        } else {
+            rows.iter().find(|path| {
+                path.last()
+                    .is_some_and(|node| node.starts_with(TREE_DOC_PREFIX))
+            })
+        };
+        let Some(path) = target.cloned() else {
+            return;
+        };
+        if let Some(node) = path.last()
+            && let Some(id) = node.strip_prefix(TREE_DOC_PREFIX)
+            && self.selected_document_id.as_deref() != Some(id)
+        {
+            self.select_tree_node(node);
+            if self.selected_document_id.as_deref() == Some(id) {
+                self.tree_state.select(path);
+                self.tree_state.scroll_selected_into_view();
+            }
+            return;
+        }
+        self.tree_state.select(path);
+        self.tree_state.scroll_selected_into_view();
     }
 
     pub fn move_tree_selection(&mut self, delta: isize) {

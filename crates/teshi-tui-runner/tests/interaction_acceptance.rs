@@ -669,6 +669,8 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
     ]);
     let terminal = fixture.launch();
     terminal.key("4").unwrap();
+    // Footer controls follow the focused pane; the tree opens first.
+    prefix(&terminal, "Right");
     terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();
     let screen = terminal.screen().unwrap();
     let (row, col) = screen
@@ -797,7 +799,7 @@ fn normal_tabs_place_navigation_left_and_details_vertically_right() {
         ("1", "Features", "Scenarios (30)", "Steps"),
         (
             "4",
-            "Requirements ·",
+            "Current project ·",
             "Req 01 extended",
             "Linked test points",
         ),

@@ -177,7 +177,9 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("# Document 1", true, 10000).unwrap();
     terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();
-    terminal.click_text("Save", 10000).unwrap();
+    terminal
+        .click_text("Save [Ctrl+s]", 10000)
+        .unwrap();
     let wait_count = |count: usize| {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

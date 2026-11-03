@@ -8866,6 +8866,10 @@ impl App {
                     }
                     match self.authoring_ui.create_default_document() {
                         Ok(id) => {
+                            // A new document starts as an unsaved draft, so hand the
+                            // keyboard to the editor instead of leaving it on the tree.
+                            self.authoring_ui.focus =
+                                crate::authoring_tab::RequirementsFocus::Editor;
                             self.status = format!("Created requirement document {id}.md");
                         }
                         Err(error) => {
@@ -10225,7 +10229,7 @@ impl App {
         } else if self.active_tab == MainTab::Requirements {
             match self.authoring_ui.focus {
                 crate::authoring_tab::RequirementsFocus::Tree => {
-                    self.authoring_ui.move_tree_selection(delta)
+                    self.authoring_ui.select_document_boundary(end)
                 }
                 crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
                     self.authoring_ui.move_linked_selection(delta)
