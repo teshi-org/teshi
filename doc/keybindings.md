@@ -427,8 +427,9 @@ Teshi does not infer tool categories from free-form titles.
 ## AI chat presentation
 
 The chat frame stays neutral while the focused input uses the purple outline.
-User messages have a subtle pink surface; answers retain a green role label with
-a quiet thin guide. Thinking, tools and secondary metadata remain muted. Code-block
+User messages have a subtle pink surface; answers retain a green role label, and the
+newest finished answer also opens on a green `▌` bar. Thinking, tools and replies
+still streaming keep the quiet `│` guide. Thinking, tools and secondary metadata remain muted. Code-block
 and text-selection colors retain their own meaning within a user message.
 
 The chat sidebar uses 22 columns and a subdued selected-row fill. It disappears

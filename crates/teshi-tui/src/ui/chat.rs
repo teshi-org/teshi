@@ -23,9 +23,10 @@ use crate::theme;
 
 /// Left rail drawn on every row of a user or assistant message.
 const RAIL: &str = "▌ ";
-/// Low-emphasis guide for answers, thinking, and tool details; the same two-cell source offset.
+/// Guide for thinking, tool details and replies that have not finished; the same two-cell
+/// source offset.
 const QUIET_RAIL: &str = "│ ";
-/// Indent from the quiet rail to a tool result's text, keeping it a step inside the call row.
+/// Indent from the guide to a tool result's text, keeping it a step inside the call row.
 const TOOL_RESULT_INDENT: &str = "  ";
 /// Fallback cursor glyph appended to a streaming response.
 const STREAM_CURSOR: &str = "▌";
@@ -173,7 +174,7 @@ fn append_blank(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>) {
     }));
 }
 
-/// Separator rows between two agent-side blocks carry the quiet guide.
+/// Separator rows between two agent-side blocks carry the guide.
 ///
 /// Blocks are separated by a blank row so they read as one at a time, but the guide is
 /// what groups a turn; leaving the separator empty cut the `│` column into dashes at every
@@ -192,8 +193,8 @@ fn carry_rail_through_gaps(out: &mut [std::rc::Rc<ChatProjectedLine>]) {
         }
         if start == 0
             || index == out.len()
-            || !starts_with_quiet_rail(&out[start - 1])
-            || !starts_with_quiet_rail(&out[index])
+            || !starts_with_agent_rail(&out[start - 1])
+            || !starts_with_agent_rail(&out[index])
         {
             continue;
         }
@@ -207,7 +208,7 @@ fn carry_rail_through_gaps(out: &mut [std::rc::Rc<ChatProjectedLine>]) {
     }
 }
 
-fn starts_with_quiet_rail(row: &ChatProjectedLine) -> bool {
+fn starts_with_agent_rail(row: &ChatProjectedLine) -> bool {
     row.line
         .spans
         .first()
@@ -1260,7 +1261,7 @@ fn build_chat_projection(
             None => body.push(Line::from(cursor)),
         }
         let mut chunk = Vec::new();
-        push_railed(&mut chunk, body, theme::MUTED, width);
+        push_railed(&mut chunk, body, RailKind::Guide, width);
         append_selectable_chunk(
             &mut out,
             &mut blocks,
@@ -1377,25 +1378,48 @@ fn role_header(role: AiRole, source: Option<&str>, completed: bool) -> Line<'sta
     Line::from(spans)
 }
 
-/// Wraps `lines` to the space right of the rail and prefixes every row with a rail,
-/// so wrapped continuation rows stay visually grouped.
+/// Which left rail a block carries.
 ///
-/// The rail marks the column, not the state: only a user block gets the accent rail,
-/// and every agent-side block shares one guide colour so a turn reads as one column
-/// rather than a rail that changes tint block by block.
+/// The rail marks the column, not the block state: every row of a block shares one rail
+/// so a turn reads as one column. Only two boundaries change it — the accent bar opens a
+/// user turn, and the green bar marks the newest answer that finished.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RailKind {
+    /// Accent bar that opens a user turn.
+    User,
+    /// Green bar on the newest finished answer.
+    Answer,
+    /// Quiet thin guide for thinking, tools and unfinished replies.
+    Guide,
+}
+
+impl RailKind {
+    fn glyph(self) -> &'static str {
+        match self {
+            RailKind::Guide => QUIET_RAIL,
+            RailKind::User | RailKind::Answer => RAIL,
+        }
+    }
+
+    fn color(self) -> ratatui::style::Color {
+        match self {
+            RailKind::User => theme::ACCENT,
+            RailKind::Answer => theme::SUCCESS,
+            RailKind::Guide => theme::BORDER,
+        }
+    }
+}
+
+/// Wraps `lines` to the space right of the rail and prefixes every row with `rail`,
+/// so wrapped continuation rows stay visually grouped.
 fn push_railed(
     out: &mut Vec<Line<'static>>,
     lines: Vec<Line<'static>>,
-    color: ratatui::style::Color,
+    rail: RailKind,
     width: usize,
 ) {
     let body_width = rail_body_width(width) as usize;
-    let (prefix, rail_color) = if color == theme::ACCENT {
-        (RAIL, theme::ACCENT)
-    } else {
-        (QUIET_RAIL, theme::BORDER)
-    };
-    let rail = Span::styled(prefix, fg(rail_color));
+    let rail = Span::styled(rail.glyph(), fg(rail.color()));
     for line in lines {
         for row in wrap_line_to_width(line, body_width) {
             let mut spans = Vec::with_capacity(row.spans.len() + 1);
@@ -1484,17 +1508,17 @@ fn push_message(
     if let Some(tool_calls) = &msg.tool_calls {
         body.extend(tool_calls.iter().map(|tc| tool_call_line(app, tc)));
     }
-    let color = match msg.role {
-        AiRole::User => theme::ACCENT,
-        _ if progress => theme::MUTED,
-        _ => theme::SUCCESS,
+    let rail = match msg.role {
+        AiRole::User => RailKind::User,
+        _ if display.completed && !progress => RailKind::Answer,
+        _ => RailKind::Guide,
     };
     if msg.role == AiRole::User {
         for line in &mut body {
             line.style = line.style.bg(theme::CHAT_USER_BG);
         }
     }
-    push_railed(out, body, color, width);
+    push_railed(out, body, rail, width);
 }
 
 /// Fits compact activity labels in terminal cells, including wide Unicode.
@@ -1565,7 +1589,7 @@ fn push_thinking_state(
             text.lines()
                 .map(|line| Line::styled(line.to_owned(), muted())),
         );
-        push_railed(out, body, theme::MUTED, width);
+        push_railed(out, body, RailKind::Guide, width);
         return;
     }
     // Read only a bounded slice even when a provider streams a very long thought.
@@ -1618,7 +1642,7 @@ fn push_thinking_state(
         };
         spans.push(Span::styled(ch.to_string(), style));
     }
-    push_railed(out, vec![Line::from(spans)], theme::MUTED, width);
+    push_railed(out, vec![Line::from(spans)], RailKind::Guide, width);
 }
 
 fn push_activity_group(
@@ -1685,7 +1709,7 @@ fn push_activity_group(
                 fg(theme::WARNING),
             ));
         }
-        push_railed(out, body, color, width);
+        push_railed(out, body, RailKind::Guide, width);
         return;
     }
     for msg in group {
@@ -1714,7 +1738,7 @@ fn push_activity_group(
             );
         }
     }
-    push_railed(out, body, color, width);
+    push_railed(out, body, RailKind::Guide, width);
 }
 
 /// One status row per requested tool call, derived from the follow-up tool
@@ -2676,7 +2700,7 @@ mod tests {
     }
 
     #[test]
-    fn tinted_user_blocks_and_quiet_answer_rails_preserve_selection_across_wraps() {
+    fn tinted_user_blocks_and_green_answer_rails_preserve_selection_across_wraps() {
         let (mut app, _project, _store) = activity_test_app();
         app.agents[0].messages_mut().extend([
             message(
@@ -2727,8 +2751,12 @@ mod tests {
                 .iter()
                 .find(|row| line_text(&row.line).contains("ANSWER_BODY"))
                 .unwrap();
-            assert_eq!(answer.line.spans[0].content, QUIET_RAIL);
-            assert_eq!(answer.line.spans[0].style.fg, Some(theme::BORDER));
+            assert_eq!(answer.line.spans[0].content, RAIL, "finished answer bar");
+            assert_eq!(
+                answer.line.spans[0].style.fg,
+                Some(theme::SUCCESS),
+                "finished answer bar colour"
+            );
         }
     }
 
@@ -2998,6 +3026,12 @@ mod tests {
     }
 
     fn assert_reply_color(app: &App, text: &str, expected: ratatui::style::Color) {
+        // A finished answer switches to the green bar; anything else keeps the quiet guide.
+        let (glyph, rail_color) = if expected == theme::SUCCESS {
+            (RAIL, theme::SUCCESS)
+        } else {
+            (QUIET_RAIL, theme::BORDER)
+        };
         let rows = build_chat_lines(app, 100, 60, ChatPlacement::Tab);
         let texts = row_texts(&rows);
         let indices: Vec<_> = texts
@@ -3008,19 +3042,21 @@ mod tests {
             .collect();
         assert_eq!(indices.len(), 1, "reply must occur once: {texts:?}");
         let index = indices[0];
+        assert_eq!(rows[index].spans[0].content, glyph, "reply rail glyph");
         assert_eq!(
             rows[index].spans[0].style.fg,
-            Some(theme::BORDER),
-            "quiet reply rail"
+            Some(rail_color),
+            "reply rail colour"
         );
         let header = (0..index)
             .rev()
             .find(|i| texts[*i].contains("Teshi"))
             .unwrap();
+        assert_eq!(rows[header].spans[0].content, glyph, "header rail glyph");
         assert_eq!(
             rows[header].spans[0].style.fg,
-            Some(theme::BORDER),
-            "quiet header rail"
+            Some(rail_color),
+            "header rail colour"
         );
         assert_eq!(
             rows[header].spans.last().unwrap().style.fg,
@@ -3035,13 +3071,13 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[(0, index as u16)].fg,
-            theme::BORDER,
-            "rendered quiet reply rail"
+            rail_color,
+            "rendered reply rail"
         );
         assert_eq!(
             buffer[(0, header as u16)].fg,
-            theme::BORDER,
-            "rendered quiet header rail"
+            rail_color,
+            "rendered header rail"
         );
     }
 
@@ -3257,7 +3293,7 @@ mod tests {
     fn test_push_railed_prefixes_every_wrapped_row() {
         let mut out = Vec::new();
         let long = Line::raw("one two three four five six seven");
-        push_railed(&mut out, vec![long], theme::ACCENT, 12);
+        push_railed(&mut out, vec![long], RailKind::User, 12);
         assert!(out.len() > 1, "expected wrapping, got {out:?}");
         for row in &out {
             assert_eq!(row.spans[0].content, RAIL);
@@ -3386,7 +3422,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_keeps_one_guide_column_across_its_blocks() {
+    fn a_turn_keeps_one_guide_column_and_ends_on_the_green_answer_bar() {
         let (mut app, _project, _store) = activity_test_app();
         let mut thought = message(AiRole::Assistant, "", Some("acp_reasoning"));
         thought.reasoning_content = Some("FIRST_THOUGHT\nSECOND_THOUGHT".into());
@@ -3401,12 +3437,26 @@ mod tests {
             message(AiRole::Assistant, "ANSWER", None),
         ]);
 
-        let rows = row_texts(&build_chat_lines(&app, 72, 40, ChatPlacement::Tab));
+        let lines = build_chat_lines(&app, 72, 40, ChatPlacement::Tab);
+        let rows = row_texts(&lines);
+        let answer = rows
+            .iter()
+            .position(|row| row.contains("ANSWER"))
+            .expect("finished answer row");
+        assert_eq!(
+            lines[answer].spans[0].content, RAIL,
+            "the finished answer opens the green bar: {rows:?}"
+        );
+        assert_eq!(
+            lines[answer].spans[0].style.fg,
+            Some(theme::SUCCESS),
+            "the finished answer bar is green"
+        );
         let first = rows
             .iter()
             .position(|row| row.starts_with(QUIET_RAIL))
             .unwrap();
-        let last = rows
+        let last = rows[..answer]
             .iter()
             .rposition(|row| row.starts_with(QUIET_RAIL))
             .unwrap();
@@ -3422,7 +3472,7 @@ mod tests {
             rows[first..=last]
                 .iter()
                 .all(|row| row.starts_with(QUIET_RAIL)),
-            "every row of a turn sits on the guide: {rows:?}"
+            "every activity row of a turn sits on the guide: {rows:?}"
         );
     }
 
