@@ -669,6 +669,9 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
     ]);
     let terminal = fixture.launch();
     terminal.key("4").unwrap();
+    // Opening the loaded store hands focus to the tree, so let the document
+    // render before moving to the editor or the chord lands too early.
+    terminal.expect_text("# Req 01", true, 10000).unwrap();
     // Footer controls follow the focused pane; the tree opens first.
     prefix(&terminal, "Right");
     terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();

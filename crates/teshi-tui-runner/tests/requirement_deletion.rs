@@ -24,6 +24,14 @@ fn document_path(store: &Path, id: &str) -> Option<PathBuf> {
         .map(|path| store.join(path))
 }
 
+/// Deletion lives in the tree's Actions menu rather than on the footer.
+fn open_delete_confirmation(terminal: &Terminal) -> anyhow::Result<()> {
+    terminal.click_text("Actions [Space]", 5000)?;
+    terminal.click_text("Delete requirement…", 5000)?;
+    terminal.expect_text("global requirement library", true, 5000)?;
+    Ok(())
+}
+
 fn launch_config(binary: &Path, project: &Path, store: &Path, root: &Path) -> Launch {
     Launch {
         program: binary.to_string_lossy().into_owned(),
@@ -69,9 +77,6 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
     for number in 1..=3 {
         terminal.key("Ctrl+n")?;
         terminal.expect_text(&format!("# Document {number}"), true, 10000)?;
-        if number == 1 {
-            terminal.key("Right")?;
-        }
         terminal.key("Ctrl+s")?;
         terminal.expect_text("Saved requirement document", true, 10000)?;
     }
@@ -91,8 +96,7 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
         terminal.screenshot(&path.with_file_name("before-delete.svg"))?;
     }
 
-    terminal.click_text("Delete [d/Delete]", 5000)?;
-    terminal.expect_text("global requirement library", true, 5000)?;
+    open_delete_confirmation(&terminal)?;
     if let Some(path) = artifact_path("delete-confirmation.txt") {
         fs::write(&path, terminal.screen()?)?;
         terminal.screenshot(&path.with_file_name("delete-confirmation.svg"))?;
@@ -103,8 +107,7 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
     let doc2 = document_path(&store, "doc-2").expect("doc-2 is indexed");
     assert!(doc2.is_file(), "cancel removed {}", doc2.display());
 
-    terminal.click_text("Delete [d/Delete]", 5000)?;
-    terminal.expect_text("global requirement library", true, 5000)?;
+    open_delete_confirmation(&terminal)?;
     terminal.key("Enter")?;
     terminal.expect_text("# Document 3", true, 5000)?;
     terminal.expect_text("Document 2", false, 5000)?;

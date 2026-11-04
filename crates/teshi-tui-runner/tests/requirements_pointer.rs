@@ -156,11 +156,39 @@ impl Fixture {
             return;
         }
         for _ in 0..3 {
-            if terminal.screen().unwrap().contains("╭Requirements") {
+            if terminal.screen().unwrap().contains("╭Current project") {
                 return;
             }
             self.focus(terminal, false);
         }
+    }
+
+    /// Clicks an editor command such as Save or Iteration.
+    ///
+    /// The footer lists editor commands only while the editor owns the keyboard,
+    /// and the bare labels also match tree rows ("Saved queries") and the scope
+    /// title ("Iteration: All"). Focus the editor through `anchor`, then click the
+    /// footer entry by its shortcut hint, which normal widths always draw.
+    fn click_editor_action(
+        &self,
+        terminal: &Terminal,
+        anchor: &str,
+        label: &str,
+        shortcut: &str,
+        stage: &str,
+    ) {
+        self.reveal(terminal, anchor);
+        if self.config.cols < 60 {
+            // Only the focused pane is drawn, and its footer omits the hints.
+            self.click(terminal, label, stage);
+            return;
+        }
+        let entry = format!("{label} [{shortcut}]");
+        if !terminal.screen().unwrap().contains(&entry) {
+            terminal.click_text(anchor, 1500).unwrap();
+            terminal.expect_text(&entry, true, 1500).unwrap();
+        }
+        self.click(terminal, &entry, stage);
     }
 
     fn reveal(&self, terminal: &Terminal, text: &str) {
@@ -186,6 +214,8 @@ impl Fixture {
         terminal
             .expect_text("# Alpha requirement", true, 10000)
             .unwrap();
+        // The tree owns the tab's shortcuts; tests walk into the editor explicitly.
+        self.focus_tree(&terminal);
         self.capture(&terminal, "initial");
         terminal
     }
@@ -267,7 +297,7 @@ fn new_document(narrow: bool) {
     let terminal = fixture.launch();
     fixture.click_new(&terminal);
     terminal.expect_text("# Document 1", true, 1500).unwrap();
-    fixture.click(&terminal, "Save", "save-new");
+    fixture.click_editor_action(&terminal, "# Document 1", "Save", "Ctrl+s", "save-new");
     wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     let body = documents::document_path(&fixture.store, "doc-1").expect("doc-1 is indexed");
     assert_eq!(fs::read_to_string(body).unwrap(), "# Document 1\n\n");
@@ -293,6 +323,7 @@ fn filter_and_group(narrow: bool) {
         .expect_text("Filter iteration", true, 1500)
         .unwrap();
     fixture.click(&terminal, "Sprint B", "choose-filter");
+    fixture.reveal(&terminal, "# Beta requirement");
     terminal
         .expect_text("# Beta requirement", true, 1500)
         .unwrap();
@@ -302,16 +333,20 @@ fn filter_and_group(narrow: bool) {
     terminal
         .expect_text("# Alpha requirement", false, 1500)
         .unwrap();
+    // Filter and View are tree commands, so narrow terminals return to the tree.
+    fixture.focus_tree(&terminal);
     fixture.click(&terminal, "Filter", "reset-filter");
     fixture.click(&terminal, "All", "choose-all");
+    fixture.reveal(&terminal, "# Beta requirement");
     terminal
         .expect_text("# Beta requirement", true, 1500)
         .unwrap();
-    fixture.click(&terminal, "Group", "group-iterations");
+    fixture.focus_tree(&terminal);
+    fixture.click(&terminal, "View", "group-iterations");
     fixture.reveal(&terminal, "Sprint A");
     terminal.expect_text("Sprint A", true, 1500).unwrap();
     terminal.expect_text("Sprint B", true, 1500).unwrap();
-    fixture.click(&terminal, "Group", "group-paths");
+    fixture.click(&terminal, "View", "group-paths");
     terminal.expect_text("Sprint B", false, 1500).unwrap();
     fixture.click(&terminal, "Filter", "filter-unassigned");
     fixture.click(&terminal, "Unassigned", "choose-unassigned");
@@ -335,7 +370,13 @@ fn filter_and_group(narrow: bool) {
 fn iteration(narrow: bool) {
     let fixture = Fixture::new("iteration-modal", narrow);
     let terminal = fixture.launch();
-    fixture.click(&terminal, "Iteration", "open-iteration");
+    fixture.click_editor_action(
+        &terminal,
+        "# Alpha requirement",
+        "Iteration",
+        "I",
+        "open-iteration",
+    );
     terminal.expect_text("Set iteration", true, 1500).unwrap();
     // An underlying tab and row remain visible while the modal owns input.
     terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
@@ -351,7 +392,13 @@ fn iteration(narrow: bool) {
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
         ALPHA
     );
-    fixture.click(&terminal, "Iteration", "reopen-iteration");
+    fixture.click_editor_action(
+        &terminal,
+        "# Alpha requirement",
+        "Iteration",
+        "I",
+        "reopen-iteration",
+    );
     terminal.write("discarded").unwrap();
     fixture.click(&terminal, "Cancel", "cancel-iteration");
     terminal.expect_text("Set iteration", false, 1500).unwrap();
@@ -366,7 +413,8 @@ fn iteration(narrow: bool) {
 fn deletion(narrow: bool) {
     let fixture = Fixture::new("delete-modal", narrow);
     let terminal = fixture.launch();
-    fixture.click(&terminal, "Delete", "delete-open");
+    fixture.click(&terminal, "Actions", "delete-menu");
+    fixture.click(&terminal, "Delete requirement…", "delete-open");
     terminal
         .expect_text("Delete requirement", true, 1500)
         .unwrap();
@@ -383,7 +431,8 @@ fn deletion(narrow: bool) {
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
         ALPHA
     );
-    fixture.click(&terminal, "Delete", "delete-open-again");
+    fixture.click(&terminal, "Actions", "delete-menu-again");
+    fixture.click(&terminal, "Delete requirement…", "delete-open-again");
     fixture.click(&terminal, "Confirm", "delete-confirm");
     wait_until(|| {
         !fixture
@@ -413,6 +462,7 @@ fn deletion(narrow: bool) {
 fn create_point(narrow: bool) {
     let fixture = Fixture::new("selection-point", narrow);
     let terminal = fixture.launch();
+    fixture.reveal(&terminal, "alpha first");
     terminal.drag_text("alpha first", 1500).unwrap();
     fixture.capture(&terminal, "source-selection");
     // The compact Points tab shares the button's prefix. Resolve the actual
@@ -445,6 +495,7 @@ fn create_point(narrow: bool) {
 fn dirty_modal(narrow: bool, save: bool) {
     let fixture = Fixture::new(if save { "dirty-save" } else { "dirty-discard" }, narrow);
     let terminal = fixture.launch();
+    fixture.reveal(&terminal, "alpha first");
     terminal.click_text("alpha first", 1500).unwrap();
     terminal.key("i").unwrap();
     terminal.write("draft ").unwrap();
@@ -458,6 +509,7 @@ fn dirty_modal(narrow: bool, save: bool) {
     terminal
         .expect_text("Unsaved requirement", false, 1500)
         .unwrap();
+    fixture.reveal(&terminal, "draft alpha first");
     terminal
         .expect_text("draft alpha first", true, 1500)
         .unwrap();
@@ -466,9 +518,11 @@ fn dirty_modal(narrow: bool, save: bool) {
         ALPHA
     );
     fixture.click_new(&terminal);
+    // The modal labels carry their key, which keeps "Save" off the tree's
+    // "Saved queries" row.
     fixture.click(
         &terminal,
-        if save { "Save" } else { "Discard" },
+        if save { "[S] Save" } else { "[D] Discard" },
         "dirty-resolve",
     );
     terminal.expect_text("# Document 1", true, 1500).unwrap();
@@ -480,7 +534,13 @@ fn dirty_modal(narrow: bool, save: bool) {
             ALPHA
         }
     );
-    fixture.click(&terminal, "Save", "save-new-after-dirty");
+    fixture.click_editor_action(
+        &terminal,
+        "# Document 1",
+        "Save",
+        "Ctrl+s",
+        "save-new-after-dirty",
+    );
     wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     fixture.capture(&terminal, "dirty-resolution-persisted");
     fixture.finish(terminal);
@@ -498,6 +558,9 @@ fn priority_roundtrip(narrow: bool) {
     use teshi_core::authoring::RequirementPriority;
     let fixture = Fixture::new("priority-roundtrip", narrow);
     let terminal = fixture.launch();
+    // The priority control sits on the editor's title, which narrow terminals
+    // draw only while the editor is focused.
+    fixture.reveal(&terminal, "Priority: Unset");
     fixture.click(&terminal, "Priority: Unset", "priority-open");
     terminal
         .expect_text("Requirement priority", true, 1500)
@@ -506,10 +569,12 @@ fn priority_roundtrip(narrow: bool) {
     fixture.click(&terminal, "Cancel", "priority-cancel");
     assert_eq!(fixture.index().documents[0].priority, None);
     // Metadata edits must neither save nor discard the dirty Markdown buffer.
+    fixture.reveal(&terminal, "alpha first");
     terminal.click_text("alpha first", 1500).unwrap();
     terminal.key("i").unwrap();
     terminal.write("draft ").unwrap();
     terminal.key("Escape").unwrap();
+    fixture.reveal(&terminal, "Priority: Unset");
     fixture.click(&terminal, "Priority: Unset", "priority-dirty-open");
     terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
     terminal
@@ -517,6 +582,7 @@ fn priority_roundtrip(narrow: bool) {
         .unwrap();
     fixture.click(&terminal, "P1", "priority-p1");
     wait_until(|| fixture.index().documents[0].priority == Some(RequirementPriority::P1));
+    fixture.reveal(&terminal, "Priority: P1");
     terminal.expect_text("Priority: P1", true, 1500).unwrap();
     terminal
         .expect_text("draft alpha first", true, 1500)
@@ -525,7 +591,13 @@ fn priority_roundtrip(narrow: bool) {
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
         ALPHA
     );
-    fixture.click(&terminal, "Save", "priority-save-body");
+    fixture.click_editor_action(
+        &terminal,
+        "draft alpha first",
+        "Save",
+        "Ctrl+s",
+        "priority-save-body",
+    );
     wait_until(|| {
         fs::read_to_string(fixture.store.join("alpha.md"))
             .unwrap()
@@ -538,6 +610,7 @@ fn priority_roundtrip(narrow: bool) {
     let before = fixture.index();
     fixture.finish(terminal);
     let terminal = fixture.launch();
+    fixture.reveal(&terminal, "Priority: P1");
     terminal.expect_text("Priority: P1", true, 1500).unwrap();
     assert_eq!(fixture.index(), before);
     // The keyboard entry remains on the tree, independent of the editor's Vim keys.
@@ -568,6 +641,7 @@ fn priority_write_failure(narrow: bool) {
     let terminal = fixture.launch();
     let original = fs::read(fixture.store.join("_teshi.json")).unwrap();
     fs::create_dir(fixture.store.join("_teshi.tmp")).unwrap();
+    fixture.reveal(&terminal, "Priority: Unset");
     fixture.click(&terminal, "Priority: Unset", "priority-failure-open");
     fixture.click(&terminal, "P0", "priority-failed-save");
     terminal
@@ -580,6 +654,7 @@ fn priority_write_failure(narrow: bool) {
     fs::remove_dir(fixture.store.join("_teshi.tmp")).unwrap();
     terminal.key("Enter").unwrap();
     wait_until(|| fixture.index().documents[0].priority == Some(RequirementPriority::P0));
+    fixture.reveal(&terminal, "Priority: P0");
     terminal.expect_text("Priority: P0", true, 1500).unwrap();
     assert_eq!(
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
