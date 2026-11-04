@@ -896,13 +896,11 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
     render_explore_steps(frame, app, cols[2]);
-    // Row bindings use logical list rows. Translate them through the same
-    // offsets used to draw the columns, and discard rows outside the viewport.
+    // Scenario/step bindings still use logical rows. Feature bindings are
+    // emitted directly for the viewport and already have screen coordinates.
     let views = app.explore_viewports;
     app.clickable_regions.retain_mut(|region| {
         let (column, row) = match region {
-            ClickableRegion::ExploreFeature { row_y, .. }
-            | ClickableRegion::ExploreDeletedFeature { row_y, .. } => (0, row_y),
             ClickableRegion::ExploreScenario { row_y, .. } => (1, row_y),
             ClickableRegion::ExploreStep { row_y, .. } => (2, row_y),
             _ => return true,
@@ -962,6 +960,37 @@ fn render_explore_lines_selected<'a>(
     selected_row: Option<usize>,
 ) -> Rect {
     let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    render_explore_viewport(
+        frame,
+        app,
+        column,
+        inner,
+        lines.len(),
+        content_width,
+        selected_row,
+        |_, range| {
+            lines
+                .into_iter()
+                .skip(range.start)
+                .take(range.len())
+                .collect()
+        },
+    )
+}
+
+// Build styled lines only after the viewport is known. Feature catalogs can be
+// huge, and resolving Git status may touch the filesystem for each visible row.
+#[allow(clippy::too_many_arguments)]
+fn render_explore_viewport<'a>(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    column: ColumnFocus,
+    inner: Rect,
+    row_count: usize,
+    content_width: usize,
+    selected_row: Option<usize>,
+    render_rows: impl FnOnce(&App, std::ops::Range<usize>) -> Vec<Line<'a>>,
+) -> Rect {
     let viewport_width = inner.width as usize;
     let overflow = content_width > viewport_width && inner.height >= 3;
     let content_area = if overflow {
@@ -997,7 +1026,7 @@ fn render_explore_lines_selected<'a>(
         view.last_owner = Some(owner);
     }
     view.rect = content_area;
-    view.max_vertical = lines.len().saturating_sub(content_area.height as usize);
+    view.max_vertical = row_count.saturating_sub(content_area.height as usize);
     view.max_horizontal = max_scroll;
     view.offset = view.offset.min(view.max_vertical);
     if view.last_selected != Some(selected) {
@@ -1013,11 +1042,8 @@ fn render_explore_lines_selected<'a>(
     }
     // Pad and render only the viewport, rather than allocating full-width
     // backgrounds for every file in a large project.
-    let visible_lines = lines
-        .into_iter()
-        .skip(view.offset)
-        .take(content_area.height as usize)
-        .collect();
+    let range = view.offset..(view.offset + content_area.height as usize).min(row_count);
+    let visible_lines = render_rows(app, range);
     frame.render_widget(
         Paragraph::new(Text::from(theme::popup_rows(
             visible_lines,
@@ -1153,76 +1179,92 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
     let selected = app.explore_selected_feature_row();
-    let lines = rows
+    let content = render_explore_viewport(
+        frame,
+        app,
+        ColumnFocus::Feature,
+        inner,
+        rows.len(),
+        app.feature_browser_width(),
+        selected,
+        |app, range| {
+            rows.iter()
+                .enumerate()
+                .skip(range.start)
+                .take(range.len())
+                .map(|(row, item)| {
+                    let label = match item {
+                        Row::Directory(path, depth) => format!(
+                            " {}{} {}/",
+                            "  ".repeat(*depth),
+                            if app.feature_directory_collapsed(path) {
+                                "▸"
+                            } else {
+                                "▾"
+                            },
+                            path.rsplit('/').next().unwrap_or(path)
+                        ),
+                        Row::File(index, label, deleted) => {
+                            let status = if *deleted {
+                                app.git_status.deleted[*index].file_status
+                            } else {
+                                let path = match &app.lazy_features {
+                                    Some(catalog) => catalog.paths.get(*index),
+                                    None => app
+                                        .project
+                                        .features
+                                        .get(*index)
+                                        .map(|feature| &feature.file_path),
+                                };
+                                path.map_or(teshi_core::git::FileGitStatus::Unmodified, |path| {
+                                    app.git_status.file_status_at_path(path)
+                                })
+                            };
+                            return Line::from(vec![
+                                Span::styled(
+                                    format!(" {:<2} ", status.marker()),
+                                    git_file_status_style(status),
+                                ),
+                                Span::styled(
+                                    label.clone(),
+                                    if selected == Some(row) {
+                                        explore_select_style(focused)
+                                    } else {
+                                        Style::default()
+                                    },
+                                ),
+                            ]);
+                        }
+                    };
+                    Line::styled(
+                        label,
+                        if selected == Some(row) {
+                            explore_select_style(focused)
+                        } else {
+                            Style::default()
+                        },
+                    )
+                })
+                .collect()
+        },
+    );
+    let offset = app.explore_viewports[ColumnFocus::Feature.index()].offset;
+    for (row, item) in rows
         .iter()
         .enumerate()
-        .map(|(row, item)| {
-            let label = match item {
-                Row::Directory(path, depth) => format!(
-                    " {}{} {}/",
-                    "  ".repeat(*depth),
-                    if app.feature_directory_collapsed(path) {
-                        "▸"
-                    } else {
-                        "▾"
-                    },
-                    path.rsplit('/').next().unwrap_or(path)
-                ),
-                Row::File(index, label, deleted) => {
-                    let status = if *deleted {
-                        app.git_status.deleted[*index].file_status
-                    } else {
-                        let path = match &app.lazy_features {
-                            Some(catalog) => catalog.paths.get(*index),
-                            None => app
-                                .project
-                                .features
-                                .get(*index)
-                                .map(|feature| &feature.file_path),
-                        };
-                        path.map_or(teshi_core::git::FileGitStatus::Unmodified, |path| {
-                            app.git_status.file_status_at_path(path)
-                        })
-                    };
-                    return Line::from(vec![
-                        Span::styled(
-                            format!(" {:<2} ", status.marker()),
-                            git_file_status_style(status),
-                        ),
-                        Span::styled(
-                            label.clone(),
-                            if selected == Some(row) {
-                                explore_select_style(focused)
-                            } else {
-                                Style::default()
-                            },
-                        ),
-                    ]);
-                }
-            };
-            Line::styled(
-                label,
-                if selected == Some(row) {
-                    explore_select_style(focused)
-                } else {
-                    Style::default()
-                },
-            )
-        })
-        .collect();
-    let content =
-        render_explore_lines_selected(frame, app, ColumnFocus::Feature, inner, lines, selected);
-    for (row, item) in rows.iter().enumerate() {
+        .skip(offset)
+        .take(content.height as usize)
+    {
         let region = match item {
             Row::File(index, _, true) => ClickableRegion::ExploreDeletedFeature {
                 deleted_idx: *index,
-                row_y: content.y + row as u16,
+                row_y: content.y + (row - offset) as u16,
                 col_x: content.x,
                 col_right: content.right(),
             },
             _ => ClickableRegion::ExploreFeature {
                 feature_idx: row,
-                row_y: content.y + row as u16,
+                row_y: content.y + (row - offset) as u16,
                 col_x: content.x,
                 col_right: content.right(),
             },
@@ -6744,6 +6786,51 @@ Feature: Rule only
         app.project.features = vec![feature];
         app.explore_selected_feature = 0;
         assert_eq!(explore_scenarios_title(&app), "Scenarios (1)");
+    }
+
+    #[test]
+    fn explore_large_tree_renders_only_visible_rows_and_correct_hit_targets() {
+        let mut app = App::from_args().unwrap();
+        app.project.features = (0..10_000)
+            .map(|i| {
+                gherkin::parse_feature(
+                    "Feature: Example",
+                    PathBuf::from(format!("file{i:05}.feature")),
+                )
+            })
+            .collect();
+        app.git_status = Default::default();
+        app.explore_selected_feature = 9_999;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| super::render_explore_panel(frame, &mut app, frame.area()))
+            .unwrap();
+        let view = &app.explore_viewports[crate::app::ColumnFocus::Feature.index()];
+        let offset = view.offset;
+        assert!(offset > 0);
+        assert_eq!(view.max_vertical, 10_000 - view.rect.height as usize);
+        let targets: Vec<_> = app
+            .clickable_regions
+            .iter()
+            .filter_map(|r| match r {
+                ClickableRegion::ExploreFeature {
+                    feature_idx, row_y, ..
+                } => Some((*feature_idx, *row_y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets.len(), view.rect.height as usize);
+        assert_eq!(targets[0], (offset, view.rect.y));
+        assert_eq!(targets.last().unwrap().0, 9_999);
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("file09999"));
+        assert!(!screen.contains("file00000"));
     }
 
     #[test]

@@ -2651,29 +2651,7 @@ impl App {
     }
 
     pub(crate) fn explore_selected_feature_row(&self) -> Option<usize> {
-        self.feature_browser_rows()
-            .iter()
-            .position(|row| match row {
-                crate::feature_browser::Row::Directory(path, _) => {
-                    self.feature_browser.directory.as_ref() == Some(path)
-                }
-                crate::feature_browser::Row::File(index, _, deleted) => {
-                    self.feature_browser.directory.is_none()
-                        && if *deleted {
-                            self.explore_selected_deleted_feature == Some(*index)
-                        } else {
-                            self.explore_selected_deleted_feature.is_none()
-                                && if let Some(catalog) = &self.lazy_features {
-                                    catalog
-                                        .selected
-                                        .as_ref()
-                                        .is_some_and(|path| catalog.paths.get(*index) == Some(path))
-                                } else {
-                                    self.explore_selected_feature == *index
-                                }
-                        }
-                }
-            })
+        self.feature_browser_selected_row()
     }
 
     fn explore_selected_scenario_count(&self) -> usize {

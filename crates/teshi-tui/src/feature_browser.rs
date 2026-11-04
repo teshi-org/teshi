@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -19,6 +19,18 @@ pub(crate) struct FeatureBrowser {
     pub(crate) directory: Option<String>,
     expanded: BTreeSet<String>,
     rows: RefCell<Option<(u64, Rc<Vec<Row>>)>>,
+    width: std::cell::Cell<usize>,
+    files: RefCell<Option<(u64, Vec<SearchFile>)>>,
+    directory_rows: RefCell<HashMap<String, usize>>,
+    file_rows: RefCell<HashMap<(usize, bool), usize>>,
+    path_rows: RefCell<HashMap<std::path::PathBuf, usize>>,
+}
+
+struct SearchFile {
+    path: String,
+    searchable: String,
+    index: usize,
+    deleted: bool,
 }
 
 #[derive(Clone)]
@@ -80,38 +92,92 @@ impl App {
         let mut key = std::collections::hash_map::DefaultHasher::new();
         self.project.root_dir.hash(&mut key);
         self.feature_discovery_root.hash(&mut key);
-        self.feature_browser_filter_query().hash(&mut key);
-        self.feature_browser.expanded.hash(&mut key);
         if let Some(catalog) = &self.lazy_features {
             catalog.revision.hash(&mut key);
-        }
-        self.project.features.len().hash(&mut key);
-        for feature in &self.project.features {
-            feature.file_path.hash(&mut key);
-            feature.name.hash(&mut key);
+        } else {
+            self.project.features.len().hash(&mut key);
+            for feature in &self.project.features {
+                feature.file_path.hash(&mut key);
+                feature.name.hash(&mut key);
+            }
         }
         self.git_status.deleted.len().hash(&mut key);
         for feature in &self.git_status.deleted {
             feature.path.hash(&mut key);
         }
+        let files_key = key.finish();
+        self.feature_browser_filter_query().hash(&mut key);
+        self.feature_browser.expanded.hash(&mut key);
         let key = key.finish();
         if let Some((cached_key, rows)) = self.feature_browser.rows.borrow().as_ref()
             && *cached_key == key
         {
             return Rc::clone(rows);
         }
+        if self
+            .feature_browser
+            .files
+            .borrow()
+            .as_ref()
+            .map(|(key, _)| *key)
+            != Some(files_key)
+        {
+            *self.feature_browser.files.borrow_mut() =
+                Some((files_key, self.build_feature_browser_files()));
+        }
         let rows = Rc::new(self.build_feature_browser_rows());
+        let mut directories = self.feature_browser.directory_rows.borrow_mut();
+        let mut files = self.feature_browser.file_rows.borrow_mut();
+        let mut paths = self.feature_browser.path_rows.borrow_mut();
+        directories.clear();
+        files.clear();
+        paths.clear();
+        // Index visible positions once; navigation near the bottom must not
+        // compare every preceding filesystem path on each key or frame.
+        for (position, row) in rows.iter().enumerate() {
+            match row {
+                Row::Directory(path, _) => {
+                    directories.insert(path.clone(), position);
+                }
+                Row::File(index, _, deleted) => {
+                    files.insert((*index, *deleted), position);
+                    if !deleted
+                        && let Some(catalog) = &self.lazy_features
+                        && let Some(path) = catalog.paths.get(*index)
+                    {
+                        paths.insert(path.clone(), position);
+                    }
+                }
+            }
+        }
+        // Width depends only on tree labels, not selection or Git markers.
+        use unicode_width::UnicodeWidthStr;
+        self.feature_browser.width.set(
+            rows.iter()
+                .map(|row| match row {
+                    Row::Directory(path, depth) => {
+                        4 + depth * 2 + path.rsplit('/').next().unwrap_or(path).width()
+                    }
+                    Row::File(_, label, _) => 4 + label.width(),
+                })
+                .max()
+                .unwrap_or(0),
+        );
         *self.feature_browser.rows.borrow_mut() = Some((key, Rc::clone(&rows)));
         rows
     }
 
-    fn build_feature_browser_rows(&self) -> Vec<Row> {
+    /// Returns the maximum display width of the most recently resolved tree.
+    pub(crate) fn feature_browser_width(&self) -> usize {
+        self.feature_browser.width.get()
+    }
+
+    fn build_feature_browser_files(&self) -> Vec<SearchFile> {
         let mut files = BTreeMap::new();
         let display_root = self
             .feature_discovery_root
             .as_deref()
             .unwrap_or(&self.project.root_dir);
-        let query = self.feature_browser_filter_query().to_lowercase();
         if let Some(catalog) = &self.lazy_features {
             for (index, file_path) in catalog.paths.iter().enumerate() {
                 let path = file_path
@@ -119,9 +185,8 @@ impl App {
                     .unwrap_or(file_path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                if query.is_empty() || path.to_lowercase().contains(&query) {
-                    files.insert((path, false), index);
-                }
+                let searchable = path.to_lowercase();
+                files.insert((path, false), (index, searchable));
             }
         } else {
             for (index, feature) in self.project.features.iter().enumerate() {
@@ -131,12 +196,9 @@ impl App {
                     .unwrap_or(&feature.file_path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                if query.is_empty()
-                    || path.to_lowercase().contains(&query)
-                    || feature.name.to_lowercase().contains(&query)
-                {
-                    files.insert((path, false), index);
-                }
+                let searchable =
+                    format!("{}\n{}", path.to_lowercase(), feature.name.to_lowercase());
+                files.insert((path, false), (index, searchable));
             }
         }
         for (index, feature) in self.git_status.deleted.iter().enumerate() {
@@ -150,13 +212,38 @@ impl App {
                 .unwrap_or(&absolute)
                 .to_string_lossy()
                 .replace('\\', "/");
-            if query.is_empty() || path.to_lowercase().contains(&query) {
-                files.insert((path, true), index);
-            }
+            let searchable = path.to_lowercase();
+            files.insert((path, true), (index, searchable));
         }
+        files
+            .into_iter()
+            .map(|((path, deleted), (index, searchable))| SearchFile {
+                path,
+                searchable,
+                index,
+                deleted,
+            })
+            .collect()
+    }
+
+    fn build_feature_browser_rows(&self) -> Vec<Row> {
+        let query = self.feature_browser_filter_query().to_lowercase();
+        let files = self.feature_browser.files.borrow();
+        let Some((_, files)) = files.as_ref() else {
+            return Vec::new();
+        };
         let mut rows = Vec::new();
         let mut emitted = BTreeSet::new();
-        for ((path, deleted), index) in files {
+        for SearchFile {
+            path,
+            searchable,
+            index,
+            deleted,
+        } in files
+        {
+            if !query.is_empty() && !searchable.contains(&query) {
+                continue;
+            }
             let parts: Vec<_> = path
                 .split('/')
                 .filter(|part| !part.is_empty() && *part != ".")
@@ -174,7 +261,7 @@ impl App {
             }
             if !hidden {
                 rows.push(Row::File(
-                    index,
+                    *index,
                     format!(
                         "{}{}",
                         "  ".repeat(parts.len().saturating_sub(1)),
@@ -184,11 +271,43 @@ impl App {
                             .strip_suffix(".feature")
                             .unwrap_or(parts.last().unwrap_or(&""))
                     ),
-                    deleted,
+                    *deleted,
                 ));
             }
         }
         rows
+    }
+
+    /// Resolves the selected visible row using the current tree's indexes.
+    pub(crate) fn feature_browser_selected_row(&self) -> Option<usize> {
+        self.feature_browser_rows();
+        if let Some(path) = &self.feature_browser.directory {
+            return self
+                .feature_browser
+                .directory_rows
+                .borrow()
+                .get(path)
+                .copied();
+        }
+        if let Some(index) = self.explore_selected_deleted_feature {
+            return self
+                .feature_browser
+                .file_rows
+                .borrow()
+                .get(&(index, true))
+                .copied();
+        }
+        if let Some(catalog) = &self.lazy_features {
+            return catalog
+                .selected
+                .as_ref()
+                .and_then(|path| self.feature_browser.path_rows.borrow().get(path).copied());
+        }
+        self.feature_browser
+            .file_rows
+            .borrow()
+            .get(&(self.explore_selected_feature, false))
+            .copied()
     }
 
     pub(crate) fn feature_directory_collapsed(&self, path: &str) -> bool {
@@ -286,6 +405,62 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_selection_tracks_filter_expansion_and_catalog_changes() {
+        let mut app = App::from_args().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut catalog = crate::lazy_features::LazyFeatures::new(root.path().into(), false);
+        catalog.paths = vec![
+            root.path().join("a/one.feature"),
+            root.path().join("z.feature"),
+        ];
+        catalog.selected = Some(catalog.paths[1].clone());
+        app.feature_discovery_root = Some(root.path().into());
+        app.lazy_features = Some(catalog);
+        app.git_status = Default::default();
+        assert_eq!(app.feature_browser_selected_row(), Some(1));
+        app.feature_browser.expanded.insert("a".into());
+        assert_eq!(app.feature_browser_selected_row(), Some(2));
+        app.feature_browser.query = "ONE".into();
+        assert_eq!(app.feature_browser_selected_row(), None);
+        app.feature_browser.directory = Some("a".into());
+        assert_eq!(app.feature_browser_selected_row(), Some(0));
+        app.feature_browser.directory = None;
+        app.feature_browser.query.clear();
+        let catalog = app.lazy_features.as_mut().unwrap();
+        catalog.paths.insert(0, root.path().join("a/added.feature"));
+        catalog.revision += 1;
+        assert_eq!(app.feature_browser_selected_row(), Some(3));
+        app.feature_browser.query = "added".into();
+        let rows = app.feature_browser_rows();
+        assert!(matches!(rows.last(), Some(Row::File(0, _, false))));
+    }
+
+    #[test]
+    fn lazy_tree_survives_selected_content_changes() {
+        let mut app = App::from_args().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut catalog = crate::lazy_features::LazyFeatures::new(root.path().into(), false);
+        catalog.paths = vec![
+            root.path().join("one.feature"),
+            root.path().join("two.feature"),
+        ];
+        app.feature_discovery_root = Some(root.path().into());
+        app.lazy_features = Some(catalog);
+        app.git_status = Default::default();
+        let initial = app.feature_browser_rows();
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            "Feature: Two",
+            root.path().join("two.feature"),
+        )];
+        assert!(Rc::ptr_eq(&initial, &app.feature_browser_rows()));
+        let catalog = app.lazy_features.as_mut().unwrap();
+        catalog.paths.push(root.path().join("three.feature"));
+        catalog.revision += 1;
+        assert_eq!(app.feature_browser_rows().len(), 3);
+        assert!(!Rc::ptr_eq(&initial, &app.feature_browser_rows()));
+    }
 
     #[test]
     fn search_coalesces_input_and_commits_explicit_actions() {
