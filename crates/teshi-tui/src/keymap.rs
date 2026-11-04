@@ -63,6 +63,8 @@ pub struct KeyContext {
     pub acp_permission_pending: bool,
     /// Whether the project switcher owns keyboard input.
     pub project_switch_active: bool,
+    /// Whether the `:` command line owns printable input.
+    pub command_line_active: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -219,6 +221,16 @@ pub enum Action {
     /// Cancel only the pending pane-navigation chord, preserving pane state.
     CancelPaneNavigation,
     ClearInputState,
+    // Command line
+    /// Open the single-line `:` prompt from a Normal/Browse surface.
+    CommandLineOpen,
+    /// Append one printable character at the command-line cursor.
+    CommandLineInsert(char),
+    CommandLineBackspace,
+    /// Run the buffered command.
+    CommandLineConfirm,
+    /// Close the prompt without running it.
+    CommandLineCancel,
     // Explore navigation
     FocusNextColumn,
     FocusPrevColumn,
@@ -445,9 +457,10 @@ pub enum Action {
 
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
-        // Ctrl+Q is the only exit chord, and it wins over every mode so the
-        // user can always leave. Ctrl+C belongs to copying, and a bare `q` is
-        // ordinary input in insert modes.
+        // Ctrl+Q is the only control-chord exit and it wins over every mode so
+        // the user can always leave. `:q` is the chord-free route that survives
+        // hosts which swallow Ctrl+Q. Ctrl+C belongs to copying, and a bare `q`
+        // is ordinary input in insert modes.
         if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::CONTROL {
             return Some(Self::Quit);
         }
@@ -918,6 +931,24 @@ impl Action {
             };
         }
 
+        // The `:` prompt is a Normal-mode text surface. Prompts, confirmations,
+        // and overlays above all return first, so they keep their input; the
+        // prompt beats pane chords, tab navigation, and every tab arm.
+        if context.command_line_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::CommandLineCancel),
+                (KeyCode::Enter, _) => Some(Self::CommandLineConfirm),
+                (KeyCode::Backspace, _) => Some(Self::CommandLineBackspace),
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::CommandLineInsert(ch))
+                }
+                _ => None,
+            };
+        }
+
         // Ctrl-W starts the pane-navigation chord after all modal and text
         // input handlers have had precedence.  In particular, it must not
         // steal an editor insertion or AI prompt keystroke, and it must not
@@ -937,6 +968,15 @@ impl Action {
                 && context.requirements_focus == RequirementsFocus::Editor
                 && context.requirements_editor_mode != RequirementsEditorMode::Browse)
             || (context.active_tab == MainTab::TestPoints && context.test_points_editing);
+        // `:` opens the prompt only where printable keys are commands. Text
+        // surfaces keep it literal, so typing a colon never leaves the buffer.
+        if event.code == KeyCode::Char(':')
+            && matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            && !text_input
+            && !context.step_input_active
+        {
+            return Some(Self::CommandLineOpen);
+        }
         if !text_input {
             let navigation = match (event.code, event.modifiers) {
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
@@ -1783,6 +1823,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         }
     }
 
@@ -1818,6 +1859,131 @@ mod tests {
                 "Ctrl+C must copy the selection instead of exiting"
             );
         }
+    }
+
+    #[test]
+    fn colon_opens_the_command_line_only_outside_text_modes() {
+        for context in [
+            requirements_tree_context(),
+            chat_context(MainTab::Explore, MindMapFocus::Main, false),
+            chat_context(MainTab::Ai, MindMapFocus::Main, false),
+            chat_context(MainTab::MindMap, MindMapFocus::Main, false),
+            chat_context(MainTab::TestPoints, MindMapFocus::Main, false),
+        ] {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                assert_eq!(
+                    Action::from_key_event(KeyEvent::new(KeyCode::Char(':'), modifiers), context),
+                    Some(Action::CommandLineOpen),
+                    "`:` must open the prompt from a Normal surface"
+                );
+            }
+        }
+
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+                chat_context(MainTab::Ai, MindMapFocus::Main, true),
+            ),
+            Some(Action::AiSendChar(':')),
+            "a colon typed into the AI prompt must stay literal"
+        );
+
+        let mut requirements = requirements_tree_context();
+        requirements.requirements_focus = RequirementsFocus::Editor;
+        requirements.requirements_editor_mode =
+            crate::authoring_tab::RequirementsEditorMode::Insert;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+                requirements
+            ),
+            Some(Action::Insert(':')),
+            "a colon typed into the Requirements editor must stay literal"
+        );
+
+        let mut step = chat_context(MainTab::Explore, MindMapFocus::Main, false);
+        step.step_input_active = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE), step),
+            Some(Action::Insert(':')),
+            "a colon typed into a step must stay literal"
+        );
+    }
+
+    #[test]
+    fn command_line_owns_keys_while_quit_still_wins() {
+        let context = KeyContext {
+            command_line_active: true,
+            ..chat_context(MainTab::Explore, MindMapFocus::Main, false)
+        };
+        for ch in ['w', 'q', ':', ' '] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    context
+                ),
+                Some(Action::CommandLineInsert(ch))
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::CommandLineBackspace)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::CommandLineConfirm)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::CommandLineCancel)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::Quit),
+            "Ctrl+Q must stay live inside the prompt"
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                KeyContext {
+                    quit_pending_confirm: true,
+                    ..context
+                }
+            ),
+            Some(Action::Quit),
+            "the quit panel keeps input over the prompt"
+        );
+    }
+
+    #[test]
+    fn overlays_and_the_project_switcher_keep_the_colon() {
+        let mut switch = chat_context(MainTab::Explore, MindMapFocus::Main, false);
+        switch.project_switch_active = true;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+                switch
+            ),
+            Some(Action::OverlayInsert(':')),
+            "the project switcher keeps text input"
+        );
+
+        let mut overlay = requirements_tree_context();
+        overlay.requirements_overlay_active = true;
+        assert_ne!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+                overlay
+            ),
+            Some(Action::CommandLineOpen),
+            "a Requirements overlay keeps its own meaning for every key"
+        );
     }
 
     #[test]
@@ -1904,6 +2070,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1948,6 +2115,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1992,6 +2160,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: true,
             project_switch_active: false,
+            command_line_active: false,
         };
         let keys = [
             (KeyCode::Up, KeyModifiers::NONE, Action::AcpPermissionUp),
@@ -2075,6 +2244,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -2129,6 +2299,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -2183,6 +2354,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -2245,6 +2417,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -2289,6 +2462,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -2333,6 +2507,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -2401,6 +2576,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -2462,6 +2638,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
@@ -2630,6 +2807,7 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+            command_line_active: false,
         }
     }
 

@@ -381,7 +381,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
-    if let Some(ref msg) = app.status_message {
+    if app.command_line.is_some() {
+        render_command_line(frame, app, chunks[3]);
+    } else if let Some(ref msg) = app.status_message {
         let status_line = Line::from(vec![Span::styled(
             msg.as_str(),
             Style::default()
@@ -604,6 +606,38 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_delete_confirmation(frame, app, frame.area());
     }
     render_pointer_feedback(frame, app);
+}
+
+/// Single-line `:` prompt in the footer strip; the block caret marks the cursor.
+fn render_command_line(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(input) = app.command_line.as_ref() else {
+        return;
+    };
+    let (before, after) = input.split_at_cursor();
+    let mut rest = after.chars();
+    let under = rest.next().map_or_else(|| " ".to_string(), String::from);
+    let line = Line::from(vec![
+        Span::styled(
+            ":",
+            Style::default()
+                .fg(theme::PRIMARY)
+                .bg(theme::FOOTER_BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            before.to_string(),
+            Style::default().fg(theme::FOOTER_DESC).bg(theme::FOOTER_BG),
+        ),
+        Span::styled(
+            under,
+            Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
+        ),
+        Span::styled(
+            rest.as_str().to_string(),
+            Style::default().fg(theme::FOOTER_DESC).bg(theme::FOOTER_BG),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
@@ -6687,6 +6721,30 @@ mod truncate_tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn command_line_renders_in_the_footer_and_keeps_the_exit_control() {
+        let mut app = App::from_args().expect("app init");
+        app.status_message = None;
+        app.command_line = Some(crate::authoring_tab::LineInput::new("wq"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let row = (0..100)
+            .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
+            .collect::<String>();
+        assert!(row.starts_with(":wq"), "{row}");
+        assert!(row.contains("^q"), "{row}");
+        assert!(
+            !app.clickable_regions.iter().any(|region| matches!(
+                region,
+                ClickableRegion::ActionButton {
+                    action: Action::Save,
+                    ..
+                }
+            )),
+            "the prompt replaces the tab action bar"
+        );
     }
 
     #[test]
