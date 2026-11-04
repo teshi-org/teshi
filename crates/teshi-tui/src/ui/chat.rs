@@ -25,8 +25,8 @@ use crate::theme;
 const RAIL: &str = "▌ ";
 /// Low-emphasis guide for answers, thinking, and tool details; the same two-cell source offset.
 const QUIET_RAIL: &str = "│ ";
-/// Indent applied to tool-result bodies, which have no rail.
-const TOOL_RESULT_INDENT: &str = "    ";
+/// Indent from the quiet rail to a tool result's text, keeping it a step inside the call row.
+const TOOL_RESULT_INDENT: &str = "  ";
 /// Fallback cursor glyph appended to a streaming response.
 const STREAM_CURSOR: &str = "▌";
 
@@ -81,7 +81,7 @@ type CachedActivity = (
 /// Cached immutable message layouts, shared by drawing and pointer projection.
 #[derive(Default)]
 pub(crate) struct ChatLayoutCache {
-    context: (usize, usize, bool, u64),
+    context: (usize, usize, bool, u64, Option<usize>),
     activities: std::collections::HashMap<usize, CachedActivity>,
     entries: std::collections::HashMap<usize, (AiChatMessage, ChatProjection)>,
 }
@@ -171,6 +171,47 @@ fn append_blank(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>) {
         source: None,
         action: None,
     }));
+}
+
+/// Separator rows between two agent-side blocks carry the quiet guide.
+///
+/// Blocks are separated by a blank row so they read as one at a time, but the guide is
+/// what groups a turn; leaving the separator empty cut the `│` column into dashes at every
+/// message boundary. A gap beside a user block stays empty: `▌` opens a turn, and the
+/// guide should not run through it.
+fn carry_rail_through_gaps(out: &mut [std::rc::Rc<ChatProjectedLine>]) {
+    let mut index = 0;
+    while index < out.len() {
+        if !out[index].line.spans.is_empty() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < out.len() && out[index].line.spans.is_empty() {
+            index += 1;
+        }
+        if start == 0
+            || index == out.len()
+            || !starts_with_quiet_rail(&out[start - 1])
+            || !starts_with_quiet_rail(&out[index])
+        {
+            continue;
+        }
+        for row in &mut out[start..index] {
+            *row = std::rc::Rc::new(ChatProjectedLine {
+                line: Line::from(Span::styled(QUIET_RAIL, fg(theme::BORDER))),
+                source: None,
+                action: None,
+            });
+        }
+    }
+}
+
+fn starts_with_quiet_rail(row: &ChatProjectedLine) -> bool {
+    row.line
+        .spans
+        .first()
+        .is_some_and(|span| span.content == QUIET_RAIL)
 }
 
 /// Add rendered rows and map visible body text to a width-independent block.
@@ -938,12 +979,14 @@ fn build_chat_projection(
     }
 
     let messages = agent.messages();
+    let completed = completed_answer(app, messages);
     let mut cache = app.chat_layout_cache.borrow_mut();
     let context = (
         app.selected_agent,
         width,
         agent.activity_details_expanded,
         agent.chat.revision,
+        completed,
     );
     if cache.context != context {
         cache.entries.clear();
@@ -993,9 +1036,16 @@ fn build_chat_projection(
             } else {
                 crate::chat_state::process_summary(&messages[turn.start + 1..turn.end])
             };
-            let label = fit_activity_header(if expanded { "▾ " } else { "▸ " }, &summary, width);
+            let label = fit_activity_header(
+                if expanded { "▾ " } else { "▸ " },
+                &summary,
+                rail_body_width(width) as usize,
+            );
             out.push(std::rc::Rc::new(ChatProjectedLine {
-                line: Line::styled(label, muted()),
+                line: Line::from(vec![
+                    Span::styled(QUIET_RAIL, fg(theme::BORDER)),
+                    Span::styled(label, muted()),
+                ]),
                 source: None,
                 action: Some(crate::keymap::Action::AiToggleTurn(turn.start)),
             }));
@@ -1117,9 +1167,13 @@ fn build_chat_projection(
                 app,
                 msg,
                 width,
-                agent.activity_details_expanded || agent.chat.thoughts.contains(&message_index),
-                folded_answer != Some(message_index),
-                live_thought,
+                MessageDisplay {
+                    expanded: agent.activity_details_expanded
+                        || agent.chat.thoughts.contains(&message_index),
+                    show_reasoning: folded_answer != Some(message_index),
+                    live: live_thought,
+                    completed: completed == Some(message_index),
+                },
             ),
         }
         append_selectable_chunk(
@@ -1181,7 +1235,11 @@ fn build_chat_projection(
     }
 
     if !agent.partial_response().is_empty() {
-        let mut body = vec![role_header(AiRole::Assistant, Some("agent_progress"))];
+        let mut body = vec![role_header(
+            AiRole::Assistant,
+            Some("agent_progress"),
+            false,
+        )];
         body.extend(render_markdown_width(
             agent.partial_response(),
             rail_body_width(width),
@@ -1233,6 +1291,7 @@ fn build_chat_projection(
         append_unselectable(
             &mut out,
             vec![Line::from(vec![
+                Span::styled(QUIET_RAIL, fg(theme::BORDER)),
                 Span::styled(format!("{} ", thinking_pulse_frame()), fg(theme::ACCENT)),
                 Span::styled("Waiting for agent…", muted()),
             ])],
@@ -1241,6 +1300,7 @@ fn build_chat_projection(
     let mut permission = Vec::new();
     push_acp_permission_prompt(&mut permission, app, width);
     append_unselectable(&mut out, permission);
+    carry_rail_through_gaps(&mut out);
     ChatProjection { lines: out, blocks }
 }
 
@@ -1290,22 +1350,32 @@ fn rail_body_width(width: usize) -> u16 {
     width.saturating_sub(RAIL.width()).min(u16::MAX as usize) as u16
 }
 
-fn role_header(role: AiRole, source: Option<&str>) -> Line<'static> {
+fn role_header(role: AiRole, source: Option<&str>, completed: bool) -> Line<'static> {
     let (label, color) = match role {
         AiRole::User => ("You", theme::ACCENT),
         _ if source == Some("agent_progress") => ("Teshi", theme::MUTED),
         _ => ("Teshi", theme::SUCCESS),
     };
-    let mut spans = Vec::with_capacity(2);
+    let mut spans = Vec::with_capacity(3);
     if let Some(source) = source.filter(|source| *source != "agent_progress") {
         spans.push(Span::styled(format!("[{source}] "), muted()));
     }
     spans.push(Span::styled(label, fg(color).add_modifier(Modifier::BOLD)));
+    if completed {
+        spans.push(Span::styled(
+            " ✓",
+            fg(theme::SUCCESS).add_modifier(Modifier::BOLD),
+        ));
+    }
     Line::from(spans)
 }
 
-/// Wraps `lines` to the space right of the rail and prefixes every row with a
-/// rail in `color`, so wrapped continuation rows stay visually grouped.
+/// Wraps `lines` to the space right of the rail and prefixes every row with a rail,
+/// so wrapped continuation rows stay visually grouped.
+///
+/// The rail marks the column, not the state: only a user block gets the accent rail,
+/// and every agent-side block shares one guide colour so a turn reads as one column
+/// rather than a rail that changes tint block by block.
 fn push_railed(
     out: &mut Vec<Line<'static>>,
     lines: Vec<Line<'static>>,
@@ -1313,15 +1383,10 @@ fn push_railed(
     width: usize,
 ) {
     let body_width = rail_body_width(width) as usize;
-    let prefix = if color == theme::ACCENT {
-        RAIL
+    let (prefix, rail_color) = if color == theme::ACCENT {
+        (RAIL, theme::ACCENT)
     } else {
-        QUIET_RAIL
-    };
-    let rail_color = if color == theme::SUCCESS || color == theme::MUTED {
-        theme::BORDER
-    } else {
-        color
+        (QUIET_RAIL, theme::BORDER)
     };
     let rail = Span::styled(prefix, fg(rail_color));
     for line in lines {
@@ -1334,30 +1399,63 @@ fn push_railed(
     }
 }
 
+/// Identifies the newest answer that finished, so the transcript keeps one completion
+/// cue without tinting every reply column. Partial, cancelled and interrupted turns do
+/// not qualify; their progress rows already say what happened.
+fn completed_answer(app: &App, messages: &[AiChatMessage]) -> Option<usize> {
+    let agent = app.agent();
+    if agent.status != AiStatus::Idle
+        || agent.task_interrupted()
+        || matches!(
+            agent.last_finish_reason.as_deref(),
+            Some("cancelled" | "length" | "max_tokens")
+        )
+    {
+        return None;
+    }
+    messages.iter().rposition(|message| {
+        message.role == AiRole::Assistant
+            && message.source.as_deref() != Some("agent_progress")
+            && message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty())
+            && !message.content.trim().is_empty()
+    })
+}
+
+/// How one message is drawn: its thinking open or folded, its reasoning shown, its
+/// stream still running, and whether it is the newest answer that finished.
+#[derive(Clone, Copy)]
+struct MessageDisplay {
+    expanded: bool,
+    show_reasoning: bool,
+    live: bool,
+    completed: bool,
+}
+
 fn push_message(
     out: &mut Vec<Line<'static>>,
     app: &App,
     msg: &AiChatMessage,
     width: usize,
-    expanded: bool,
-    show_reasoning: bool,
-    live: bool,
+    display: MessageDisplay,
 ) {
     if msg.source.as_deref() == Some("acp_reasoning") {
         push_thinking_state(
             out,
             msg.reasoning_content.as_deref().unwrap_or_default(),
             width,
-            expanded,
-            live,
+            display.expanded,
+            display.live,
         );
         return;
     }
     if let Some(reasoning) = &msg.reasoning_content
         && !reasoning.is_empty()
-        && show_reasoning
+        && display.show_reasoning
     {
-        push_thinking_state(out, reasoning, width, expanded, live);
+        push_thinking_state(out, reasoning, width, display.expanded, display.live);
     }
     let progress = msg.source.as_deref() == Some("agent_progress")
         || msg
@@ -1371,6 +1469,7 @@ fn push_message(
         } else {
             msg.source.as_deref()
         },
+        display.completed,
     )];
     if !msg.content.is_empty() {
         body.extend(render_markdown_width(&msg.content, rail_body_width(width)));
@@ -1658,7 +1757,7 @@ fn push_tool_result(out: &mut Vec<Line<'static>>, msg: &AiChatMessage, width: us
     let tool_id = msg.tool_call_id.as_deref().unwrap_or("?");
     out.extend(wrap_line_to_width(
         Line::from(vec![
-            Span::raw("  "),
+            Span::styled(QUIET_RAIL, fg(theme::BORDER)),
             Span::styled(icon, fg(color).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" Tool ({tool_id})"), muted()),
         ]),
@@ -1667,12 +1766,15 @@ fn push_tool_result(out: &mut Vec<Line<'static>>, msg: &AiChatMessage, width: us
 
     // Tool output is supporting detail: default its text to the muted color
     // while keeping any explicit Markdown colors (code, headings).
-    let indent = TOOL_RESULT_INDENT.width();
+    let indent = QUIET_RAIL.width() + TOOL_RESULT_INDENT.width();
     let body_width = width.saturating_sub(indent);
     let body = render_markdown_width(&msg.content, body_width.min(u16::MAX as usize) as u16);
     for line in body {
         for row in wrap_line_to_width(line, body_width) {
-            let mut spans = vec![Span::raw(TOOL_RESULT_INDENT)];
+            let mut spans = vec![
+                Span::styled(QUIET_RAIL, fg(theme::BORDER)),
+                Span::raw(TOOL_RESULT_INDENT),
+            ];
             spans.extend(row.spans.into_iter().map(|s| {
                 let style = muted().patch(s.style);
                 s.style(style)
@@ -2346,11 +2448,75 @@ mod tests {
 
     #[test]
     fn progress_header_is_muted_and_final_header_is_green() {
-        let progress = role_header(AiRole::Assistant, Some("agent_progress"));
+        let progress = role_header(AiRole::Assistant, Some("agent_progress"), false);
         assert_eq!(progress.spans.len(), 1);
         assert_eq!(progress.spans[0].style.fg, Some(theme::MUTED));
-        let final_reply = role_header(AiRole::Assistant, None);
+        let final_reply = role_header(AiRole::Assistant, None, false);
         assert_eq!(final_reply.spans[0].style.fg, Some(theme::SUCCESS));
+        assert_eq!(
+            final_reply.spans.len(),
+            1,
+            "unfinished replies carry no mark"
+        );
+    }
+
+    #[test]
+    fn the_newest_finished_answer_carries_one_green_check() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "QUESTION_ONE", None),
+            message(AiRole::Assistant, "ANSWER_ONE", None),
+            message(AiRole::User, "QUESTION_TWO", None),
+            message(AiRole::Assistant, "ANSWER_TWO", None),
+        ]);
+        // The cue sits on the reply's header, so the marked row is the one that opens the
+        // answer; the row under it is what the user reads.
+        let marks = |app: &App| {
+            let projection = build_chat_projection(app, 80, 40, ChatPlacement::Tab);
+            let rows: Vec<String> = projection
+                .lines
+                .iter()
+                .map(|row| line_text(&row.line))
+                .collect();
+            rows.iter()
+                .enumerate()
+                .filter_map(|(index, text)| {
+                    if !text.contains('✓') {
+                        return None;
+                    }
+                    let mark = projection.lines[index]
+                        .line
+                        .spans
+                        .iter()
+                        .find(|span| span.content.contains('✓'))
+                        .unwrap();
+                    assert_eq!(mark.style.fg, Some(theme::SUCCESS), "completion mark");
+                    rows[index + 1..]
+                        .iter()
+                        .find(|row| !row.is_empty())
+                        .cloned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let marked = marks(&app);
+        assert_eq!(
+            marked.len(),
+            1,
+            "only the newest answer is marked: {marked:?}"
+        );
+        assert!(marked[0].contains("ANSWER_TWO"), "{marked:?}");
+
+        app.agents[0].status = AiStatus::Waiting;
+        assert!(
+            marks(&app).is_empty(),
+            "a running turn must not claim completion"
+        );
+        app.agents[0].status = AiStatus::Idle;
+        app.agents[0].last_finish_reason = Some("cancelled".into());
+        assert!(
+            marks(&app).is_empty(),
+            "cancelled turns are not completion markers"
+        );
     }
 
     use super::*;
@@ -3185,6 +3351,63 @@ mod tests {
         ] {
             assert!(screen.contains(expected), "Missing {expected}: {screen}");
         }
+    }
+
+    #[test]
+    fn a_turn_keeps_one_guide_column_across_its_blocks() {
+        let (mut app, _project, _store) = activity_test_app();
+        let mut thought = message(AiRole::Assistant, "", Some("acp_reasoning"));
+        thought.reasoning_content = Some("FIRST_THOUGHT\nSECOND_THOUGHT".into());
+        let mut call = message(AiRole::Assistant, "Read project", Some("acp_activity"));
+        call.reasoning_content = Some("completed".into());
+        call.tool_call_id = Some("read-1".into());
+        app.agents[0].activity_details_expanded = true;
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "QUESTION", None),
+            thought,
+            call,
+            message(AiRole::Assistant, "ANSWER", None),
+        ]);
+
+        let rows = row_texts(&build_chat_lines(&app, 72, 40, ChatPlacement::Tab));
+        let first = rows
+            .iter()
+            .position(|row| row.starts_with(QUIET_RAIL))
+            .unwrap();
+        let last = rows
+            .iter()
+            .rposition(|row| row.starts_with(QUIET_RAIL))
+            .unwrap();
+        assert!(
+            first > 0 && rows[first - 1].is_empty(),
+            "a turn opens after an empty gap: {rows:?}"
+        );
+        assert!(
+            rows[first..=last].iter().all(|row| !row.is_empty()),
+            "the guide breaks inside a turn: {rows:?}"
+        );
+        assert!(
+            rows[first..=last]
+                .iter()
+                .all(|row| row.starts_with(QUIET_RAIL)),
+            "every row of a turn sits on the guide: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn tool_results_sit_on_the_guide() {
+        let mut result = message(AiRole::Tool, "first line\nsecond line", None);
+        result.tool_call_id = Some("read-1".into());
+        let mut out = Vec::new();
+        push_tool_result(&mut out, &result, 40);
+        assert_eq!(out.len(), 3);
+        assert!(
+            row_texts(&out)
+                .iter()
+                .all(|row| row.starts_with(QUIET_RAIL)),
+            "tool results indent from the guide: {:?}",
+            row_texts(&out)
+        );
     }
 
     #[test]

@@ -138,7 +138,8 @@ fn elapsed_time_advances_through_acp_tool_activity_and_remains_after_completion(
                 attrs.contains("fill=\"#5fff87\"")
                     && text
                         .split_once("</text>")
-                        .is_some_and(|(body, _)| body.trim().ends_with("Teshi"))
+                        // The newest finished answer carries a check after its name.
+                        .is_some_and(|(body, _)| body.trim().ends_with("Teshi ✓"))
             })
         {
             break;
