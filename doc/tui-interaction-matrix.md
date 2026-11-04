@@ -30,6 +30,8 @@ overlay's click regions are rebuilt from the rendered rows each frame.
 
 Text input has precedence over the prefix: step editing, Requirements insert mode, TestPoints detail editing, and focused AI input retain their input semantics. Modal overlays, ACP permission prompts, profile/session pickers, and the requirements filter/iteration overlays intercept the same keys before pane navigation.
 
+`:`, by contrast, opens the command-line prompt from any Normal/Browse surface and then owns printable keys, Enter, Esc, and Backspace until it runs or is dismissed; text input modes keep `:` literal. The prompt sits below prompts and overlays that ask for a decision or edit a file, above pane navigation and tab digits, and a left click closes it. `:q` reaches the same guarded exit as `Ctrl+Q`, which keeps an exit available where a host terminal also binds `Ctrl+Q`.
+
 TestPoints details expose Normal/Insert modes. `i`/Enter starts editing; Esc/Enter
 commits and returns to Normal. Printable commands and tab digits remain text in
 Insert, while arrows operate on a Unicode character cursor. Model forms similarly

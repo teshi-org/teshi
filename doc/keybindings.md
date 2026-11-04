@@ -21,7 +21,7 @@ current modal layer. Requirements calls its Normal mode **Browse**.
 | `Ctrl+B/Ctrl+F` or PageUp/PageDown | Page up/down in Normal mode and choice lists |
 | `s` / `Ctrl+S` | Save the active editable buffer in Normal mode |
 | `m` | Open model settings in Normal mode |
-| `Ctrl+Q` | Exit immediately; the `^q 退出` control at the bottom-right of every tab is the clickable equivalent. `q` and `Ctrl+C` never exit, and Ctrl+C copies the selection |
+| `Ctrl+Q` or `:q` | Exit; the `^q 退出` control at the bottom-right of every tab is the clickable equivalent. `:q` is the host-safe route when a parent terminal also binds `Ctrl+Q`. `q` and `Ctrl+C` never exit, and Ctrl+C copies the selection |
 
 Pane chords do not steal text input or Requirements visual selections. Existing
 Tab/Shift+Tab and non-text column-navigation keys remain available. Layouts with
@@ -30,6 +30,29 @@ no vertical neighbor ignore `Ctrl+W j/k` and `Ctrl+W Up/Down`.
 All five tab labels and the project header are clickable. Narrow terminals use
 Explore, Map, AI, Req, and Points labels. Wheels target the pane beneath the
 pointer; Shift+wheel scrolls horizontally where supported.
+
+### Command line
+
+`:` in any Normal/Browse mode opens a single-line prompt in the footer strip.
+Insert, Input, and form modes keep `:` as a literal character.
+
+| Key | Action |
+|-----|--------|
+| `:` | Open the prompt in Normal/Browse mode |
+| `Enter` | Run the command and close the prompt |
+| `Esc` | Close the prompt without running it |
+| `Backspace` | Delete the character before the cursor; on an empty prompt it closes the prompt |
+
+| Command | Action |
+|---------|--------|
+| `:q`, `:quit` | Quit through the same unsaved-changes guard as `Ctrl+Q` |
+| `:w`, `:write` | Save the active editable buffer, like `Ctrl+S` |
+| `:wq`, `:x` | Save, then quit; a failed save keeps Teshi open |
+| anything else | Report the unknown command in the footer and stay open |
+
+The prompt is the reliable exit inside a host terminal that swallows `Ctrl+Q`,
+because it needs no control chord. `Ctrl+Q` and the footer exit control still
+work while the prompt is open, and a left click closes it.
 
 ## Explore
 
@@ -186,7 +209,8 @@ Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 | Esc | Return to Normal |
 
 In the AI tab, Esc from Input followed by Esc in Normal cancels a running
-request. Ctrl+Q exits from any mode; Ctrl+C copies the selection instead.
+request. Ctrl+Q exits from any mode, and `:` then `q` reaches the same exit
+without a control chord; Ctrl+C copies the selection instead.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
 

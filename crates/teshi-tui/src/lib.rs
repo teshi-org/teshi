@@ -447,6 +447,7 @@ pub fn run() -> Result<()> {
                                 app.project_switch.overlay,
                                 crate::project_context::SwitchOverlay::None
                             ),
+                            command_line_active: app.command_line.is_some(),
                         },
                     ) {
                         app.handle_action(action)?;
@@ -469,6 +470,7 @@ pub fn run() -> Result<()> {
                 Event::Paste(_)
                     if app.pending_delete.is_some()
                         || app.quit_pending_confirm
+                        || app.command_line.is_some()
                         || app.auth_panel_active
                         || app.session_panel_active
                         || app.agent_profile_panel_active

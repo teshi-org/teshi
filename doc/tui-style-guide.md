@@ -165,6 +165,18 @@ AI [3]
  Focus [Enter]   Clear [Esc]   Model [m]   Quit [Ctrl+Q]
 ```
 
+`:` from any Normal/Browse mode replaces the active tab's footer bar with the
+command-line prompt until Enter runs it or Esc closes it. The prompt keeps the
+`^q 退出` control on the right and needs no control chord, so `:q` stays usable
+where a host terminal also binds `Ctrl+Q`. The prompt itself is not advertised
+in the footer beyond the `:` you type.
+
+```text
+Command line prompt
+━━━━━━━━━━━━━━━━━━━
+:wq▏                                                          ^q 退出
+```
+
 ```text
 Requirements [4]
 ━━━━━━━━━━━━━━━━━━

@@ -979,6 +979,8 @@ pub struct App {
     pub quit_pending_confirm: bool,
     /// Which button is focused in quit confirm panel: 0 = Yes, 1 = No.
     pub quit_panel_selection: usize,
+    /// The open `:` command line, or `None` when the prompt is closed.
+    pub command_line: Option<crate::authoring_tab::LineInput>,
     /// Temporary one-shot status message (e.g. "AI applied filter: @smoke").
     pub status_message: Option<String>,
     /// When the status message should be cleared (3-second lifespan).
@@ -2193,6 +2195,7 @@ impl App {
             slash_suggestion_selection: 0,
             ai_input_focused: true,
             quit_pending_confirm: false,
+            command_line: None,
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
@@ -2388,6 +2391,7 @@ impl App {
             scenario_dropdown_open: false,
             scenario_dropdown_selection: 0,
             quit_pending_confirm: false,
+            command_line: None,
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
@@ -2574,6 +2578,7 @@ impl App {
             scenario_dropdown_open: false,
             scenario_dropdown_selection: 0,
             quit_pending_confirm: false,
+            command_line: None,
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
@@ -7636,6 +7641,17 @@ impl App {
         {
             return self.resolve_unsaved_requirement(action, pending);
         }
+        // The `:` prompt owns its keys unless a prompt that edits files or asks
+        // for a decision is open, so those keep their input and the buffered
+        // command survives underneath them.
+        if self.command_line.is_some()
+            && !self.has_external_change_prompt()
+            && !self.has_agent_change_prompt()
+            && !self.has_acp_permission_prompt()
+            && !self.quit_pending_confirm
+        {
+            return self.command_line_action(action);
+        }
         if self.is_requirements_editor_active()
             && self.authoring_ui.editor_mode == crate::authoring_tab::RequirementsEditorMode::Browse
             && matches!(
@@ -9229,6 +9245,11 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::Save => self.save()?,
+            Action::CommandLineOpen => self.open_command_line(),
+            Action::CommandLineInsert(_)
+            | Action::CommandLineBackspace
+            | Action::CommandLineConfirm
+            | Action::CommandLineCancel => self.command_line_action(action)?,
             Action::RefreshFeatures => {
                 if let Some(catalog) = self.lazy_features.as_mut() {
                     catalog.request_refresh();
@@ -9908,6 +9929,61 @@ impl App {
         } else {
             self.should_quit = true;
         }
+    }
+
+    fn open_command_line(&mut self) {
+        self.command_line = Some(crate::authoring_tab::LineInput::default());
+    }
+
+    /// Runs the buffered `:` command through the same guarded paths as the
+    /// `Ctrl+Q` and `Ctrl+S` chords, so unsaved work still prompts.
+    fn execute_command_line(&mut self) -> Result<()> {
+        let Some(input) = self.command_line.take() else {
+            return Ok(());
+        };
+        match input.text().trim() {
+            "q" | "quit" => self.quit(),
+            "w" | "write" => self.save()?,
+            "wq" | "x" => {
+                self.save()?;
+                self.quit();
+            }
+            "" => self.set_status_message("Type q, w, wq, or x".to_string()),
+            other => self.set_status_message(format!("Unknown command: {other}")),
+        }
+        Ok(())
+    }
+
+    fn command_line_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::CommandLineInsert(ch) => {
+                if let Some(input) = self.command_line.as_mut() {
+                    input.insert(ch);
+                }
+            }
+            Action::CommandLineBackspace => {
+                // Backspace removes the `:` itself once the command is empty,
+                // so the prompt closes the way it was opened.
+                if self
+                    .command_line
+                    .as_ref()
+                    .is_some_and(|input| input.text().is_empty())
+                {
+                    self.command_line = None;
+                } else if let Some(input) = self.command_line.as_mut() {
+                    input.backspace();
+                }
+            }
+            Action::CommandLineCancel => self.command_line = None,
+            Action::CommandLineConfirm => return self.execute_command_line(),
+            // Ctrl+Q and the footer exit control stay live inside the prompt.
+            Action::Quit => {
+                self.command_line = None;
+                self.quit();
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn clamp_cursor(&mut self) {
@@ -10825,6 +10901,11 @@ impl App {
         // first so moving away from a control always clears its feedback.
         if matches!(kind, MouseEventKind::Moved) {
             self.mouse_position = Some((col, row));
+        }
+        // A left click closes the `:` prompt and then lands on whatever control
+        // is under the pointer.
+        if self.command_line.is_some() && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.command_line = None;
         }
         if !matches!(
             self.project_switch.overlay,
@@ -17573,6 +17654,118 @@ mod tests {
         assert!(app.should_quit);
     }
 
+    fn run_command_line(app: &mut App, command: &str) {
+        app.handle_action(Action::CommandLineOpen)
+            .expect("open command line");
+        for ch in command.chars() {
+            app.handle_action(Action::CommandLineInsert(ch))
+                .expect("type command");
+        }
+        app.handle_action(Action::CommandLineConfirm)
+            .expect("run command");
+    }
+
+    #[test]
+    fn command_line_q_follows_the_guarded_quit_path() {
+        let mut app = App::from_args().expect("app init should work");
+        app.dirty = true;
+
+        run_command_line(&mut app, "q");
+        assert!(app.command_line.is_none());
+        assert!(!app.should_quit, "an unsaved buffer must still ask first");
+        assert!(app.quit_pending_confirm);
+
+        app.handle_action(Action::DeleteConfirm)
+            .expect("confirm quit");
+        assert!(app.should_quit);
+
+        let mut clean = App::from_args().expect("app init should work");
+        run_command_line(&mut clean, "quit");
+        assert!(clean.should_quit);
+    }
+
+    #[test]
+    fn command_line_w_and_wq_save_the_active_buffer() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("login.feature");
+        fs::write(&path, "# language: en\nFeature: Login\n").expect("seed file");
+        let saved = "# language: en\nFeature: Login\n  Scenario: Login works\n";
+        let mut app = App::from_args().expect("app init should work");
+        app.file_path = Some(path.clone());
+        app.buffer = EditorBuffer::from_string(saved.to_string());
+        app.dirty = true;
+
+        run_command_line(&mut app, "w");
+        assert_eq!(fs::read_to_string(&path).expect("read file"), saved);
+        assert!(!app.dirty);
+        assert!(!app.should_quit, "`:w` must not quit");
+
+        app.dirty = true;
+        run_command_line(&mut app, "wq");
+        assert_eq!(fs::read_to_string(&path).expect("read file"), saved);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn command_line_empty_and_unknown_commands_stay_in_the_app() {
+        let mut app = App::from_args().expect("app init should work");
+
+        run_command_line(&mut app, "");
+        assert!(!app.should_quit);
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Type q, w, wq, or x")
+        );
+
+        run_command_line(&mut app, "zz");
+        assert!(!app.should_quit);
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Unknown command: zz")
+        );
+
+        app.handle_action(Action::CommandLineOpen)
+            .expect("open command line");
+        app.handle_action(Action::CommandLineCancel)
+            .expect("cancel command line");
+        assert!(app.command_line.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn command_line_backspace_deletes_the_colon_that_opened_it() {
+        let mut app = App::from_args().expect("app init should work");
+        app.handle_action(Action::CommandLineOpen)
+            .expect("open command line");
+        app.handle_action(Action::CommandLineBackspace)
+            .expect("backspace");
+        assert!(
+            app.command_line.is_none(),
+            "an empty prompt closes on Backspace"
+        );
+
+        app.handle_action(Action::CommandLineOpen)
+            .expect("open command line");
+        app.handle_action(Action::CommandLineInsert('w'))
+            .expect("type");
+        app.handle_action(Action::CommandLineBackspace)
+            .expect("backspace");
+        assert_eq!(
+            app.command_line
+                .as_ref()
+                .map(|input| input.text().to_string()),
+            Some(String::new()),
+            "the first Backspace only clears the typed text"
+        );
+        app.handle_action(Action::CommandLineBackspace)
+            .expect("backspace");
+        assert!(app.command_line.is_none());
+    }
+
     #[test]
     fn test_requirements_tab_select_and_create_document() {
         let mut app = App::from_args().expect("app init should work");
@@ -18395,6 +18588,7 @@ mod tests {
             slash_suggestion_selection: 0,
             ai_input_focused: true,
             quit_pending_confirm: false,
+            command_line: None,
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
@@ -18593,6 +18787,7 @@ Feature: B
             slash_suggestion_selection: 0,
             ai_input_focused: true,
             quit_pending_confirm: false,
+            command_line: None,
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,

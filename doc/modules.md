@@ -298,6 +298,7 @@ Maps `KeyEvent` → `Action` (60+ variants) using `KeyContext` to capture mode s
 - Active tab, view stage, focus slots
 - Step input active, keyword picker open, auth panel open
 - Pending two-key sequences (`dd`, `yy`)
+- `:` command line open (printable keys become `CommandLineInsert`)
 
 ### Priority order
 
@@ -308,11 +309,13 @@ Maps `KeyEvent` → `Action` (60+ variants) using `KeyContext` to capture mode s
 5. Auth panel keys (Esc)
 6. Step keyword picker keys (arrows, Enter, Esc)
 7. Step text input keys (Esc, Ctrl+S, Tab, etc.)
-8. Explore navigation keys
-9. AI focus mode keys
-10. Mind map AI panel focus keys
-11. Mind map tree keys
-12. Default editor keys
+8. `:` opens the command line; while it is open it owns printable keys, Enter,
+   Esc, and Backspace
+9. Explore navigation keys
+10. AI focus mode keys
+11. Mind map AI panel focus keys
+12. Mind map tree keys
+13. Default editor keys
 
 ---
 

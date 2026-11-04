@@ -229,6 +229,33 @@ fn bottom_right_exit_control_quits_on_click() {
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn typed_colon_q_exits_without_the_ctrl_q_chord() {
+    let fixture = Fixture::new();
+    let terminal = fixture.launch();
+    terminal.expect_text("Explore", true, 10000).unwrap();
+    terminal.write(":q").unwrap();
+    terminal.expect_text(":q", true, 10000).unwrap();
+    terminal.key("Enter").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn colon_stays_literal_inside_the_ai_prompt() {
+    let fixture = Fixture::new();
+    let terminal = fixture.launch();
+    terminal.key("3").unwrap();
+    terminal.key("i").unwrap();
+    terminal.write("a:b").unwrap();
+    terminal.expect_text("a:b", true, 10000).unwrap();
+    terminal.expect_text("AI Chat", true, 2000).unwrap();
+    terminal.key("Escape").unwrap();
+    terminal.key("ctrl+q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
