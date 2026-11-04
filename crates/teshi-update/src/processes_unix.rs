@@ -25,10 +25,7 @@ pub(super) fn inspect(pid: u32) -> Result<Option<ProcessIdentity>> {
     // The process can exit between the stat read and the link read. A vanished
     // /proc/<pid>/exe means the identity is gone, which callers treat as "not
     // running" rather than as an I/O failure of the shutdown path.
-    let executable = match fs::read_link(root.join("exe"))
-        .map_err(std::io::Error::from)
-        .and_then(fs::canonicalize)
-    {
+    let executable = match fs::read_link(root.join("exe")).and_then(fs::canonicalize) {
         Ok(executable) => executable,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
