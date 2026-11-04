@@ -3,6 +3,7 @@
 mod api_dispatch;
 mod app_data;
 mod authoring;
+pub use authoring::organization;
 mod browser_agent;
 mod daemon;
 mod events;
@@ -17,7 +18,9 @@ mod locator;
 mod managed_runtime;
 pub mod model_profile;
 mod project;
+pub mod project_identity;
 mod project_settings;
+pub mod replay_evidence;
 mod screen;
 mod sidecar;
 mod terminal;
@@ -35,44 +38,51 @@ pub mod python_env {
     };
 }
 
+pub use api_dispatch::start_replay_run;
 pub use api_dispatch::{
     api_endpoint_path, dispatch_cases, ensure_api_sidecar, list_runnable_scenarios,
     mode_uses_teshi_dispatch, read_api_endpoint, send_api_command, stop_api_sidecar, ApiEndpoint,
     DispatchCase, RunnableScenario,
 };
 pub use app_data::{
-    app_data_dir, ensure_migrated_from_teshi_desktop_at,
-    get_recent_projects as load_recent_projects, load_settings, open_dialog_default_dir,
-    requirements_data_dir, save_settings, validated_window_size, AppSettings,
-    RequirementsViewPrefs, DEFAULT_REQUIREMENTS_STORE_DIR, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
-    TESHI_REQUIREMENTS_DIR_ENV,
+    add_recent_project, app_data_dir, ensure_migrated_from_teshi_desktop_at,
+    get_recent_projects as load_recent_projects, load_recent_project_entries, load_settings,
+    open_dialog_default_dir, requirements_data_dir, save_settings, validated_window_size,
+    AppSettings, RecentProjectEntry, RequirementsViewPrefs, DEFAULT_REQUIREMENTS_STORE_DIR,
+    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, TESHI_REQUIREMENTS_DIR_ENV,
 };
 pub use authoring::{
-    compute_document_revision, import_project_requirements, initialize_requirement_store,
-    list_requirement_documents, load_authoring_artifacts, read_requirement_document,
-    resolve_requirement_ref, resolve_requirement_ref_in_store, save_requirement_document_index,
-    save_requirement_markdown, save_test_points, set_requirement_document_iteration,
-    set_requirement_documents_iteration, update_requirement_document_body, AuthoringLoadResult,
+    compute_document_revision, create_requirement_document, delete_requirement_document,
+    ensure_requirement_project, import_project_requirements, initialize_requirement_store,
+    is_requirement_document_id_reserved, list_requirement_documents, load_authoring_artifacts,
+    read_requirement_document, read_requirement_project, requirement_project_filter,
+    requirement_timestamp_filename, resolve_requirement_ref, resolve_requirement_ref_in_store,
+    save_requirement_document_index, save_requirement_draft, save_requirement_markdown,
+    save_test_points, set_requirement_document_iteration, set_requirement_documents_iteration,
+    snapshot_requirement_project, update_requirement_document_body,
+    update_requirement_document_priority, update_requirement_projects, AuthoringLoadResult,
     ImportMapping, ImportProjectOptions, ImportProjectPlan, RequirementDocumentList,
-    RequirementRefMatch, RequirementStoreError, DEFAULT_REQUIREMENTS_DIR, DEFAULT_TESTPOINTS_DIR,
-    REQUIREMENTS_INDEX_FILE,
+    RequirementProject, RequirementProjectSnapshot, RequirementRefMatch, RequirementStoreError,
+    DEFAULT_REQUIREMENTS_DIR, DEFAULT_TESTPOINTS_DIR, REQUIREMENTS_INDEX_FILE,
+    REQUIREMENTS_TRASH_FILE,
 };
 pub use browser_agent::{
     AccessibleElement, BrowserAction, BrowserAgentError, BrowserAgentErrorCode,
-    BrowserCapabilities, BrowserConsoleLevel, BrowserElementInput, BrowserElementReferenceRecord,
-    BrowserElementState, BrowserEvidenceReference, BrowserFeatureAvailability, BrowserFeatureId,
-    BrowserFeaturePhase, BrowserLease, BrowserLeaseSummary, BrowserMetadata, BrowserOperation,
-    BrowserOperationResponse, BrowserOperations, BrowserPageSnapshot, BrowserPrivilegedCapability,
-    BrowserRequestEnvelope, BrowserScreenshot, BrowserScreenshotFormat, BrowserSession,
-    BrowserSessionHealth, BrowserTab, BrowserTarget, BrowserWaitCondition, BrowserWindow,
-    ExtensionIdentity, LocatorContext, LocatorIntent, LocatorVerificationStatus,
-    PageContextRevision, PlaywrightLocatorCandidate, PlaywrightLocatorKind,
-    PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION,
-    DEFAULT_BROWSER_CAPABILITY_GRANT_TTL_SECS, DEFAULT_BROWSER_LEASE_TTL_SECS,
+    BrowserBrokerIdentity, BrowserCapabilities, BrowserConsoleLevel, BrowserElementInput,
+    BrowserElementReferenceRecord, BrowserElementState, BrowserEvidenceReference,
+    BrowserFeatureAvailability, BrowserFeatureId, BrowserFeaturePhase, BrowserLease,
+    BrowserLeaseSummary, BrowserMetadata, BrowserOperation, BrowserOperationResponse,
+    BrowserOperations, BrowserPageSnapshot, BrowserPrivilegedCapability, BrowserRequestEnvelope,
+    BrowserScreenshot, BrowserScreenshotFormat, BrowserSession, BrowserSessionHealth, BrowserTab,
+    BrowserTarget, BrowserWaitCondition, BrowserWindow, ExtensionIdentity, LocatorContext,
+    LocatorIntent, LocatorVerificationStatus, PageContextRevision, PlaywrightLocatorCandidate,
+    PlaywrightLocatorKind, PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION,
+    BROWSER_BROKER_PROTOCOL_VERSION, DEFAULT_BROWSER_CAPABILITY_GRANT_TTL_SECS,
+    DEFAULT_BROWSER_LEASE_TTL_SECS,
 };
 pub use daemon::{
-    find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
-    DaemonManifest, DaemonManifestExt,
+    find_project_root, pick_free_port, remove_daemon_manifest, remove_daemon_manifest_if_matches,
+    spawn_daemon_background, DaemonManifest, DaemonManifestExt,
 };
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
 pub use fs_util::{read_locked, write_atomic};
@@ -115,16 +125,20 @@ pub use project::{
     open_project, set_browser_active, set_terminal_active, teardown_runtime, DirEntry,
     ProjectState,
 };
+pub use project_identity::{ProjectGeneration, ProjectIdentity, ProjectStamp};
 pub use project_settings::{
     load_project_settings, ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC,
     DEFAULT_PLAYWRIGHT_TEST_ID_ATTRIBUTE,
 };
 pub use screen::{Cell, Color, ProcessState, ScreenGrid};
 pub use sidecar::{
-    chrome_broker_endpoint_path, ensure_user_chrome_broker, fetch_chrome_broker_endpoint,
-    get_recent_projects, send_sidecar_command, send_sidecar_command_with_timeout,
-    start_browser_sidecar, stop_browser_sidecar, BrowserError, BrowserMode, BrowserStartResult,
-    ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
+    authenticated_sidecar_ws_url, chrome_broker_endpoint_path, chrome_broker_pairing_approve,
+    chrome_broker_pairing_list, chrome_broker_pairing_remove, chrome_broker_pairing_store,
+    ensure_user_chrome_broker, ensure_user_rust_transport_broker_transport_only,
+    fetch_chrome_broker_endpoint, get_recent_projects, send_sidecar_command,
+    send_sidecar_command_with_timeout, start_browser_sidecar, start_browser_sidecar_with_options,
+    stop_browser_sidecar, write_chrome_broker_endpoint, BrowserError, BrowserMode,
+    BrowserStartResult, ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
 pub use validation::{

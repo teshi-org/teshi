@@ -33,3 +33,8 @@
     假如 Chrome 桥接不可用
     当 用户请求连接 Chrome
     那么 teshi web 尝试启动 Chrome 桥接
+
+# Acceptance note (2026-10-16): replay is blocked because the test browser
+# reports no usable WebGPU adapter and the GPUI page cannot initialize.
+# Rerun with a verified WebGPU browser in an interactive Windows session;
+# acceptance remains pending until the real UI assertions pass.

@@ -187,6 +187,14 @@
                                 Source='$(var.StagingRoot)\share\browser_service.py'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='BrowserPageTextScript' Guid='*'>
+                            <File
+                                Id='browserPageTextScriptFile'
+                                Name='browser_page_text.py'
+                                DiskId='1'
+                                Source='$(var.StagingRoot)\share\browser_page_text.py'
+                                KeyPath='yes'/>
+                        </Component>
                         <Component Id='BrowserAgentBrokerScript' Guid='*'>
                             <File
                                 Id='browserAgentBrokerScriptFile'
@@ -235,6 +243,7 @@
             <ComponentRef Id='ApiLibrary'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='BrowserServiceScript'/>
+            <ComponentRef Id='BrowserPageTextScript'/>
             <ComponentRef Id='BrowserAgentBrokerScript'/>
             <ComponentRef Id='WinAppServiceScript'/>
             <ComponentGroupRef Id='BridgeFiles'/>

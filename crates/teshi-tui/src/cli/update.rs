@@ -1,18 +1,17 @@
 //! Thin terminal adapter for the native update core.
 
-use std::{
-    io::{self, IsTerminal, Write},
-    sync::atomic::AtomicBool,
-};
+use std::sync::atomic::AtomicBool;
 use teshi_core::version::{ReleaseChannel, build_identity};
-use teshi_update::{ErrorCode, UpdateError, manager};
+use teshi_update::manager;
 
 /// Runs the update CLI, reserving exit 3 for an accepted helper handoff.
 pub fn handle_update(
     status_only: bool,
     check_only: bool,
+    retry_install: bool,
+    force_close: bool,
     channel: Option<&str>,
-    yes: bool,
+    _yes: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let result = (|| -> teshi_update::Result<(serde_json::Value, i32)> {
@@ -25,15 +24,19 @@ pub fn handle_update(
                 .root
                 .as_deref()
                 .and_then(teshi_update::transaction::last_result);
+            let executable = std::env::current_exe()?;
+            let key = installation.root.as_deref().unwrap_or(&executable);
+            let failure = teshi_update::diagnostics::last_failure(key);
+            let running = if let (Some(root), Some(bundle)) =
+                (installation.root.as_deref(), installation.bundle.as_ref())
+            {
+                teshi_update::processes::installation_processes(root, bundle)?
+            } else {
+                teshi_update::processes::processes_for_images(std::slice::from_ref(&executable))?
+            };
             return Ok((
-                serde_json::json!({"status":"local_status", "installation":installation, "previous_transaction":previous}),
+                serde_json::json!({"status":"local_status", "installation":installation, "previous_transaction":previous, "last_failure":failure, "running_processes":running}),
                 0,
-            ));
-        }
-        if !check_only && !yes && (json || !io::stdin().is_terminal()) {
-            return Err(UpdateError::new(
-                ErrorCode::Cancelled,
-                "Installation requires --yes when input is non-interactive or --json is set",
             ));
         }
         let channel = channel.map(|value| {
@@ -43,34 +46,8 @@ pub fn handle_update(
                 ReleaseChannel::Stable
             }
         });
-        // Check is a multi-request GitHub metadata walk; say so before the prompt.
-        eprintln!("Checking GitHub for updates...");
-        let report = manager::check(&std::env::current_exe()?, build_identity(), channel)?;
-        if check_only || report.candidate.is_none() {
-            return Ok((serde_json::to_value(report)?, 0));
-        }
-        if !report.installation.can_install() {
-            return Err(UpdateError::new(
-                ErrorCode::Unsupported,
-                report.installation.explanation.clone().unwrap_or_default(),
-            ));
-        }
-        if !yes {
-            let tag = report
-                .candidate
-                .as_ref()
-                .map(|c| c.manifest.tag.as_str())
-                .unwrap_or_default();
-            eprint!("Install {tag}? Close other Teshi processes before continuing. [y/N] ");
-            io::stderr().flush()?;
-            let mut line = String::new();
-            io::stdin().read_line(&mut line)?;
-            if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                return Err(UpdateError::new(ErrorCode::Cancelled, "Update cancelled"));
-            }
-        }
         let mut previous_percent = None;
-        let transaction = manager::install(&report, &AtomicBool::new(false), &mut |event| {
+        let mut emit = |event: teshi_update::UpdateEvent| {
             let percent = event.progress.map(|p| (p * 100.0) as u32);
             if percent != previous_percent || percent.is_none() {
                 eprintln!(
@@ -81,7 +58,33 @@ pub fn handle_update(
                 );
                 previous_percent = percent;
             }
-        })?;
+        };
+        let (report, transaction) = if retry_install {
+            eprintln!("Revalidating cached update (offline)...");
+            manager::retry_install_with_close(
+                &std::env::current_exe()?,
+                build_identity(),
+                &AtomicBool::new(false),
+                &mut emit,
+                force_close,
+            )?
+        } else {
+            eprintln!("Checking GitHub for updates...");
+            let report = manager::check(&std::env::current_exe()?, build_identity(), channel)?;
+            if check_only || report.candidate.is_none() {
+                return Ok((serde_json::to_value(report)?, 0));
+            }
+            let transaction = manager::install_with_options(
+                &report,
+                &AtomicBool::new(false),
+                &mut emit,
+                manager::InstallOptions {
+                    force_close,
+                    ..Default::default()
+                },
+            )?;
+            (report, transaction)
+        };
         Ok((
             serde_json::json!({
                 "status":"pending",
@@ -124,6 +127,34 @@ pub fn handle_update(
                         "Previous update: {}",
                         previous["detail"].as_str().unwrap_or_default()
                     );
+                }
+                if let Some(failure) = value.get("last_failure").filter(|v| !v.is_null()) {
+                    println!(
+                        "Last failure [{}/{}]: {}",
+                        failure["stage"].as_str().unwrap_or_default(),
+                        failure["error"]["code"].as_str().unwrap_or_default(),
+                        failure["error"]["message"].as_str().unwrap_or_default()
+                    );
+                    if let Some(payload) = failure.get("payload").filter(|v| !v.is_null()) {
+                        println!(
+                            "Payload: {} ({})",
+                            payload["asset"]["name"].as_str().unwrap_or_default(),
+                            payload["asset"]["sha256"].as_str().unwrap_or_default()
+                        );
+                    }
+                    println!("{}", failure["next_attempt"].as_str().unwrap_or_default());
+                }
+                if let Some(processes) = value
+                    .get("running_processes")
+                    .and_then(|value| value.as_array())
+                {
+                    for process in processes {
+                        println!(
+                            "Running: PID {} {}",
+                            process["pid"],
+                            process["executable"].as_str().unwrap_or_default()
+                        );
+                    }
                 }
                 if code == 3 {
                     println!(

@@ -1,0 +1,110 @@
+name: Windows test temp experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA containing the CI measurement harness
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Windows temp (${{ matrix.temp_mode }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        temp_mode: [default, runner]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Pin the experiment source
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          if ($env:SOURCE_SHA -notmatch '^[0-9a-fA-F]{40}$') { throw 'An exact 40-character SHA is required' }
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch' }
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/teshi-artifacts" | Out-Null
+          git show -s --format=fuller HEAD | Set-Content "$env:RUNNER_TEMP/teshi-artifacts/source.txt"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/teshi-tui-runner -> target
+      - name: Select and record temporary storage
+        shell: pwsh
+        run: ./scripts/prepare-ci-temp.ps1 -Mode '${{ matrix.temp_mode }}' -Evidence "$env:RUNNER_TEMP/teshi-artifacts/environment"
+      - name: Build the same workloads outside the measurement window
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          cargo build -p teshi-cli --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml --bin teshi-directory-feature-runner --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --test management_pointer --test terminal --no-run
+          exit $LASTEXITCODE
+      - name: Measure three sequential repeats
+        timeout-minutes: 35
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          $env:TESHI_SELF_TEST_BIN = (Resolve-Path 'target/debug/teshi.exe').Path
+          $runner = (Resolve-Path 'crates/teshi-tui-runner/target/debug/teshi-directory-feature-runner.exe').Path
+          & $env:TESHI_SELF_TEST_BIN check --feature features/zh-CN/项目目录加载.feature --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $failed = $false
+          foreach ($repeat in 1..3) {
+            $root = "$env:RUNNER_TEMP/teshi-artifacts/repeat-$repeat"
+            $env:TESHI_FEATURE_ARTIFACTS = "$root/directory-evidence"
+            $env:TESHI_MANAGEMENT_POINTER_ARTIFACTS = "$root/management-evidence"
+            $env:TESHI_CAPTURE_TIMINGS = "$root/capture-timings.ndjson"
+            python scripts/run-ci-command.py --label directory --timeout-seconds 900 --artifacts "$root/directory" -- $env:TESHI_SELF_TEST_BIN run features/zh-CN/项目目录加载.feature --runner-cmd $runner --report "$root/directory-evidence/report.json"
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+            python scripts/run-ci-command.py --label management --timeout-seconds 300 --serial-libtest --artifacts "$root/management" -- cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --test management_pointer -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+            python scripts/run-ci-command.py --label terminal --timeout-seconds 120 --serial-libtest --artifacts "$root/terminal" -- cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --test terminal -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+      - name: Upload all measurements, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-temp-${{ matrix.temp_mode }}
+          path: ${{ runner.temp }}/teshi-artifacts
+          if-no-files-found: error
+
+  summary:
+    name: Compare Windows temp measurements
+    if: always()
+    needs: compare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-temp-default
+          path: measurements/default
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-temp-runner
+          path: measurements/runner
+      - name: Require both modes to finish successfully
+        env:
+          EXPERIMENT_RESULT: ${{ needs.compare.result }}
+        run: test "$EXPERIMENT_RESULT" = success
+      - name: Compare complete same-SHA measurements
+        run: python scripts/compare-ci-temp.py measurements --output "$GITHUB_STEP_SUMMARY"

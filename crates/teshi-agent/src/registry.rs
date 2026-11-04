@@ -17,6 +17,7 @@ use crate::loader::{AgentLoader, LoadError};
 pub struct AgentRegistry {
     definitions: Vec<AgentDefinition>,
     errors: Vec<LoadError>,
+    builtin_fallback: bool,
 }
 
 impl AgentRegistry {
@@ -26,16 +27,22 @@ impl AgentRegistry {
     /// Pass `None` to skip project-tier agents.
     pub fn load(project_dir: Option<&Path>) -> Self {
         let loader = AgentLoader::new(project_dir);
-        let (definitions, errors) = loader.load_all();
+        let (definitions, errors, builtin_fallback) = loader.load_with_origin();
         Self {
             definitions,
             errors,
+            builtin_fallback,
         }
     }
 
     /// Number of loaded agent definitions.
     pub fn len(&self) -> usize {
         self.definitions.len()
+    }
+
+    /// Whether the registry contains the built-in fallback rather than disk profiles.
+    pub fn uses_builtin_fallback(&self) -> bool {
+        self.builtin_fallback
     }
 
     pub fn is_empty(&self) -> bool {
@@ -161,6 +168,16 @@ model_ref: test-model
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.default().id, "default");
         assert!(reg.errors().is_empty());
+        assert!(reg.uses_builtin_fallback());
+    }
+
+    #[test]
+    fn custom_default_profile_is_not_the_builtin_fallback() {
+        let (project, agent_dir) = make_project_agent_dir();
+        write_agent(&agent_dir.join("default"), "default");
+        let registry = AgentRegistry::load(Some(project.path()));
+        assert_eq!(registry.default().id, "default");
+        assert!(!registry.uses_builtin_fallback());
     }
 
     #[test]

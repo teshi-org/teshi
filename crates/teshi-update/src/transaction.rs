@@ -42,6 +42,8 @@ struct Journal {
     attempted: Vec<String>,
     committed: bool,
     restart: Option<Restart>,
+    #[serde(default)]
+    force_close: bool,
 }
 
 /// Approved native desktop restart context. Executable selection is fixed by the helper.
@@ -64,6 +66,20 @@ pub struct Participant {
 /// `teshi update --status` and `--check` can run while a helper holds it.
 pub fn registers_install_participant<S: AsRef<str>>(args: &[S]) -> bool {
     let rest: Vec<&str> = args.iter().skip(1).map(AsRef::as_ref).collect();
+    // Stop must remain usable while a helper holds gate.lock waiting for daemons.
+    let mut command = rest.as_slice();
+    while let Some(first) = command.first() {
+        if *first == "--requirements-root" && command.len() >= 2 {
+            command = &command[2..];
+        } else if first.starts_with("--requirements-root=") {
+            command = &command[1..];
+        } else {
+            break;
+        }
+    }
+    if command.starts_with(&["daemon", "stop"]) {
+        return false;
+    }
     if rest.first().is_some_and(|arg| {
         matches!(
             *arg,
@@ -193,6 +209,22 @@ impl Preparation {
         new: &BundleManifest,
         restart: Option<Restart>,
     ) -> Result<TransactionResult> {
+        self.handoff_with_close(root, old, new, restart, false)
+    }
+
+    /// Hands off an update with explicit permission to force-close remaining
+    /// processes from this installation after the graceful-exit deadline.
+    ///
+    /// # Errors
+    /// Returns the same validation and handoff errors as [`Self::handoff`].
+    pub fn handoff_with_close(
+        self,
+        root: &Path,
+        old: &BundleManifest,
+        new: &BundleManifest,
+        restart: Option<Restart>,
+        force_close: bool,
+    ) -> Result<TransactionResult> {
         old.validate()?;
         new.validate()?;
         verify_bundle(&self.directory.path().join("stage"), new)?;
@@ -238,6 +270,7 @@ impl Preparation {
             attempted: Vec::new(),
             committed: false,
             restart,
+            force_close,
         };
         write_json(&self.directory.path().join("journal.json"), &journal)?;
         let journal_hash = file_hash(&self.directory.path().join("journal.json"))?;
@@ -302,6 +335,82 @@ fn participant_wait() -> Duration {
         .filter(|seconds: &u64| (1..=120).contains(seconds))
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(30))
+}
+
+fn close_installation_processes(
+    root: &Path,
+    old: &BundleManifest,
+    force: bool,
+    directory: &Path,
+    id: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + participant_wait();
+    let mut requested = BTreeSet::new();
+    let mut audit = Vec::new();
+    loop {
+        let processes = crate::processes::installation_processes(root, old)?;
+        if processes.is_empty() {
+            return Ok(());
+        }
+        for process in &processes {
+            if requested.insert((process.pid, process.started.clone())) {
+                let detail = crate::processes::request_exit(root, process);
+                audit.push((process.clone(), detail));
+                write_json(&directory.join("processes.json"), &audit)?;
+            }
+        }
+        let description = processes
+            .iter()
+            .map(|process| format!("{} ({})", process.pid, process.executable.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        outcome(
+            root,
+            id,
+            UpdateStatus::WaitingForExit,
+            format!("Waiting for installation processes: {description}"),
+        )?;
+        if Instant::now() >= deadline {
+            // A graceful request can take the remaining deadline. Recheck after
+            // it returns before reporting a timeout or force-closing anything.
+            let processes = crate::processes::installation_processes(root, old)?;
+            if processes.is_empty() {
+                return Ok(());
+            }
+            let description = processes
+                .iter()
+                .map(|process| format!("{} ({})", process.pid, process.executable.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !force {
+                return Err(UpdateError::new(
+                    ErrorCode::Busy,
+                    format!(
+                        "Teshi processes are still running: {description}. Close them or retry with --force-close; unsaved work may be lost."
+                    ),
+                ));
+            }
+            for process in processes {
+                // The OS handle/pidfd is checked against this captured generation.
+                // No name-based taskkill or process-tree termination is used.
+                crate::processes::terminate(&process)?;
+                audit.push((
+                    process,
+                    "Force close completed; process exit confirmed".into(),
+                ));
+                write_json(&directory.join("processes.json"), &audit)?;
+            }
+            let remaining = crate::processes::installation_processes(root, old)?;
+            if !remaining.is_empty() {
+                return Err(UpdateError::new(
+                    ErrorCode::Busy,
+                    format!("New installation processes appeared during close: {remaining:?}"),
+                ));
+            }
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub(crate) fn wait_for_participants(state: &Path) -> Result<Vec<File>> {
@@ -534,6 +643,7 @@ pub fn run_helper(directory: &Path, expected_plan_hash: &str) -> Result<()> {
     verify_bundle(&directory.join("stage"), &journal.new)?;
     write_json(&state.join("pending.json"), &id)?;
     File::create(directory.join("accepted"))?.sync_all()?;
+    let mut failure_stage = "process_exit";
     let result = (|| {
         // Parent publishes Pending before releasing its reservation. Wait for
         // that release so a fast helper cannot have Completed overwritten by Pending.
@@ -545,7 +655,9 @@ pub fn run_helper(directory: &Path, expected_plan_hash: &str) -> Result<()> {
                 Err(_) => std::thread::sleep(Duration::from_millis(25)),
             }
         };
+        close_installation_processes(root, &journal.old, journal.force_close, &directory, &id)?;
         let _participants = wait_for_participants(state)?;
+        failure_stage = "commit";
         outcome(
             root,
             &id,
@@ -569,7 +681,23 @@ pub fn run_helper(directory: &Path, expected_plan_hash: &str) -> Result<()> {
             fs::remove_file(state.join("pending.json"))?;
             crate::exe::remove_staged_payload(root);
         }
-        Err(error) => {
+        Err(mut error) => {
+            let candidate: Option<crate::github::Candidate> =
+                fs::read(directory.join("candidate.json"))
+                    .ok()
+                    .and_then(|data| serde_json::from_slice(&data).ok());
+            if let Err(diagnostic) = crate::diagnostics::record(
+                root,
+                failure_stage,
+                &error,
+                candidate.as_ref(),
+                candidate.is_some(),
+            ) {
+                // Diagnostic storage must never prevent rollback or recovery.
+                error.message.push_str(&format!(
+                    " (could not persist update diagnostics: {diagnostic})"
+                ));
+            }
             rollback(root, &directory, &journal)?;
             outcome(
                 root,
@@ -781,6 +909,7 @@ mod tests {
             attempted: Vec::new(),
             committed: false,
             restart: None,
+            force_close: false,
         };
         (root, directory, journal)
     }
@@ -858,6 +987,17 @@ mod tests {
 
     #[test]
     fn inspect_commands_skip_install_participant() {
+        assert!(!registers_install_participant(&[
+            "teshi", "daemon", "stop", "--force"
+        ]));
+        assert!(!registers_install_participant(&[
+            "teshi",
+            "--requirements-root",
+            "somewhere",
+            "daemon",
+            "stop"
+        ]));
+        assert!(registers_install_participant(&["teshi", "daemon", "start"]));
         assert!(!registers_install_participant(&[
             "teshi",
             "--update-identity"

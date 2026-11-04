@@ -7,15 +7,7 @@ use std::process::Command;
 fn teshi_binary() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_teshi")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let fallback =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/teshi.exe");
-            if fallback.exists() {
-                fallback
-            } else {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/teshi")
-            }
-        })
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_teshi")))
 }
 
 fn runner_binary(teshi: &Path) -> PathBuf {
@@ -27,15 +19,29 @@ fn runner_binary(teshi: &Path) -> PathBuf {
 }
 
 fn ensure_runner(teshi: &Path) -> PathBuf {
+    let runner = runner_binary(teshi);
+    if runner.is_file() {
+        return runner;
+    }
+    // A nested Cargo build must not wait on its parent test's build lock.
+    let bootstrap = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bdd-runner-bootstrap");
     let status = Command::new(env!("CARGO"))
-        .args(["build", "-p", "teshi-requirement-cli-runner", "--quiet"])
+        .args([
+            "build",
+            "-p",
+            "teshi-requirement-cli-runner",
+            "--locked",
+            "--quiet",
+            "--target-dir",
+        ])
+        .arg(&bootstrap)
         .status()
         .expect("spawn cargo to build teshi-requirement-cli-runner");
     assert!(
         status.success(),
         "failed to build teshi-requirement-cli-runner"
     );
-    let runner = runner_binary(teshi);
+    let runner = bootstrap.join("debug").join(runner.file_name().unwrap());
     assert!(
         runner.exists(),
         "runner binary missing at {}",
@@ -107,7 +113,7 @@ fn run_locale(locale: &str) {
         "{locale}: teshi run did not emit end_run.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        combined.contains("end_run passed=17 failed=0 skipped=0"),
+        combined.contains("end_run passed=44 failed=0 skipped=0"),
         "{locale}: requirement CLI E2E failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(

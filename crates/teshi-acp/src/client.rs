@@ -72,6 +72,9 @@ pub struct InitializeResult {
 pub struct AcpSession {
     pub id: String,
     pub cwd: PathBuf,
+    /// Settings discovered while creating or loading this session.
+    #[serde(default)]
+    pub config: crate::session_config::SessionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +123,7 @@ pub struct AcpClient<W> {
     events: mpsc::Sender<AcpEvent>,
     lifecycle: Arc<Mutex<AcpLifecycle>>,
     config: AcpClientConfig,
-    permission_policy: PermissionPolicy,
+    permission_policy: Arc<Mutex<PermissionPolicy>>,
     permission_host: Option<Arc<dyn PermissionHost>>,
     initialized: Arc<Mutex<Option<InitializeResult>>>,
     prompt_running: Arc<AtomicBool>,
@@ -128,6 +131,7 @@ pub struct AcpClient<W> {
     reader_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     child: Option<Child>,
+    process_tree: Option<crate::process_tree::ProcessTree>,
 }
 
 impl AcpClient<tokio::process::ChildStdin> {
@@ -138,14 +142,25 @@ impl AcpClient<tokio::process::ChildStdin> {
         permission_policy: PermissionPolicy,
         permission_host: Option<Arc<dyn PermissionHost>>,
     ) -> AcpResult<Self> {
-        let mut child =
-            command
-                .to_tokio_command()
-                .spawn()
-                .map_err(|source| AcpError::SpawnFailed {
+        let mut process_command = command.to_tokio_command();
+        crate::process_tree::ProcessTree::configure(&mut process_command);
+        let mut child = process_command
+            .spawn()
+            .map_err(|source| AcpError::SpawnFailed {
+                program: command.program.display().to_string(),
+                source,
+            })?;
+        let process_tree = match crate::process_tree::ProcessTree::attach(&child) {
+            Ok(tree) => tree,
+            Err(source) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(AcpError::SpawnFailed {
                     program: command.program.display().to_string(),
                     source,
-                })?;
+                });
+            }
+        };
         let stdin = child.stdin.take().ok_or_else(|| AcpError::SpawnFailed {
             program: command.program.display().to_string(),
             source: std::io::Error::other("missing stdin"),
@@ -164,6 +179,7 @@ impl AcpClient<tokio::process::ChildStdin> {
             permission_host,
         );
         client.child = Some(child);
+        client.process_tree = Some(process_tree);
         if let Some(stderr) = stderr {
             client.stderr_task = Some(tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -195,7 +211,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             events,
             lifecycle: Arc::new(Mutex::new(AcpLifecycle::Created)),
             config,
-            permission_policy,
+            permission_policy: Arc::new(Mutex::new(permission_policy)),
             permission_host,
             initialized: Arc::new(Mutex::new(None)),
             prompt_running: Arc::new(AtomicBool::new(false)),
@@ -203,11 +219,17 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             reader_task: Some(reader_task),
             stderr_task: None,
             child: None,
+            process_tree: None,
         }
     }
 
     pub async fn lifecycle(&self) -> AcpLifecycle {
         *self.lifecycle.lock().await
+    }
+
+    /// Set the policy for future permission requests; pending requests keep their decision path.
+    pub async fn set_permission_policy(&self, policy: PermissionPolicy) {
+        *self.permission_policy.lock().await = policy;
     }
 
     async fn set_state(&self, to: AcpLifecycle) {
@@ -304,7 +326,23 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         }
     }
 
+    /// Create a session without client-provided MCP servers.
+    ///
+    /// # Errors
+    /// Returns lifecycle, serialization, transport, or remote session errors.
     pub async fn new_session(&self, cwd: PathBuf) -> AcpResult<AcpSession> {
+        self.new_session_with_mcp(cwd, Vec::new()).await
+    }
+
+    /// Create a session with client-provided MCP tool servers.
+    ///
+    /// # Errors
+    /// Returns lifecycle, serialization, transport, or remote session errors.
+    pub async fn new_session_with_mcp(
+        &self,
+        cwd: PathBuf,
+        servers: Vec<crate::McpServer>,
+    ) -> AcpResult<AcpSession> {
         self.ensure_state(
             &[
                 AcpLifecycle::Initialized,
@@ -314,7 +352,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             "session/new",
         )
         .await?;
-        let params = serialize_params(NewSessionRequest::new(cwd.clone()))?;
+        let params = serialize_params(NewSessionRequest::new(cwd.clone()).mcp_servers(servers))?;
         let result = self
             .request_with_timeout("session/new", params, self.config.request_timeout)
             .await?;
@@ -325,7 +363,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .ok_or_else(|| AcpError::SessionFailed("session/new missing sessionId".into()))?
             .to_string();
         self.set_state(AcpLifecycle::Ready).await;
-        Ok(AcpSession { id, cwd })
+        Ok(AcpSession {
+            id,
+            cwd,
+            config: crate::session_config::SessionConfig::from_response(&result),
+        })
     }
 
     pub async fn list_sessions(&self) -> AcpResult<Value> {
@@ -375,10 +417,69 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .and_then(Value::as_str)
             .unwrap_or(id)
             .to_string();
+        self.set_state(AcpLifecycle::Ready).await;
         Ok(AcpSession {
             id: session_id,
             cwd,
+            config: crate::session_config::SessionConfig::from_response(&result),
         })
+    }
+
+    /// Change an advertised setting on the existing session.
+    ///
+    /// # Errors
+    /// Rejects unsupported values, active turns, and remote protocol errors.
+    pub async fn set_session_option(
+        &self,
+        session: &AcpSession,
+        option: &crate::session_config::ConfigOption,
+        value: Value,
+    ) -> AcpResult<Value> {
+        use crate::session_config::ConfigRoute;
+        self.ensure_state(&[AcpLifecycle::Ready], "set session option")
+            .await?;
+        if self.prompt_running.load(Ordering::SeqCst) {
+            return Err(AcpError::PromptAlreadyRunning);
+        }
+        if !option.accepts(&value) {
+            return Err(AcpError::ProtocolViolation(
+                "unsupported configuration value".into(),
+            ));
+        }
+        let (method, params) = match option.route {
+            ConfigRoute::Config => {
+                use agent_client_protocol::schema::v1::{
+                    SessionConfigOptionValue, SetSessionConfigOptionRequest,
+                };
+                let value = match value {
+                    Value::Bool(value) => SessionConfigOptionValue::boolean(value),
+                    Value::String(value) => SessionConfigOptionValue::value_id(value),
+                    _ => {
+                        return Err(AcpError::ProtocolViolation(
+                            "unsupported configuration type".into(),
+                        ));
+                    }
+                };
+                (
+                    "session/set_config_option",
+                    serialize_params(SetSessionConfigOptionRequest::new(
+                        session.id.clone(),
+                        option.id.clone(),
+                        value,
+                    ))?,
+                )
+            }
+            ConfigRoute::Mode => (
+                "session/set_mode",
+                json!({"sessionId":session.id,"modeId":value}),
+            ),
+            ConfigRoute::Model => (
+                "session/set_model",
+                json!({"sessionId":session.id,"modelId":value}),
+            ),
+        };
+        self.request_with_timeout(method, params, self.config.request_timeout)
+            .await
     }
 
     pub async fn prompt(&self, session: &AcpSession, prompt: &str) -> AcpResult<Option<String>> {
@@ -453,7 +554,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
 
     pub async fn shutdown(&mut self) -> AcpResult<()> {
         let state = self.lifecycle().await;
-        if matches!(state, AcpLifecycle::ShuttingDown | AcpLifecycle::Exited) {
+        if matches!(state, AcpLifecycle::Exited) {
             return Ok(());
         }
         self.set_state(AcpLifecycle::ShuttingDown).await;
@@ -465,6 +566,13 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                 Ok(Ok(_)) => {}
                 _ => terminate_child(child).await,
             }
+        }
+        // The container outlives the primary process, so a graceful agent exit
+        // cannot leave its tools writing into the old project after a switch.
+        if let Some(tree) = &mut self.process_tree {
+            tree.shutdown()
+                .await
+                .map_err(|error| AcpError::Shutdown(error.to_string()))?;
         }
         if let Some(t) = self.reader_task.take() {
             t.abort();
@@ -493,7 +601,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         };
         let peer = self.peer.clone();
         let events = self.events.clone();
-        let policy = self.permission_policy;
+        let policy = Arc::clone(&self.permission_policy);
         let host = self.permission_host.clone();
         let pending_permissions = Arc::clone(&self.pending_permissions);
         tokio::spawn(async move {
@@ -524,6 +632,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                         .unwrap_or_default();
                         let peer = peer.clone();
                         let host = host.clone();
+                        let policy = *policy.lock().await;
                         let pending = Arc::clone(&pending_permissions);
                         let (cancel_tx, cancel_rx) = oneshot::channel();
                         pending.lock().await.insert(id.clone(), cancel_tx);

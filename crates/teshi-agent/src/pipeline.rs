@@ -148,6 +148,9 @@ pub struct RequirementSourceScope {
     pub store_id: RequirementStoreId,
     /// Iteration window: all documents, one named iteration, or unassigned.
     pub iteration: RequirementIterationFilter,
+    /// Project membership fixed when the generation scope is confirmed.
+    #[serde(default)]
+    pub project_filter: teshi_core::authoring::RequirementProjectFilter,
 }
 
 /// Why restored generation state cannot continue against the current store.
@@ -416,7 +419,10 @@ pub fn documents_in_scope<'a>(
     Ok(index
         .documents
         .iter()
-        .filter(|doc| doc.matches_iteration_filter(&scope.iteration))
+        .filter(|doc| {
+            doc.matches_iteration_filter(&scope.iteration)
+                && doc.matches_project_filter(&scope.project_filter)
+        })
         .collect())
 }
 
@@ -971,8 +977,34 @@ mod tests {
     fn sample_scope(iteration: RequirementIterationFilter) -> RequirementSourceScope {
         RequirementSourceScope {
             store_id: sample_store(),
+            project_filter: Default::default(),
             iteration,
         }
+    }
+
+    #[test]
+    fn project_scope_rejects_cross_project_sources_and_membership_drift() {
+        use teshi_core::authoring::{RequirementProjectFilter, RequirementProjectStatus};
+        let mut index = sample_index(Some("Sprint 1"));
+        index.documents[0]
+            .projects
+            .insert("project-a".into(), RequirementProjectStatus::Planned);
+        let documents = sample_documents("hello world", Some("Sprint 1"));
+        let mut scope = sample_scope(RequirementIterationFilter::All);
+        scope.project_filter = RequirementProjectFilter::Project("project-b".into());
+        assert!(documents_in_scope(&index, &scope).unwrap().is_empty());
+        assert!(
+            read_document_in_scope(&documents, &index, &scope, &sample_store(), "doc-1").is_err()
+        );
+        scope.project_filter = RequirementProjectFilter::Project("project-a".into());
+        assert_eq!(documents_in_scope(&index, &scope).unwrap().len(), 1);
+        assert!(
+            read_document_in_scope(&documents, &index, &scope, &sample_store(), "doc-1").is_ok()
+        );
+        index.documents[0].projects.clear();
+        assert!(
+            read_document_in_scope(&documents, &index, &scope, &sample_store(), "doc-1").is_err()
+        );
     }
 
     #[test]

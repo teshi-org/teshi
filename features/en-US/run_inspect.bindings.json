@@ -15,7 +15,7 @@
         "action": "navigate",
         "value_arg": "http://127.0.0.1:20253/?e2e=1"
       },
-      "confirmed_at": "2026-08-28T11:20:38.238531+00:00"
+      "confirmed_at": "2026-10-19T08:35:30.970147600+00:00"
     },
     {
       "step_line": 11,
@@ -29,7 +29,7 @@
         "value": "[data-testid=\"e2e-root\"]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T11:26:54.299732+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.075761400+00:00"
     },
     {
       "step_line": 12,
@@ -44,7 +44,7 @@
         "action": "assert_text",
         "value_arg": "browser"
       },
-      "confirmed_at": "2026-09-09T14:54:53.389456500+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.193593400+00:00"
     },
     {
       "step_line": 15,
@@ -58,7 +58,7 @@
         "value": "[data-testid=open-api-run]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T11:23:15.300073200+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.300071400+00:00"
     },
     {
       "step_line": 16,
@@ -73,7 +73,7 @@
         "action": "assert_text",
         "value_arg": "run"
       },
-      "confirmed_at": "2026-09-09T15:11:47.234754400+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.406208400+00:00"
     },
     {
       "step_line": 17,
@@ -88,11 +88,25 @@
         "action": "assert_text",
         "value_arg": "none"
       },
-      "confirmed_at": "2026-08-28T11:23:22.874975500+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.509766800+00:00"
     },
     {
       "step_line": 20,
-      "step_keyword": "Given",
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:31.614681500+00:00"
+    },
+    {
+      "step_line": 21,
+      "step_keyword": "Then",
       "step_text": "the Run inspect surface is shown",
       "step_text_normalized": "the run inspect surface is shown",
       "source": "binding",
@@ -103,10 +117,10 @@
         "action": "assert_text",
         "value_arg": "run"
       },
-      "confirmed_at": "2026-09-09T15:11:48.953187600+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.717403800+00:00"
     },
     {
-      "step_line": 21,
+      "step_line": 22,
       "step_keyword": "When",
       "step_text": "the user views the scenario list",
       "step_text_normalized": "the user views the scenario list",
@@ -117,26 +131,40 @@
         "value": "[data-testid=run-reload]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T11:23:25.175968200+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.821482200+00:00"
     },
     {
-      "step_line": 22,
+      "step_line": 23,
       "step_keyword": "Then",
       "step_text": "teshi web lists Gherkin scenarios from the open project",
       "step_text_normalized": "teshi web lists gherkin scenarios from the open project",
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "css",
-        "value": "[data-testid='e2e-scenarios']",
+        "strategy": "testid",
+        "value": "[data-testid=e2e-scenarios]",
         "action": "assert_text",
         "value_arg": "[api] Create a user then fetch by extracted id"
       },
-      "confirmed_at": "2026-09-09T15:16:37.124409+00:00"
+      "confirmed_at": "2026-10-19T08:35:31.927320100+00:00"
     },
     {
-      "step_line": 25,
-      "step_keyword": "Given",
+      "step_line": 26,
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:32.034231300+00:00"
+    },
+    {
+      "step_line": 27,
+      "step_keyword": "Then",
       "step_text": "the Run inspect surface is shown",
       "step_text_normalized": "the run inspect surface is shown",
       "source": "binding",
@@ -147,10 +175,10 @@
         "action": "assert_text",
         "value_arg": "run"
       },
-      "confirmed_at": "2026-09-09T15:11:50.677028300+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.139282900+00:00"
     },
     {
-      "step_line": 26,
+      "step_line": 28,
       "step_keyword": "When",
       "step_text": "the user refreshes the scenario list",
       "step_text_normalized": "the user refreshes the scenario list",
@@ -161,10 +189,10 @@
         "value": "[data-testid=run-reload]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T11:23:28.471823900+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.245390900+00:00"
     },
     {
-      "step_line": 27,
+      "step_line": 29,
       "step_keyword": "Then",
       "step_text": "teshi web lists Gherkin scenarios from the open project",
       "step_text_normalized": "teshi web lists gherkin scenarios from the open project",
@@ -176,11 +204,25 @@
         "action": "assert_text",
         "value_arg": "[api] Create a user then fetch by extracted id"
       },
-      "confirmed_at": "2026-08-28T11:23:29.611254700+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.350556100+00:00"
     },
     {
-      "step_line": 30,
-      "step_keyword": "Given",
+      "step_line": 32,
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:32.463155+00:00"
+    },
+    {
+      "step_line": 33,
+      "step_keyword": "Then",
       "step_text": "the Run inspect surface is shown",
       "step_text_normalized": "the run inspect surface is shown",
       "source": "binding",
@@ -191,10 +233,10 @@
         "action": "assert_text",
         "value_arg": "run"
       },
-      "confirmed_at": "2026-09-09T15:12:05.417316900+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.569396800+00:00"
     },
     {
-      "step_line": 31,
+      "step_line": 34,
       "step_keyword": "And",
       "step_text": "a Gherkin scenario is selected",
       "step_text_normalized": "a gherkin scenario is selected",
@@ -205,10 +247,10 @@
         "value": "[data-testid=e2e-scenarios]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T11:23:31.758826700+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.673541600+00:00"
     },
     {
-      "step_line": 32,
+      "step_line": 35,
       "step_keyword": "When",
       "step_text": "the user starts that scenario",
       "step_text_normalized": "the user starts that scenario",
@@ -219,10 +261,10 @@
         "value": "[data-testid=run-start]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T11:23:34.609037700+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.778944700+00:00"
     },
     {
-      "step_line": 33,
+      "step_line": 36,
       "step_keyword": "Then",
       "step_text": "an event log is shown for the run",
       "step_text_normalized": "an event log is shown for the run",
@@ -233,11 +275,25 @@
         "value": "[data-testid='e2e-events']",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-09-09T15:19:47.259034300+00:00"
+      "confirmed_at": "2026-10-19T08:35:32.884867300+00:00"
     },
     {
-      "step_line": 36,
-      "step_keyword": "Given",
+      "step_line": 39,
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:32.990196100+00:00"
+    },
+    {
+      "step_line": 40,
+      "step_keyword": "Then",
       "step_text": "the Run inspect surface is shown",
       "step_text_normalized": "the run inspect surface is shown",
       "source": "binding",
@@ -248,10 +304,10 @@
         "action": "assert_text",
         "value_arg": "run"
       },
-      "confirmed_at": "2026-09-09T15:16:00.484003800+00:00"
+      "confirmed_at": "2026-10-19T08:35:33.098320200+00:00"
     },
     {
-      "step_line": 37,
+      "step_line": 41,
       "step_keyword": "When",
       "step_text": "the user inspects the run events",
       "step_text_normalized": "the user inspects the run events",
@@ -262,10 +318,10 @@
         "value": "[data-testid=e2e-events]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T11:24:10.973193800+00:00"
+      "confirmed_at": "2026-10-19T08:35:33.204127100+00:00"
     },
     {
-      "step_line": 38,
+      "step_line": 42,
       "step_keyword": "Then",
       "step_text": "teshi web does not offer a Gherkin editor",
       "step_text_normalized": "teshi web does not offer a gherkin editor",
@@ -277,11 +333,39 @@
         "action": "assert_text",
         "value_arg": "none"
       },
-      "confirmed_at": "2026-08-28T11:24:12.090529200+00:00"
+      "confirmed_at": "2026-10-19T08:35:33.309271700+00:00"
     },
     {
-      "step_line": 41,
-      "step_keyword": "Given",
+      "step_line": 45,
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:33.412280400+00:00"
+    },
+    {
+      "step_line": 46,
+      "step_keyword": "And",
+      "step_text": "the user starts that scenario",
+      "step_text_normalized": "the user starts that scenario",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=run-start]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:33.514297600+00:00"
+    },
+    {
+      "step_line": 47,
+      "step_keyword": "Then",
       "step_text": "a completed run with redacted HTTP values is shown",
       "step_text_normalized": "a completed run with redacted http values is shown",
       "source": "binding",
@@ -291,10 +375,10 @@
         "value": "[data-testid=e2e-run-status]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T11:24:13.034989+00:00"
+      "confirmed_at": "2026-10-19T08:35:33.616323500+00:00"
     },
     {
-      "step_line": 42,
+      "step_line": 48,
       "step_keyword": "When",
       "step_text": "the user expands secrets",
       "step_text_normalized": "the user expands secrets",
@@ -305,10 +389,10 @@
         "value": "[data-testid=run-expand]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T11:24:14.136528+00:00"
+      "confirmed_at": "2026-10-19T08:35:33.720782700+00:00"
     },
     {
-      "step_line": 43,
+      "step_line": 49,
       "step_keyword": "Then",
       "step_text": "teshi web reveals the previously redacted values",
       "step_text_normalized": "teshi web reveals the previously redacted values",
@@ -320,11 +404,25 @@
         "action": "assert_text",
         "value_arg": "Showing plaintext"
       },
-      "confirmed_at": "2026-09-09T15:20:11.406999900+00:00"
+      "confirmed_at": "2026-10-19T08:35:33.823666100+00:00"
     },
     {
-      "step_line": 46,
-      "step_keyword": "Given",
+      "step_line": 52,
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:33.929644600+00:00"
+    },
+    {
+      "step_line": 53,
+      "step_keyword": "Then",
       "step_text": "the Run inspect surface is shown",
       "step_text_normalized": "the run inspect surface is shown",
       "source": "binding",
@@ -335,10 +433,10 @@
         "action": "assert_text",
         "value_arg": "run"
       },
-      "confirmed_at": "2026-09-09T15:20:32.181414200+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.030891400+00:00"
     },
     {
-      "step_line": 47,
+      "step_line": 54,
       "step_keyword": "When",
       "step_text": "the user opens the Browser Profiles surface",
       "step_text_normalized": "the user opens the browser profiles surface",
@@ -349,10 +447,10 @@
         "value": "[data-testid=open-browser-sessions]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T11:24:17.332217700+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.131493+00:00"
     },
     {
-      "step_line": 48,
+      "step_line": 55,
       "step_keyword": "Then",
       "step_text": "the Browser Profiles surface is shown",
       "step_text_normalized": "the browser profiles surface is shown",
@@ -364,7 +462,7 @@
         "action": "assert_text",
         "value_arg": "browser"
       },
-      "confirmed_at": "2026-09-09T15:21:05.866992800+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.235052100+00:00"
     }
   ]
 }

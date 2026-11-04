@@ -50,6 +50,32 @@ Feature: Requirement authoring
     Then the command succeeds
     And the revision of document "doc-12" is unchanged
 
+  Scenario: Replacement heading synchronizes the stored title
+    When the tester replaces the body of document "doc-12" with:
+      """
+      # Sign In
+
+      Updated authentication flow.
+      """
+    Then the command succeeds
+    When the tester shows document "doc-12" as JSON
+    Then the JSON show envelope has id "doc-12", title "Sign In", path "auth/login.md", and iteration "Sprint 12"
+
+  Scenario: Replacement without a leading heading is rejected and preserves the document
+    When the tester replaces the body of document "doc-12" as JSON with:
+      """
+      Updated authentication flow without a heading.
+      """
+    Then the command fails
+    And the JSON error code is "invalid_requirement_title"
+    And the revision of document "doc-12" is unchanged
+    And the body of document "doc-12" is:
+      """
+      # Login
+
+      Users can sign in.
+      """
+
   Scenario: Non-interactive edit without a body is rejected
     When the tester edits document "doc-12" as JSON without providing a body
     Then the command fails

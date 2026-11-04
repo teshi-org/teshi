@@ -13,7 +13,16 @@ pub const STAGED_DIR: &str = "install";
 
 /// Silent Inno arguments used for in-app upgrades. `/DIR=` is supplied separately.
 pub fn silent_update_args() -> &'static [&'static str] {
-    &["/VERYSILENT", "/NORESTART", "/CURRENTUSER", "/update=true"]
+    &[
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/SP-",
+        "/NORESTART",
+        "/NOCLOSEAPPLICATIONS",
+        "/NOFORCECLOSEAPPLICATIONS",
+        "/CURRENTUSER",
+        "/update=true",
+    ]
 }
 
 /// Ensures the candidate is the Windows setup payload, never ZIP/MSI.
@@ -58,6 +67,20 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 /// Absolute `{app}\\install` path produced by a silent Inno update.
 pub fn staged_payload(root: &Path) -> PathBuf {
     root.join(STAGED_DIR)
+}
+
+/// Removes the previous Inno staging tree while the caller owns the update slot.
+///
+/// # Errors
+/// Rejects linked paths and propagates cleanup failures.
+pub fn clear_staged_payload(root: &Path) -> Result<()> {
+    crate::install::reject_links(root, Path::new(STAGED_DIR))?;
+    let staged = staged_payload(root);
+    match fs::remove_dir_all(staged) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Converts a Windows extended path to the syntax accepted by Inno Setup.
@@ -145,6 +168,11 @@ mod tests {
         assert!(args.contains(&"/VERYSILENT"));
         assert!(args.contains(&"/update=true"));
         assert!(args.contains(&"/CURRENTUSER"));
+        assert!(args.contains(&"/SUPPRESSMSGBOXES"));
+        assert!(args.contains(&"/SP-"));
+        // Only the helper implements the installation-scoped close policy.
+        assert!(args.contains(&"/NOCLOSEAPPLICATIONS"));
+        assert!(args.contains(&"/NOFORCECLOSEAPPLICATIONS"));
         assert!(!args.iter().any(|a| a.eq_ignore_ascii_case("/forcerestart")));
     }
 

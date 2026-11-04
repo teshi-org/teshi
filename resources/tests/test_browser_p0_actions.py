@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -43,6 +44,25 @@ class BrowserP0ActionTests(unittest.IsolatedAsyncioTestCase):
             await self.session.browser.close()
         if self.session.playwright is not None:
             await self.session.playwright.stop()
+
+    async def test_text_assertion_waits_for_delayed_content(self) -> None:
+        await self.session.page.evaluate(
+            "setTimeout(() => document.querySelector('#status').textContent = 'value [ready]', 400)"
+        )
+        result = await self.session.execute_locator(
+            "#status", "assert_text", "[ready]", timeout_ms=2000
+        )
+        self.assertTrue(result["ok"], result)
+
+    async def test_text_assertion_deadline_retains_failure_code_and_actual(self) -> None:
+        started = time.monotonic()
+        result = await self.session.execute_locator(
+            "#status", "assert_text", "never arrives", timeout_ms=150
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["code"], "assert_text_failed")
+        self.assertEqual(result["actual"], "waiting")
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
 
     async def test_dom_pointer_text_select_key_and_reactive_waits(self) -> None:
         missing = await self.session.execute_locator(

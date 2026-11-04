@@ -12,16 +12,17 @@ use teshi_engine::{
     BrowserElementInput, BrowserFeatureId, BrowserMode, BrowserOperation, BrowserOperations,
     BrowserPrivilegedCapability, BrowserScreenshotFormat, BrowserTarget, BrowserWaitCondition,
     LocatorIntent, PageContextRevision, PlaywrightLocatorCandidate, RuntimeConfig, StepBinding,
-    TeshiEngine, default_browser_service_script, default_winapp_service_script,
-    ensure_user_chrome_broker, load_project_settings, open_project, read_active_step,
-    resolve_step_bindings, send_sidecar_command_with_timeout, start_browser_sidecar,
-    stop_browser_sidecar,
+    TeshiEngine, chrome_broker_pairing_approve, chrome_broker_pairing_list,
+    chrome_broker_pairing_remove, chrome_broker_pairing_store, default_browser_service_script,
+    default_winapp_service_script, ensure_user_chrome_broker, fetch_chrome_broker_endpoint,
+    load_project_settings, open_project, read_active_step, send_sidecar_command_with_timeout,
+    start_browser_sidecar, stop_browser_sidecar,
 };
 
 use super::browser_endpoint::{
     auto_reconnect_enabled, doctor_endpoint, ensure_sidecar_healthy, read_cdp_endpoint,
-    reconnect_embedded, resolve_browser_project_root, write_cdp_endpoint_from_rust,
-    write_chrome_broker_endpoint,
+    reconnect_chrome_broker, reconnect_embedded, resolve_browser_project_root,
+    write_cdp_endpoint_from_rust, write_chrome_broker_endpoint,
 };
 use super::check::preflight_feature;
 use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
@@ -35,7 +36,8 @@ use super::{
     BrowserContentSettingArgs, BrowserCookiesArgs, BrowserEvidenceArgs, BrowserExecuteArgs,
     BrowserExtensionsArgs, BrowserGrantCommand, BrowserJavascriptArgs, BrowserLeaseCommand,
     BrowserLocatorArgs, BrowserLocatorVerifyArgs, BrowserNavigateArgs, BrowserNetworkCommand,
-    BrowserNetworkDetailArgs, BrowserNetworkListArgs, BrowserNetworkStartArgs, BrowserPdfArgs,
+    BrowserNetworkDetailArgs, BrowserNetworkListArgs, BrowserNetworkStartArgs,
+    BrowserPairingApproveArgs, BrowserPairingCommand, BrowserPairingOriginArgs, BrowserPdfArgs,
     BrowserProfileLabelCommand, BrowserReconnectArgs, BrowserReplayArgs, BrowserScreenshotArgs,
     BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs, BrowserTabCommand,
     BrowserTargetArgs, BrowserVerifyArgs,
@@ -43,9 +45,16 @@ use super::{
 
 /// Handles `teshi browser ...` subcommands.
 pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
+    if let BrowserCommand::Pairing { action } = action {
+        return pairing(action);
+    }
     let cwd = std::env::current_dir().context("resolve current directory")?;
-    let project_root = resolve_browser_project_root(&cwd).unwrap_or(cwd);
+    let project_root = match action {
+        BrowserCommand::Replay(args) => replay_project_root(&cwd, args.feature.as_deref()),
+        _ => resolve_browser_project_root(&cwd).unwrap_or(cwd),
+    };
     match action {
+        BrowserCommand::Pairing { action } => pairing(action),
         BrowserCommand::Sessions => {
             ensure_cli_chrome_broker(&project_root)?;
             run_typed_operation(
@@ -82,6 +91,7 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::ContentSetting(args) => privileged_content_setting(&project_root, args),
         BrowserCommand::Extensions(args) => privileged_extensions(&project_root, args),
         BrowserCommand::Snapshot(args) => snapshot(&project_root, args),
+        BrowserCommand::Scan(args) => scan(&project_root, args),
         BrowserCommand::Navigate(args) => navigate(&project_root, args),
         BrowserCommand::Highlight(args) => highlight(&project_root, args),
         BrowserCommand::ClearHighlight(target) => clear_highlight(&project_root, target),
@@ -102,6 +112,107 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::Network { action } => network(&project_root, action),
         BrowserCommand::ArtifactCleanup(args) => artifact_cleanup(&project_root, args),
     }
+}
+
+fn replay_project_root(cwd: &Path, feature: Option<&str>) -> PathBuf {
+    let Some(feature) = feature else {
+        return resolve_browser_project_root(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    };
+    let path = Path::new(feature);
+    if !path.is_absolute() {
+        return cwd.to_path_buf();
+    }
+    teshi_engine::find_project_root(Some(path))
+        .or_else(|| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+fn pairing(action: &BrowserPairingCommand) -> Result<()> {
+    match action {
+        BrowserPairingCommand::List => {
+            let value = if rust_broker_is_live() {
+                chrome_broker_pairing_list().map_err(browser_error_to_anyhow)?
+            } else {
+                let store = chrome_broker_pairing_store().map_err(browser_error_to_anyhow)?;
+                json!({
+                    "ok": true,
+                    "trusted_origins": store.list().map_err(|error| anyhow!(error.message))?,
+                    "effective_origins": store
+                        .list()
+                        .map_err(|error| anyhow!(error.message))?
+                        .into_iter()
+                        .map(|record| record.origin)
+                        .collect::<Vec<_>>(),
+                    "pending_pairings": [],
+                    "broker": "offline",
+                })
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        BrowserPairingCommand::Approve(args) => pairing_approve(args),
+        BrowserPairingCommand::Remove(args) => pairing_remove(args),
+    }
+}
+
+fn pairing_approve(args: &BrowserPairingApproveArgs) -> Result<()> {
+    let origin = normalize_pairing_origin(&args.origin)?;
+    let value = if rust_broker_is_live() {
+        chrome_broker_pairing_approve(&origin, args.display_name.as_deref())
+            .map_err(browser_error_to_anyhow)?
+    } else {
+        let store = chrome_broker_pairing_store().map_err(browser_error_to_anyhow)?;
+        let change = store
+            .add_exact(&origin, args.display_name.as_deref())
+            .map_err(|error| anyhow!(error.message))?;
+        json!({"ok": true, "changed": change.changed, "origin": origin, "broker": "offline"})
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn pairing_remove(args: &BrowserPairingOriginArgs) -> Result<()> {
+    let origin = normalize_pairing_origin(&args.origin)?;
+    let value = if rust_broker_is_live() {
+        chrome_broker_pairing_remove(&origin).map_err(browser_error_to_anyhow)?
+    } else {
+        let store = chrome_broker_pairing_store().map_err(browser_error_to_anyhow)?;
+        let change = store
+            .remove_exact(&origin)
+            .map_err(|error| anyhow!(error.message))?;
+        json!({"ok": true, "changed": change.changed, "origin": origin, "broker": "offline"})
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn rust_broker_is_live() -> bool {
+    fetch_chrome_broker_endpoint(teshi_engine::CHROME_DISCOVERY_PORT).is_ok_and(|endpoint| {
+        endpoint
+            .broker_features
+            .iter()
+            .any(|feature| feature == "transport.v1")
+    })
+}
+
+fn browser_error_to_anyhow(error: teshi_engine::BrowserError) -> anyhow::Error {
+    match error.hint {
+        Some(hint) => anyhow!("{} ({hint})", error.message),
+        None => anyhow!(error.message),
+    }
+}
+
+fn normalize_pairing_origin(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.starts_with("chrome-extension://") {
+        return Ok(value.to_owned());
+    }
+    if value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) {
+        return Ok(format!("chrome-extension://{value}"));
+    }
+    Err(anyhow!(
+        "pairing target must be an exact chrome-extension:// origin or a 32-character extension ID"
+    ))
 }
 
 fn grant(project_root: &Path, action: &BrowserGrantCommand) -> Result<()> {
@@ -347,6 +458,15 @@ fn tab_operation(project_root: &Path, action: &BrowserTabCommand) -> Result<()> 
 }
 
 fn ensure_cli_chrome_broker(project_root: &Path) -> Result<()> {
+    if std::env::var("TESHI_BROWSER_BROKER_USE_EXISTING_ENDPOINT").as_deref() == Ok("1") {
+        let endpoint = read_cdp_endpoint(project_root)?;
+        if endpoint.mode != "chrome" {
+            return Err(anyhow!(
+                "test broker endpoint is not a Chrome broker endpoint"
+            ));
+        }
+        return Ok(());
+    }
     let endpoint = ensure_user_chrome_broker(project_root, &default_browser_service_script())
         .map_err(|error| match error.hint {
             Some(hint) => anyhow!("{} ({hint})", error.message),
@@ -767,6 +887,99 @@ fn execute_typed_operation_value(
     }
 }
 
+/// Execute one legacy compatibility command through the typed Rust broker when
+/// the endpoint belongs to that broker. The implicit target remains deliberately
+/// strict: it is allowed only when exactly one ready session exists, and the
+/// lease is always released before returning to the caller.
+fn execute_implicit_rust_browser_operation(
+    project_root: &Path,
+    timeout: Duration,
+    build: impl FnOnce(BrowserTarget, String) -> BrowserOperation,
+) -> Result<serde_json::Value> {
+    let endpoint = read_cdp_endpoint(project_root)?;
+    if endpoint.bridge != "rust" {
+        return Err(anyhow!(
+            "implicit typed browser targeting requires the Rust broker endpoint"
+        ));
+    }
+    let client = BrowserOperations::new(endpoint.ws_url, timeout)
+        .with_caller_label("teshi-cli")
+        .with_project_root(project_root.to_string_lossy());
+    let sessions = client
+        .execute(&BrowserOperation::ListBrowserSessions)?
+        .payload;
+    let records = sessions
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .context("browser session discovery returned no sessions array")?;
+    let ready: Vec<_> = records
+        .iter()
+        .filter(|record| record.get("health").and_then(serde_json::Value::as_str) == Some("ready"))
+        .collect();
+    if ready.len() != 1 {
+        anyhow::bail!(
+            "implicit browser targeting requires exactly one ready Profile; found {}",
+            ready.len()
+        );
+    }
+    let record = ready[0];
+    let extension_instance_id = record
+        .pointer("/identity/extension_instance_id")
+        .and_then(serde_json::Value::as_str)
+        .context("browser session missing extension identity")?
+        .to_owned();
+    let (window_id, tab_id) = record
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|windows| {
+            windows.iter().find_map(|window| {
+                let window_id = window.get("id")?.as_i64()?;
+                window
+                    .get("tabs")?
+                    .as_array()?
+                    .iter()
+                    .find(|tab| {
+                        tab.get("active").and_then(serde_json::Value::as_bool) == Some(true)
+                    })
+                    .and_then(|tab| Some((window_id, tab.get("id")?.as_i64()?)))
+            })
+        })
+        .context("ready browser session has no active tab")?;
+    let target = BrowserTarget {
+        extension_instance_id: extension_instance_id.clone(),
+        window_id,
+        tab_id,
+    };
+    let lease = client.execute(&BrowserOperation::AcquireBrowserLease {
+        extension_instance_id: extension_instance_id.clone(),
+        owner_label: "teshi-cli-implicit".into(),
+        ttl_secs: 30,
+    })?;
+    let lease_token = lease
+        .payload
+        .get("lease_token")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            lease
+                .payload
+                .pointer("/lease/lease_token")
+                .and_then(serde_json::Value::as_str)
+        })
+        .context("browser lease response missing token")?
+        .to_owned();
+    let result = client.execute(&build(target, lease_token.clone()));
+    let release = client.execute(&BrowserOperation::ReleaseBrowserLease {
+        extension_instance_id,
+        lease_token,
+    });
+    if let Err(error) = release
+        && result.is_ok()
+    {
+        return Err(error.into());
+    }
+    result.map(|response| response.payload).map_err(Into::into)
+}
+
 fn doctor(project_root: &Path) -> Result<()> {
     let report = doctor_endpoint(project_root)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -777,7 +990,15 @@ fn doctor(project_root: &Path) -> Result<()> {
 }
 
 fn reconnect(project_root: &Path, args: &BrowserReconnectArgs) -> Result<()> {
-    let endpoint = reconnect_embedded(project_root, args.navigate.as_deref(), args.wait_secs)?;
+    let before = read_cdp_endpoint(project_root).ok();
+    let endpoint = if before
+        .as_ref()
+        .is_some_and(|endpoint| endpoint.mode == "chrome")
+    {
+        reconnect_chrome_broker(project_root)?
+    } else {
+        reconnect_embedded(project_root, args.navigate.as_deref(), args.wait_secs)?
+    };
     let report = doctor_endpoint(project_root)?;
     println!(
         "{}",
@@ -934,6 +1155,24 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
         );
     }
     let timeout = command_timeout_for_ms(args.timeout_ms);
+    if read_cdp_endpoint(project_root)
+        .ok()
+        .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let response = execute_implicit_rust_browser_operation(
+            project_root,
+            timeout,
+            |target, lease_token| BrowserOperation::NavigateBrowser {
+                target,
+                lease_token,
+                url: args.url.clone(),
+                timeout_ms: args.timeout_ms,
+                wait: Some(BrowserWaitCondition::LoadComplete),
+                monitor: args.monitor,
+            },
+        )?;
+        return print_json_response(response);
+    }
     let response = navigate_to_url(
         project_root,
         &args.url,
@@ -942,6 +1181,37 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
         "browser-navigate",
         true,
         Some(&args.target),
+    )?;
+    ensure_ok(&response)?;
+    print_json_response(response)
+}
+
+fn scan(project_root: &Path, args: &super::BrowserScanArgs) -> Result<()> {
+    let timeout = Duration::from_millis(args.timeout_ms);
+    let operation = |target, lease_token| BrowserOperation::GetPageText {
+        target,
+        lease_token,
+        selector: args.selector.clone(),
+        offset: args.offset,
+        limit: args.limit,
+    };
+    if args.target.session.is_some() {
+        let (target, lease_token) = required_target(&args.target)?;
+        return run_typed_operation(project_root, operation(target, lease_token), timeout);
+    }
+    if read_cdp_endpoint(project_root)
+        .ok()
+        .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let response = execute_implicit_rust_browser_operation(project_root, timeout, operation)?;
+        return print_json_response(response);
+    }
+    let response = send_browser_command(
+        project_root,
+        json!({"cmd": "get_page_text", "request_id": "browser-scan",
+            "selector": args.selector, "offset": args.offset, "limit": args.limit}),
+        timeout,
+        true,
     )?;
     ensure_ok(&response)?;
     print_json_response(response)
@@ -959,6 +1229,20 @@ fn snapshot(project_root: &Path, args: &BrowserSnapshotArgs) -> Result<()> {
             },
             timeout,
         );
+    }
+    if read_cdp_endpoint(project_root)
+        .ok()
+        .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let response = execute_implicit_rust_browser_operation(
+            project_root,
+            timeout,
+            |target, lease_token| BrowserOperation::GetPageSnapshot {
+                target,
+                lease_token,
+            },
+        )?;
+        return print_json_response(response);
     }
     let response = send_browser_command(
         project_root,
@@ -1163,20 +1447,73 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         }
     };
     preflight_feature(project_root, &feature)?;
-    let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
-    if steps.is_empty() {
-        return Err(anyhow!("no confirmed bindings found for {feature}"));
+    let plan = super::replay_plan::build_selected(
+        project_root,
+        &feature,
+        args.until_line,
+        args.scenario.as_deref(),
+    )?;
+    if let Some(gap) = plan
+        .gaps
+        .iter()
+        .find(|gap| gap["status"] == "unbound" && gap["step_line"].is_number())
+    {
+        anyhow::bail!(
+            "unbound replay step at line {}: {}",
+            gap["step_line"],
+            gap["reason"]
+        );
+    }
+    anyhow::ensure!(
+        plan.gaps.is_empty(),
+        "replay coverage incomplete: {}",
+        json!(plan.gaps)
+    );
+    let steps = &plan.steps;
+    anyhow::ensure!(
+        !steps.is_empty(),
+        "no confirmed bindings found for {feature}"
+    );
+
+    let capture_replay_screenshots = replay_screenshots_supported(project_root, args)?;
+    if !args.dry_run && !capture_replay_screenshots {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "event": "replay_screenshots_skipped",
+                "reason": "broker_capability_unavailable",
+                "required_feature": "p1.observability_artifacts",
+                "message": "Capture unavailable; replay will retain test results but cannot pass evidence acceptance"
+            }))?
+        );
     }
 
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
-    let screenshot_dir = project_root
-        .join(".teshi")
-        .join("logs")
-        .join("replay-screenshots");
+    let mut evidence = if args.dry_run {
+        None
+    } else {
+        Some(super::replay_screenshots::create_cli_replay(
+            project_root,
+            &feature,
+            args.scenario.as_deref(),
+        )?)
+    };
+    if let Some(run) = evidence.as_mut() {
+        for planned in steps {
+            let step = &planned.binding;
+            run.record(json!({"type":"planned_step","case_id":planned.case_id, "step_id":planned.step_id,
+                "feature":feature,"scenario":planned.scenario,"step_line":step.step_line,"screenshot_required":true,"source":"web_page"}))?;
+        }
+    }
+    let screenshot_dir = evidence
+        .as_ref()
+        .map(|run| run.directory().to_path_buf())
+        .unwrap_or_else(|| project_root.join(".teshi/logs/replay-screenshots"));
     let _ = fs::create_dir_all(&screenshot_dir);
 
     let non_interactive = args.non_interactive || args.yes;
-    for (idx, step) in steps.iter().enumerate() {
+    for (idx, planned) in steps.iter().enumerate() {
+        let step = &planned.binding;
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -1195,117 +1532,10 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if !non_interactive {
             prompt_continue(step)?;
         }
-        let response = if step.primary.action == "navigate" && args.target.session.is_some() {
-            let (target, lease_token) = required_target(&args.target)?;
-            let url = step
-                .primary
-                .value_arg
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&step.primary.value);
-            execute_typed_operation_value(
-                project_root,
-                BrowserOperation::NavigateBrowser {
-                    target,
-                    lease_token,
-                    url: url.to_string(),
-                    timeout_ms: 15_000,
-                    wait: Some(BrowserWaitCondition::LoadComplete),
-                    monitor: false,
-                },
-                command_timeout_for_ms(15_000),
-            )?
-        } else if step.primary.action == "navigate" {
-            let url = step
-                .primary
-                .value_arg
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&step.primary.value);
-            let timeout_ms = 15_000;
-            navigate_to_url(
-                project_root,
-                url,
-                timeout_ms,
-                command_timeout_for_ms(timeout_ms),
-                &format!("browser-replay-{}", idx + 1),
-                true,
-                Some(&args.target),
-            )?
-        } else if step.primary.action == "open_project" {
-            let path = step
-                .primary
-                .value_arg
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&step.primary.value);
-            let timeout_ms = 15_000;
-            open_project_via_sidecar(
-                project_root,
-                path,
-                command_timeout_for_ms(timeout_ms),
-                &format!("browser-replay-{}", idx + 1),
-                Some(&args.target),
-            )?
-        } else if args.target.session.is_some() {
-            let (target, lease_token) = required_target(&args.target)?;
-            let action: BrowserAction = serde_json::from_value(json!(step.primary.action))
-                .with_context(|| format!("unsupported binding action {}", step.primary.action))?;
-            let candidate = step
-                .primary
-                .structured_candidate
-                .clone()
-                .map(serde_json::from_value)
-                .transpose()
-                .context("binding structured_candidate is invalid")?;
-            let element = BrowserElementInput {
-                reference: step.primary.element_reference.clone(),
-                candidate,
-                css: (step.primary.element_reference.is_none()
-                    && step.primary.structured_candidate.is_none())
-                .then(|| step.primary.value.clone()),
-                snapshot_id: None,
-                page_context_revision: step
-                    .primary
-                    .page_context_revision
-                    .clone()
-                    .map(PageContextRevision),
-            };
-            execute_typed_operation_value(
-                project_root,
-                BrowserOperation::ExecuteBrowserAction {
-                    target,
-                    lease_token,
-                    action,
-                    element,
-                    value: step.primary.value_arg.clone(),
-                    files: vec![],
-                    wait: None,
-                    timeout_ms: 5_000,
-                    focus: false,
-                    monitor: false,
-                },
-                command_timeout_for_ms(5_000),
-            )?
-        } else {
-            let timeout_ms = 5_000;
-            execute_locator(
-                project_root,
-                ExecuteLocatorParams {
-                    selector: &step.primary.value,
-                    action: &step.primary.action,
-                    value: step.primary.value_arg.as_deref(),
-                    timeout_ms,
-                    request_id: &format!("browser-replay-{}", idx + 1),
-                    health_check: true,
-                    target: Some(&args.target),
-                },
-                command_timeout_for_ms(timeout_ms),
-            )?
-        };
-        // Capture screenshot after each step (before ensure_ok so we capture even on failure).
-        if !args.dry_run {
-            match capture_replay_step_screenshot(
+        let closing = step.primary.capture_before
+            || teshi_engine::replay_evidence::capture_before_action(&step.primary.action);
+        let capture_frame = || {
+            capture_replay_step_screenshot(
                 project_root,
                 &feature,
                 step.step_line,
@@ -1313,7 +1543,135 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 &step.step_text,
                 &screenshot_dir,
                 &args.target,
-            ) {
+            )
+        };
+        let before_capture = (closing && capture_replay_screenshots).then(capture_frame);
+        let mut capture_error = None;
+        let response = (|| -> Result<serde_json::Value> {
+            Ok(
+                if step.primary.action == "navigate" && args.target.session.is_some() {
+                    let (target, lease_token) = required_target(&args.target)?;
+                    let url = step
+                        .primary
+                        .value_arg
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&step.primary.value);
+                    execute_typed_operation_value(
+                        project_root,
+                        BrowserOperation::NavigateBrowser {
+                            target,
+                            lease_token,
+                            url: url.to_string(),
+                            timeout_ms: 15_000,
+                            wait: Some(BrowserWaitCondition::LoadComplete),
+                            monitor: false,
+                        },
+                        command_timeout_for_ms(15_000),
+                    )?
+                } else if step.primary.action == "navigate" {
+                    let url = step
+                        .primary
+                        .value_arg
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&step.primary.value);
+                    let timeout_ms = 15_000;
+                    navigate_to_url(
+                        project_root,
+                        url,
+                        timeout_ms,
+                        command_timeout_for_ms(timeout_ms),
+                        &format!("browser-replay-{}", idx + 1),
+                        true,
+                        Some(&args.target),
+                    )?
+                } else if step.primary.action == "open_project" {
+                    let path = step
+                        .primary
+                        .value_arg
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&step.primary.value);
+                    let timeout_ms = 15_000;
+                    open_project_via_sidecar(
+                        project_root,
+                        path,
+                        command_timeout_for_ms(timeout_ms),
+                        &format!("browser-replay-{}", idx + 1),
+                        Some(&args.target),
+                    )?
+                } else if args.target.session.is_some() {
+                    let (target, lease_token) = required_target(&args.target)?;
+                    let action: BrowserAction = serde_json::from_value(json!(step.primary.action))
+                        .with_context(|| {
+                            format!("unsupported binding action {}", step.primary.action)
+                        })?;
+                    let candidate = step
+                        .primary
+                        .structured_candidate
+                        .clone()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .context("binding structured_candidate is invalid")?;
+                    let page_context_revision = match step.primary.page_context_revision.clone() {
+                        Some(revision) => Some(PageContextRevision(revision)),
+                        None => Some(current_page_context_revision(
+                            project_root,
+                            &target,
+                            &lease_token,
+                        )?),
+                    };
+                    let element = BrowserElementInput {
+                        reference: step.primary.element_reference.clone(),
+                        candidate,
+                        css: (step.primary.element_reference.is_none()
+                            && step.primary.structured_candidate.is_none())
+                        .then(|| step.primary.value.clone()),
+                        snapshot_id: None,
+                        page_context_revision,
+                    };
+                    execute_typed_operation_value(
+                        project_root,
+                        BrowserOperation::ExecuteBrowserAction {
+                            target,
+                            lease_token,
+                            action,
+                            element,
+                            value: step.primary.value_arg.clone(),
+                            files: vec![],
+                            wait: None,
+                            // Feature pages may finish their WASM/UI update after
+                            // navigation reports load-complete. Keep replay bounded,
+                            // without relying on stage-5 screenshots as a delay.
+                            timeout_ms: 15_000,
+                            focus: false,
+                            monitor: false,
+                        },
+                        command_timeout_for_ms(15_000),
+                    )?
+                } else {
+                    let timeout_ms = 5_000;
+                    execute_locator(
+                        project_root,
+                        ExecuteLocatorParams {
+                            selector: &step.primary.value,
+                            action: &step.primary.action,
+                            value: step.primary.value_arg.as_deref(),
+                            timeout_ms,
+                            request_id: &format!("browser-replay-{}", idx + 1),
+                            health_check: true,
+                            target: Some(&args.target),
+                        },
+                        command_timeout_for_ms(timeout_ms),
+                    )?
+                },
+            )
+        })()
+        .unwrap_or_else(|error| json!({"ok":false,"error":error.to_string()}));
+        // Capture screenshot after each step (before ensure_ok so we capture even on failure).
+        if !args.dry_run && capture_replay_screenshots {
+            match before_capture.unwrap_or_else(capture_frame) {
                 Ok(entry) => {
                     println!(
                         "{}",
@@ -1326,11 +1684,33 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                     );
                     screenshot_entries.push(entry);
                 }
-                Err(e) => eprintln!(
-                    "warning: screenshot capture failed at L{}: {e}",
-                    step.step_line
-                ),
+                Err(e) => {
+                    eprintln!(
+                        "warning: screenshot capture failed at L{}: {e}",
+                        step.step_line
+                    );
+                    capture_error = Some(e.to_string());
+                }
             }
+        }
+        if let Some(run) = evidence.as_mut() {
+            super::replay_screenshots::record_cli_step(
+                run,
+                project_root,
+                super::replay_screenshots::CliReplayStep {
+                    feature: &feature,
+                    identity: Some((&planned.case_id, &planned.step_id, &planned.scenario)),
+                    source: (step.step_line, &step.step_keyword, &step.step_text),
+                    passed: ensure_ok(&response).is_ok(),
+                    response: Some(&response),
+                    capture_supported: capture_replay_screenshots,
+                    capture_error: capture_error.as_deref(),
+                    before_close: closing,
+                },
+                screenshot_entries
+                    .last()
+                    .filter(|entry| entry.step_line == step.step_line),
+            )?;
         }
         ensure_ok(&response).with_context(|| {
             format!(
@@ -1340,25 +1720,62 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         })?;
     }
 
+    if let Some(run) = evidence.as_mut() {
+        run.record(json!({"type":"end_run", "failed":0, "status":if plan.omitted>0 {"partial"} else {"passed"}}))?;
+    }
+
     if !args.dry_run && !screenshot_entries.is_empty() {
         let mut index = load_or_create_index(&screenshot_dir, &feature);
         index.steps = screenshot_entries;
         index.completed_at = Some(iso_now());
-        index.status = "completed".to_string();
+        index.status = evidence
+            .as_ref()
+            .map(|run| run.snapshot().status.clone())
+            .unwrap_or_else(|| "unknown".into());
         if let Err(e) = save_index(&screenshot_dir, &index) {
             eprintln!("warning: failed to write screenshot index: {e}");
         }
+    }
+
+    if !args.dry_run {
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "event": "replay_complete",
-                "screenshots_saved": index.steps.len(),
+                "event": "replay_complete", "steps_replayed": steps.len(),
+                "status":evidence.as_ref().map(|run|&run.snapshot().status),
+                "test_status":evidence.as_ref().map(|run|&run.snapshot().test_status),
+                "evidence":evidence.as_ref().map(|run|&run.snapshot().evidence),
+                "scenario": args.scenario,
                 "screenshots_dir": screenshot_dir.to_string_lossy(),
             }))?
         );
     }
 
+    if let Some(run) = evidence.as_ref() {
+        run.ensure_accepted()?;
+    }
+
     Ok(())
+}
+
+fn replay_screenshots_supported(project_root: &Path, args: &BrowserReplayArgs) -> Result<bool> {
+    if args.dry_run || args.target.session.is_none() {
+        return Ok(true);
+    }
+    let endpoint = read_cdp_endpoint(project_root)?;
+    let rust_transport = endpoint.mode == "chrome"
+        && endpoint.bridge == "rust"
+        && endpoint
+            .broker_features
+            .iter()
+            .any(|feature| feature == "transport.v1");
+    if !rust_transport {
+        return Ok(true);
+    }
+    Ok(endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "p1.observability_artifacts"))
 }
 
 /// Starts the embedded Playwright sidecar and blocks until interrupted (for CI/scripts).
@@ -1492,7 +1909,7 @@ fn capture_replay_step_screenshot(
                 element: None,
             })
             .map_err(|error| anyhow!("{}", error.message))?;
-        let artifact = artifact_path_from_screenshot_payload(&response.payload)?;
+        let artifact = artifact_path_from_screenshot_payload(project_root, &response.payload)?;
         save_screenshot_from_artifact(
             &artifact,
             &feature_sanitized,
@@ -1548,6 +1965,34 @@ fn required_target(args: &BrowserTargetArgs) -> Result<(BrowserTarget, String)> 
     ))
 }
 
+fn current_page_context_revision(
+    project_root: &Path,
+    target: &BrowserTarget,
+    lease_token: &str,
+) -> Result<PageContextRevision> {
+    let snapshot = || {
+        execute_typed_operation_value(
+            project_root,
+            BrowserOperation::GetPageSnapshot {
+                target: target.clone(),
+                lease_token: lease_token.to_owned(),
+            },
+            Duration::from_secs(15),
+        )
+    };
+    // The first snapshot after navigation can race extension stream resumption.
+    // Take a second bounded observation before the locator action; this is not an
+    // action retry and therefore cannot duplicate a side effect.
+    let _ = snapshot()?;
+    let snapshot = snapshot()?;
+    let revision = snapshot
+        .get("page_context_revision")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .context("browser snapshot did not return page_context_revision")?;
+    Ok(PageContextRevision(revision.to_owned()))
+}
+
 fn apply_targeting(
     mut command: serde_json::Value,
     args: &BrowserTargetArgs,
@@ -1579,6 +2024,25 @@ fn navigate_to_url(
     health_check: bool,
     target: Option<&BrowserTargetArgs>,
 ) -> Result<serde_json::Value> {
+    let has_explicit_target = target.is_some_and(|value| value.session.is_some());
+    if !has_explicit_target
+        && read_cdp_endpoint(project_root)
+            .ok()
+            .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        return execute_implicit_rust_browser_operation(
+            project_root,
+            sidecar_timeout,
+            |target, lease_token| BrowserOperation::NavigateBrowser {
+                target,
+                lease_token,
+                url: url.to_owned(),
+                timeout_ms,
+                wait: Some(BrowserWaitCondition::LoadComplete),
+                monitor: false,
+            },
+        );
+    }
     let command = json!({
         "cmd": "navigate",
         "request_id": request_id,
@@ -1635,6 +2099,37 @@ fn execute_locator(
     params: ExecuteLocatorParams<'_>,
     sidecar_timeout: Duration,
 ) -> Result<serde_json::Value> {
+    let has_explicit_target = params.target.is_some_and(|value| value.session.is_some());
+    if !has_explicit_target
+        && read_cdp_endpoint(project_root)
+            .ok()
+            .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let action: BrowserAction = serde_json::from_value(json!(params.action))
+            .with_context(|| format!("unsupported Rust browser action {}", params.action))?;
+        let selector = params.selector.to_owned();
+        let value = params.value.map(str::to_owned);
+        let timeout_ms = params.timeout_ms;
+        return execute_implicit_rust_browser_operation(
+            project_root,
+            sidecar_timeout,
+            move |target, lease_token| BrowserOperation::ExecuteBrowserAction {
+                target,
+                lease_token,
+                action,
+                element: BrowserElementInput {
+                    css: Some(selector),
+                    ..Default::default()
+                },
+                value,
+                files: vec![],
+                wait: None,
+                timeout_ms,
+                focus: false,
+                monitor: false,
+            },
+        );
+    }
     let command = json!({
         "cmd": "execute_locator",
         "request_id": params.request_id,
@@ -1660,6 +2155,14 @@ fn send_browser_command(
     timeout: Duration,
     health_check: bool,
 ) -> Result<serde_json::Value> {
+    // A project can also be connected to a native window. Never dispatch a
+    // browser action (or reconnect) through that unrelated sidecar.
+    let endpoint = read_cdp_endpoint(project_root)?;
+    if endpoint.mode == "winapp" {
+        return Err(anyhow!(
+            "browser target unavailable: project endpoint is in winapp mode; select an explicit browser session or use a separate browser test project"
+        ));
+    }
     let started = Instant::now();
     let cmd = command
         .get("cmd")
@@ -1886,5 +2389,120 @@ mod tests {
             }]
         });
         assert!(validate_filtered_network_capture_capabilities(&discovery, "profile-a").is_ok());
+    }
+
+    #[test]
+    fn rust_p0_replay_skips_stage_five_screenshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_dir = temp.path().join(".teshi");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        fs::write(
+            endpoint_dir.join("cdp-endpoint.json"),
+            r#"{"mode":"chrome","bridge":"rust","ws_url":"ws://127.0.0.1:1","broker_features":["transport.v1","p0.control"]}"#,
+        )
+        .unwrap();
+        let args = BrowserReplayArgs {
+            feature: Some("features/example.feature".into()),
+            scenario: None,
+            until_line: None,
+            dry_run: false,
+            non_interactive: true,
+            yes: true,
+            target: BrowserTargetArgs {
+                session: Some("profile-a".into()),
+                window: Some(1),
+                tab: Some(2),
+                lease_token: Some("lease".into()),
+            },
+        };
+        assert!(!replay_screenshots_supported(temp.path(), &args).unwrap());
+    }
+
+    #[test]
+    fn browser_dispatch_rejects_winapp_endpoint_before_connecting() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_dir = temp.path().join(".teshi");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        let path = endpoint_dir.join("cdp-endpoint.json");
+        let original = r#"{"mode":"winapp","bridge":"python","ws_url":"ws://127.0.0.1:1"}"#;
+        fs::write(&path, original).unwrap();
+        let error = send_browser_command(
+            temp.path(),
+            json!({"cmd":"navigate", "url":"http://127.0.0.1/"}),
+            Duration::from_millis(1),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("endpoint is in winapp mode"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn scenario_replay_rejects_incomplete_bindings_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("case.feature"),
+            "Feature: Replay\n  Scenario: Sample\n    Given ready\n    Then complete\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("case.bindings.json"),
+            serde_json::to_vec(&json!({
+                "format_version":2, "feature":"case.feature", "steps":[{
+                    "step_line":3, "step_keyword":"Given", "step_text":"ready",
+                    "step_text_normalized":"ready", "source":"binding", "status":"confirmed",
+                    "primary":{"strategy":"css", "value":"body", "action":"assert_visible"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = BrowserReplayArgs {
+            feature: Some("case.feature".into()),
+            scenario: Some("Sample".into()),
+            until_line: None,
+            dry_run: true,
+            non_interactive: true,
+            yes: true,
+            target: BrowserTargetArgs {
+                session: None,
+                window: None,
+                tab: None,
+                lease_token: None,
+            },
+        };
+        assert!(
+            replay(temp.path(), &args)
+                .unwrap_err()
+                .to_string()
+                .contains("unbound replay step at line 4")
+        );
+    }
+
+    #[test]
+    fn python_or_p1_replay_keeps_screenshot_capture_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_dir = temp.path().join(".teshi");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        fs::write(
+            endpoint_dir.join("cdp-endpoint.json"),
+            r#"{"mode":"chrome","bridge":"python","ws_url":"ws://127.0.0.1:1","broker_features":["p0.control"]}"#,
+        )
+        .unwrap();
+        let args = BrowserReplayArgs {
+            feature: Some("features/example.feature".into()),
+            scenario: None,
+            until_line: None,
+            dry_run: false,
+            non_interactive: true,
+            yes: true,
+            target: BrowserTargetArgs {
+                session: Some("profile-a".into()),
+                window: Some(1),
+                tab: Some(2),
+                lease_token: Some("lease".into()),
+            },
+        };
+        assert!(replay_screenshots_supported(temp.path(), &args).unwrap());
     }
 }

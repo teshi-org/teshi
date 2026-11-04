@@ -41,6 +41,39 @@ Gotchas:
   `libxkbcommon-x11-dev libwayland-dev libvulkan-dev` (and the CI list of
   xcb/gtk/glib/pango/cairo/atk/graphene dev libs).
 
+### Installing the local build (all agent tools)
+
+Install the CLI from this checkout so `teshi` resolves globally:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local.ps1   # Windows
+bash scripts/install-local.sh                                                   # Linux / WSL
+```
+
+Both run `cargo install --path apps/teshi-cli --profile dev`. The `--profile
+dev` flag is **required**: `cargo install` defaults to `release`, and
+`[profile.release]` sets `lto = true`, so each iteration pays a full LTO link
+(~4 min) and cannot reuse the `target/debug` cache that `cargo build` fills.
+With the dev profile the same command is incremental — ~14 s after a one-line
+edit, ~4 s when nothing changed.
+
+Do **not** run bare `cargo install --path apps/teshi-cli`. No Cargo config key
+changes the default install profile; `[install] profile = ...` is silently
+ignored, so omitting the flag always costs the full release build.
+
+Build the packaged `setup.exe` (see the "Local source build identity" section of
+`doc/development.md`) only when the installer or the update path itself is under
+test. Routine feature and UI work does not need it.
+
+The dev binary still carries a full `local` build identity
+(`0.7.10-local.<stamp>+0800 (<sha7>)`) because `crates/teshi-core/build.rs`
+derives the missing `TESHI_BUILD_*` values whenever no CI identity is injected.
+Refresh the stamp after committing with `touch crates/teshi-core/build.rs`.
+
+Concurrent cargo invocations share one package-cache lock, so several agents
+building at once report `Blocking waiting for file lock on package cache` while
+each waits its turn.
+
 ### CI / validation notes
 
 - Linux CI uses the native workspace commands above and excludes the wasm-only `teshi-web` crate.

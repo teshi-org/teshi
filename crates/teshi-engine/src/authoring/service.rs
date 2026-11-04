@@ -6,14 +6,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use teshi_core::authoring::{
-    normalize_iteration_name, resolve_requirement_store_path, InvalidIterationName,
+    normalize_iteration_name, requirement_title, resolve_requirement_store_path,
+    InvalidIterationName, InvalidRequirementPriority, InvalidRequirementTitle,
     RequirementDocumentContent, RequirementDocumentIndex, RequirementDocumentMeta,
-    RequirementIterationFilter, RequirementStoreId,
+    RequirementIterationFilter, RequirementPriority, RequirementStoreId,
 };
 
 use super::store::{
     compute_document_revision as hash_document_revision, read_requirement_index_unlocked,
+    read_requirement_trash_unlocked, recover_requirement_store_unlocked, replace_markdown,
     with_requirement_store_lock, write_requirement_index_unlocked,
+    write_requirement_markdown_unlocked, write_requirement_trash_unlocked, RequirementTombstone,
 };
 
 /// One candidate returned when a document reference is ambiguous.
@@ -84,6 +87,19 @@ pub enum RequirementStoreError {
     },
     /// Iteration name failed validation.
     InvalidIterationName(InvalidIterationName),
+    /// Priority label failed validation.
+    InvalidPriority(InvalidRequirementPriority),
+    /// Markdown lacks a non-empty first-line H1 title.
+    InvalidTitle(InvalidRequirementTitle),
+    /// The priority value changed after the caller read the document.
+    PriorityConflict {
+        /// Document that could not be updated.
+        document_id: String,
+        /// Priority observed by the caller, where `Some(None)` means unset.
+        expected: Option<Option<RequirementPriority>>,
+        /// Priority currently stored in the index.
+        actual: Option<RequirementPriority>,
+    },
     /// Batch update was called with no document ids.
     EmptyDocumentIdList,
     /// I/O or path-safety failure while reading or writing the store.
@@ -101,6 +117,9 @@ impl RequirementStoreError {
             Self::Ambiguous { .. } => "ambiguous_requirement_ref",
             Self::RevisionConflict { .. } => "revision_conflict",
             Self::InvalidIterationName(_) => "invalid_iteration_name",
+            Self::InvalidPriority(_) => "invalid_requirement_priority",
+            Self::InvalidTitle(_) => "invalid_requirement_title",
+            Self::PriorityConflict { .. } => "priority_conflict",
             Self::EmptyDocumentIdList => "empty_document_id_list",
             Self::Io(_) => "requirement_store_io",
         }
@@ -148,6 +167,18 @@ impl fmt::Display for RequirementStoreError {
                 "requirement document '{document_id}' changed on disk (expected revision {expected}, found {actual})"
             ),
             Self::InvalidIterationName(err) => write!(f, "{err}"),
+            Self::InvalidPriority(err) => write!(f, "{err}"),
+            Self::InvalidTitle(err) => write!(f, "{err}"),
+            Self::PriorityConflict {
+                document_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "requirement document '{document_id}' changed priority on disk (expected {}, found {})",
+                format_priority_expectation(*expected),
+                format_priority(*actual),
+            ),
             Self::EmptyDocumentIdList => {
                 f.write_str("at least one requirement document id is required")
             }
@@ -160,6 +191,8 @@ impl std::error::Error for RequirementStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidIterationName(err) => Some(err),
+            Self::InvalidPriority(err) => Some(err),
+            Self::InvalidTitle(err) => Some(err),
             Self::Io(err) => Some(err.as_ref()),
             _ => None,
         }
@@ -174,6 +207,17 @@ impl From<anyhow::Error> for RequirementStoreError {
 
 fn io_err(context: impl Into<String>, err: impl Into<anyhow::Error>) -> RequirementStoreError {
     RequirementStoreError::Io(err.into().context(context.into()))
+}
+
+fn format_priority(priority: Option<RequirementPriority>) -> String {
+    priority.map_or_else(|| "unset".to_string(), |value| value.to_string())
+}
+
+fn format_priority_expectation(expected: Option<Option<RequirementPriority>>) -> String {
+    match expected {
+        None => "any".to_string(),
+        Some(priority) => format_priority(priority),
+    }
 }
 
 fn with_store_lock<T>(
@@ -334,14 +378,113 @@ pub fn read_requirement_document(
     Ok(RequirementDocumentContent { meta, body })
 }
 
-/// Writes a document body by id and updates the index revision.
+/// Removes one saved requirement from the active library and records a
+/// recoverable store-local tombstone.
+///
+/// The body and metadata are captured before the source file is removed. The
+/// index replacement is the commit point: if it fails, the body and tombstone
+/// are restored so callers never observe a half-deleted active document.
+///
+/// When `expected_revision` is supplied, the current index must still contain
+/// that body revision. Deleted ids remain reserved by the tombstone and are
+/// never reused by the default document allocator.
+pub fn delete_requirement_document(
+    requirements_root: &Path,
+    document_id: &str,
+    expected_revision: Option<&str>,
+) -> Result<RequirementDocumentMeta, RequirementStoreError> {
+    with_store_lock(requirements_root, || {
+        recover_requirement_store_unlocked(requirements_root)
+            .map_err(RequirementStoreError::from)?;
+        let index = require_initialized_index(requirements_root)?;
+        let document_index = index
+            .documents
+            .iter()
+            .position(|doc| doc.id == document_id)
+            .ok_or_else(|| RequirementStoreError::NotFound {
+                query: document_id.to_string(),
+            })?;
+        let meta = index.documents[document_index].clone();
+        let actual_revision = meta.revision.as_str().to_string();
+        if let Some(expected) = expected_revision {
+            if expected != actual_revision {
+                return Err(RequirementStoreError::RevisionConflict {
+                    document_id: document_id.to_string(),
+                    expected: expected.to_string(),
+                    actual: actual_revision,
+                });
+            }
+        }
+
+        let markdown_path = resolve_requirement_store_path(requirements_root, &meta.path)
+            .map_err(|err| io_err(format!("unsafe requirement path '{}'", meta.path), err))?;
+        let body = fs::read_to_string(&markdown_path)
+            .with_context(|| format!("read {}", markdown_path.display()))
+            .map_err(RequirementStoreError::from)?;
+
+        let mut trash = read_requirement_trash_unlocked(requirements_root)
+            .map_err(RequirementStoreError::from)?;
+        if trash
+            .documents
+            .iter()
+            .any(|tombstone| tombstone.meta.id == meta.id)
+        {
+            return Err(RequirementStoreError::Io(anyhow::anyhow!(
+                "requirement document '{}' already has a deletion tombstone",
+                meta.id
+            )));
+        }
+        trash.documents.push(RequirementTombstone {
+            meta: meta.clone(),
+            body: body.clone(),
+        });
+        write_requirement_trash_unlocked(requirements_root, &trash)
+            .map_err(RequirementStoreError::from)?;
+
+        if let Err(error) = fs::remove_file(&markdown_path) {
+            return Err(io_err(format!("remove {}", markdown_path.display()), error));
+        }
+
+        let mut replacement = index.clone();
+        replacement.documents.remove(document_index);
+        if let Err(error) = write_requirement_index_unlocked(requirements_root, &replacement) {
+            let restore = replace_markdown(&markdown_path, body.as_bytes());
+            if let Err(restore_error) = restore {
+                return Err(io_err(
+                    format!(
+                        "{error:#}; could not restore deleted requirement body: {restore_error:#}"
+                    ),
+                    error,
+                ));
+            }
+            trash
+                .documents
+                .retain(|tombstone| tombstone.meta.id != meta.id);
+            if let Err(cleanup_error) = write_requirement_trash_unlocked(requirements_root, &trash)
+            {
+                return Err(io_err(
+                    format!(
+                        "{error:#}; restored body but could not remove deletion tombstone: {cleanup_error:#}"
+                    ),
+                    error,
+                ));
+            }
+            return Err(RequirementStoreError::from(error));
+        }
+
+        Ok(meta)
+    })
+}
+
+/// Writes a document body by id and synchronizes its first-line H1 title and revision.
 ///
 /// When `expected_revision` is set and `force` is false, the on-disk revision
-/// must still match. Identical body content is a successful no-op.
+/// must still match. Identical content with an already synchronized title is a
+/// successful no-op.
 ///
 /// # Errors
 ///
-/// Returns a store, not-found, revision-conflict, or I/O error.
+/// Returns a store, not-found, revision-conflict, invalid-title, or I/O error.
 pub fn update_requirement_document_body(
     requirements_root: &Path,
     document_id: &str,
@@ -349,6 +492,7 @@ pub fn update_requirement_document_body(
     expected_revision: Option<&str>,
     force: bool,
 ) -> Result<RequirementDocumentMeta, RequirementStoreError> {
+    let title = requirement_title(body).map_err(RequirementStoreError::InvalidTitle)?;
     with_store_lock(requirements_root, || {
         let mut index = require_initialized_index(requirements_root)?;
         let doc_index = index
@@ -379,26 +523,63 @@ pub fn update_requirement_document_body(
         } else {
             String::new()
         };
-        if existing == body {
+        if existing == body && index.documents[doc_index].title == title {
             return Ok(index.documents[doc_index].clone());
         }
 
-        fs::create_dir_all(requirements_root)
-            .context("create requirements directory")
-            .map_err(RequirementStoreError::from)?;
-        if let Some(parent) = markdown_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))
-                .map_err(RequirementStoreError::from)?;
-        }
-        fs::write(&markdown_path, body)
-            .with_context(|| format!("write {}", markdown_path.display()))
-            .map_err(RequirementStoreError::from)?;
-
+        index.documents[doc_index].title = title.to_string();
         index.documents[doc_index].revision = hash_document_revision(body);
-        write_requirement_index_unlocked(requirements_root, &index)
+        write_requirement_markdown_unlocked(requirements_root, &index, &relative_path, body)
             .map_err(RequirementStoreError::from)?;
         Ok(index.documents[doc_index].clone())
+    })
+}
+
+/// Atomically sets or clears a document's optional scheduling priority.
+///
+/// The update reloads the index while holding the requirement-store lock. When
+/// `expected_priority` is `Some`, the inner value must match the current value;
+/// `Some(None)` therefore provides an explicit compare-against-unset check while
+/// an outer `None` opts out of the compare-and-set guard. Body, title, path,
+/// iteration, and revision are preserved.
+///
+/// # Errors
+///
+/// Returns a store, not-found, priority-conflict, or I/O error. The operation
+/// does not partially update the index when persistence fails.
+pub fn update_requirement_document_priority(
+    requirements_root: &Path,
+    document_id: &str,
+    priority: Option<RequirementPriority>,
+    expected_priority: Option<Option<RequirementPriority>>,
+) -> Result<RequirementDocumentMeta, RequirementStoreError> {
+    with_store_lock(requirements_root, || {
+        let mut index = require_initialized_index(requirements_root)?;
+        let document_index = index
+            .documents
+            .iter()
+            .position(|doc| doc.id == document_id)
+            .ok_or_else(|| RequirementStoreError::NotFound {
+                query: document_id.to_string(),
+            })?;
+        let current_priority = index.documents[document_index].priority;
+
+        if expected_priority.is_some() && expected_priority != Some(current_priority) {
+            return Err(RequirementStoreError::PriorityConflict {
+                document_id: document_id.to_string(),
+                expected: expected_priority,
+                actual: current_priority,
+            });
+        }
+
+        if current_priority == priority {
+            return Ok(index.documents[document_index].clone());
+        }
+        index.documents[document_index].priority = priority;
+        let updated = index.documents[document_index].clone();
+        write_requirement_index_unlocked(requirements_root, &index)
+            .map_err(RequirementStoreError::from)?;
+        Ok(updated)
     })
 }
 
@@ -465,15 +646,16 @@ pub fn resolve_requirement_ref_in_store(
 mod tests {
     use super::*;
     use crate::authoring::{
-        initialize_requirement_store, save_requirement_document_index, save_requirement_markdown,
-        REQUIREMENTS_INDEX_FILE,
+        initialize_requirement_store, is_requirement_document_id_reserved,
+        load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
+        REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE,
     };
-    use teshi_core::authoring::RequirementDocumentMeta;
+    use teshi_core::authoring::{RequirementDocumentMeta, RequirementPriority};
 
     fn seed_store(root: &Path) -> RequirementDocumentIndex {
         let mut index = initialize_requirement_store(root).unwrap();
-        let login = "# Login\n";
-        let mobile = "# Login\n\nmobile";
+        let login = "# 登录需求\n";
+        let mobile = "# 登录需求\n\nmobile";
         let checkout = "# Checkout\n";
         index.documents = vec![
             RequirementDocumentMeta::new(
@@ -666,6 +848,347 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.revision, before);
+    }
+
+    #[test]
+    fn body_update_syncs_title_and_preserves_identity_path_and_iteration() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let original = &index.documents[0];
+        let body = "#    用户认证需求    \r\n\r\nBody\r\n# Later heading\r\n";
+        let updated = update_requirement_document_body(
+            store.path(),
+            &original.id,
+            body,
+            Some(original.revision.as_str()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(updated.title, "用户认证需求");
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.path, original.path);
+        assert_eq!(updated.iteration, original.iteration);
+        assert_eq!(
+            read_requirement_document(store.path(), &original.id)
+                .unwrap()
+                .body,
+            body
+        );
+        assert_eq!(
+            resolve_requirement_ref_in_store(store.path(), "用户认证需求").unwrap(),
+            original.id
+        );
+    }
+
+    #[test]
+    fn body_update_rejects_invalid_title_and_preserves_saved_document() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let original = read_requirement_document(store.path(), "doc-12").unwrap();
+        for body in ["#", "#    \n", "No H1\n# Later"] {
+            let error = update_requirement_document_body(store.path(), "doc-12", body, None, true)
+                .unwrap_err();
+            assert_eq!(error.code(), "invalid_requirement_title");
+            assert_eq!(
+                read_requirement_document(store.path(), "doc-12").unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn priority_update_persists_and_preserves_document_metadata() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let original = index.documents[0].clone();
+
+        let updated = update_requirement_document_priority(
+            store.path(),
+            &original.id,
+            Some(RequirementPriority::P1),
+            Some(None),
+        )
+        .unwrap();
+        assert_eq!(updated.priority, Some(RequirementPriority::P1));
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.path, original.path);
+        assert_eq!(updated.title, original.title);
+        assert_eq!(updated.revision, original.revision);
+        assert_eq!(updated.iteration, original.iteration);
+
+        let reloaded = read_requirement_document(store.path(), &original.id).unwrap();
+        assert_eq!(reloaded.meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(reloaded.body, "# 登录需求\n");
+
+        let body_updated = update_requirement_document_body(
+            store.path(),
+            &original.id,
+            "# Renamed\n\nBody\n",
+            Some(original.revision.as_str()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(body_updated.priority, Some(RequirementPriority::P1));
+
+        let iteration_updated = set_requirement_documents_iteration(
+            store.path(),
+            &[original.id.as_str()],
+            Some("Sprint 13"),
+        )
+        .unwrap();
+        let final_meta = iteration_updated
+            .documents
+            .iter()
+            .find(|doc| doc.id == original.id)
+            .unwrap();
+        assert_eq!(final_meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(final_meta.iteration.as_deref(), Some("Sprint 13"));
+    }
+
+    #[test]
+    fn priority_update_rejects_stale_expected_value_and_can_clear() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        update_requirement_document_priority(
+            store.path(),
+            "doc-9",
+            Some(RequirementPriority::P2),
+            Some(None),
+        )
+        .unwrap();
+
+        let conflict = update_requirement_document_priority(
+            store.path(),
+            "doc-9",
+            Some(RequirementPriority::P3),
+            Some(None),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            conflict,
+            RequirementStoreError::PriorityConflict {
+                expected: Some(None),
+                actual: Some(RequirementPriority::P2),
+                ..
+            }
+        ));
+        assert_eq!(conflict.code(), "priority_conflict");
+
+        let cleared = update_requirement_document_priority(
+            store.path(),
+            "doc-9",
+            None,
+            Some(Some(RequirementPriority::P2)),
+        )
+        .unwrap();
+        assert_eq!(cleared.priority, None);
+    }
+
+    #[test]
+    fn concurrent_priority_writers_cannot_both_overwrite_unset() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let writers: Vec<_> = [RequirementPriority::P1, RequirementPriority::P2]
+                .into_iter()
+                .map(|priority| {
+                    let barrier = &barrier;
+                    let root = store.path();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        update_requirement_document_priority(
+                            root,
+                            "doc-9",
+                            Some(priority),
+                            Some(None),
+                        )
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .map(|writer| writer.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .any(|result| matches!(result, Err(RequirementStoreError::PriorityConflict { .. }))));
+    }
+
+    #[test]
+    fn priority_update_failure_leaves_metadata_unchanged() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        fs::create_dir(store.path().join("_teshi.tmp")).unwrap();
+
+        let error = update_requirement_document_priority(
+            store.path(),
+            "doc-12",
+            Some(RequirementPriority::P0),
+            Some(None),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "requirement_store_io");
+        assert_eq!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .priority,
+            None
+        );
+    }
+
+    #[test]
+    fn delete_removes_active_document_keeps_body_and_reserves_id() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let deleted = delete_requirement_document(
+            store.path(),
+            "doc-12",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap();
+
+        assert_eq!(deleted.id, "doc-12");
+        assert!(!store.path().join("auth/login.md").exists());
+        assert!(matches!(
+            read_requirement_document(store.path(), "doc-12"),
+            Err(RequirementStoreError::NotFound { .. })
+        ));
+        assert!(is_requirement_document_id_reserved(store.path(), "doc-12").unwrap());
+        let trash: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.path().join(REQUIREMENTS_TRASH_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(trash["documents"][0]["meta"]["id"], "doc-12");
+        assert_eq!(trash["documents"][0]["body"], "# 登录需求\n");
+    }
+
+    #[test]
+    fn delete_rejects_missing_and_stale_documents() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let stale = delete_requirement_document(store.path(), "doc-12", Some("stale")).unwrap_err();
+        assert!(matches!(
+            stale,
+            RequirementStoreError::RevisionConflict { .. }
+        ));
+        assert!(store.path().join("auth/login.md").exists());
+
+        let missing = delete_requirement_document(store.path(), "missing", None).unwrap_err();
+        assert!(matches!(missing, RequirementStoreError::NotFound { .. }));
+        assert_eq!(
+            require_initialized_index(store.path())
+                .unwrap()
+                .documents
+                .len(),
+            index.documents.len()
+        );
+    }
+
+    #[test]
+    fn delete_rejects_revision_from_a_stale_store_instance_after_body_edit() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let stale_revision = index.documents[0].revision.clone();
+        let updated = update_requirement_document_body(
+            store.path(),
+            "doc-12",
+            "# 登录需求\n\nupdated\n",
+            Some(stale_revision.as_str()),
+            false,
+        )
+        .unwrap();
+
+        let error =
+            delete_requirement_document(store.path(), "doc-12", Some(stale_revision.as_str()))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            RequirementStoreError::RevisionConflict { .. }
+        ));
+        assert_eq!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .revision,
+            updated.revision
+        );
+        assert!(store.path().join("auth/login.md").is_file());
+    }
+
+    #[test]
+    fn delete_rolls_back_body_and_tombstone_when_index_replace_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        fs::create_dir(store.path().join("_teshi.tmp")).unwrap();
+
+        let error = delete_requirement_document(
+            store.path(),
+            "doc-12",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "requirement_store_io");
+        assert_eq!(
+            fs::read_to_string(store.path().join("auth/login.md")).unwrap(),
+            "# 登录需求\n"
+        );
+        assert!(!store.path().join(REQUIREMENTS_TRASH_FILE).exists());
+        assert!(!is_requirement_document_id_reserved(store.path(), "doc-12").unwrap());
+    }
+
+    #[test]
+    fn delete_rolls_back_before_body_mutation_when_tombstone_write_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        fs::create_dir(store.path().join("_teshi-trash.tmp")).unwrap();
+
+        delete_requirement_document(
+            store.path(),
+            "doc-12",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap_err();
+        assert!(store.path().join("auth/login.md").exists());
+        assert!(require_initialized_index(store.path())
+            .unwrap()
+            .documents
+            .iter()
+            .any(|doc| doc.id == "doc-12"));
+    }
+
+    #[test]
+    fn load_recovers_an_interrupted_delete_with_active_index() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let body = fs::read_to_string(store.path().join("auth/login.md")).unwrap();
+        fs::remove_file(store.path().join("auth/login.md")).unwrap();
+        let trash = serde_json::json!({
+            "version": 1,
+            "documents": [{"meta": index.documents[0], "body": body}]
+        });
+        fs::write(
+            store.path().join(REQUIREMENTS_TRASH_FILE),
+            serde_json::to_string_pretty(&trash).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
+        assert!(loaded
+            .artifacts
+            .unwrap()
+            .documents
+            .iter()
+            .any(|doc| doc.meta.id == "doc-12"));
+        assert_eq!(
+            fs::read_to_string(store.path().join("auth/login.md")).unwrap(),
+            "# 登录需求\n"
+        );
+        assert!(!store.path().join(REQUIREMENTS_TRASH_FILE).exists());
     }
 
     #[test]

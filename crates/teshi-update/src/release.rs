@@ -12,6 +12,14 @@ pub fn is_update(
     candidate: &BuildIdentity,
     explicit_channel: bool,
 ) -> Result<bool> {
+    if matches!(
+        candidate.channel,
+        ReleaseChannel::Local | ReleaseChannel::Dev
+    ) {
+        return Err(invalid(
+            "Local and development builds are not published update candidates",
+        ));
+    }
     validate_identity(candidate)?;
     let current_version =
         semver::Version::parse(&current.semver).map_err(|e| invalid(e.to_string()))?;
@@ -68,5 +76,15 @@ mod tests {
         assert!(is_update(&current, &candidate, true).unwrap());
         candidate.semver = "0.7.9".into();
         assert!(!is_update(&current, &candidate, true).unwrap());
+    }
+
+    #[test]
+    fn local_builds_require_an_explicit_published_channel() {
+        let mut current = nightly(10, 'a');
+        current.channel = ReleaseChannel::Local;
+        let candidate = nightly(11, 'b');
+        assert!(is_update(&current, &candidate, false).is_err());
+        assert!(is_update(&current, &candidate, true).unwrap());
+        assert!(is_update(&candidate, &current, true).is_err());
     }
 }

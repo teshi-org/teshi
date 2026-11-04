@@ -11,6 +11,15 @@ For Gherkin step selection, binding proposals, confirmation, and replay, use the
 
 `teshi browser sessions` starts or reuses the per-user loopback broker even when Desktop is closed. A live incompatible broker is never terminated implicitly.
 
+Chrome uses the shared Rust broker by default, without Python or a project venv.
+If the extension is unpaired, report its setup state. The user can inspect
+`teshi browser pairing list` and explicitly approve the exact ID shown in the
+extension popup with `teshi browser pairing approve <extension-id>`. Do not infer
+or approve an extension identity without the user's explicit pairing request.
+Moving an unpacked extension may change its ID; verify the replacement Profile
+before removing the old pairing. Embedded Playwright and WinApp retain their
+Python requirements. There is no automatic broker fallback.
+
 ## Preflight
 
 1. Run `teshi --version`. Require the CLI range in [references/compatibility.md](references/compatibility.md).
@@ -33,6 +42,26 @@ teshi browser lease acquire \
 ```
 
 Keep the returned `lease_token` private. Renew it before expiry if the workflow takes longer than its TTL. A `browser_session_busy` response means another agent or UI owns the profile; do not retry in a tight loop or steal the session. Select a different dedicated profile or wait for its owner to release it.
+
+## Read page content
+
+For articles, lists, status messages, and other static content, use `scan` before
+resolving controls. `snapshot` provides accessibility structure and interactive
+elements; it is not the preferred way to read prose.
+
+```bash
+teshi browser scan --text-only \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token> --limit 35000
+```
+
+Use `--selector` to scope the content and `--offset` to continue from `next_offset`.
+Offsets and limits count Unicode characters. Inspect `truncated` and `warnings`:
+inaccessible frames and the DOM traversal limit mean the result is incomplete.
+Open shadow roots and accessible frame documents are included; password values
+are omitted. This reads rendered DOM content, including content below the viewport,
+and does not OCR canvas or images. MCP callers can use `get_page_text` with the same
+target and lease. Older extensions must be reloaded to advertise this operation.
 
 ## Resolve a locator
 

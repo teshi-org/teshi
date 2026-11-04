@@ -41,7 +41,6 @@ pub struct UpdateView {
     status: String,
     report: Option<CheckResult>,
     busy: bool,
-    confirm: bool,
     cancel: Arc<AtomicBool>,
     sender: mpsc::Sender<Event>,
     receiver: mpsc::Receiver<Event>,
@@ -93,7 +92,6 @@ impl UpdateView {
             status,
             report: None,
             busy: false,
-            confirm: false,
             cancel: Arc::new(AtomicBool::new(false)),
             sender,
             receiver,
@@ -106,7 +104,6 @@ impl UpdateView {
             return;
         }
         self.busy = true;
-        self.confirm = false;
         self.report = None;
         self.status = "Checking for updates…".into();
         let sender = self.sender.clone();
@@ -188,19 +185,12 @@ impl UpdateView {
         }
         if !lifecycle::may_start_install(!(self.can_exit)(cx)) {
             self.status = UNSAVED_INSTALL_MESSAGE.into();
-            self.confirm = false;
             cx.notify();
             return;
         }
         let Some(report) = self.report.clone() else {
             return;
         };
-        if !self.confirm {
-            self.confirm = true;
-            cx.notify();
-            return;
-        }
-        self.confirm = false;
         self.busy = true;
         self.cancel.store(false, Ordering::Relaxed);
         let cancel = self.cancel.clone();
@@ -290,7 +280,6 @@ impl Render for UpdateView {
                                     },
                                 );
                                 this.report = None;
-                                this.confirm = false;
                                 this.status =
                                     "Channel selected; check for updates before installing.".into();
                                 cx.notify();
@@ -318,18 +307,14 @@ impl Render for UpdateView {
                 div()
                     .id("update-install")
                     .cursor_pointer()
-                    .child(if self.confirm {
-                        "Confirm install and restart"
-                    } else {
-                        "Download and Install"
-                    })
+                    .child("Download and Install")
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.install(cx)),
                     ),
             );
         }
-        if self.confirm || self.busy {
+        if self.busy {
             controls = controls.child(
                 div()
                     .id("update-cancel")
@@ -338,7 +323,6 @@ impl Render for UpdateView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
-                            this.confirm = false;
                             this.cancel.store(true, Ordering::Relaxed);
                             cx.notify();
                         }),

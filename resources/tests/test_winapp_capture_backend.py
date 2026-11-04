@@ -180,6 +180,14 @@ class WinAppCaptureProtocolTests(unittest.IsolatedAsyncioTestCase):
         ):
             session = service.WinAppSession(None)
             session._attach_target({"hwnd": 606, "title": "Protocol"})
+            session.integrity_status = lambda: {
+                "executor_pid": 10,
+                "executor_integrity": "Medium",
+                "target_pid": 20,
+                "target_integrity": "Medium",
+                "target_elevated": False,
+                "integrity_match": True,
+            }
             response = await service.handle_command(
                 session,
                 {"cmd": "screenshot", "request_id": "shot"},

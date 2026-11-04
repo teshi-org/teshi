@@ -8,7 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use teshi_core::authoring::RequirementIterationFilter;
+use teshi_core::authoring::{
+    RequirementIterationFilter, RequirementPriority, RequirementProjectFilter,
+    RequirementProjectStatus,
+};
 use teshi_engine::{
     ImportProjectOptions, ImportProjectPlan, RequirementStoreError, import_project_requirements,
     list_requirement_documents, read_requirement_document, requirements_data_dir,
@@ -121,6 +124,8 @@ struct DocumentMetaJson {
     title: String,
     path: String,
     iteration: Option<String>,
+    priority: Option<RequirementPriority>,
+    projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
 }
 
@@ -139,6 +144,8 @@ struct ShowEnvelopeJson {
     title: String,
     path: String,
     iteration: Option<String>,
+    priority: Option<RequirementPriority>,
+    projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
     body: String,
 }
@@ -288,11 +295,133 @@ fn run_store_command(
     let requirements_root =
         requirements_data_dir(cli_override).map_err(|err| (false, CliError::Io(err)))?;
     match action {
+        RequirementsCommand::Organize {
+            project,
+            file,
+            folder,
+            query,
+            condition,
+            assign,
+            to,
+        } => (|| -> anyhow::Result<String> {
+            let cwd = std::env::current_dir()?;
+            let root = project.as_deref().unwrap_or(&cwd);
+            let identity = teshi_engine::read_requirement_project(root)?.ok_or_else(|| {
+                anyhow::anyhow!("project has no identity; link requirements first")
+            })?;
+            if let Some(path) = file {
+                let value = serde_json::from_slice(&std::fs::read(path)?)?;
+                teshi_engine::organization::save_requirement_organization(
+                    &requirements_root,
+                    &identity.id,
+                    &value,
+                )?;
+            }
+            use teshi_engine::organization::*;
+            let mut value = load_requirement_organization(&requirements_root, &identity.id)?;
+            let expected = value.clone();
+            if let Some(path) = folder {
+                value.ensure_folder(path)?;
+            }
+            if let (Some(name), Some(rule)) = (query, condition) {
+                let predicate =
+                    value.condition_with_folder_ids(&parse_requirement_condition(rule)?);
+                let existing = value.root_query_id(name);
+                value.save_query(existing.as_deref(), name, predicate)?;
+            }
+            if let Some(path) = to {
+                let id = value
+                    .folder_id(path)
+                    .ok_or_else(|| anyhow::anyhow!("unknown folder: {path}"))?;
+                value.add_documents(&id, assign)?;
+            }
+            if folder.is_some() || query.is_some() || to.is_some() {
+                save_requirement_organization_checked(
+                    &requirements_root,
+                    &identity.id,
+                    &value,
+                    Some(&expected),
+                )?;
+            }
+            Ok(serde_json::to_string_pretty(&value)?)
+        })()
+        .map_err(|e| (true, CliError::Io(e))),
+        RequirementsCommand::Create {
+            title,
+            file,
+            stdin,
+            priority,
+            project,
+            iteration,
+            json,
+        } => (|| -> Result<String, CliError> {
+            let body = if let Some(path) = file {
+                fs::read_to_string(path).map_err(|e| CliError::Io(e.into()))?
+            } else if *stdin {
+                if let Some(body) = &runtime.stdin_body {
+                    body.clone()
+                } else {
+                    let mut body = String::new();
+                    io::stdin()
+                        .read_to_string(&mut body)
+                        .map_err(|e| CliError::Io(e.into()))?;
+                    body
+                }
+            } else {
+                format!("# {}\n\n", title.trim())
+            };
+            let parsed = teshi_core::authoring::requirement_title(&body)
+                .map_err(|e| CliError::Io(e.into()))?;
+            if title.trim() != parsed || title.contains(['\n', '\r']) {
+                return Err(CliError::Io(anyhow::anyhow!(
+                    "title must match the document H1"
+                )));
+            }
+            let priority = priority
+                .as_deref()
+                .map(RequirementPriority::parse)
+                .transpose()
+                .map_err(|e| CliError::Io(e.into()))?;
+            let project = project
+                .as_deref()
+                .map(teshi_engine::ensure_requirement_project)
+                .transpose()
+                .map_err(CliError::Io)?;
+            let meta = teshi_engine::create_requirement_document(
+                &requirements_root,
+                &body,
+                priority,
+                iteration.as_deref(),
+                project.as_ref().map(|p| p.id.as_str()),
+            )
+            .map_err(CliError::Io)?;
+            if *json {
+                Ok(serde_json::json!({"ok": true, "id": meta.id,
+                    "path": meta.path, "revision": meta.revision, "projects": meta.projects,
+                    "priority": meta.priority, "iteration": meta.iteration})
+                .to_string())
+            } else {
+                Ok(format!("Created {} ({})", meta.id, meta.path))
+            }
+        })()
+        .map_err(|e| (*json, e)),
         RequirementsCommand::List {
+            project,
+            all_projects,
+            unassigned_project,
             iteration,
             unassigned,
             json,
-        } => list_documents(&requirements_root, iteration.as_deref(), *unassigned, *json)
+        } => project_list_filter(project.as_deref(), *all_projects, *unassigned_project)
+            .and_then(|scope| {
+                list_documents(
+                    &requirements_root,
+                    iteration.as_deref(),
+                    *unassigned,
+                    *json,
+                    &scope,
+                )
+            })
             .map_err(|err| (*json, err)),
         RequirementsCommand::Show { reference, json } => {
             show_document(&requirements_root, reference, *json).map_err(|err| (*json, err))
@@ -320,10 +449,134 @@ fn run_store_command(
         RequirementsCommand::ClearIteration { refs, json } => {
             mutate_iteration(&requirements_root, refs, None, *json).map_err(|err| (*json, err))
         }
+        RequirementsCommand::LinkProject {
+            refs,
+            project,
+            json,
+        } => mutate_project(
+            &requirements_root,
+            refs,
+            project.as_deref(),
+            true,
+            None,
+            *json,
+        )
+        .map_err(|err| (*json, err)),
+        RequirementsCommand::UnlinkProject {
+            refs,
+            project,
+            json,
+        } => mutate_project(
+            &requirements_root,
+            refs,
+            project.as_deref(),
+            false,
+            None,
+            *json,
+        )
+        .map_err(|err| (*json, err)),
+        RequirementsCommand::SetProjectStatus {
+            refs,
+            project,
+            status,
+            json,
+        } => {
+            let status = match status.as_str() {
+                "planned" => RequirementProjectStatus::Planned,
+                "implemented" => RequirementProjectStatus::Implemented,
+                "verified" => RequirementProjectStatus::Verified,
+                _ => {
+                    return Err((
+                        *json,
+                        CliError::Io(anyhow::anyhow!("invalid project status")),
+                    ));
+                }
+            };
+            mutate_project(
+                &requirements_root,
+                refs,
+                project.as_deref(),
+                true,
+                Some(status),
+                *json,
+            )
+            .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::ExportProject { project, output } => {
+            export_project(&requirements_root, project.as_deref(), output)
+                .map_err(|err| (false, err))
+        }
         RequirementsCommand::Path | RequirementsCommand::ImportProject { .. } => {
             unreachable!("path/import-project are handled before store commands")
         }
     }
+}
+
+fn project_list_filter(
+    project: Option<&Path>,
+    all: bool,
+    unassigned: bool,
+) -> Result<RequirementProjectFilter, CliError> {
+    if all {
+        return Ok(RequirementProjectFilter::All);
+    }
+    if unassigned {
+        return Ok(RequirementProjectFilter::Unassigned);
+    }
+    teshi_engine::requirement_project_filter(project.unwrap_or_else(|| Path::new(".")))
+        .map_err(CliError::Io)
+}
+
+fn mutate_project(
+    root: &Path,
+    refs: &[String],
+    project: Option<&Path>,
+    linked: bool,
+    status: Option<RequirementProjectStatus>,
+    json: bool,
+) -> Result<String, CliError> {
+    let ids: Vec<String> = refs
+        .iter()
+        .map(|reference| resolve_requirement_ref_in_store(root, reference).map_err(CliError::store))
+        .collect::<Result<_, _>>()?;
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    teshi_engine::update_requirement_projects(
+        root,
+        project.unwrap_or_else(|| Path::new(".")),
+        &borrowed,
+        linked,
+        status,
+    )
+    .map_err(CliError::Io)?;
+    if json {
+        Ok(serde_json::json!({"ok": true, "ids": ids}).to_string())
+    } else {
+        Ok(format!(
+            "Updated project associations for {} requirement(s)\n",
+            ids.len()
+        ))
+    }
+}
+
+fn export_project(root: &Path, project: Option<&Path>, output: &Path) -> Result<String, CliError> {
+    let snapshot =
+        teshi_engine::snapshot_requirement_project(root, project.unwrap_or_else(|| Path::new(".")))
+            .map_err(CliError::Io)?;
+    let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|err| CliError::Io(err.into()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .with_context(|| format!("create snapshot {}", output.display()))
+        .map_err(CliError::Io)?;
+    file.write_all(&bytes)
+        .context("write requirement snapshot")
+        .map_err(CliError::Io)?;
+    Ok(format!(
+        "Exported {} requirement(s) to {}\n",
+        snapshot.documents.len(),
+        output.display()
+    ))
 }
 
 fn list_documents(
@@ -331,6 +584,7 @@ fn list_documents(
     iteration: Option<&str>,
     unassigned: bool,
     json: bool,
+    scope: &RequirementProjectFilter,
 ) -> Result<String, CliError> {
     let filter = if unassigned {
         RequirementIterationFilter::Unassigned
@@ -339,7 +593,11 @@ fn list_documents(
     } else {
         RequirementIterationFilter::All
     };
-    let listed = list_requirement_documents(requirements_root, &filter).map_err(CliError::store)?;
+    let mut listed =
+        list_requirement_documents(requirements_root, &filter).map_err(CliError::store)?;
+    listed
+        .documents
+        .retain(|doc| doc.matches_project_filter(scope));
     if json {
         let envelope = ListEnvelopeJson {
             store_id: listed.store_id.to_string(),
@@ -352,6 +610,8 @@ fn list_documents(
                     title: doc.title.clone(),
                     path: doc.path.clone(),
                     iteration: doc.iteration.clone(),
+                    priority: doc.priority,
+                    projects: doc.projects.clone(),
                     revision: doc.revision.as_str().to_string(),
                 })
                 .collect(),
@@ -393,6 +653,8 @@ fn show_document(
             title: document.meta.title,
             path: document.meta.path,
             iteration: document.meta.iteration,
+            priority: document.meta.priority,
+            projects: document.meta.projects,
             revision: document.meta.revision.as_str().to_string(),
             body: document.body,
         };
@@ -692,7 +954,7 @@ fn confirm_import() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teshi_core::authoring::RequirementDocumentMeta;
+    use teshi_core::authoring::{RequirementDocumentMeta, RequirementPriority};
     use teshi_engine::{
         compute_document_revision, initialize_requirement_store, save_requirement_document_index,
         save_requirement_markdown,
@@ -700,8 +962,8 @@ mod tests {
 
     fn seed_store(root: &Path) {
         let mut index = initialize_requirement_store(root).unwrap();
-        let login = "# Login\n";
-        let mobile = "# Login\n\nmobile\n";
+        let login = "# 登录需求\n";
+        let mobile = "# 登录需求\n\nmobile\n";
         let checkout = "# Checkout\n";
         index.documents = vec![
             RequirementDocumentMeta::new(
@@ -723,6 +985,8 @@ mod tests {
                 compute_document_revision(checkout),
             ),
         ];
+        index.documents[0].priority = Some(RequirementPriority::P1);
+        index.documents[2].priority = Some(RequirementPriority::P3);
         fs::create_dir_all(root.join("auth")).unwrap();
         fs::create_dir_all(root.join("mobile")).unwrap();
         fs::create_dir_all(root.join("shop")).unwrap();
@@ -752,6 +1016,9 @@ mod tests {
         let output = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: Some("Sprint 12".into()),
                 unassigned: false,
                 json: true,
@@ -761,10 +1028,14 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
         assert_eq!(value["documents"].as_array().unwrap().len(), 1);
         assert_eq!(value["documents"][0]["id"], "doc-12");
+        assert_eq!(value["documents"][0]["priority"], "P1");
 
         let empty = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: Some("Missing".into()),
                 unassigned: false,
                 json: true,
@@ -776,12 +1047,41 @@ mod tests {
     }
 
     #[test]
+    fn list_json_exposes_unset_priority_as_null() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let output = run(
+            store.path(),
+            RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
+                iteration: None,
+                unassigned: false,
+                json: true,
+            },
+        );
+        assert_eq!(output.exit_code, 0);
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        let unset = value["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|doc| doc["id"] == "doc-37")
+            .expect("unset document");
+        assert!(unset["priority"].is_null());
+    }
+
+    #[test]
     fn list_unassigned_excludes_named_iteration() {
         let store = tempfile::tempdir().unwrap();
         seed_store(store.path());
         let output = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: None,
                 unassigned: true,
                 json: false,
@@ -817,6 +1117,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         assert_eq!(value["id"], "doc-9");
         assert_eq!(value["body"], "# Checkout\n");
+        assert_eq!(value["priority"], "P3");
         assert!(value.get("store_id").is_some());
     }
 
@@ -983,6 +1284,41 @@ mod tests {
         assert_eq!(conflict.exit_code, 1);
         let conflict_value: serde_json::Value = serde_json::from_str(&conflict.stdout).unwrap();
         assert_eq!(conflict_value["code"], "conflicting_edit_input");
+    }
+
+    #[test]
+    fn edit_syncs_title_and_reports_invalid_titles_without_partial_updates() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let original = read_requirement_document(store.path(), "doc-12").unwrap();
+        let action = RequirementsCommand::Edit {
+            reference: "doc-12".into(),
+            file: None,
+            force: false,
+            json: true,
+        };
+        let renamed = execute_store_command(
+            &action,
+            Some(store.path()),
+            &runtime_non_tty("# Renamed login\n\nBody\n"),
+        );
+        assert_eq!(renamed.exit_code, 0, "{}", renamed.stdout);
+        let saved = read_requirement_document(store.path(), "doc-12").unwrap();
+        assert_eq!(saved.meta.title, "Renamed login");
+        assert_eq!(saved.meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(saved.meta.id, original.meta.id);
+        assert_eq!(saved.meta.path, original.meta.path);
+        for body in ["#\n", "Missing H1\n"] {
+            let invalid =
+                execute_store_command(&action, Some(store.path()), &runtime_non_tty(body));
+            assert_eq!(invalid.exit_code, 1);
+            let value: serde_json::Value = serde_json::from_str(&invalid.stdout).unwrap();
+            assert_eq!(value["code"], "invalid_requirement_title");
+            assert_eq!(
+                read_requirement_document(store.path(), "doc-12").unwrap(),
+                saved
+            );
+        }
     }
 
     #[test]

@@ -3,8 +3,26 @@
  */
 
 const DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
+importScripts("page-text.js");
 const HEARTBEAT_URL = "http://127.0.0.1:17373/v1/bridge/heartbeat";
 const RESPONSE_URL = "http://127.0.0.1:17373/v1/bridge/response";
+// A JSON POST makes Chromium perform a CORS request with its browser-supplied
+// extension Origin. Rust only returns a credential on that exact Origin; the
+// public GET probe remains project-neutral and credential-free.
+function discoveryRequestOptions(identity = {}) {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // These are untrusted pairing hints. The broker binds trust only to the
+    // browser-supplied HTTP Origin header, never to this body.
+    body: JSON.stringify({
+      extension_id: chrome.runtime.id || "",
+      extension_instance_id: identity.extension_instance_id || "",
+      profile_label: identity.profile_label || "",
+    }),
+    cache: "no-store",
+  };
+}
 const PROTOCOL_VERSION = 1;
 const IDENTITY_STORAGE_KEY = "teshiBridgeIdentity";
 /** Metadata heartbeat (tabs, URL) — no screenshot. */
@@ -63,6 +81,8 @@ const SUPPORTED_ACTIONS = Object.freeze([
   "upload",
 ]);
 const SUPPORTED_OPERATIONS = Object.freeze([
+  "get_page_text",
+  "capture_browser_evidence",
   "capture_browser_screenshot",
   "generate_browser_pdf",
   "start_console_capture",
@@ -99,9 +119,13 @@ const debuggerSessions = new Map();
 /** @type {Map<number, Promise<{roles: Set<string>, domains: Set<string>}>>} */
 const debuggerAttachmentPromises = new Map();
 let cachedProjectRoot = "";
+let cachedBrokerProjectNeutral = false;
 let cachedBrokerToken = "";
+let cachedBrokerStartId = "";
 let extensionFrameWsUrl = "";
 let heartbeatRunning = false;
+/** @type {Promise<void> | null} */
+let heartbeatOncePromise = null;
 let pendingStreamRestart = false;
 let tabEventTimer = null;
 let commandExecution = Promise.resolve();
@@ -110,18 +134,22 @@ let streamPaused = false;
 let lastStreamErrorPostedAt = 0;
 /** @type {WebSocket | null} */
 let streamWs = null;
+/** Monotonic identity for the current stream WebSocket attempt. */
+let streamWsEpoch = 0;
 /** @type {Promise<boolean> | null} */
 let streamWsConnectPromise = null;
+let streamWsConnectPromiseEpoch = null;
 let streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
+/** Broker stream generation acknowledged by the current WebSocket. */
+let lastStreamGeneration = null;
 let screencastActive = false;
 /** @type {number | null} */
 let streamSessionTabId = null;
 let streamSeq = 0;
 let lastScreencastPublishAt = 0;
 let screencastListenerRegistered = false;
-/** Tab IDs with broker-owned bounded console capture enabled. */
-const consoleCaptureTabIds = new Set();
-/** @type {Map<number, object>} Active capture state keyed by tab ID. */
+/** @type {Map<number, {capture_id: string, window_id: number}>} Active capture state keyed by tab ID. */
+const consoleCaptureTabIds = new Map();
 const networkCapturesByTab = new Map();
 /** @type {Map<string, object>} Active or unacknowledged capture delivery state. */
 const networkDeliveryStates = new Map();
@@ -337,14 +365,21 @@ function encodeTsh1Frame(meta, jpegBytes) {
   return packet;
 }
 
+function isCurrentStreamWebSocket(ws, epoch) {
+  return streamWs === ws && streamWsEpoch === epoch;
+}
+
 function closeStreamWebSocket() {
-  if (streamWs) {
+  const ws = streamWs;
+  streamWs = null;
+  lastStreamGeneration = null;
+  streamWsEpoch += 1;
+  if (ws) {
     try {
-      streamWs.close();
+      ws.close();
     } catch {
       // ignore
     }
-    streamWs = null;
   }
 }
 
@@ -358,16 +393,92 @@ function cacheBrokerToken(info) {
   return Boolean(cachedBrokerToken);
 }
 
+function brokerConnectionReady() {
+  return Boolean(cachedProjectRoot || cachedBrokerProjectNeutral);
+}
+
+function clearBrokerCache() {
+  cachedProjectRoot = "";
+  cachedBrokerProjectNeutral = false;
+  cachedBrokerToken = "";
+  extensionFrameWsUrl = "";
+}
+
+function applyBridgeDiscovery(info) {
+  if (info?.mode !== "chrome") {
+    clearBrokerCache();
+    return false;
+  }
+  const projectNeutral = Array.isArray(info.broker_features)
+    && info.broker_features.includes("transport.v1");
+  const projectRoot = typeof info.project_root === "string"
+    ? info.project_root.trim()
+    : "";
+  // Python Broker remains project-bound. Rust transport discovery is deliberately
+  // project-neutral, so it may omit project_root without weakening auth or Origin
+  // checks. No other discovery shape is accepted.
+  if ((!projectNeutral && !projectRoot) || !cacheBrokerToken(info)) {
+    clearBrokerCache();
+    return false;
+  }
+  const nextBrokerStartId = String(info.broker_start_id || "").trim();
+  if (cachedBrokerStartId && nextBrokerStartId && cachedBrokerStartId !== nextBrokerStartId) {
+    for (const [tabId, capture] of consoleCaptureTabIds.entries()) {
+      consoleCaptureTabIds.delete(tabId);
+      void reportConsoleTermination(
+        capture,
+        { window_id: capture.window_id, tab_id: tabId },
+        "broker_restart",
+      );
+      void releaseDebuggerRole(tabId, "console");
+    }
+    // A broker generation owns the capture barriers and acknowledgements.
+    // Never replay an old generation's Network queue into a fresh broker;
+    // drop the bounded raw-body queue and release its debugger roles instead.
+    for (const [tabId, capture] of networkCapturesByTab.entries()) {
+      networkCapturesByTab.delete(tabId);
+      capture.active = false;
+      capture.queue = [];
+      capture.queue_bytes = 0;
+      capture.matched_request_ids.clear();
+      void releaseDebuggerRole(tabId, "network");
+    }
+    for (const capture of networkDeliveryStates.values()) {
+      capture.active = false;
+      capture.queue = [];
+      capture.queue_bytes = 0;
+      capture.matched_request_ids.clear();
+    }
+    networkDeliveryStates.clear();
+  }
+  if (nextBrokerStartId) {
+    cachedBrokerStartId = nextBrokerStartId;
+  }
+  cachedProjectRoot = projectNeutral ? "" : projectRoot;
+  cachedBrokerProjectNeutral = projectNeutral;
+  extensionFrameWsUrl = String(info.extension_frame_ws_url || "");
+  return true;
+}
+
 async function refreshExtensionFrameWsUrl() {
   try {
-    const res = await fetch(DISCOVERY_URL);
+    const identity = await getExtensionIdentity();
+    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions(identity));
     if (!res.ok) {
+      const failure = await res.json().catch(() => ({}));
+      if (failure.code === "broker_pairing_required") {
+        lastBridgeStatus = {
+          connected: false,
+          code: failure.code,
+          pairing_required: true,
+          origin: failure.recovery?.origin || `chrome-extension://${chrome.runtime.id}`,
+          error: "Waiting for Teshi approval of this Chrome extension.",
+        };
+      }
       return false;
     }
     const info = await res.json();
-    if (info.extension_frame_ws_url) {
-      cacheBrokerToken(info);
-      extensionFrameWsUrl = String(info.extension_frame_ws_url);
+    if (applyBridgeDiscovery(info) && info.extension_frame_ws_url) {
       return true;
     }
   } catch {
@@ -383,6 +494,9 @@ function streamSocketNeeded() {
   if (networkCapturesByTab.size > 0) {
     return true;
   }
+  if (consoleCaptureTabIds.size > 0) {
+    return true;
+  }
   return Array.from(networkDeliveryStates.values()).some(
     (state) => state.queue.length > 0 || (
       state.termination_reason && !state.termination_acknowledged
@@ -391,34 +505,51 @@ function streamSocketNeeded() {
 }
 
 async function connectStreamWebSocket() {
-  if (!extensionFrameWsUrl || !cachedProjectRoot) {
+  if (!extensionFrameWsUrl || !brokerConnectionReady()) {
     return false;
   }
   if (streamWs?.readyState === WebSocket.OPEN) {
     return true;
   }
-  if (streamWsConnectPromise) {
+  if (
+    streamWsConnectPromise
+    && streamWsConnectPromiseEpoch === streamWsEpoch
+  ) {
     return streamWsConnectPromise;
   }
   closeStreamWebSocket();
-  streamWsConnectPromise = new Promise((resolve) => {
+  const connectionEpoch = ++streamWsEpoch;
+  const connectPromise = new Promise((resolve) => {
     let settled = false;
+    const settle = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
     const ws = new WebSocket(extensionFrameWsUrl);
     streamWs = ws;
+    lastStreamGeneration = null;
     ws.binaryType = "arraybuffer";
     ws.onopen = async () => {
-      streamWs = ws;
-      streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch) || ws.readyState !== WebSocket.OPEN) {
+        settle(false);
+        return;
+      }
       const identity = await getExtensionIdentity();
-      ws.send(
-        JSON.stringify({
-          type: "stream_hello",
-          project_root: cachedProjectRoot,
-          extension_instance_id: identity.extension_instance_id,
-          protocol_version: PROTOCOL_VERSION,
-          extension_version: chrome.runtime.getManifest().version,
-        }),
-      );
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch) || ws.readyState !== WebSocket.OPEN) {
+        settle(false);
+        return;
+      }
+      streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
+      const hello = {
+        type: "stream_hello",
+        extension_instance_id: identity.extension_instance_id,
+        protocol_version: PROTOCOL_VERSION,
+        extension_version: chrome.runtime.getManifest().version,
+        ...(cachedProjectRoot ? { project_root: cachedProjectRoot } : {}),
+      };
+      ws.send(JSON.stringify(hello));
       for (const state of networkDeliveryStates.values()) {
         state.sent_through_seq = state.acked_seq;
         state.termination_sent = false;
@@ -427,25 +558,36 @@ async function connectStreamWebSocket() {
         }
       }
       flushNetworkBatches();
-      if (!settled) {
-        settled = true;
-        resolve(true);
-      }
+      settle(true);
     };
     ws.onmessage = (event) => {
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch)) {
+        return;
+      }
       if (typeof event.data !== "string") {
         return;
       }
       try {
         const ack = JSON.parse(event.data);
-        if (ack.type === "stream_hello_ack" && ack.ok === false) {
-          void postFrameErrorDebounced(
-            ack.error || "extension stream hello rejected",
-          );
+        if (ack.type === "stream_hello_ack") {
+          if (ack.ok === false) {
+            void postFrameErrorDebounced(
+              ack.error || "extension stream hello rejected",
+            );
+          } else if (Number.isSafeInteger(ack.generation)) {
+            lastStreamGeneration = ack.generation;
+          }
         } else if (ack.type === "direct_command" && ack.command) {
           void (async () => {
+            if (!isCurrentStreamWebSocket(ws, connectionEpoch)) {
+              return;
+            }
             const reply = await handleCmd(ack.command);
-            if (ws.readyState === WebSocket.OPEN) {
+            if (
+              !ack.command.suppress_response
+              && isCurrentStreamWebSocket(ws, connectionEpoch)
+              && ws.readyState === WebSocket.OPEN
+            ) {
               ws.send(JSON.stringify(reply));
             }
           })();
@@ -457,15 +599,25 @@ async function connectStreamWebSocket() {
       }
     };
     ws.onclose = () => {
-      streamWs = null;
-      if (!settled) {
-        settled = true;
-        resolve(false);
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch)) {
+        settle(false);
+        return;
       }
-      if (streamSocketNeeded() && cachedProjectRoot) {
+      streamWs = null;
+      lastStreamGeneration = null;
+      terminateConsoleCaptures("stream_disconnected");
+      settle(false);
+      if (streamSocketNeeded() && brokerConnectionReady()) {
+        const reconnectDelay = streamWsReconnectDelay;
         setTimeout(() => {
+          if (streamWsEpoch !== connectionEpoch || streamWs !== null) {
+            return;
+          }
+          if (!streamSocketNeeded() || !brokerConnectionReady()) {
+            return;
+          }
           void connectStreamWebSocket();
-        }, streamWsReconnectDelay);
+        }, reconnectDelay);
         streamWsReconnectDelay = Math.min(
           streamWsReconnectDelay * 2,
           STREAM_WS_RECONNECT_MAX_MS,
@@ -473,16 +625,21 @@ async function connectStreamWebSocket() {
       }
     };
     ws.onerror = () => {
-      if (!settled) {
-        settled = true;
-        resolve(false);
-      }
+      settle(false);
     };
   });
+  streamWsConnectPromise = connectPromise;
+  streamWsConnectPromiseEpoch = connectionEpoch;
   try {
-    return await streamWsConnectPromise;
+    return await connectPromise;
   } finally {
-    streamWsConnectPromise = null;
+    if (
+      streamWsConnectPromise === connectPromise
+      && streamWsConnectPromiseEpoch === connectionEpoch
+    ) {
+      streamWsConnectPromise = null;
+      streamWsConnectPromiseEpoch = null;
+    }
   }
 }
 
@@ -589,7 +746,8 @@ function remoteObjectText(value) {
 
 async function publishConsoleEvent(tabId, method, params) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab || !consoleCaptureTabIds.has(tabId)) return;
+  const capture = consoleCaptureTabIds.get(tabId);
+  if (!tab || !capture) return;
   const identity = await getExtensionIdentity();
   const entry = method === "Log.entryAdded" ? (params?.entry || {}) : null;
   const stackFrame = params?.stackTrace?.callFrames?.[0];
@@ -619,6 +777,8 @@ async function publishConsoleEvent(tabId, method, params) {
         window_id: tab.windowId,
         tab_id: tabId,
       },
+      capture_id: capture.capture_id,
+      stream_generation: lastStreamGeneration,
       event,
     });
   } catch {
@@ -626,19 +786,94 @@ async function publishConsoleEvent(tabId, method, params) {
   }
 }
 
-async function startConsoleCapture(target = null) {
+async function startConsoleCapture(target = null, captureId = null) {
+  const normalizedCaptureId = String(captureId || "").trim();
+  if (!normalizedCaptureId) {
+    throw new Error("console capture_id is required");
+  }
   ensureScreencastDebuggerListener();
   const tab = await resolveCommandTab(target);
   await acquireDebuggerRole(tab, "console", ["Runtime", "Log"]);
-  consoleCaptureTabIds.add(tab.id);
-  return { ok: true, active: true, tab_id: tab.id };
+  consoleCaptureTabIds.set(tab.id, {
+    capture_id: normalizedCaptureId,
+    window_id: tab.windowId,
+  });
+  if (streamSocketNeeded() && brokerConnectionReady()) {
+    void connectStreamWebSocket();
+  }
+  return {
+    ok: true,
+    active: true,
+    tab_id: tab.id,
+    capture_id: normalizedCaptureId,
+    stream_generation: lastStreamGeneration,
+  };
 }
 
-async function stopConsoleCapture(target = null) {
+async function stopConsoleCapture(target = null, captureId = null) {
   const tab = await resolveCommandTab(target);
+  const current = consoleCaptureTabIds.get(tab.id);
+  const normalizedCaptureId = String(captureId || "").trim();
+  if (current && current.capture_id !== normalizedCaptureId) {
+    return {
+      ok: false,
+      active: true,
+      tab_id: tab.id,
+      capture_id: current.capture_id,
+      code: "console_capture_id_mismatch",
+      error: "console capture_id does not match the active target capture",
+    };
+  }
   consoleCaptureTabIds.delete(tab.id);
   await releaseDebuggerRole(tab.id, "console");
-  return { ok: true, active: false, tab_id: tab.id };
+  return {
+    ok: true,
+    active: false,
+    tab_id: tab.id,
+    capture_id: current?.capture_id || normalizedCaptureId || null,
+  };
+}
+
+async function reportConsoleTermination(capture, target, reason, detail = "") {
+  if (!capture || !target) return;
+  const identity = await getExtensionIdentity();
+  const safeTarget = {
+    ...target,
+    extension_instance_id: target.extension_instance_id || identity.extension_instance_id,
+    window_id: target.window_id || capture.window_id,
+    tab_id: target.tab_id || 0,
+  };
+  const payload = {
+    type: "console_capture_terminated",
+    extension_instance_id: identity.extension_instance_id,
+    target: safeTarget,
+    capture_id: capture.capture_id,
+    stream_generation: lastStreamGeneration,
+    reason,
+    detail: String(detail || "").slice(0, 256),
+  };
+  try {
+    await bridgePost(RESPONSE_URL, payload);
+  } catch {
+    // The Rust broker will also expire the capture when the Profile heartbeat
+    // becomes stale; termination reporting is best effort during teardown.
+  }
+}
+
+function terminateConsoleCaptures(reason, detail = "") {
+  for (const [tabId, capture] of consoleCaptureTabIds.entries()) {
+    if (consoleCaptureTabIds.get(tabId) !== capture) {
+      continue;
+    }
+    consoleCaptureTabIds.delete(tabId);
+    void reportConsoleTermination(
+      capture,
+      { window_id: capture.window_id, tab_id: tabId },
+      reason,
+      detail,
+    );
+    void releaseDebuggerRole(tabId, "console");
+  }
 }
 
 function normalizeAllowedHostnames(values) {
@@ -1144,7 +1379,7 @@ async function stopStreamSession() {
 
 async function startStreamSession(options = {}) {
   ensureScreencastDebuggerListener();
-  if (!cachedProjectRoot) {
+  if (!brokerConnectionReady()) {
     return;
   }
   let tabId = options.tabId;
@@ -1208,7 +1443,7 @@ async function pauseScreencast() {
 }
 
 async function resumeScreencast() {
-  if (!cachedProjectRoot || streamPaused) {
+  if (!brokerConnectionReady() || streamPaused) {
     return;
   }
   const tabId = streamSessionTabId ?? (await getActiveTab())?.id;
@@ -1306,6 +1541,33 @@ async function collectInteractiveElements(tabId) {
       }
 
       const sel = "button, [role='button'], input, input[type='submit'], select, a[href], [role='link'], textarea";
+      function accessibleName(el) {
+        const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
+        if (labelledBy) {
+          const text = labelledBy.split(/\s+/).map((id) => el.ownerDocument?.getElementById(id)?.textContent || '').join(' ').trim();
+          if (text) return text;
+        }
+        const ariaLabel = (el.getAttribute?.('aria-label') || '').trim();
+        if (ariaLabel) return ariaLabel;
+        const tag = (el.tagName || '').toLowerCase();
+        if (['img', 'area'].includes(tag) || el.getAttribute?.('role') === 'img') {
+          const alt = (el.getAttribute?.('alt') || '').trim();
+          if (alt) return alt;
+        }
+        const label = (el.labels?.[0]?.textContent || '').trim();
+        if (label) return label;
+        const title = (el.getAttribute?.('title') || '').trim();
+        if (title) return title;
+        const text = (el.innerText || el.textContent || '').trim();
+        if (['button', 'a'].includes(tag) || ['button', 'link', 'menuitem'].includes(el.getAttribute?.('role'))) {
+          if (text) return text.slice(0, 120);
+        }
+        if (tag === 'input' && ['button', 'submit', 'reset'].includes((el.getAttribute?.('type') || '').toLowerCase())) {
+          const value = (el.getAttribute?.('value') || '').trim();
+          if (value) return value;
+        }
+        return (el.value || text || '').trim().slice(0, 120) || null;
+      }
       function collect(root, framePath = null, shadowPath = null, output = []) {
         let elements = [];
         try { elements = Array.from(root.querySelectorAll(sel)); } catch { elements = []; }
@@ -1326,7 +1588,7 @@ async function collectInteractiveElements(tabId) {
             classes: el.className || null,
             shortSelector: makeShortSelector(el),
             ariaLabel: el.getAttribute('aria-label'),
-            accessible_name: el.getAttribute('aria-label') || (el.labels?.[0]?.textContent || '').trim() || (el.innerText || el.value || '').trim().slice(0, 120) || null,
+            accessible_name: accessibleName(el),
             label: (el.labels?.[0]?.textContent || '').trim() || null,
             placeholder: el.getAttribute('placeholder'),
             name: el.getAttribute('name'),
@@ -1334,7 +1596,15 @@ async function collectInteractiveElements(tabId) {
             visible: Boolean(el.getClientRects().length),
             context: { frame: framePath, shadow_root: shadowPath },
           });
-          if (el.shadowRoot) collect(el.shadowRoot, framePath, makeShortSelector(el), output);
+        }
+        // A Shadow DOM host is not necessarily itself interactive (a custom
+        // element often owns the actual button/input). Walk every host so
+        // descendants are published with the host selector as their scope.
+        let shadowHosts = [];
+        try { shadowHosts = Array.from(root.querySelectorAll('*')); } catch { shadowHosts = []; }
+        for (const host of shadowHosts) {
+          if (output.length >= 200) break;
+          if (host.shadowRoot) collect(host.shadowRoot, framePath, makeShortSelector(host), output);
         }
         let frames = [];
         try { frames = Array.from(root.querySelectorAll('iframe,frame')); } catch { frames = []; }
@@ -1430,6 +1700,17 @@ async function getPageSnapshot(target = null) {
     accessibility_tree,
     interactive_elements,
   };
+}
+
+async function getPageText(target, options) {
+  const tab = await attachActiveTab(target);
+  const { result, exceptionDetails } = await cdp(tab.id, "Runtime.evaluate", {
+    expression: `(${collectPageText.toString()})(${JSON.stringify(options)})`,
+    returnByValue: true,
+  });
+  if (exceptionDetails) return { ok: false, code: "browser_text_failure", error: "Page text extraction failed" };
+  return { ...result.value, url: tab.url || "", title: tab.title || "",
+    tab_id: tab.id, window_id: tab.windowId, page_context_revision: await pageContextRevision(tab.id) };
 }
 
 async function highlightSelector(selector, target = null) {
@@ -1770,7 +2051,16 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
   const expression = `(() => {
     const selector = ${JSON.stringify(selector)};
     const candidate = ${JSON.stringify(candidate)};
-    const locatorContext = ${JSON.stringify(locatorContext)} || {};
+    const suppliedLocatorContext = ${JSON.stringify(locatorContext)};
+    const candidateContext = candidate?.context || null;
+    const hasContextValue = (context) => Boolean(context && (context.frame || context.shadow_root));
+    if (hasContextValue(suppliedLocatorContext) && hasContextValue(candidateContext) && (
+        (suppliedLocatorContext.frame || null) !== (candidateContext.frame || null) ||
+        (suppliedLocatorContext.shadow_root || null) !== (candidateContext.shadow_root || null)
+    )) {
+      return { ok: false, error: "candidate and locator context do not match", code: "browser_capability_unavailable" };
+    }
+    const locatorContext = hasContextValue(suppliedLocatorContext) ? suppliedLocatorContext : (candidateContext || {});
     const action = ${JSON.stringify(action)};
     const value = ${JSON.stringify(value ?? "")};
     const timeoutMs = ${Number(timeoutMs) || 5000};
@@ -1798,55 +2088,100 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       if (tag === 'select') return 'combobox';
       return '';
     };
-    const accessibleName = (el) => (el.getAttribute?.('aria-label') || el.labels?.[0]?.textContent || el.innerText || el.value || el.textContent || '').trim();
+    const accessibleName = (el) => {
+      const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
+      if (labelledBy) {
+        const text = labelledBy.split(/\s+/).map((id) => el.ownerDocument?.getElementById(id)?.textContent || '').join(' ').trim();
+        if (text) return text;
+      }
+      const ariaLabel = (el.getAttribute?.('aria-label') || '').trim();
+      if (ariaLabel) return ariaLabel;
+      const tag = (el.tagName || '').toLowerCase();
+      if (['img', 'area'].includes(tag) || el.getAttribute?.('role') === 'img') {
+        const alt = (el.getAttribute?.('alt') || '').trim();
+        if (alt) return alt;
+      }
+      const label = (el.labels?.[0]?.textContent || '').trim();
+      if (label) return label;
+      const title = (el.getAttribute?.('title') || '').trim();
+      if (title) return title;
+      return (el.innerText || el.value || el.textContent || '').trim();
+    };
     const resolveRoot = () => {
       let root = document;
       if (locatorContext.frame) {
-        const frames = Array.from(document.querySelectorAll('iframe,frame'));
-        const frame = frames.find((item) => item.src === locatorContext.frame || item.name === locatorContext.frame || item.src?.includes(locatorContext.frame));
-        if (!frame?.contentDocument) return null;
-        root = frame.contentDocument;
+        let frames = [];
+        try { frames = Array.from(document.querySelectorAll('iframe,frame')); } catch {
+          return { root: null, code: "invalid_selector", error: "iframe locator context is invalid" };
+        }
+        const matches = frames.filter((item) => item.src === locatorContext.frame || item.name === locatorContext.frame || item.src?.includes(locatorContext.frame));
+        if (matches.length > 1) return { root: null, code: "stale_element_reference", error: "iframe locator context is ambiguous" };
+        const frame = matches[0];
+        if (!frame) return { root: null, code: "stale_element_reference", error: "iframe locator context is unavailable" };
+        let contentDocument = null;
+        try { contentDocument = frame.contentDocument; } catch { /* cross-origin */ }
+        if (!contentDocument) {
+          let crossOrigin = false;
+          try {
+            crossOrigin = new URL(frame.src || frame.getAttribute("src") || "", document.baseURI).origin !== window.location.origin;
+          } catch { /* keep the stale-context error */ }
+          return {
+            root: null,
+            code: crossOrigin ? "browser_capability_unavailable" : "stale_element_reference",
+            error: crossOrigin ? "cross-origin iframe locator context is unsupported" : "iframe locator context is unavailable",
+          };
+        }
+        root = contentDocument;
       }
       if (locatorContext.shadow_root) {
-        const host = root.querySelector(locatorContext.shadow_root);
-        if (!host?.shadowRoot) return null;
+        let hosts = [];
+        try { hosts = Array.from(root.querySelectorAll(locatorContext.shadow_root)); } catch {
+          return { root: null, code: "invalid_selector", error: "shadow root locator context is invalid" };
+        }
+        if (hosts.length > 1) return { root: null, code: "stale_element_reference", error: "shadow root locator context is ambiguous" };
+        const host = hosts[0];
+        if (!host?.shadowRoot) return { root: null, code: "stale_element_reference", error: "shadow root locator context is unavailable" };
         root = host.shadowRoot;
       }
-      return root;
+      return { root };
+    };
+    const querySelectorAll = (root, rawSelector) => {
+      const selectorText = String(rawSelector || '');
+      const marker = selectorText.lastIndexOf(':has-text(');
+      if (marker < 0 || !selectorText.endsWith(')')) {
+        return Array.from(root.querySelectorAll(selectorText));
+      }
+      const baseSelector = selectorText.slice(0, marker).trim() || '*';
+      const textArgument = selectorText.slice(marker + ':has-text('.length, -1).trim();
+      let expectedText = textArgument;
+      try { expectedText = JSON.parse(textArgument); } catch { /* keep a bounded literal */ }
+      return Array.from(root.querySelectorAll(baseSelector)).filter((el) =>
+        (el.innerText || el.textContent || '').includes(String(expectedText))
+      );
     };
     const findMatches = () => {
-      const root = resolveRoot();
-      if (!root) return [];
+      const resolved = resolveRoot();
+      if (!resolved.root) return resolved;
+      const root = resolved.root;
       if (!candidate) {
-        try { return Array.from(root.querySelectorAll(selector)); } catch { return []; }
+        try { return { matches: querySelectorAll(root, selector) }; } catch { return { matches: [], selector_error: true }; }
       }
       const args = candidate.arguments || {};
       let all = [];
       try { all = Array.from(root.querySelectorAll('*')); } catch { all = []; }
-      if (candidate.kind === 'role') return all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || ''));
-      if (candidate.kind === 'label') return all.filter((el) => (el.labels?.[0]?.textContent || el.getAttribute?.('aria-label') || '').trim() === String(args.text || ''));
-      if (candidate.kind === 'placeholder') return all.filter((el) => (el.getAttribute?.('placeholder') || '') === String(args.text || ''));
-      if (candidate.kind === 'test_id' || candidate.kind === 'attribute') return all.filter((el) => (el.getAttribute?.(String(args.attribute || 'data-testid')) || '') === String(args.value || ''));
-      if (candidate.kind === 'text') return all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || ''));
-      if (candidate.kind === 'css') { try { return Array.from(root.querySelectorAll(String(args.selector || ''))); } catch { return []; } }
-      return [];
+      if (candidate.kind === 'role') return { matches: all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || '')) };
+      if (candidate.kind === 'label') return { matches: all.filter((el) => (el.labels?.[0]?.textContent || el.getAttribute?.('aria-label') || '').trim() === String(args.text || '')) };
+      if (candidate.kind === 'placeholder') return { matches: all.filter((el) => (el.getAttribute?.('placeholder') || '') === String(args.text || '')) };
+      if (candidate.kind === 'test_id' || candidate.kind === 'attribute') return { matches: all.filter((el) => (el.getAttribute?.(String(args.attribute || 'data-testid')) || '') === String(args.value || '')) };
+      if (candidate.kind === 'text') return { matches: all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || '')) };
+      if (candidate.kind === 'css') { try { return { matches: querySelectorAll(root, args.selector) }; } catch { return { matches: [], selector_error: true }; } }
+      return { matches: [] };
     };
     if (action === "assert_not_exists") {
-      const root = resolveRoot();
-      if (!root) return { ok: false, error: "locator context is unavailable", code: "element_not_found" };
-      let matches;
-      try {
-        if (!candidate) {
-          matches = Array.from(root.querySelectorAll(selector));
-        } else if (candidate.kind === "css") {
-          const args = candidate.arguments || {};
-          matches = Array.from(root.querySelectorAll(String(args.selector || "")));
-        } else {
-          matches = findMatches();
-        }
-      } catch {
-        return { ok: false, error: "invalid selector", code: "invalid_selector" };
-      }
+      const resolved = findMatches();
+      if (resolved.error) return { ok: false, error: resolved.error, code: resolved.code };
+      if (resolved.selector_error) return { ok: false, error: "invalid selector", code: "invalid_selector" };
+      const matches = resolved.matches;
       if (matches.length > 0) {
         return {
           ok: false,
@@ -1860,7 +2195,9 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
     return (async () => {
       let el = null;
       while (Date.now() < deadline) {
-        const found = findMatches();
+        const resolved = findMatches();
+        if (resolved.error) return { ok: false, error: resolved.error, code: resolved.code };
+        const found = resolved.matches;
         if (found.length > 1) return { ok: false, error: "locator became ambiguous", code: "stale_element_reference", match_count: found.length };
         el = found[0] || null;
         if (visible(el)) break;
@@ -1871,6 +2208,9 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       }
       if (!visible(el)) {
         return { ok: false, error: "element not visible before timeout", code: "not_visible" };
+      }
+      if (el.disabled || el.getAttribute?.("aria-disabled") === "true") {
+        return { ok: false, error: "element is disabled", code: "element_disabled" };
       }
       el.scrollIntoView({ block: "center", inline: "center" });
       if (action === "upload") {
@@ -1898,10 +2238,13 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       } else if (action === "assert_visible") {
         return { ok: true };
       } else if (action === "assert_text") {
-        const text = (el.innerText || el.textContent || el.value || "").trim();
-        if (!text.includes(value)) {
-          return { ok: false, error: "text assertion failed", code: "assert_text_failed", actual: text };
+        let text = "";
+        while (Date.now() < deadline) {
+          text = (el.innerText || el.textContent || el.value || "").trim();
+          if (text.includes(value)) return { ok: true };
+          await sleep(100);
         }
+        return { ok: false, error: "text assertion failed", code: "assert_text_failed", actual: text };
       } else if (action === "select") {
         el.value = value;
         el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2144,32 +2487,96 @@ async function verifyPlaywrightLocators(
     const accessibleName = (el) => {
       const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
       if (labelledBy) {
-        const text = labelledBy.split(/\\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ').trim();
+        const text = labelledBy.split(/\s+/).map((id) => el.ownerDocument?.getElementById(id)?.textContent || '').join(' ').trim();
         if (text) return text;
       }
-      return (el.getAttribute?.('aria-label') || el.labels?.[0]?.textContent || el.getAttribute?.('alt') || el.getAttribute?.('title') || el.innerText || el.value || el.textContent || '').trim();
-    };
-    const collect = (root, output = []) => {
-      let elements = [];
-      try { elements = Array.from(root.querySelectorAll('*')); } catch { elements = []; }
-      for (const el of elements) {
-        output.push(el);
-        if (el.shadowRoot) collect(el.shadowRoot, output);
+      const ariaLabel = (el.getAttribute?.('aria-label') || '').trim();
+      if (ariaLabel) return ariaLabel;
+      const tag = (el.tagName || '').toLowerCase();
+      if (['img', 'area'].includes(tag) || el.getAttribute?.('role') === 'img') {
+        const alt = (el.getAttribute?.('alt') || '').trim();
+        if (alt) return alt;
       }
-      let frames = [];
-      try { frames = Array.from(root.querySelectorAll('iframe,frame')); } catch { frames = []; }
-      for (const frame of frames) {
-        try { if (frame.contentDocument) collect(frame.contentDocument, output); } catch { /* cross origin */ }
-      }
-      return output;
+      const label = (el.labels?.[0]?.textContent || '').trim();
+      if (label) return label;
+      const title = (el.getAttribute?.('title') || '').trim();
+      if (title) return title;
+      return (el.innerText || el.value || el.textContent || '').trim();
     };
-    const all = collect(document);
+    const resolveRoot = (context = {}) => {
+      let root = document;
+      if (context.frame) {
+        let frames = [];
+        try { frames = Array.from(document.querySelectorAll('iframe,frame')); } catch {
+          return { root: null, code: "invalid_selector", error: "iframe locator context is invalid" };
+        }
+        const matches = frames.filter((item) => item.src === context.frame || item.name === context.frame || item.src?.includes(context.frame));
+        if (matches.length > 1) return { root: null, code: "stale_element_reference", error: "iframe locator context is ambiguous" };
+        const frame = matches[0];
+        if (!frame) return { root: null, code: "stale_element_reference", error: "iframe locator context is unavailable" };
+        let contentDocument = null;
+        try { contentDocument = frame.contentDocument; } catch { /* cross-origin */ }
+        if (!contentDocument) {
+          let crossOrigin = false;
+          try {
+            crossOrigin = new URL(frame.src || frame.getAttribute("src") || "", document.baseURI).origin !== window.location.origin;
+          } catch { /* keep the stale-context error */ }
+          return {
+            root: null,
+            code: crossOrigin ? "browser_capability_unavailable" : "stale_element_reference",
+            error: crossOrigin ? "cross-origin iframe locator context is unsupported" : "iframe locator context is unavailable",
+          };
+        }
+        root = contentDocument;
+      }
+      if (context.shadow_root) {
+        let hosts = [];
+        try { hosts = Array.from(root.querySelectorAll(context.shadow_root)); } catch {
+          return { root: null, code: "invalid_selector", error: "shadow root locator context is invalid" };
+        }
+        if (hosts.length > 1) return { root: null, code: "stale_element_reference", error: "shadow root locator context is ambiguous" };
+        const host = hosts[0];
+        if (!host?.shadowRoot) return { root: null, code: "stale_element_reference", error: "shadow root locator context is unavailable" };
+        root = host.shadowRoot;
+      }
+      return { root };
+    };
+    const querySelectorAll = (root, rawSelector) => {
+      const selectorText = String(rawSelector || '');
+      const marker = selectorText.lastIndexOf(':has-text(');
+      if (marker < 0 || !selectorText.endsWith(')')) {
+        return Array.from(root.querySelectorAll(selectorText));
+      }
+      const baseSelector = selectorText.slice(0, marker).trim() || '*';
+      const textArgument = selectorText.slice(marker + ':has-text('.length, -1).trim();
+      let expectedText = textArgument;
+      try { expectedText = JSON.parse(textArgument); } catch { /* keep a bounded literal */ }
+      return Array.from(root.querySelectorAll(baseSelector)).filter((el) =>
+        (el.innerText || el.textContent || '').includes(String(expectedText))
+      );
+    };
+    for (const candidate of candidates) {
+      const contextResult = resolveRoot(candidate?.context || {});
+      if (!contextResult.root) {
+        return {
+          ok: false,
+          code: contextResult.code,
+          error: contextResult.error,
+          page_context_revision: ${JSON.stringify(currentRevision)},
+          verification: [],
+        };
+      }
+    }
     const visible = (el) => {
       const style = getComputedStyle(el);
       const rect = el.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || '1') > 0 && rect.width > 0 && rect.height > 0;
     };
     const matches = (candidate) => {
+      const root = resolveRoot(candidate?.context || {}).root;
+      if (!root) return [];
+      let all = [];
+      try { all = Array.from(root.querySelectorAll('*')); } catch { all = []; }
       const args = candidate.arguments || {};
       if (candidate.kind === 'role') {
         return all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || ''));
@@ -2187,7 +2594,7 @@ async function verifyPlaywrightLocators(
         return all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || ''));
       }
       if (candidate.kind === 'css') {
-        try { return Array.from(document.querySelectorAll(String(args.selector || ''))); } catch { return []; }
+        try { return querySelectorAll(root, args.selector); } catch { return []; }
       }
       return [];
     };
@@ -2479,42 +2886,61 @@ async function postFrameErrorDebounced(error) {
 }
 
 async function bridgePost(url, payload) {
-  if (!cachedBrokerToken) {
-    await refreshBridgeCache();
-  }
-  if (!cachedBrokerToken) {
-    throw new Error("bridge discovery did not provide a command token");
-  }
-  const authenticatedUrl = new URL(url);
-  authenticatedUrl.searchParams.set("token", cachedBrokerToken);
   const body = JSON.stringify(payload);
   let lastErr = null;
+  let rediscoveryAttempted = false;
   for (let attempt = 0; attempt <= BRIDGE_POST_RETRIES; attempt += 1) {
+    if (!cachedBrokerToken) {
+      await refreshBridgeCache();
+    }
+    if (!cachedBrokerToken) {
+      lastErr = new Error("bridge discovery did not provide a command token");
+      if (attempt < BRIDGE_POST_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
+    const token = cachedBrokerToken;
+    const authenticatedUrl = new URL(url);
+    authenticatedUrl.searchParams.set("token", token);
+    let timer = null;
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), BRIDGE_FETCH_TIMEOUT_MS);
+      timer = setTimeout(() => controller.abort(), BRIDGE_FETCH_TIMEOUT_MS);
       const res = await fetch(authenticatedUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Teshi-Broker-Token": cachedBrokerToken,
+          "X-Teshi-Broker-Token": token,
         },
         body,
         signal: controller.signal,
       });
-      clearTimeout(timer);
-      if (!res.ok) {
-        throw new Error(`bridge HTTP ${res.status} for ${url}`);
+      if (res.ok) {
+        return res;
       }
-      return res;
+      if ((res.status === 401 || res.status === 403) && !rediscoveryAttempted) {
+        rediscoveryAttempted = true;
+        clearBrokerCache();
+        continue;
+      }
+      lastErr = new Error(`bridge HTTP ${res.status} for ${url}`);
     } catch (err) {
       lastErr = err;
-      if (attempt < BRIDGE_POST_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
-      }
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+    if (attempt < BRIDGE_POST_RETRIES) {
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  // A failed authenticated request must not pin the service worker to a dead
+  // broker generation. The next heartbeat will perform a fresh discovery.
+  clearBrokerCache();
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(String(lastErr));
 }
 
 async function postFrameError(error) {
@@ -2544,6 +2970,7 @@ async function postFrameError(error) {
 }
 
 const COMMANDS_PAUSING_STREAM = new Set([
+  "get_page_text",
   "get_page_snapshot",
   "highlight_selector",
   "clear_highlight",
@@ -2567,6 +2994,8 @@ async function executeCmd(msg) {
   try {
     if (cmd === "get_page_snapshot") {
       body = await getPageSnapshot(target);
+    } else if (cmd === "get_page_text") {
+      body = await getPageText(target, { selector: msg.selector, offset: msg.offset, limit: msg.limit });
     } else if (cmd === "highlight_selector") {
       body = await highlightSelector(selector, target);
     } else if (cmd === "clear_highlight") {
@@ -2666,9 +3095,11 @@ async function executeCmd(msg) {
         target,
       );
     } else if (cmd === "start_console_capture") {
-      body = await startConsoleCapture(target);
+      body = await startConsoleCapture(target, msg.capture_id);
     } else if (cmd === "stop_console_capture") {
-      body = await stopConsoleCapture(target);
+      body = await stopConsoleCapture(target, msg.capture_id);
+    } else if (cmd === "__teshi_stop_console_capture") {
+      body = await stopConsoleCapture(target, msg.capture_id);
     } else if (cmd === "start_network_capture") {
       body = await startNetworkCapture(
         target,
@@ -2756,22 +3187,31 @@ function setBadge(connected) {
 
 async function refreshBridgeCache() {
   try {
-    const res = await fetch(DISCOVERY_URL);
+    const identity = await getExtensionIdentity();
+    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions(identity));
     if (!res.ok) {
+      const failure = await res.json().catch(() => ({}));
+      clearBrokerCache();
+      if (failure.code === "broker_pairing_required") {
+        lastBridgeStatus = {
+          connected: false,
+          code: failure.code,
+          pairing_required: true,
+          origin: failure.recovery?.origin || `chrome-extension://${chrome.runtime.id}`,
+          pending: failure.recovery?.pending || null,
+          error: "Waiting for Teshi approval of this Chrome extension.",
+        };
+      } else {
+        lastBridgeStatus = {
+          connected: false,
+          code: failure.code,
+          error: failure.error || `Broker discovery failed with HTTP ${res.status}.`,
+        };
+      }
       return false;
     }
     const info = await res.json();
-    if (info.mode === "chrome" && info.project_root) {
-      cachedProjectRoot = info.project_root;
-      if (!cacheBrokerToken(info)) {
-        cachedProjectRoot = "";
-        return false;
-      }
-      if (info.extension_frame_ws_url) {
-        extensionFrameWsUrl = String(info.extension_frame_ws_url);
-      }
-      return true;
-    }
+    return applyBridgeDiscovery(info);
   } catch {
     // Bridge offline.
   }
@@ -2779,15 +3219,15 @@ async function refreshBridgeCache() {
 }
 
 async function ensureProjectRoot() {
-  if (cachedProjectRoot) {
+  if (brokerConnectionReady()) {
     return cachedProjectRoot;
   }
   await refreshBridgeCache();
-  return cachedProjectRoot;
+  return brokerConnectionReady() ? cachedProjectRoot : "";
 }
 
 async function ensureStreamForActiveTab() {
-  if (!cachedProjectRoot || streamPaused) {
+  if (!brokerConnectionReady() || streamPaused) {
     return;
   }
   const tab = await getActiveTab();
@@ -2801,9 +3241,9 @@ async function ensureStreamForActiveTab() {
   await startStreamSession({ tabId: tab.id });
 }
 
-async function heartbeatOnce(options = {}) {
+async function performHeartbeatOnce(options = {}) {
   const projectRoot = await ensureProjectRoot();
-  if (!projectRoot) {
+  if (!brokerConnectionReady()) {
     setBadge(false);
     lastBridgeStatus = {
       connected: false,
@@ -2817,28 +3257,32 @@ async function heartbeatOnce(options = {}) {
   const identity = await getExtensionIdentity();
   const optionalPermissions = await optionalPermissionStatus();
 
+  const heartbeat = {
+    schema_version: 1,
+    protocol_version: PROTOCOL_VERSION,
+    extension_version: chrome.runtime.getManifest().version,
+    extension_instance_id: identity.extension_instance_id,
+    profile_label: identity.profile_label,
+    browser: browserMetadata(),
+    features: phasedFeatures(optionalPermissions),
+    supported_actions: SUPPORTED_ACTIONS,
+    supported_operations: SUPPORTED_OPERATIONS,
+    optional_permissions: optionalPermissions,
+    url: tab?.url ?? "",
+    title: tab?.title ?? "",
+    active_window_id: tab?.windowId ?? null,
+    active_tab_id: windowTabs.active_tab_id,
+    tabs: windowTabs.tabs,
+    windows,
+    frame_error: "",
+  };
+  if (projectRoot) {
+    heartbeat.project_root = projectRoot;
+  }
+
   let res;
   try {
-    res = await bridgePost(HEARTBEAT_URL, {
-      schema_version: 1,
-      protocol_version: PROTOCOL_VERSION,
-      extension_version: chrome.runtime.getManifest().version,
-      extension_instance_id: identity.extension_instance_id,
-      profile_label: identity.profile_label,
-      browser: browserMetadata(),
-      features: phasedFeatures(optionalPermissions),
-      supported_actions: SUPPORTED_ACTIONS,
-      supported_operations: SUPPORTED_OPERATIONS,
-      optional_permissions: optionalPermissions,
-      project_root: projectRoot,
-      url: tab?.url ?? "",
-      title: tab?.title ?? "",
-      active_window_id: tab?.windowId ?? null,
-      active_tab_id: windowTabs.active_tab_id,
-      tabs: windowTabs.tabs,
-      windows,
-      frame_error: "",
-    });
+    res = await bridgePost(HEARTBEAT_URL, heartbeat);
   } catch {
     setBadge(false);
     lastBridgeStatus = {
@@ -2849,7 +3293,7 @@ async function heartbeatOnce(options = {}) {
   }
   if (!res.ok) {
     setBadge(false);
-    cachedProjectRoot = "";
+    clearBrokerCache();
     lastBridgeStatus = {
       connected: false,
       error: `Broker heartbeat failed with HTTP ${res.status}.`,
@@ -2869,7 +3313,7 @@ async function heartbeatOnce(options = {}) {
   }
   if (!data.ok) {
     setBadge(false);
-    cachedProjectRoot = "";
+    clearBrokerCache();
     lastBridgeStatus = {
       connected: false,
       error: data.error || "Broker rejected the extension heartbeat.",
@@ -2889,16 +3333,36 @@ async function heartbeatOnce(options = {}) {
 
   if (data.cmd) {
     const reply = await handleCmd(data.cmd);
-    try {
-      await bridgePost(RESPONSE_URL, reply);
-    } catch {
-      // Best-effort.
+    if (!data.cmd.suppress_response) {
+      try {
+        await bridgePost(RESPONSE_URL, reply);
+      } catch {
+        // Best-effort.
+      }
     }
   }
   if (data.stream_restart || data.force_capture || options.forceStream) {
     await startStreamSession({ force: true });
   } else {
     await ensureStreamForActiveTab();
+  }
+}
+
+async function heartbeatOnce(options = {}) {
+  if (heartbeatOncePromise) {
+    if (options.forceStream) {
+      pendingStreamRestart = true;
+    }
+    return heartbeatOncePromise;
+  }
+  const current = performHeartbeatOnce(options);
+  heartbeatOncePromise = current;
+  try {
+    return await current;
+  } finally {
+    if (heartbeatOncePromise === current) {
+      heartbeatOncePromise = null;
+    }
   }
 }
 
@@ -2979,9 +3443,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "connect_now") {
-    cachedProjectRoot = "";
-    cachedBrokerToken = "";
-    extensionFrameWsUrl = "";
+    clearBrokerCache();
     closeStreamWebSocket();
     void (async () => {
       heartbeatRunning = false;
@@ -3016,7 +3478,15 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const consoleCapture = consoleCaptureTabIds.get(tabId);
   consoleCaptureTabIds.delete(tabId);
+  if (consoleCapture) {
+    void reportConsoleTermination(
+      consoleCapture,
+      { window_id: consoleCapture.window_id, tab_id: tabId },
+      "target_closed",
+    );
+  }
   const networkState = networkCapturesByTab.get(tabId);
   if (networkState) {
     networkCapturesByTab.delete(tabId);
@@ -3029,12 +3499,21 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
+  const consoleCapture = consoleCaptureTabIds.get(source.tabId);
+  consoleCaptureTabIds.delete(source.tabId);
+  if (consoleCapture) {
+    void reportConsoleTermination(
+      consoleCapture,
+      { window_id: consoleCapture.window_id, tab_id: source.tabId },
+      "debugger_detached",
+      reason,
+    );
+  }
   const session = debuggerSessions.get(source.tabId);
   if (!session) {
     return;
   }
   debuggerSessions.delete(source.tabId);
-  consoleCaptureTabIds.delete(source.tabId);
   const networkState = networkCapturesByTab.get(source.tabId);
   if (networkState) {
     networkCapturesByTab.delete(source.tabId);
@@ -3048,6 +3527,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 if (globalThis.__TESHI_BRIDGE_TEST__) {
   globalThis.__teshiBridgeTestHooks = {
+    applyBridgeDiscovery,
     acquireDebuggerRole,
     releaseDebuggerRole,
     normalizeAllowedHostnames,
@@ -3064,6 +3544,10 @@ if (globalThis.__TESHI_BRIDGE_TEST__) {
     stopNetworkCapture,
     streamSocketNeeded,
     connectStreamWebSocket,
+    bridgePost,
+    refreshBridgeCache,
+    refreshExtensionFrameWsUrl,
+    brokerConnectionReady,
     debuggerSessions,
     networkCapturesByTab,
     networkDeliveryStates,
@@ -3071,9 +3555,21 @@ if (globalThis.__TESHI_BRIDGE_TEST__) {
     setStreamWebSocketForTest(socket) {
       streamWs = socket;
     },
+    getStreamGenerationForTest() {
+      return lastStreamGeneration;
+    },
     setBridgeContextForTest(projectRoot, wsUrl) {
       cachedProjectRoot = projectRoot;
+      cachedBrokerProjectNeutral = false;
       extensionFrameWsUrl = wsUrl;
+    },
+    getBridgeContextForTest() {
+      return {
+        projectRoot: cachedProjectRoot,
+        projectNeutral: cachedBrokerProjectNeutral,
+        tokenCached: Boolean(cachedBrokerToken),
+        extensionFrameWsUrl,
+      };
     },
   };
 }

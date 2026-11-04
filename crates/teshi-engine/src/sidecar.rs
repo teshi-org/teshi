@@ -1,5 +1,7 @@
 //! Python Playwright sidecar management.
 
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -10,6 +12,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
+use teshi_browser_broker::{
+    BrokerIdentityChallenge, BrokerIdentityProof, EndpointRecord, PrivateCredentialStore,
+    BROWSER_BROKER_IDENTITY_CHALLENGE_PATH, MAX_TRUSTED_EXTENSION_ORIGINS,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_TIMEOUT};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::{
+    ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+};
 
 use crate::{
     ensure_winapp_runtime, TeshiEngine, BROWSER_AGENT_SCHEMA_VERSION,
@@ -40,12 +55,78 @@ impl BrowserMode {
 
 /// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
 pub const CHROME_DISCOVERY_PORT: u16 = 17373;
+const CHROME_BROKER_IMPLEMENTATION_ENV: &str = "TESHI_BROWSER_BROKER_IMPLEMENTATION";
+const CHROME_BROKER_EXTENSION_ORIGINS_ENV: &str = "TESHI_BROWSER_BROKER_EXTENSION_ORIGINS";
+const MAX_DISCOVERY_HEADER_BYTES: usize = 16 * 1024;
+const MAX_DISCOVERY_BODY_BYTES: usize = 64 * 1024;
+const MAX_DISCOVERY_RESPONSE_BYTES: usize = MAX_DISCOVERY_HEADER_BYTES + MAX_DISCOVERY_BODY_BYTES;
+const MAX_DISCOVERY_FEATURES: usize = 64;
+
+#[cfg(windows)]
+const ELEVATION_CANCELLED_ERROR: u32 = 1223;
+
+/// Handle returned by `ShellExecuteExW` for an elevated sidecar process.
+///
+/// A standard `std::process::Child` cannot represent a process started through
+/// the Windows `runas` shell verb. Keeping the process handle in the daemon
+/// lets the daemon stop the elevated executor with the rest of the session.
+#[cfg(windows)]
+struct ElevatedProcess {
+    // Store the opaque Windows handle as an integer so SidecarState remains
+    // Send + Sync when shared with Teshi's watcher and terminal threads.
+    handle: isize,
+}
+
+#[cfg(not(windows))]
+struct ElevatedProcess;
+
+#[cfg(windows)]
+impl ElevatedProcess {
+    fn is_running(&self) -> bool {
+        unsafe { WaitForSingleObject(self.handle as HANDLE, 0) == WAIT_TIMEOUT }
+    }
+
+    fn terminate_if_running(&self) {
+        if self.is_running() {
+            unsafe {
+                let _ = TerminateProcess(self.handle as HANDLE, 1);
+                let _ = WaitForSingleObject(self.handle as HANDLE, 3_000);
+            }
+        }
+    }
+
+    fn stop(self) {
+        self.terminate_if_running();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ElevatedProcess {
+    fn drop(&mut self) {
+        self.terminate_if_running();
+        unsafe {
+            let _ = CloseHandle(self.handle as HANDLE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl ElevatedProcess {
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn stop(self) {}
+}
 
 /// Holds the browser sidecar child process and WebSocket URL.
 pub struct SidecarState {
     child: Mutex<Option<Child>>,
+    elevated_process: Mutex<Option<ElevatedProcess>>,
     ws_url: Mutex<Option<String>>,
     mode: Mutex<Option<BrowserMode>>,
+    elevated: Mutex<bool>,
+    lifecycle_lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for SidecarState {
@@ -59,13 +140,21 @@ impl SidecarState {
     pub fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            elevated_process: Mutex::new(None),
             ws_url: Mutex::new(None),
             mode: Mutex::new(None),
+            elevated: Mutex::new(false),
+            lifecycle_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Stops the sidecar process if running.
     pub async fn stop(&self) -> Result<()> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        self.stop_inner()
+    }
+
+    fn stop_inner(&self) -> Result<()> {
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -78,8 +167,13 @@ impl SidecarState {
             }
         }
 
+        if let Some(process) = self.elevated_process.lock().unwrap().take() {
+            process.stop();
+        }
+
         *self.ws_url.lock().unwrap() = None;
         *self.mode.lock().unwrap() = None;
+        *self.elevated.lock().unwrap() = false;
         Ok(())
     }
 
@@ -93,13 +187,26 @@ impl SidecarState {
         *self.mode.lock().unwrap()
     }
 
+    /// Returns true when the active WinApp executor was started elevated.
+    pub fn is_elevated(&self) -> bool {
+        *self.elevated.lock().unwrap()
+    }
+
     /// Returns true when the owned sidecar child still appears to be running.
     pub fn child_is_running(&self) -> bool {
-        self.child
+        let child_running = self
+            .child
             .lock()
             .unwrap()
             .as_mut()
-            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()))
+            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()));
+        let elevated_running = self
+            .elevated_process
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(ElevatedProcess::is_running);
+        child_running || elevated_running
     }
 }
 
@@ -124,8 +231,6 @@ pub struct ChromeBrokerEndpoint {
     pub broker_start_id: String,
     #[serde(default)]
     pub broker_features: Vec<String>,
-    #[serde(default)]
-    pub project_root: String,
 }
 
 /// User-facing browser startup failure.
@@ -145,34 +250,443 @@ pub fn send_sidecar_command(
     send_sidecar_command_with_timeout(ws_url, command, std::time::Duration::from_secs(10))
 }
 
-/// Sends a one-shot command and waits up to `timeout` for a typed `response` message.
+/// Sends a one-shot command and waits up to `timeout` for its terminal response.
 pub fn send_sidecar_command_with_timeout(
     ws_url: &str,
     command: serde_json::Value,
     timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
-    use tungstenite::{connect, Message};
+    use tungstenite::Message;
 
-    let (mut socket, _) = connect(ws_url).map_err(|e| e.to_string())?;
+    let expected_request_id = command
+        .get("request_id")
+        .and_then(serde_json::Value::as_str);
+    let authenticated_url = authenticated_sidecar_ws_url(ws_url)?;
+    let deadline = std::time::Instant::now() + timeout;
+    let stream = deadline_stream(&authenticated_url, deadline)?;
+    let (mut socket, _) =
+        tungstenite::client(authenticated_url.as_str(), stream).map_err(|error| {
+            sidecar_transport_error(
+                "websocket_handshake_failed: stage=handshake",
+                error,
+                &authenticated_url,
+                ws_url,
+            )
+        })?;
     socket
         .send(Message::Text(command.to_string()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            sidecar_transport_error(
+                "websocket_closed_before_command: stage=send",
+                error,
+                &authenticated_url,
+                ws_url,
+            )
+        })?;
 
-    let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        let message = socket.read().map_err(|e| e.to_string())?;
-        if let Message::Text(text) = message {
-            let payload: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| e.to_string())?;
-            if payload.get("type") == Some(&serde_json::Value::String("response".into())) {
-                return Ok(payload);
+        let message = socket.read().map_err(|error| {
+            sidecar_transport_error(
+                "websocket_closed_before_command: stage=awaiting_response",
+                error,
+                &authenticated_url,
+                ws_url,
+            )
+        })?;
+        match message {
+            Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                    format!("websocket_protocol_error: invalid JSON response: {error}")
+                })?;
+                if is_terminal_sidecar_response(&payload, expected_request_id) {
+                    // A one-shot client still owes the peer a closing frame. Dropping
+                    // TCP here makes each successful command look like a server error.
+                    let _ = socket.close(None);
+                    return Ok(payload);
+                }
             }
+            Message::Close(frame) => {
+                let close_code = frame
+                    .map(|frame| format!("{:?}", frame.code))
+                    .unwrap_or_else(|| "none".into());
+                return Err(format!(
+                    "websocket_closed_before_command: stage=awaiting_response close_code={close_code}"
+                ));
+            }
+            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
     let secs = timeout.as_secs();
     Err(format!(
-        "browser sidecar did not respond within {secs}s (CLI timeout; check extension heartbeat if using Connect Chrome)"
+        "command_timeout: stage=awaiting_response timeout_s={secs}"
     ))
+}
+
+// Refresh the socket timeout before every IO, including each handshake read.
+// A peer sending occasional bytes cannot extend the absolute command deadline.
+struct DeadlineStream {
+    stream: std::net::TcpStream,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> std::io::Result<std::time::Duration> {
+        self.deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "command_timeout"))
+    }
+}
+
+impl std::io::Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        std::io::Read::read(&mut self.stream, bytes).map_err(deadline_io_error)
+    }
+}
+
+impl std::io::Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::write(&mut self.stream, bytes).map_err(deadline_io_error)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::flush(&mut self.stream)
+    }
+}
+
+fn deadline_io_error(error: std::io::Error) -> std::io::Error {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "command_timeout")
+    } else {
+        error
+    }
+}
+
+fn deadline_stream(url: &str, deadline: std::time::Instant) -> Result<DeadlineStream, String> {
+    let parsed = url::Url::parse(url).map_err(|_| "invalid_endpoint: stage=connect".to_string())?;
+    // Sidecars are local plaintext WebSockets. Refuse unsupported transports
+    // rather than silently removing TLS from an unexpected endpoint.
+    if parsed.scheme() != "ws" {
+        return Err("unsupported_transport: stage=connect expected=ws".into());
+    }
+    let host = parsed.host_str().ok_or("invalid_endpoint: stage=connect")?;
+    let port = parsed.port().unwrap_or(80);
+    let addresses = if host == "localhost" {
+        vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))]
+    } else if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        let host = host.to_owned();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            use std::net::ToSocketAddrs;
+            let _ = sender.send(
+                (host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|items| items.collect::<Vec<_>>()),
+            );
+        });
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .map_err(|_| "command_timeout: stage=connect dns".to_string())?
+            .map_err(|_| "connection_failed: stage=connect dns".to_string())?
+    };
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or("command_timeout: stage=connect")?;
+    let mut error = "connection_failed: stage=connect no_addresses".to_owned();
+    for address in addresses {
+        let remaining = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(remaining);
+        if remaining.is_zero() {
+            return Err("command_timeout: stage=connect".into());
+        }
+        match std::net::TcpStream::connect_timeout(&address, remaining) {
+            Ok(stream) => return Ok(DeadlineStream { stream, deadline }),
+            Err(failure) => error = format!("connection_failed: stage=connect {failure}"),
+        }
+    }
+    Err(error)
+}
+
+fn sidecar_transport_error(
+    code: &str,
+    error: impl std::fmt::Display,
+    authenticated_url: &str,
+    public_url: &str,
+) -> String {
+    let detail = error.to_string().replace(authenticated_url, public_url);
+    if detail.contains("token=") {
+        return format!("{code}: broker credential redacted");
+    }
+    format!("{code}: {detail}")
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_response_closes_the_one_shot_websocket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.read().unwrap();
+            socket
+                .send(tungstenite::Message::Text(
+                    serde_json::json!({"type":"response","ok":true}).to_string(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                socket.read().unwrap(),
+                tungstenite::Message::Close(_)
+            ));
+        });
+        let response = send_sidecar_command_with_timeout(
+            &format!("ws://{address}"),
+            serde_json::json!({"cmd":"health"}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(response["ok"], true);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn sidecar_stderr_is_drained_with_a_bounded_diagnostic_tail() {
+        let mut bytes = vec![b'x'; 1024 * 1024];
+        bytes.extend_from_slice(b"final diagnostic");
+        let stderr = SidecarStderr::drain(std::io::Cursor::new(bytes));
+        stderr
+            .finished
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let detail = stderr.exit_detail();
+        assert_eq!(detail.len(), SIDECAR_STDERR_TAIL_BYTES);
+        assert!(detail.ends_with("final diagnostic"));
+    }
+
+    #[test]
+    fn stalled_handshake_and_response_obey_absolute_deadline() {
+        for handshake in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, released) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                if handshake {
+                    let _ = released.recv_timeout(Duration::from_secs(3));
+                    drop(stream);
+                } else {
+                    let mut socket = tungstenite::accept(stream).unwrap();
+                    socket.read().unwrap();
+                    let _ = released.recv_timeout(Duration::from_secs(3));
+                }
+            });
+            let start = std::time::Instant::now();
+            let error = send_sidecar_command_with_timeout(
+                &format!("ws://{address}"),
+                serde_json::json!({"cmd":"probe"}),
+                Duration::from_millis(150),
+            )
+            .unwrap_err();
+            let elapsed = start.elapsed();
+            release.send(()).unwrap();
+            server.join().unwrap();
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}: {error}");
+            assert!(
+                error.contains(if handshake {
+                    "stage=handshake"
+                } else {
+                    "stage=awaiting_response"
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_frames_do_not_extend_response_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.read().unwrap();
+            for _ in 0..30 {
+                if socket
+                    .send(tungstenite::Message::Text("{\"type\":\"frame\"}".into()))
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let start = std::time::Instant::now();
+        assert!(send_sidecar_command_with_timeout(
+            &format!("ws://{address}"),
+            serde_json::json!({"cmd":"probe"}),
+            Duration::from_millis(150)
+        )
+        .is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        server.join().unwrap();
+    }
+}
+
+/// Adds the private generation-bound credential only when a URL identifies the
+/// Rust user broker. Embedded, WinApp, and legacy Python URLs remain unchanged.
+/// The public endpoint file never contains the resulting query parameter. The
+/// returned URL is for an in-process native connection only and must never be
+/// serialized, logged, or sent to a browser/UI client.
+pub fn authenticated_sidecar_ws_url(ws_url: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(ws_url).map_err(|error| error.to_string())?;
+    if parsed.query_pairs().any(|(name, _)| name == "token") {
+        return Ok(ws_url.to_owned());
+    }
+
+    // Explicit selection enables strict endpoint diagnostics for this mode-agnostic
+    // helper. Default Chrome endpoints are still authenticated when matched below;
+    // making strictness the default would also reject Embedded and WinApp URLs.
+    let rust_selected = std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV)
+        .is_ok_and(|value| value.eq_ignore_ascii_case("rust"));
+    let endpoint_path = match chrome_broker_endpoint_path() {
+        Ok(path) => path,
+        Err(error) if rust_selected => {
+            return Err(format!("broker_endpoint_unavailable: {}", error.message));
+        }
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    let state_dir = match chrome_broker_state_dir() {
+        Ok(path) => path,
+        Err(error) if rust_selected => {
+            return Err(format!(
+                "broker_private_credential_unavailable: {}",
+                error.message
+            ));
+        }
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    authenticated_sidecar_ws_url_from_paths(ws_url, rust_selected, &endpoint_path, &state_dir)
+}
+
+fn authenticated_sidecar_ws_url_from_paths(
+    ws_url: &str,
+    rust_selected: bool,
+    endpoint_path: &Path,
+    state_dir: &Path,
+) -> Result<String, String> {
+    let parsed = url::Url::parse(ws_url).map_err(|error| error.to_string())?;
+    let endpoint_text = match std::fs::read_to_string(endpoint_path) {
+        Ok(text) => text,
+        Err(error) if rust_selected => {
+            return Err(format!(
+                "broker_endpoint_unavailable: cannot read Rust Chrome broker endpoint ({error})"
+            ));
+        }
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    let endpoint: ChromeBrokerEndpoint = match serde_json::from_str(&endpoint_text) {
+        Ok(endpoint) => endpoint,
+        Err(error) if rust_selected => {
+            return Err(format!(
+                "broker_endpoint_invalid: Rust Chrome broker endpoint is not valid JSON ({error})"
+            ));
+        }
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    if endpoint.ws_url != ws_url {
+        if rust_selected {
+            return Err(
+                "broker_endpoint_mismatch: Rust Chrome broker endpoint does not match the active WebSocket"
+                    .into(),
+            );
+        }
+        return Ok(ws_url.to_owned());
+    }
+    if endpoint.mode != "chrome" {
+        if rust_selected {
+            return Err("broker_endpoint_mismatch: Rust broker endpoint is not Chrome mode".into());
+        }
+        return Ok(ws_url.to_owned());
+    }
+    if !endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        if rust_selected {
+            return Err(
+                "broker_transport_incompatible: Rust Chrome broker does not advertise transport.v1"
+                    .into(),
+            );
+        }
+        return Ok(ws_url.to_owned());
+    }
+
+    let credential_store = PrivateCredentialStore::new(state_dir);
+    let public_record = EndpointRecord {
+        schema_version: endpoint.schema_version,
+        protocol_version: endpoint.protocol_version,
+        mode: endpoint.mode.clone(),
+        ws_url: endpoint.ws_url.clone(),
+        discovery_url: endpoint.discovery_url.clone(),
+        extension_frame_ws_url: endpoint.extension_frame_ws_url.clone(),
+        broker_pid: endpoint.broker_pid,
+        broker_start_id: endpoint.broker_start_id.clone(),
+        broker_features: endpoint.broker_features.clone(),
+        bridge: "rust".into(),
+    };
+    let credential = credential_store
+        .read_for_endpoint(&public_record)
+        .map_err(|error| {
+            format!(
+                "broker_private_credential_missing: Rust Chrome broker credential is unavailable: {}",
+                error.message
+            )
+        })?;
+    verify_rust_broker_identity(&endpoint, &credential, &public_record)
+        .map_err(|error| format!("broker_identity_mismatch: {}", error.message))?;
+    let mut authenticated = parsed;
+    authenticated
+        .query_pairs_mut()
+        .append_pair("token", credential.token());
+    Ok(authenticated.to_string())
+}
+
+fn is_terminal_sidecar_response(
+    payload: &serde_json::Value,
+    expected_request_id: Option<&str>,
+) -> bool {
+    let request_matches = expected_request_id.is_none_or(|expected| {
+        payload
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected)
+    });
+    if payload.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+        // Existing WinApp/embedded sidecars may omit request_id on typed
+        // responses; preserve that response contract while still rejecting a
+        // typed packet carrying a different explicit request ID.
+        return payload.get("request_id").is_none() || request_matches;
+    }
+    payload.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        && expected_request_id.is_some()
+        && request_matches
 }
 
 use crate::venv::{
@@ -227,30 +741,116 @@ pub fn fetch_chrome_broker_endpoint(port: u16) -> Result<ChromeBrokerEndpoint, B
                 hint: None,
             })?;
     stream
-        .write_all(b"GET /v1/bridge HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .and_then(|()| stream.set_write_timeout(Some(Duration::from_millis(750))))
+        .map_err(|error| BrowserError {
+            message: format!("cannot bound broker discovery I/O: {error}"),
+            hint: None,
+        })?;
+    stream
+        .write_all(
+            format!(
+                "GET /v1/bridge HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
         .map_err(|e| BrowserError {
             message: e.to_string(),
             hint: None,
         })?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| BrowserError {
-        message: e.to_string(),
-        hint: None,
-    })?;
-    let text = String::from_utf8_lossy(&buf);
-    if !text.contains("200 OK") {
+    stream
+        .take((MAX_DISCOVERY_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| BrowserError {
+            message: format!("failed to read bounded broker discovery response: {e}"),
+            hint: None,
+        })?;
+    if buf.len() > MAX_DISCOVERY_RESPONSE_BYTES {
         return Err(BrowserError {
-            message: "discovery endpoint did not return bridge info".into(),
+            message: "discovery response exceeds its configured size limit".into(),
             hint: None,
         });
     }
-    let body = text
-        .split("\r\n\r\n")
-        .nth(1)
-        .or_else(|| text.split("\n\n").nth(1))
-        .unwrap_or("")
-        .trim();
-    let payload: serde_json::Value = serde_json::from_str(body).map_err(|e| BrowserError {
+    let header_end = buf
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| BrowserError {
+            message: "discovery response has no complete HTTP header block".into(),
+            hint: None,
+        })?;
+    if header_end > MAX_DISCOVERY_HEADER_BYTES {
+        return Err(BrowserError {
+            message: "discovery response headers exceed their configured limit".into(),
+            hint: None,
+        });
+    }
+    let headers = std::str::from_utf8(&buf[..header_end]).map_err(|_| BrowserError {
+        message: "discovery response headers are not valid HTTP text".into(),
+        hint: None,
+    })?;
+    let mut lines = headers.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    let mut status_parts = status_line.split_ascii_whitespace();
+    if !matches!(status_parts.next(), Some("HTTP/1.0" | "HTTP/1.1"))
+        || status_parts.next() != Some("200")
+    {
+        return Err(BrowserError {
+            message: "discovery endpoint did not return HTTP 200".into(),
+            hint: None,
+        });
+    }
+    let mut content_length = None;
+    let mut content_type = None;
+    let mut transfer_encoding = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(BrowserError {
+                message: "discovery response contains a malformed HTTP header".into(),
+                hint: None,
+            });
+        };
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(BrowserError {
+                        message: "discovery response contains duplicate Content-Length headers"
+                            .into(),
+                        hint: None,
+                    });
+                }
+                content_length = Some(value.trim().parse::<usize>().map_err(|_| BrowserError {
+                    message: "discovery response has an invalid Content-Length".into(),
+                    hint: None,
+                })?);
+            }
+            "content-type" => content_type = Some(value.trim().to_ascii_lowercase()),
+            "transfer-encoding" => transfer_encoding = Some(value.trim().to_ascii_lowercase()),
+            _ => {}
+        }
+    }
+    let body_start = header_end + 4;
+    let body = &buf[body_start..];
+    if body.len() > MAX_DISCOVERY_BODY_BYTES
+        || content_length.is_some_and(|length| length > MAX_DISCOVERY_BODY_BYTES)
+    {
+        return Err(BrowserError {
+            message: "discovery response body exceeds its configured size limit".into(),
+            hint: None,
+        });
+    }
+    if content_length.is_some_and(|length| length != body.len())
+        || transfer_encoding.is_some()
+        || content_type
+            .as_deref()
+            .is_none_or(|value| !value.starts_with("application/json"))
+    {
+        return Err(BrowserError {
+            message: "discovery response body or content headers are invalid".into(),
+            hint: None,
+        });
+    }
+    let payload: serde_json::Value = serde_json::from_slice(body).map_err(|e| BrowserError {
         message: format!("invalid discovery JSON: {e}"),
         hint: None,
     })?;
@@ -288,50 +888,235 @@ pub fn fetch_chrome_broker_endpoint(port: u16) -> Result<ChromeBrokerEndpoint, B
                 hint: None,
             })
     };
-    Ok(ChromeBrokerEndpoint {
-        schema_version: u16::try_from(number("schema_version")?).map_err(|_| BrowserError {
-            message: "invalid broker schema_version".into(),
-            hint: None,
-        })?,
-        protocol_version: u16::try_from(number("protocol_version")?).map_err(|_| BrowserError {
+    let extension_frame_ws_url = string("extension_frame_ws_url")?;
+    validate_discovery_ws_urls(ws_url, &extension_frame_ws_url)?;
+    let schema_version = u16::try_from(number("schema_version")?).map_err(|_| BrowserError {
+        message: "invalid broker schema_version".into(),
+        hint: None,
+    })?;
+    let protocol_version =
+        u16::try_from(number("protocol_version")?).map_err(|_| BrowserError {
             message: "invalid broker protocol_version".into(),
             hint: None,
-        })?,
+        })?;
+    let broker_pid = u32::try_from(number("broker_pid")?).map_err(|_| BrowserError {
+        message: "invalid broker_pid".into(),
+        hint: None,
+    })?;
+    if schema_version == 0 || protocol_version == 0 || broker_pid == 0 {
+        return Err(BrowserError {
+            message: "discovery returned an invalid broker identity".into(),
+            hint: None,
+        });
+    }
+    Ok(ChromeBrokerEndpoint {
+        schema_version,
+        protocol_version,
         mode: "chrome".into(),
         ws_url: ws_url.to_string(),
         discovery_url: format!("http://127.0.0.1:{port}/v1/bridge"),
-        extension_frame_ws_url: string("extension_frame_ws_url")?,
-        broker_pid: u32::try_from(number("broker_pid")?).map_err(|_| BrowserError {
-            message: "invalid broker_pid".into(),
-            hint: None,
-        })?,
-        broker_start_id: string("broker_start_id")?,
-        broker_features: payload
-            .get("broker_features")
-            .and_then(|value| value.as_array())
-            .ok_or_else(|| BrowserError {
-                message: "discovery response missing broker_features".into(),
-                hint: None,
-            })?
-            .iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect(),
-        project_root: payload
-            .get("project_root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        extension_frame_ws_url,
+        broker_pid,
+        broker_start_id: {
+            let start_id = string("broker_start_id")?;
+            if start_id.len() > 128 {
+                return Err(BrowserError {
+                    message: "discovery broker_start_id exceeds its size limit".into(),
+                    hint: None,
+                });
+            }
+            start_id
+        },
+        broker_features: {
+            let features = payload
+                .get("broker_features")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| BrowserError {
+                    message: "discovery response missing broker_features".into(),
+                    hint: None,
+                })?;
+            if features.len() > MAX_DISCOVERY_FEATURES {
+                return Err(BrowserError {
+                    message: "discovery broker_features exceeds its count limit".into(),
+                    hint: None,
+                });
+            }
+            features
+                .iter()
+                .map(|value| {
+                    let feature = value.as_str().ok_or_else(|| BrowserError {
+                        message: "discovery broker_features contains a non-string value".into(),
+                        hint: None,
+                    })?;
+                    if feature.is_empty() || feature.len() > 128 {
+                        return Err(BrowserError {
+                            message: "discovery broker feature name is invalid".into(),
+                            hint: None,
+                        });
+                    }
+                    Ok(feature.to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        },
     })
 }
 
-fn read_child_stderr(child: &mut Child) -> String {
-    if let Some(mut stderr) = child.stderr.take() {
-        let mut buf = Vec::new();
-        if stderr.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-            return String::from_utf8_lossy(&buf).trim().to_string();
+/// Write the project-local compatibility pointer for a shared Chrome broker.
+/// This file is intentionally limited to public broker identity and contains
+/// neither project identity nor private authentication state.
+pub fn write_chrome_broker_endpoint(
+    project_root: &Path,
+    endpoint: &ChromeBrokerEndpoint,
+) -> Result<(), BrowserError> {
+    for (label, value) in [
+        ("ws_url", endpoint.ws_url.as_str()),
+        ("discovery_url", endpoint.discovery_url.as_str()),
+        (
+            "extension_frame_ws_url",
+            endpoint.extension_frame_ws_url.as_str(),
+        ),
+    ] {
+        let parsed = url::Url::parse(value).map_err(|_| BrowserError {
+            message: format!("public broker endpoint contains an invalid {label}"),
+            hint: None,
+        })?;
+        if parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(BrowserError {
+                message: format!("public broker endpoint {label} contains private URL state"),
+                hint: Some("Broker credentials remain in the private per-user state file.".into()),
+            });
         }
     }
-    String::new()
+    let path = project_root.join(".teshi").join("cdp-endpoint.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| BrowserError {
+            message: format!(
+                "cannot create endpoint directory {}: {error}",
+                parent.display()
+            ),
+            hint: None,
+        })?;
+    }
+    let bridge = if endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        "rust"
+    } else {
+        "python"
+    };
+    let payload = serde_json::json!({
+        "schema_version": endpoint.schema_version,
+        "protocol_version": endpoint.protocol_version,
+        "mode": endpoint.mode,
+        "ws_url": endpoint.ws_url,
+        "page_url": "about:blank",
+        "bridge": bridge,
+        "broker_pid": endpoint.broker_pid,
+        "broker_start_id": endpoint.broker_start_id,
+        "broker_features": endpoint.broker_features,
+        "discovery_url": endpoint.discovery_url,
+        "extension_frame_ws_url": endpoint.extension_frame_ws_url,
+    });
+    crate::fs_util::write_atomic(&path, &payload).map_err(|error| BrowserError {
+        message: format!("cannot write endpoint {}: {error}", path.display()),
+        hint: None,
+    })
+}
+
+fn validate_discovery_ws_urls(
+    ws_url: &str,
+    extension_frame_ws_url: &str,
+) -> Result<(), BrowserError> {
+    let invalid_endpoint = || BrowserError {
+        message: "discovery returned a non-loopback or malformed WebSocket endpoint".into(),
+        hint: None,
+    };
+    let command = url::Url::parse(ws_url).map_err(|_| invalid_endpoint())?;
+    let frames = url::Url::parse(extension_frame_ws_url).map_err(|_| invalid_endpoint())?;
+    let is_local_ws = |url: &url::Url| {
+        url.scheme() == "ws"
+            && url.host_str() == Some("127.0.0.1")
+            && url.port().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+    };
+    if !is_local_ws(&command)
+        || !is_local_ws(&frames)
+        || command.path() != "/"
+        || frames.path() != "/extension/frames"
+        || command.host_str() != frames.host_str()
+        || command.port() != frames.port()
+        || command.query() != frames.query()
+        || !valid_broker_ws_query(command.query())
+    {
+        return Err(invalid_endpoint());
+    }
+    Ok(())
+}
+
+fn valid_broker_ws_query(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return true;
+    };
+    let Some(token) = query.strip_prefix("token=") else {
+        return false;
+    };
+    token.len() >= 32
+        && token.len() <= 512
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+const SIDECAR_STDERR_TAIL_BYTES: usize = 16 * 1024;
+
+struct SidecarStderr {
+    tail: Arc<Mutex<Vec<u8>>>,
+    finished: std::sync::mpsc::Receiver<()>,
+}
+
+impl SidecarStderr {
+    fn drain(mut reader: impl Read + Send + 'static) -> Self {
+        let tail = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&tail);
+        let (done, finished) = std::sync::mpsc::channel();
+        // Keep draining for the child's entire lifetime: a full stderr pipe can
+        // block Python's event loop even when native execution is isolated.
+        std::thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        let mut tail = output.lock().unwrap();
+                        tail.extend_from_slice(&chunk[..count]);
+                        let excess = tail.len().saturating_sub(SIDECAR_STDERR_TAIL_BYTES);
+                        tail.drain(..excess);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = done.send(());
+        });
+        Self { tail, finished }
+    }
+
+    fn exit_detail(&self) -> String {
+        // An exited child may leave inherited handles in descendants. Bound the
+        // wait for trailing diagnostics rather than waiting indefinitely for EOF.
+        let _ = self.finished.recv_timeout(Duration::from_millis(100));
+        String::from_utf8_lossy(&self.tail.lock().unwrap())
+            .trim()
+            .to_owned()
+    }
 }
 
 /// Read the first line from the child's stdout and parse it as a port number.
@@ -340,7 +1125,11 @@ fn read_child_stderr(child: &mut Child) -> String {
 ///   - JSON readiness object: `{"ready": true, "ws_url": "ws://127.0.0.1:54321", ...}` (winapp mode)
 ///
 /// Uses a background thread so the main thread can poll for child exit and timeout.
-fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u16, BrowserError> {
+fn read_port_from_child_stdout(
+    child: &mut Child,
+    stderr: &SidecarStderr,
+    timeout: Duration,
+) -> Result<u16, BrowserError> {
     let mut stdout = child.stdout.take().expect("stdout must be piped");
     let deadline = Instant::now() + timeout;
 
@@ -358,13 +1147,7 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
         // 2) JSON readiness object (winapp mode): extract port from ws_url
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(ws_url) = v.get("ws_url").and_then(|u| u.as_str()) {
-                if let Some(port) = ws_url
-                    .rsplit(':')
-                    .next()
-                    .and_then(|p| p.parse::<u16>().ok())
-                {
-                    return Some(port);
-                }
+                return ws_url_to_addr(ws_url).ok().map(|address| address.port());
             }
         }
         None
@@ -381,7 +1164,7 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
             };
         }
         if let Ok(Some(status)) = child.try_wait() {
-            let detail = read_child_stderr(child);
+            let detail = stderr.exit_detail();
             let message = if detail.is_empty() {
                 format!("Browser sidecar exited during startup (status: {status}).")
             } else {
@@ -404,6 +1187,13 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
     }
 }
 
+/// Return the sidecar WebSocket coordinate without query credentials for
+/// runtime events. The full authenticated URL remains available only through
+/// the direct start response and the private project endpoint file.
+fn public_event_ws_url(ws_url: &str) -> String {
+    ws_url.split(['?', '#']).next().unwrap_or(ws_url).to_owned()
+}
+
 fn chrome_broker_state_dir() -> Result<PathBuf, BrowserError> {
     let base = dirs::data_local_dir()
         .or_else(dirs::cache_dir)
@@ -419,6 +1209,7 @@ pub fn chrome_broker_endpoint_path() -> Result<PathBuf, BrowserError> {
     Ok(chrome_broker_state_dir()?.join("endpoint.json"))
 }
 
+#[cfg(test)]
 fn validate_chrome_broker_compatibility(
     endpoint: ChromeBrokerEndpoint,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
@@ -455,23 +1246,721 @@ fn validate_chrome_broker_compatibility(
     Ok(endpoint)
 }
 
-fn discover_compatible_chrome_broker() -> Result<Option<ChromeBrokerEndpoint>, BrowserError> {
-    if !port_is_open(CHROME_DISCOVERY_PORT) {
+/// Confirm that a Rust listener matches both the private process generation and
+/// the bearer secret written by that exact process. Public metadata alone is not
+/// sufficient to reuse a listener on the fixed discovery port.
+fn validate_rust_transport_broker(
+    endpoint: &ChromeBrokerEndpoint,
+    credential_store: &PrivateCredentialStore,
+    expected_extension_origins: Option<&[String]>,
+) -> Result<(), BrowserError> {
+    if !endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        return Err(BrowserError {
+            message: "Rust Chrome broker does not advertise the compatible transport.v1 feature."
+                .into(),
+            hint: Some("The running listener was left untouched.".into()),
+        });
+    }
+    let public_record = EndpointRecord {
+        schema_version: endpoint.schema_version,
+        protocol_version: endpoint.protocol_version,
+        mode: endpoint.mode.clone(),
+        ws_url: endpoint.ws_url.clone(),
+        discovery_url: endpoint.discovery_url.clone(),
+        extension_frame_ws_url: endpoint.extension_frame_ws_url.clone(),
+        broker_pid: endpoint.broker_pid,
+        broker_start_id: endpoint.broker_start_id.clone(),
+        broker_features: endpoint.broker_features.clone(),
+        bridge: "rust".into(),
+    };
+    let credential = credential_store
+        .read_for_endpoint(&public_record)
+        .map_err(|error| BrowserError {
+            message: format!(
+                "Rust Chrome broker identity did not match its private credential: {}",
+                error.message
+            ),
+            hint: Some("The listener was left untouched; do not reuse stale broker state.".into()),
+        })?;
+    if let Some(expected) = expected_extension_origins {
+        let mut expected = expected.to_vec();
+        expected.sort();
+        if credential.trusted_extension_origins() != expected {
+            return Err(BrowserError {
+                message: "Rust Chrome broker is paired with a different extension identity set."
+                    .into(),
+                hint: Some(
+                    "The listener was left untouched; review the configured extension IDs.".into(),
+                ),
+            });
+        }
+    }
+    verify_rust_broker_identity(endpoint, &credential, &public_record)
+}
+
+fn verify_rust_broker_identity(
+    endpoint: &ChromeBrokerEndpoint,
+    credential: &teshi_browser_broker::PrivateBrokerCredential,
+    public_record: &EndpointRecord,
+) -> Result<(), BrowserError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use uuid::Uuid;
+
+    validate_discovery_ws_urls(&endpoint.ws_url, &endpoint.extension_frame_ws_url)?;
+    if url::Url::parse(&endpoint.ws_url).is_ok_and(|url| url.query().is_some())
+        || url::Url::parse(&endpoint.extension_frame_ws_url).is_ok_and(|url| url.query().is_some())
+    {
+        return Err(BrowserError {
+            message: "Rust Chrome broker public endpoint must not contain a token".into(),
+            hint: None,
+        });
+    }
+    let mut identity_url = url::Url::parse(&endpoint.discovery_url).map_err(|_| BrowserError {
+        message: "Rust Chrome broker discovery URL is malformed".into(),
+        hint: None,
+    })?;
+    if identity_url.scheme() != "http"
+        || identity_url.host_str() != Some("127.0.0.1")
+        || identity_url.path() != "/v1/bridge"
+        || identity_url.query().is_some()
+        || identity_url.fragment().is_some()
+        || !identity_url.username().is_empty()
+        || identity_url.password().is_some()
+    {
+        return Err(BrowserError {
+            message: "Rust Chrome broker identity endpoint is not a plain loopback URL".into(),
+            hint: None,
+        });
+    }
+    identity_url.set_path(BROWSER_BROKER_IDENTITY_CHALLENGE_PATH);
+    let mut nonce_bytes = [0u8; 32];
+    nonce_bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    nonce_bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    let challenge = BrokerIdentityChallenge {
+        nonce: URL_SAFE_NO_PAD.encode(nonce_bytes),
+    };
+    let port = identity_url.port().ok_or_else(|| BrowserError {
+        message: "Rust Chrome broker discovery URL is missing its listener port".into(),
+        hint: None,
+    })?;
+    let address: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_millis(500)).map_err(|_| {
+            BrowserError {
+                message: "Rust Chrome broker did not answer its identity challenge".into(),
+                hint: Some("The listener was left untouched.".into()),
+            }
+        })?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .and_then(|()| stream.set_write_timeout(Some(Duration::from_millis(750))))
+        .map_err(|_| BrowserError {
+            message: "cannot bound Rust broker identity verification I/O".into(),
+            hint: None,
+        })?;
+    let request_body = serde_json::to_vec(&challenge).map_err(|_| BrowserError {
+        message: "cannot serialize Rust broker identity challenge".into(),
+        hint: None,
+    })?;
+    write!(
+        stream,
+        "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        identity_url.path(),
+        request_body.len()
+    )
+    .and_then(|()| stream.write_all(&request_body))
+    .map_err(|_| BrowserError {
+        message: "cannot send bounded Rust broker identity challenge".into(),
+        hint: Some("The listener was left untouched.".into()),
+    })?;
+    let mut response = Vec::new();
+    stream
+        .take((MAX_DISCOVERY_HEADER_BYTES + 4 * 1024 + 1) as u64)
+        .read_to_end(&mut response)
+        .map_err(|_| BrowserError {
+            message: "cannot read bounded Rust Chrome broker identity response".into(),
+            hint: Some("The listener was left untouched.".into()),
+        })?;
+    if response.len() > MAX_DISCOVERY_HEADER_BYTES + 4 * 1024 {
+        return Err(BrowserError {
+            message: "Rust Chrome broker identity response exceeds its size limit".into(),
+            hint: Some("The listener was left untouched.".into()),
+        });
+    }
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .filter(|header_end| *header_end <= MAX_DISCOVERY_HEADER_BYTES)
+        .ok_or_else(|| BrowserError {
+            message: "Rust Chrome broker identity response has malformed headers".into(),
+            hint: Some("The listener was left untouched.".into()),
+        })?;
+    let headers = std::str::from_utf8(&response[..header_end]).map_err(|_| BrowserError {
+        message: "Rust Chrome broker identity response headers are malformed".into(),
+        hint: Some("The listener was left untouched.".into()),
+    })?;
+    let mut lines = headers.split("\r\n");
+    if lines.next().is_none_or(|line| {
+        let mut parts = line.split_ascii_whitespace();
+        !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) || parts.next() != Some("200")
+    }) {
+        return Err(BrowserError {
+            message: "Rust Chrome broker identity response is not successful".into(),
+            hint: Some("The listener was left untouched.".into()),
+        });
+    }
+    let mut content_length = None;
+    let mut content_type = None;
+    let mut transfer_encoding = false;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or_else(|| BrowserError {
+            message: "Rust Chrome broker identity response has malformed headers".into(),
+            hint: Some("The listener was left untouched.".into()),
+        })?;
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(BrowserError {
+                        message: "Rust Chrome broker identity response has duplicate lengths"
+                            .into(),
+                        hint: Some("The listener was left untouched.".into()),
+                    });
+                }
+                content_length = Some(value.trim().parse::<usize>().map_err(|_| BrowserError {
+                    message: "Rust Chrome broker identity response length is invalid".into(),
+                    hint: Some("The listener was left untouched.".into()),
+                })?);
+            }
+            "content-type" => content_type = Some(value.trim().to_ascii_lowercase()),
+            "transfer-encoding" => transfer_encoding = true,
+            _ => {}
+        }
+    }
+    let body = &response[header_end + 4..];
+    if body.len() > 4 * 1024
+        || content_length != Some(body.len())
+        || transfer_encoding
+        || content_type
+            .as_deref()
+            .is_none_or(|value| !value.starts_with("application/json"))
+    {
+        return Err(BrowserError {
+            message: "Rust Chrome broker identity response is invalid".into(),
+            hint: Some("The listener was left untouched.".into()),
+        });
+    }
+    let proof: BrokerIdentityProof = serde_json::from_slice(body).map_err(|_| BrowserError {
+        message: "Rust Chrome broker identity response is malformed".into(),
+        hint: Some("The listener was left untouched.".into()),
+    })?;
+    credential
+        .verify_identity_proof(&challenge, &proof, public_record)
+        .map_err(|_| BrowserError {
+            message: "Rust Chrome broker did not prove possession of its private credential".into(),
+            hint: Some("The listener was left untouched.".into()),
+        })
+}
+
+fn discover_rust_broker_at(
+    port: u16,
+    state_dir: &Path,
+    trusted_extension_origins: &[String],
+    require_full_chrome_features: bool,
+) -> Result<Option<ChromeBrokerEndpoint>, BrowserError> {
+    if !port_is_open(port) {
         return Ok(None);
     }
-    let endpoint = fetch_chrome_broker_endpoint(CHROME_DISCOVERY_PORT).map_err(|error| {
-        BrowserError {
+    let endpoint = fetch_chrome_broker_endpoint(port).map_err(|error| BrowserError {
+        message: format!(
+            "Port {port} is occupied by a listener that is not a verifiable Rust Chrome broker: {}",
+            error.message
+        ),
+        hint: Some("The listener was left untouched.".into()),
+    })?;
+    if endpoint.schema_version != BROWSER_AGENT_SCHEMA_VERSION
+        || endpoint.protocol_version != BROWSER_BROKER_PROTOCOL_VERSION
+    {
+        return Err(BrowserError {
+            message: "The Rust Chrome transport broker protocol is incompatible.".into(),
+            hint: Some("The existing listener was left untouched.".into()),
+        });
+    }
+    if require_full_chrome_features
+        && [
+            "transport.v1",
+            "p0.control",
+            "p1.observability_artifacts",
+            "p1.filtered_network_capture",
+            "p1.network_batch_transport",
+        ]
+        .iter()
+        .any(|required| {
+            !endpoint
+                .broker_features
+                .iter()
+                .any(|feature| feature == required)
+        })
+    {
+        return Err(BrowserError {
+            message: "The Rust Chrome broker does not advertise the required control and observability features.".into(),
+            hint: Some("The existing listener was left untouched; stop it explicitly before retrying.".into()),
+        });
+    }
+    let credential_store = PrivateCredentialStore::new(state_dir);
+    validate_rust_transport_broker(
+        &endpoint,
+        &credential_store,
+        Some(trusted_extension_origins),
+    )?;
+    Ok(Some(endpoint))
+}
+
+fn prepare_private_broker_state_dir(path: &Path) -> Result<(), BrowserError> {
+    std::fs::create_dir_all(path).map_err(|error| BrowserError {
+        message: format!("cannot create Rust broker state directory: {error}"),
+        hint: None,
+    })?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| BrowserError {
+        message: format!("cannot inspect Rust broker state directory: {error}"),
+        hint: None,
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(BrowserError {
+            message: "Rust broker state path must be a real directory.".into(),
+            hint: Some("The existing path was left untouched.".into()),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| BrowserError {
+                message: format!("cannot restrict Rust broker state directory: {error}"),
+                hint: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn open_private_broker_diagnostic_log(path: &Path) -> Result<std::fs::File, BrowserError> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(BrowserError {
+                message: "Rust broker diagnostic path must be a regular file.".into(),
+                hint: Some("The existing path was left untouched.".into()),
+            });
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(|error| BrowserError {
+        message: format!("cannot open Rust broker diagnostic log: {error}"),
+        hint: None,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| BrowserError {
+                message: format!("cannot restrict Rust broker diagnostic log: {error}"),
+                hint: None,
+            })?;
+    }
+    Ok(file)
+}
+
+/// Start or reuse an internal Rust broker process.
+///
+/// The caller may supply zero or more exact paired extension origins; no
+/// wildcard or arbitrary-ID fallback is provided. Feature flags are explicit so the
+/// transport-only migration probe cannot accidentally advertise the full
+/// Chrome control surface.
+#[doc(hidden)]
+fn ensure_rust_broker_at(
+    state_dir: &Path,
+    teshi_executable: &Path,
+    trusted_extension_origins: &[String],
+    discovery_port: u16,
+    readiness_timeout: Duration,
+    enable_p0_control: bool,
+    enable_p1_observability: bool,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    if discovery_port == 0
+        || trusted_extension_origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
+        || trusted_extension_origins
+            .iter()
+            .any(|origin| !valid_chrome_extension_origin(origin))
+        || trusted_extension_origins
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != trusted_extension_origins.len()
+    {
+        return Err(BrowserError {
+            message: "Rust transport startup requires a fixed port and at most the bounded set of unique exact Chrome extension origins.".into(),
+            hint: None,
+        });
+    }
+    if !teshi_executable.is_file() {
+        return Err(BrowserError {
             message: format!(
-                "Port {CHROME_DISCOVERY_PORT} is occupied by a service that is not a compatible Teshi Chrome broker: {}",
+                "Teshi CLI executable is unavailable at {}",
+                teshi_executable.display()
+            ),
+            hint: Some(
+                "Install teshi beside the application that starts Chrome automation.".into(),
+            ),
+        });
+    }
+
+    let state_dir = state_dir.to_path_buf();
+    prepare_private_broker_state_dir(&state_dir)?;
+    let executable = teshi_executable.to_path_buf();
+    let stderr_path = state_dir.join("broker.stderr.log");
+    let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let mut discover = {
+        let child_slot = Arc::clone(&child_slot);
+        let state_dir = state_dir.clone();
+        let stderr_path = stderr_path.clone();
+        move || {
+            let child_status = {
+                let mut slot = child_slot.lock().unwrap();
+                match slot.as_mut() {
+                    Some(child) => child.try_wait().map_err(|error| BrowserError {
+                        message: format!("cannot inspect the Rust broker child process: {error}"),
+                        hint: Some("The listener was not terminated.".into()),
+                    })?,
+                    None => None,
+                }
+            };
+            if let Some(status) = child_status {
+                return Err(BrowserError {
+                    message: format!("Rust browser broker exited during startup ({status})."),
+                    hint: Some(format!(
+                        "Inspect {} for startup diagnostics.",
+                        stderr_path.display()
+                    )),
+                });
+            }
+            discover_rust_broker_at(
+                discovery_port,
+                &state_dir,
+                trusted_extension_origins,
+                enable_p0_control && enable_p1_observability,
+            )
+        }
+    };
+    let mut start = {
+        let child_slot = Arc::clone(&child_slot);
+        let state_dir = state_dir.clone();
+        let executable = executable.clone();
+        let stderr_path = stderr_path.clone();
+        move || {
+            let stderr = open_private_broker_diagnostic_log(&stderr_path)?;
+            let mut command = Command::new(&executable);
+            command
+                .arg("--browser-broker-internal")
+                .arg("--state-dir")
+                .arg(&state_dir)
+                .arg("--discovery-port")
+                .arg(discovery_port.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(stderr));
+            for origin in trusted_extension_origins {
+                command.arg("--trusted-extension-origin").arg(origin);
+            }
+            if enable_p0_control {
+                command.arg("--enable-p0-control");
+            }
+            if enable_p1_observability {
+                command.arg("--enable-p1-observability");
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const DETACHED_PROCESS: u32 = 0x00000008;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+                command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let child = command.spawn().map_err(|error| BrowserError {
+                message: format!("cannot start the internal Rust Chrome broker: {error}"),
+                hint: Some(format!(
+                    "Inspect {} for startup diagnostics.",
+                    stderr_path.display()
+                )),
+            })?;
+            *child_slot.lock().unwrap() = Some(child);
+            Ok(())
+        }
+    };
+    let endpoint =
+        coordinate_broker_start(&state_dir, readiness_timeout, &mut discover, &mut start)?;
+    persist_user_broker_endpoint(&endpoint)?;
+    Ok(endpoint)
+}
+
+fn valid_chrome_extension_origin(origin: &str) -> bool {
+    let Some(id) = origin.strip_prefix("chrome-extension://") else {
+        return false;
+    };
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+fn parse_configured_chrome_extension_origins(raw: &str) -> Result<Vec<String>, BrowserError> {
+    let mut origins: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_owned)
+        .collect();
+    origins.sort();
+    if origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
+        || origins
+            .iter()
+            .any(|origin| !valid_chrome_extension_origin(origin))
+        || origins.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(BrowserError {
+            message: format!(
+                "{CHROME_BROKER_EXTENSION_ORIGINS_ENV} must contain 0-{MAX_TRUSTED_EXTENSION_ORIGINS} unique exact chrome-extension:// origins."
+            ),
+            hint: Some(
+                "Copy the extension ID shown by teshi-bridge and pair it explicitly; wildcards are not supported."
+                    .into(),
+            ),
+        });
+    }
+    Ok(origins)
+}
+
+fn configured_chrome_extension_origins() -> Result<Vec<String>, BrowserError> {
+    match std::env::var(CHROME_BROKER_EXTENSION_ORIGINS_ENV) {
+        Ok(raw) => parse_configured_chrome_extension_origins(&raw),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+fn effective_chrome_extension_origins() -> Result<Vec<String>, BrowserError> {
+    let state_dir = chrome_broker_state_dir()?;
+    let durable = teshi_browser_broker::PairingStore::new(state_dir)
+        .load()
+        .map_err(|error| BrowserError {
+            message: format!(
+                "cannot load durable Chrome pairing state: {}",
                 error.message
             ),
             hint: Some(
-                "The listener was not terminated. Stop it explicitly or configure the matching Teshi version."
-                    .into(),
+                "The broker failed closed; repair or remove pairing.json explicitly.".into(),
             ),
+        })?;
+    let configured = configured_chrome_extension_origins()?;
+    let mut origins = configured;
+    origins.extend(durable.into_iter().map(|record| record.origin));
+    origins.sort();
+    origins.dedup();
+    if origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS {
+        return Err(BrowserError {
+            message: format!(
+                "effective Chrome extension pairing exceeds the limit of {MAX_TRUSTED_EXTENSION_ORIGINS} exact origins"
+            ),
+            hint: Some("Remove an origin from durable pairing or the development override.".into()),
+        });
+    }
+    Ok(origins)
+}
+
+/// Return the existing user-scoped pairing store used by the Rust broker.
+pub fn chrome_broker_pairing_store() -> Result<teshi_browser_broker::PairingStore, BrowserError> {
+    Ok(teshi_browser_broker::PairingStore::new(
+        chrome_broker_state_dir()?,
+    ))
+}
+
+/// List durable pairing state through the authenticated local broker admin API.
+/// The bearer credential is read only in this native process and is never put
+/// in a URL or returned to a caller.
+pub fn chrome_broker_pairing_list() -> Result<serde_json::Value, BrowserError> {
+    chrome_broker_pairing_request(reqwest::Method::GET, None)
+}
+
+/// Explicitly approve one exact extension Origin through the trusted Teshi
+/// process. Claims submitted by the extension are never used here.
+pub fn chrome_broker_pairing_approve(
+    origin: &str,
+    display_name: Option<&str>,
+) -> Result<serde_json::Value, BrowserError> {
+    chrome_broker_pairing_request(
+        reqwest::Method::POST,
+        Some(serde_json::json!({
+            "origin": origin,
+            "display_name": display_name,
+        })),
+    )
+}
+
+/// Revoke one exact extension Origin through the live broker so existing
+/// streams and their scoped state are closed immediately.
+pub fn chrome_broker_pairing_remove(origin: &str) -> Result<serde_json::Value, BrowserError> {
+    chrome_broker_pairing_request(
+        reqwest::Method::DELETE,
+        Some(serde_json::json!({"origin": origin})),
+    )
+}
+
+fn chrome_broker_pairing_request(
+    method: reqwest::Method,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, BrowserError> {
+    let endpoint = fetch_chrome_broker_endpoint(CHROME_DISCOVERY_PORT)?;
+    if !endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        return Err(BrowserError {
+            message: "the discovery listener is not the Rust Chrome broker".into(),
+            hint: None,
+        });
+    }
+    let endpoint_path = chrome_broker_endpoint_path()?;
+    let state_dir = endpoint_path.parent().ok_or_else(|| BrowserError {
+        message: "Rust broker endpoint has no private state directory".into(),
+        hint: None,
+    })?;
+    let public_record = EndpointRecord {
+        schema_version: endpoint.schema_version,
+        protocol_version: endpoint.protocol_version,
+        mode: endpoint.mode.clone(),
+        ws_url: endpoint.ws_url.clone(),
+        discovery_url: endpoint.discovery_url.clone(),
+        extension_frame_ws_url: endpoint.extension_frame_ws_url.clone(),
+        broker_pid: endpoint.broker_pid,
+        broker_start_id: endpoint.broker_start_id.clone(),
+        broker_features: endpoint.broker_features.clone(),
+        bridge: "rust".into(),
+    };
+    let credentials = PrivateCredentialStore::new(state_dir);
+    let credential = credentials
+        .read_for_endpoint(&public_record)
+        .map_err(|error| BrowserError {
+            message: format!(
+                "cannot authenticate broker pairing administration: {}",
+                error.message
+            ),
+            hint: None,
+        })?;
+    verify_rust_broker_identity(&endpoint, &credential, &public_record).map_err(|error| {
+        BrowserError {
+            message: format!(
+                "cannot verify broker pairing administration: {}",
+                error.message
+            ),
+            hint: None,
         }
     })?;
-    validate_chrome_broker_compatibility(endpoint).map(Some)
+    let url = format!("{}/pairing", endpoint.discovery_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| BrowserError {
+            message: format!("cannot create broker pairing client: {error}"),
+            hint: None,
+        })?;
+    let mut request = client
+        .request(method, url)
+        .header("X-Teshi-Broker-Token", credential.token());
+    if let Some(payload) = payload {
+        request = request.json(&payload);
+    }
+    let response = request.send().map_err(|error| BrowserError {
+        message: format!("broker pairing request failed: {error}"),
+        hint: None,
+    })?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|error| BrowserError {
+            message: format!("broker pairing response was malformed: {error}"),
+            hint: None,
+        })?;
+    if !status.is_success() {
+        return Err(BrowserError {
+            message: body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("broker pairing request was rejected")
+                .to_owned(),
+            hint: body
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        });
+    }
+    Ok(body)
+}
+
+fn resolve_teshi_cli_executable(current_executable: &Path) -> Result<PathBuf, BrowserError> {
+    let is_teshi = current_executable
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("teshi"));
+    if is_teshi && current_executable.is_file() {
+        return Ok(current_executable.to_path_buf());
+    }
+    let sibling_name = if cfg!(windows) { "teshi.exe" } else { "teshi" };
+    let sibling = current_executable.with_file_name(sibling_name);
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
+    Err(BrowserError {
+        message: format!(
+            "cannot locate the Teshi CLI broker host beside {}",
+            current_executable.display()
+        ),
+        hint: Some(format!("Install the Teshi CLI at {}.", sibling.display())),
+    })
+}
+
+/// Starts or reuses the transport-only Rust broker for the current OS user.
+///
+/// This remains an internal migration probe. It intentionally advertises no
+/// `p0.control` feature, so it cannot be selected as a Chrome executor.
+#[doc(hidden)]
+pub fn ensure_user_rust_transport_broker_transport_only(
+    trusted_extension_origins: &[String],
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    let current_executable = std::env::current_exe().map_err(|error| BrowserError {
+        message: format!("cannot locate the Teshi application executable: {error}"),
+        hint: None,
+    })?;
+    let teshi_executable = resolve_teshi_cli_executable(&current_executable)?;
+    ensure_rust_broker_at(
+        &chrome_broker_state_dir()?,
+        &teshi_executable,
+        trusted_extension_origins,
+        CHROME_DISCOVERY_PORT,
+        Duration::from_secs(10),
+        false,
+        false,
+    )
 }
 
 fn persist_user_broker_endpoint(endpoint: &ChromeBrokerEndpoint) -> Result<(), BrowserError> {
@@ -534,93 +2023,67 @@ where
     })
 }
 
-/// Starts or reuses the per-user Chrome broker under an inter-process startup lock.
-pub fn ensure_user_chrome_broker(
-    project_root: &Path,
-    browser_service_script: &Path,
+/// Starts or reuses the full Rust Chrome broker for the current user's
+/// durable pairing set plus any explicit development/test override. Native clients still obtain their bearer
+/// credential from the private state record; it is never placed in the
+/// public endpoint returned by this function.
+#[doc(hidden)]
+pub fn ensure_user_rust_chrome_broker(
+    trusted_extension_origins: &[String],
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
-    let state_dir = chrome_broker_state_dir()?;
-    let start = || {
-        let venv = resolve_project_venv(project_root).ok_or_else(|| BrowserError {
-            message: "Python virtual environment not found or not runnable.".into(),
-            hint: Some("Create .venv and install websockets from python/requirements.txt.".into()),
-        })?;
-        let check = build_import_check_command(&venv)
-            .args(["-c", "import websockets"])
-            .output()
-            .map_err(|error| BrowserError {
-                message: format!("Failed to run Python: {error}"),
-                hint: Some(format!(
-                    "{} -m pip install websockets",
-                    venv.python_exe.display()
-                )),
-            })?;
-        if !check.status.success() {
-            return Err(BrowserError {
-                message: import_check_failed_message(&check, "websockets"),
-                hint: Some(format!(
-                    "{} -m pip install websockets",
-                    venv.python_exe.display()
-                )),
-            });
-        }
-        if !browser_service_script.is_file() {
-            return Err(BrowserError {
-                message: format!(
-                    "browser_service.py not found at {}",
-                    browser_service_script.display()
-                ),
-                hint: Some("Reinstall Teshi so its bundled share resources are present.".into()),
-            });
-        }
-
-        let stderr_path = state_dir.join("broker.stderr.log");
-        let stderr = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&stderr_path)
-            .map_err(|error| BrowserError {
-                message: format!("Failed to open broker diagnostic log: {error}"),
-                hint: None,
-            })?;
-        let mut cmd = python_sidecar_command(&venv);
-        cmd.arg(browser_service_script).args([
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "0",
-            "--mode",
-            "chrome",
-            "--user-session",
-            "--project-root",
-            &project_root.to_string_lossy(),
-            "--discovery-port",
-            &CHROME_DISCOVERY_PORT.to_string(),
-        ]);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr));
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        }
-        cmd.spawn().map_err(|error| BrowserError {
-            message: format!("Failed to start the user-session Chrome broker: {error}"),
-            hint: Some(format!("Inspect {}", stderr_path.display())),
-        })?;
-        Ok(())
-    };
-    let endpoint = coordinate_broker_start(
-        &state_dir,
+    let current_executable = std::env::current_exe().map_err(|error| BrowserError {
+        message: format!("cannot locate the Teshi application executable: {error}"),
+        hint: None,
+    })?;
+    let teshi_executable = resolve_teshi_cli_executable(&current_executable)?;
+    ensure_rust_broker_at(
+        &chrome_broker_state_dir()?,
+        &teshi_executable,
+        trusted_extension_origins,
+        CHROME_DISCOVERY_PORT,
         Duration::from_secs(10),
-        discover_compatible_chrome_broker,
-        start,
-    )?;
-    persist_user_broker_endpoint(&endpoint)?;
-    Ok(endpoint)
+        true,
+        true,
+    )
+}
+
+/// Starts or reuses the selected per-user Chrome broker under the shared
+/// inter-process startup lock.
+///
+/// Rust is the default when `TESHI_BROWSER_BROKER_IMPLEMENTATION` is unset or
+/// non-Unicode. Exact `rust` is accepted for compatibility; `python` and other
+/// selector values are rejected before startup. Chrome never invokes Python.
+/// `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS` is only a development/test union
+/// override; durable pairing is loaded from the per-user state directory.
+///
+/// # Errors
+/// Returns invalid selection, pairing, or launcher errors without retrying with
+/// another implementation.
+pub fn ensure_user_chrome_broker(
+    _project_root: &Path,
+    _browser_service_script: &Path,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    ensure_user_chrome_broker_with_launcher(std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV), || {
+        let origins = effective_chrome_extension_origins()?;
+        ensure_user_rust_chrome_broker(&origins)
+    })
+}
+
+// Keep all launcher work lazy: default Chrome startup must never inspect Python,
+// and invalid selectors must fail before launcher side effects.
+fn ensure_user_chrome_broker_with_launcher(
+    selection: Result<String, std::env::VarError>,
+    rust_launcher: impl FnOnce() -> Result<ChromeBrokerEndpoint, BrowserError>,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    match selection.as_deref() {
+        Ok("rust") | Err(_) => rust_launcher(),
+        Ok(other) => Err(BrowserError {
+            message: format!(
+                "unsupported {CHROME_BROKER_IMPLEMENTATION_ENV} value {other:?}; expected rust; Python Chrome support has been removed"
+            ),
+            hint: Some("Unset TESHI_BROWSER_BROKER_IMPLEMENTATION or set it to rust. Embedded and WinApp still use their Python runtimes.".into()),
+        }),
+    }
 }
 
 /// Starts the browser sidecar for the open project in the given mode.
@@ -628,6 +2091,27 @@ pub async fn start_browser_sidecar(
     rt: Arc<TeshiEngine>,
     mode: BrowserMode,
 ) -> Result<BrowserStartResult, BrowserError> {
+    start_browser_sidecar_with_options(rt, mode, false).await
+}
+
+/// Starts a browser sidecar, optionally giving only the WinApp executor a
+/// high-integrity token through the Windows `runas` shell verb.
+///
+/// The daemon, CLI, and all other sidecar modes remain at their existing
+/// integrity level. `elevated` is meaningful only for `BrowserMode::WinApp`.
+pub async fn start_browser_sidecar_with_options(
+    rt: Arc<TeshiEngine>,
+    mode: BrowserMode,
+    elevated: bool,
+) -> Result<BrowserStartResult, BrowserError> {
+    if elevated && mode != BrowserMode::WinApp {
+        return Err(BrowserError {
+            message: "elevation is only supported for the WinApp executor.".into(),
+            hint: None,
+        });
+    }
+    let _lifecycle_guard = rt.sidecar.lifecycle_lock.lock().await;
+
     let project_root = rt
         .project
         .root
@@ -641,6 +2125,7 @@ pub async fn start_browser_sidecar(
 
     if mode != BrowserMode::Chrome
         && rt.sidecar.browser_mode() == Some(mode)
+        && rt.sidecar.is_elevated() == elevated
         && rt.sidecar.child_is_running()
     {
         if let Some(ws_url) = rt.sidecar.browser_ws_url() {
@@ -660,17 +2145,19 @@ pub async fn start_browser_sidecar(
         }
     }
 
-    rt.sidecar.stop().await.ok();
+    rt.sidecar.stop_inner().ok();
+    *rt.project.browser_active.lock().unwrap() = false;
 
     if mode == BrowserMode::Chrome {
         let endpoint = ensure_user_chrome_broker(&project_root, &rt.browser_service_script)?;
+        write_chrome_broker_endpoint(&project_root, &endpoint)?;
         *rt.sidecar.ws_url.lock().unwrap() = Some(endpoint.ws_url.clone());
         *rt.sidecar.mode.lock().unwrap() = Some(mode);
         *rt.project.browser_active.lock().unwrap() = true;
         rt.events.emit(
             "browser-started",
             serde_json::json!({
-                "ws_url": endpoint.ws_url,
+                "ws_url": public_event_ws_url(&endpoint.ws_url),
                 "mode": mode.as_str(),
                 "broker_pid": endpoint.broker_pid,
                 "broker_start_id": endpoint.broker_start_id,
@@ -788,6 +2275,16 @@ pub async fn start_browser_sidecar(
         });
     }
 
+    let sidecar_port = if elevated {
+        pick_port().map_err(|e| BrowserError {
+            message: e.to_string(),
+            hint: None,
+        })?
+    } else {
+        0
+    };
+    let auth_token =
+        (mode == BrowserMode::WinApp).then(|| format!("tk_{}", uuid::Uuid::new_v4().simple()));
     let cdp_port = if mode == BrowserMode::Embedded {
         pick_port().map_err(|e| BrowserError {
             message: e.to_string(),
@@ -802,49 +2299,116 @@ pub async fn start_browser_sidecar(
     } else {
         python_sidecar_command(venv.as_ref().expect("venv for non-WinApp sidecar"))
     };
+    let sidecar_port_arg = sidecar_port.to_string();
     cmd.arg(script).args([
         "--host",
         "127.0.0.1",
         "--port",
-        "0",
+        &sidecar_port_arg,
         "--mode",
         mode.as_str(),
         "--project-root",
         &project_root.to_string_lossy(),
     ]);
+    if let Some(auth_token) = auth_token.as_deref() {
+        cmd.args(["--auth-token", auth_token]);
+    }
     if mode == BrowserMode::Embedded {
         cmd.args(["--cdp-port", &cdp_port.to_string()]);
         if rt.embedded_no_preview_stream {
             cmd.arg("--no-preview-stream");
         }
     }
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| BrowserError {
-            message: format!("Failed to start browser sidecar: {e}"),
-            hint: None,
-        })?;
 
-    let actual_port = read_port_from_child_stdout(&mut child, Duration::from_secs(10))?;
-    let ready = wait_until_ready(&mut child, actual_port);
-    if let Err(err) = ready {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err);
-    }
+    let (ws_url, child, elevated_process) = if elevated {
+        #[cfg(windows)]
+        {
+            let process = spawn_elevated_winapp_service(
+                managed_winapp
+                    .as_ref()
+                    .expect("elevated WinApp uses managed runtime"),
+                script,
+                &project_root,
+                sidecar_port,
+                auth_token.as_deref().ok_or_else(|| BrowserError {
+                    message: "WinApp sidecar authentication token was not created.".into(),
+                    hint: None,
+                })?,
+            )?;
+            if let Err(error) = wait_until_elevated_ready(&process, sidecar_port) {
+                process.stop();
+                return Err(error);
+            }
+            (
+                format!(
+                    "ws://127.0.0.1:{sidecar_port}/?token={}",
+                    auth_token.as_deref().ok_or_else(|| BrowserError {
+                        message: "WinApp sidecar authentication token was not created.".into(),
+                        hint: None,
+                    })?
+                ),
+                None,
+                Some(process),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (&managed_winapp, script, &project_root, sidecar_port);
+            return Err(BrowserError {
+                message: "elevated WinApp sessions are only supported on Windows.".into(),
+                hint: None,
+            });
+        }
+    } else {
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| BrowserError {
+                message: format!("Failed to start browser sidecar: {e}"),
+                hint: None,
+            })?;
 
-    *rt.sidecar.child.lock().unwrap() = Some(child);
-    let ws_url = format!("ws://127.0.0.1:{actual_port}");
+        let stderr = SidecarStderr::drain(child.stderr.take().expect("stderr must be piped"));
+        let actual_port =
+            match read_port_from_child_stdout(&mut child, &stderr, Duration::from_secs(10)) {
+                Ok(port) => port,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
+        if let Err(error) = wait_until_ready(&mut child, &stderr, actual_port) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        (
+            match auth_token.as_deref() {
+                Some(token) => format!("ws://127.0.0.1:{actual_port}/?token={token}"),
+                None => format!("ws://127.0.0.1:{actual_port}"),
+            },
+            Some(child),
+            None,
+        )
+    };
+
+    *rt.sidecar.child.lock().unwrap() = child;
+    *rt.sidecar.elevated_process.lock().unwrap() = elevated_process;
     *rt.sidecar.ws_url.lock().unwrap() = Some(ws_url.clone());
     *rt.sidecar.mode.lock().unwrap() = Some(mode);
+    *rt.sidecar.elevated.lock().unwrap() = elevated;
     *rt.project.browser_active.lock().unwrap() = true;
 
-    rt.events.emit(
-        "browser-started",
-        serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }),
-    );
+    let mut event = serde_json::json!({
+        "ws_url": public_event_ws_url(&ws_url),
+        "mode": mode.as_str(),
+    });
+    if elevated {
+        event["elevated"] = serde_json::json!(true);
+    }
+    rt.events.emit("browser-started", event);
 
     let cdp_endpoint_path = project_root
         .join(".teshi")
@@ -859,7 +2423,155 @@ pub async fn start_browser_sidecar(
     })
 }
 
-fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
+#[cfg(windows)]
+fn elevation_error(error_code: u32) -> BrowserError {
+    if error_code == ELEVATION_CANCELLED_ERROR {
+        return BrowserError {
+            message: "WinApp elevation was cancelled or denied by the user.".into(),
+            hint: Some(
+                "Confirm the Windows UAC prompt to create an elevated WinApp session.".into(),
+            ),
+        };
+    }
+    BrowserError {
+        message: format!(
+            "Windows could not start the elevated WinApp executor (error {error_code})."
+        ),
+        hint: Some(
+            "The WinApp session was not elevated; retry and confirm the Windows UAC prompt.".into(),
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn quote_windows_arg(value: &OsStr) -> String {
+    let value = value.to_string_lossy();
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for character in value.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                quoted.push(character);
+                backslashes = 0;
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+fn spawn_elevated_winapp_service(
+    runtime: &crate::ManagedRuntime,
+    script: &Path,
+    project_root: &Path,
+    port: u16,
+    auth_token: &str,
+) -> Result<ElevatedProcess, BrowserError> {
+    let arguments = [
+        script.to_string_lossy().into_owned(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string(),
+        "--mode".into(),
+        "winapp".into(),
+        "--project-root".into(),
+        project_root.to_string_lossy().into_owned(),
+        "--auth-token".into(),
+        auth_token.into(),
+    ];
+    let parameters = arguments
+        .iter()
+        .map(|argument| quote_windows_arg(OsStr::new(argument)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = runtime
+        .python_exe
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let parameters: Vec<u16> = parameters
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let directory: Vec<u16> = project_root
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut execute_info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    execute_info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    execute_info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    execute_info.lpVerb = verb.as_ptr();
+    execute_info.lpFile = file.as_ptr();
+    execute_info.lpParameters = parameters.as_ptr();
+    execute_info.lpDirectory = directory.as_ptr();
+    // Keep the executor's console hidden. The UAC consent UI is owned by
+    // Windows and remains visible to the user.
+    execute_info.nShow = 0;
+
+    let started = unsafe { ShellExecuteExW(&mut execute_info) };
+    if started == 0 {
+        let error_code = unsafe { GetLastError() };
+        return Err(elevation_error(error_code));
+    }
+    if execute_info.hProcess.is_null() {
+        return Err(BrowserError {
+            message: "Windows started the elevated WinApp executor without a process handle."
+                .into(),
+            hint: Some("The elevated session cannot be lifecycle-managed safely.".into()),
+        });
+    }
+    Ok(ElevatedProcess {
+        handle: execute_info.hProcess as isize,
+    })
+}
+
+#[cfg(windows)]
+fn wait_until_elevated_ready(process: &ElevatedProcess, port: u16) -> Result<(), BrowserError> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if !process.is_running() {
+            return Err(BrowserError {
+                message: "Elevated WinApp executor exited before it became ready.".into(),
+                hint: Some(
+                    "Check the WinApp runtime installation and its diagnostic output.".into(),
+                ),
+            });
+        }
+        if port_is_open(port) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(BrowserError {
+                message: "Elevated WinApp executor did not become ready in time.".into(),
+                hint: Some("The elevated WinApp service failed to open its WebSocket port.".into()),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn wait_until_ready(
+    child: &mut Child,
+    stderr: &SidecarStderr,
+    port: u16,
+) -> Result<(), BrowserError> {
     use std::net::{SocketAddr, TcpStream};
     use std::time::{Duration, Instant};
 
@@ -868,7 +2580,7 @@ fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
 
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let detail = read_child_stderr(child);
+            let detail = stderr.exit_detail();
             let message = if detail.is_empty() {
                 format!("Browser sidecar exited during startup (status: {status}).")
             } else {
@@ -910,6 +2622,7 @@ pub fn get_recent_projects() -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use teshi_browser_broker::{BrokerRuntime, BrokerServerConfig};
 
     fn endpoint(start_id: &str) -> ChromeBrokerEndpoint {
         ChromeBrokerEndpoint {
@@ -922,8 +2635,348 @@ mod tests {
             broker_pid: 42,
             broker_start_id: start_id.into(),
             broker_features: vec!["p0.control".into()],
-            project_root: "fixture".into(),
         }
+    }
+
+    #[test]
+    fn chrome_selector_accepts_only_rust_and_default() {
+        for selection in [Err(std::env::VarError::NotPresent), Ok("rust".into())] {
+            let result =
+                ensure_user_chrome_broker_with_launcher(selection, || Ok(endpoint("rust")))
+                    .unwrap();
+            assert_eq!(result.broker_start_id, "rust");
+        }
+    }
+
+    #[test]
+    fn chrome_selector_rejects_python_and_invalid_values_before_launch() {
+        for selected in ["python", "", "Rust", "PYTHON", " rust", "rust ", "unknown"] {
+            let error = ensure_user_chrome_broker_with_launcher(Ok(selected.into()), || {
+                panic!("invalid selection must not launch a broker")
+            })
+            .unwrap_err();
+            assert!(error
+                .message
+                .contains("Python Chrome support has been removed"));
+        }
+    }
+
+    #[test]
+    fn chrome_selector_preserves_rust_startup_failure() {
+        let error =
+            ensure_user_chrome_broker_with_launcher(Err(std::env::VarError::NotPresent), || {
+                Err(BrowserError {
+                    message: "sentinel Rust startup failure".into(),
+                    hint: None,
+                })
+            })
+            .unwrap_err();
+        assert_eq!(error.message, "sentinel Rust startup failure");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn chrome_selector_non_unicode_uses_rust_default() {
+        use std::os::windows::ffi::OsStringExt;
+        let selection = Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from_wide(&[0xd800]),
+        ));
+        let result =
+            ensure_user_chrome_broker_with_launcher(selection, || Ok(endpoint("rust"))).unwrap();
+        assert_eq!(result.broker_start_id, "rust");
+    }
+
+    #[test]
+    fn configured_chrome_origins_are_exact_sorted_and_bounded() {
+        let first = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let second = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(
+            parse_configured_chrome_extension_origins(&format!(" {second}, {first} ")).unwrap(),
+            vec![first, second]
+        );
+        assert!(parse_configured_chrome_extension_origins("https://example.test").is_err());
+        assert!(parse_configured_chrome_extension_origins(&format!("{first},{first}")).is_err());
+        assert!(parse_configured_chrome_extension_origins("*").is_err());
+    }
+
+    #[test]
+    fn public_endpoint_writer_rejects_private_url_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut private_url = endpoint("writer-generation");
+        private_url.ws_url.push_str("?token=private");
+        assert!(write_chrome_broker_endpoint(temp.path(), &private_url).is_err());
+        assert!(!temp.path().join(".teshi/cdp-endpoint.json").exists());
+    }
+
+    #[test]
+    fn discovery_websocket_urls_must_remain_local_and_correlated() {
+        let local = "ws://127.0.0.1:43123/";
+        let frames = "ws://127.0.0.1:43123/extension/frames";
+        assert!(validate_discovery_ws_urls(local, frames).is_ok());
+        assert!(validate_discovery_ws_urls(
+            "ws://127.0.0.1:43123/?token=abcdefghijklmnopqrstuvwxyz0123456789",
+            "ws://127.0.0.1:43123/extension/frames?token=abcdefghijklmnopqrstuvwxyz0123456789"
+        )
+        .is_ok());
+        assert!(validate_discovery_ws_urls("ws://evil.example:43123/", frames).is_err());
+        assert!(
+            validate_discovery_ws_urls(local, "ws://127.0.0.1:43124/extension/frames").is_err()
+        );
+        assert!(validate_discovery_ws_urls(
+            "ws://127.0.0.1:43123/?token=abcdefghijklmnopqrstuvwxyz0123456789",
+            frames
+        )
+        .is_err());
+        assert!(validate_discovery_ws_urls(
+            "ws://127.0.0.1:43123/?token=bad&token=duplicate",
+            "ws://127.0.0.1:43123/extension/frames?token=bad&token=duplicate"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sidecar_accepts_correlated_operation_error_without_response_type() {
+        let payload = serde_json::json!({
+            "ok": false,
+            "request_id": "request-1",
+            "code": "stale_browser_target"
+        });
+        assert!(is_terminal_sidecar_response(&payload, Some("request-1")));
+    }
+
+    #[test]
+    fn sidecar_accepts_legacy_typed_response_without_request_id() {
+        let payload = serde_json::json!({
+            "type": "response",
+            "ok": false,
+            "code": "browser_operation_failed"
+        });
+        assert!(is_terminal_sidecar_response(&payload, Some("request-1")));
+    }
+
+    #[test]
+    fn sidecar_ignores_unrelated_operation_errors() {
+        let payload = serde_json::json!({
+            "ok": false,
+            "request_id": "request-2",
+            "code": "stale_browser_target"
+        });
+        assert!(!is_terminal_sidecar_response(&payload, Some("request-1")));
+        assert!(!is_terminal_sidecar_response(&payload, None));
+    }
+
+    #[test]
+    fn rust_broker_state_and_diagnostic_log_are_private_and_reject_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("user-state");
+        prepare_private_broker_state_dir(&state_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+
+        let log_path = state_dir.join("broker.stderr.log");
+        drop(open_private_broker_diagnostic_log(&log_path).unwrap());
+        assert!(std::fs::metadata(&log_path).unwrap().is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&log_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = temp.path().join("external-log-target");
+            std::fs::write(&target, b"keep").unwrap();
+            let symlink_path = state_dir.join("symlink.log");
+            symlink(&target, &symlink_path).unwrap();
+            assert!(open_private_broker_diagnostic_log(&symlink_path).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn engine_discovery_client_interoperates_with_rust_broker_listener() {
+        let mut config =
+            BrokerServerConfig::new("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        config.broker_features = vec!["transport.v1".into()];
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let credentials = PrivateCredentialStore::new(temp.path().join("private-state"));
+        runtime.persist_private_credential(&credentials).unwrap();
+        let public = runtime.endpoint_record();
+        let port = public
+            .discovery_url
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|value| value.split('/').next())
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        let received = tokio::task::spawn_blocking(move || fetch_chrome_broker_endpoint(port))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.broker_pid, std::process::id());
+        assert_eq!(received.broker_start_id, public.broker_start_id);
+        assert_eq!(received.ws_url, public.ws_url);
+        assert_eq!(
+            received.extension_frame_ws_url,
+            public.extension_frame_ws_url
+        );
+        assert_eq!(received.broker_features, vec!["transport.v1"]);
+        let trusted_origins =
+            vec!["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()];
+        validate_rust_transport_broker(&received, &credentials, Some(&trusted_origins)).unwrap();
+        let wrong_extension = validate_rust_transport_broker(
+            &received,
+            &credentials,
+            Some(&["chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()]),
+        );
+        assert!(wrong_extension
+            .unwrap_err()
+            .message
+            .contains("different extension identity set"));
+
+        let mut stale = received.clone();
+        stale.broker_start_id.push_str("-stale");
+        assert!(validate_rust_transport_broker(&stale, &credentials, None).is_err());
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn forged_listener_cannot_reuse_broker_credential_or_observe_token() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        use std::io::{Read, Write};
+        use std::net::TcpListener as StdTcpListener;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut forged_endpoint = endpoint("forged-generation");
+        forged_endpoint.discovery_url = format!("http://127.0.0.1:{port}/v1/bridge");
+        forged_endpoint.ws_url = format!("ws://127.0.0.1:{port}/");
+        forged_endpoint.extension_frame_ws_url = format!("ws://127.0.0.1:{port}/extension/frames");
+        forged_endpoint.broker_features = vec!["transport.v1".into()];
+
+        let temp = tempfile::tempdir().unwrap();
+        let credentials = PrivateCredentialStore::new(temp.path().join("private-state"));
+        let token = "Q".repeat(43);
+        let credential = teshi_browser_broker::PrivateBrokerCredential::for_endpoint(
+            &EndpointRecord {
+                schema_version: forged_endpoint.schema_version,
+                protocol_version: forged_endpoint.protocol_version,
+                mode: forged_endpoint.mode.clone(),
+                ws_url: forged_endpoint.ws_url.clone(),
+                discovery_url: forged_endpoint.discovery_url.clone(),
+                extension_frame_ws_url: forged_endpoint.extension_frame_ws_url.clone(),
+                broker_pid: forged_endpoint.broker_pid,
+                broker_start_id: forged_endpoint.broker_start_id.clone(),
+                broker_features: forged_endpoint.broker_features.clone(),
+                bridge: "rust".into(),
+            },
+            token.clone(),
+            vec!["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        )
+        .unwrap();
+        credentials.write(&credential).unwrap();
+
+        let fake_identity = forged_endpoint.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let (body_start, body_len) = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "client closed before its challenge was complete");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    assert!(request.len() < 8 * 1024);
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let body_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                let body_start = header_end + 4;
+                if request.len() >= body_start + body_len {
+                    break (body_start, body_len);
+                }
+                assert!(request.len() < 8 * 1024);
+            };
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /v1/bridge/identity "));
+            assert!(!request_text.contains(&token));
+            assert!(!request_text.contains("token="));
+            let challenge: BrokerIdentityChallenge =
+                serde_json::from_slice(&request[body_start..body_start + body_len]).unwrap();
+            let forged_proof = BrokerIdentityProof {
+                schema_version: fake_identity.schema_version,
+                protocol_version: fake_identity.protocol_version,
+                broker_pid: fake_identity.broker_pid,
+                broker_start_id: fake_identity.broker_start_id,
+                nonce: challenge.nonce,
+                proof: URL_SAFE_NO_PAD.encode([0u8; 32]),
+            };
+            let body = serde_json::to_vec(&forged_proof).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+
+        let error =
+            validate_rust_transport_broker(&forged_endpoint, &credentials, None).unwrap_err();
+        assert!(error.message.contains("did not prove possession"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn discovery_response_body_is_bounded() {
+        use std::io::Write;
+        use std::net::TcpListener as StdTcpListener;
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = vec![b' '; MAX_DISCOVERY_BODY_BYTES + 1];
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let error = fetch_chrome_broker_endpoint(port).unwrap_err();
+        assert!(error.message.contains("size limit"));
+        server.join().unwrap();
     }
 
     #[test]
@@ -1051,5 +3104,220 @@ mod tests {
         assert!(state.child.lock().unwrap().is_none());
         assert!(state.browser_ws_url().is_none());
         assert!(state.browser_mode().is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn elevation_cancelled_is_not_reported_as_generic_launch_failure() {
+        let error = elevation_error(ELEVATION_CANCELLED_ERROR);
+        assert!(error.message.contains("cancelled or denied"));
+        assert!(error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("UAC")));
+    }
+
+    #[test]
+    fn authenticated_sidecar_url_keeps_port_discoverable() {
+        let address = ws_url_to_addr("ws://127.0.0.1:43123/?token=tk_secret").unwrap();
+        assert_eq!(address.port(), 43123);
+    }
+
+    #[test]
+    fn already_authenticated_sidecar_url_is_not_rewritten() {
+        let url = "ws://127.0.0.1:43123/?token=tk_secret";
+        assert_eq!(authenticated_sidecar_ws_url(url).unwrap(), url);
+    }
+
+    #[test]
+    fn non_chrome_urls_remain_unchanged_with_default_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let state_dir = temp.path().join("private-state");
+        let urls = ["ws://127.0.0.1:23457", "ws://127.0.0.1:23458/winapp"];
+
+        for ws_url in urls {
+            assert_eq!(
+                authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir)
+                    .unwrap(),
+                ws_url
+            );
+        }
+        let mut chrome = endpoint("rust-generation");
+        chrome.broker_features = vec!["transport.v1".into()];
+        std::fs::write(&endpoint_path, serde_json::to_vec(&chrome).unwrap()).unwrap();
+        for ws_url in urls {
+            assert_eq!(
+                authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir)
+                    .unwrap(),
+                ws_url
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_rust_endpoint_authenticates_without_explicit_selection() {
+        let mut config =
+            BrokerServerConfig::new("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        config.broker_features = vec!["transport.v1".into()];
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("private-state");
+        let credentials = PrivateCredentialStore::new(&state_dir);
+        runtime.persist_private_credential(&credentials).unwrap();
+        let public = runtime.endpoint_record();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let public_json = serde_json::to_vec(&public).unwrap();
+        std::fs::write(&endpoint_path, &public_json).unwrap();
+        let expected_token = credentials
+            .read_for_endpoint(&public)
+            .unwrap()
+            .token()
+            .to_owned();
+
+        let (authenticated, missing_credential) = tokio::task::spawn_blocking(move || {
+            let authenticated = authenticated_sidecar_ws_url_from_paths(
+                &public.ws_url,
+                false,
+                &endpoint_path,
+                &state_dir,
+            )
+            .unwrap();
+            let authenticated = url::Url::parse(&authenticated).unwrap();
+            assert_eq!(
+                authenticated
+                    .query_pairs()
+                    .find(|(name, _)| name == "token")
+                    .unwrap()
+                    .1,
+                expected_token
+            );
+            assert_eq!(std::fs::read(&endpoint_path).unwrap(), public_json);
+            assert!(!String::from_utf8(public_json).unwrap().contains("token"));
+
+            std::fs::remove_file(credentials.path()).unwrap();
+            let missing = authenticated_sidecar_ws_url_from_paths(
+                &public.ws_url,
+                false,
+                &endpoint_path,
+                &state_dir,
+            )
+            .unwrap_err();
+            (authenticated, missing)
+        })
+        .await
+        .unwrap();
+        assert_eq!(authenticated.scheme(), "ws");
+        assert!(missing_credential.starts_with("broker_private_credential_missing:"));
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn rust_authentication_fails_closed_for_broken_endpoint_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let state_dir = temp.path().join("private-state");
+        let ws_url = "ws://127.0.0.1:23456";
+
+        let missing =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(missing.starts_with("broker_endpoint_unavailable:"));
+
+        std::fs::write(&endpoint_path, b"not-json").unwrap();
+        let malformed =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(malformed.starts_with("broker_endpoint_invalid:"));
+
+        let mut mismatched = endpoint("rust-generation");
+        mismatched.ws_url = "ws://127.0.0.1:23457".into();
+        mismatched.broker_features = vec!["transport.v1".into()];
+        std::fs::write(&endpoint_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let mismatch =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(mismatch.starts_with("broker_endpoint_mismatch:"));
+
+        mismatched.ws_url = ws_url.into();
+        std::fs::write(&endpoint_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let missing_credential =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(missing_credential.starts_with("broker_private_credential_missing:"));
+
+        mismatched.broker_features = vec!["p0.control".into()];
+        std::fs::write(&endpoint_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let incompatible =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(incompatible.starts_with("broker_transport_incompatible:"));
+    }
+
+    #[test]
+    fn legacy_authentication_keeps_unauthenticated_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let state_dir = temp.path().join("private-state");
+        let ws_url = "ws://127.0.0.1:23456";
+
+        assert_eq!(
+            authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir,)
+                .unwrap(),
+            ws_url
+        );
+
+        std::fs::write(&endpoint_path, b"not-json").unwrap();
+        assert_eq!(
+            authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir,)
+                .unwrap(),
+            ws_url
+        );
+
+        let mut legacy = endpoint("legacy-generation");
+        legacy.ws_url = ws_url.into();
+        std::fs::write(&endpoint_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir,)
+                .unwrap(),
+            ws_url
+        );
+    }
+
+    #[test]
+    fn sidecar_transport_diagnostics_redact_credentials() {
+        let error = sidecar_transport_error(
+            "websocket_handshake_failed",
+            "failed to connect to ws://127.0.0.1:23456/?token=secret",
+            "ws://127.0.0.1:23456/?token=secret",
+            "ws://127.0.0.1:23456/",
+        );
+        assert_eq!(
+            error,
+            "websocket_handshake_failed: failed to connect to ws://127.0.0.1:23456/"
+        );
+        assert!(!error.contains("secret"));
+    }
+
+    #[test]
+    fn runtime_event_ws_url_drops_query_credentials() {
+        assert_eq!(
+            public_event_ws_url("ws://127.0.0.1:43123/?token=tk_secret"),
+            "ws://127.0.0.1:43123/"
+        );
+        assert_eq!(
+            public_event_ws_url("ws://127.0.0.1:43123/winapp"),
+            "ws://127.0.0.1:43123/winapp"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_stop_clears_elevated_session_state() {
+        let state = SidecarState::new();
+        *state.elevated.lock().unwrap() = true;
+        state.stop().await.unwrap();
+        assert!(!state.is_elevated());
+        assert!(!state.child_is_running());
     }
 }

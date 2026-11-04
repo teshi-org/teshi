@@ -7,12 +7,12 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::extract::{ConnectInfo, Extension, Path, Query, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -29,17 +29,19 @@ use teshi_web_protocol::{
 
 use crate::session::{Role, SessionStore};
 use teshi_engine::{
-    check_project_switch_allowed, confirm_locator, default_api_service_script, delete_profile,
-    dispatch_cases, get_active_step, get_pending_locator, get_profile_public, get_project_root,
-    get_recent_projects, highlight_locator, list_dir, list_profiles, list_runnable_scenarios,
-    load_llm_config_public, load_project_settings, open_project, reject_locator, render_feature,
-    resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
-    spawn_terminal, start_browser_sidecar, step_binding_statuses, stop_browser_sidecar,
+    authenticated_sidecar_ws_url, check_project_switch_allowed, confirm_locator,
+    default_api_service_script, delete_profile, dispatch_cases, get_active_step,
+    get_pending_locator, get_profile_public, get_project_root, get_recent_projects,
+    highlight_locator, list_dir, list_profiles, list_runnable_scenarios, load_llm_config_public,
+    load_project_settings, open_project, reject_locator, render_feature, resize_terminal,
+    save_profile, save_stored_llm_config, send_api_command, set_active_id, spawn_terminal,
+    start_browser_sidecar_with_options, step_binding_statuses, stop_browser_sidecar,
     sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
-    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking,
-    DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList,
-    ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
-    StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
+    ActiveStep, ApiStyle, BrowserAgentError, BrowserError, BrowserMode, BrowserOperation,
+    BrowserOperations, BrowserStartResult, BrowserTarget, DeepSeekThinking, DirEntry, DispatchCase,
+    LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
+    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
+    PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -89,6 +91,7 @@ struct DaemonState {
     shutdown_token: CancellationToken,
     active_control_sessions: Arc<StdMutex<HashSet<String>>>,
     hosted_session_gate: Arc<tokio::sync::RwLock<()>>,
+    process_endpoint: Option<teshi_update::processes::DaemonEndpoint>,
 }
 
 impl DaemonState {
@@ -170,6 +173,16 @@ pub async fn run_server_with_listener(
     dist: PathBuf,
     project_root: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    let shutdown_project = project_root.as_deref().map(fs::canonicalize).transpose()?;
+    let port = listener.local_addr()?.port();
+    let process_endpoint = teshi_update::processes::inspect(std::process::id())?.map(|process| {
+        teshi_update::processes::DaemonEndpoint {
+            process,
+            port,
+            project_root: shutdown_project.clone(),
+        }
+    });
+    let _update_registration = teshi_update::processes::register_daemon(port, shutdown_project)?;
     let shutdown_token = CancellationToken::new();
     let sessions = SessionStore::new();
     let state = DaemonState {
@@ -180,6 +193,7 @@ pub async fn run_server_with_listener(
         shutdown_token: shutdown_token.clone(),
         active_control_sessions: Arc::new(StdMutex::new(HashSet::new())),
         hosted_session_gate: Arc::new(tokio::sync::RwLock::new(())),
+        process_endpoint,
     };
 
     let cors = browser_cors_layer();
@@ -247,6 +261,7 @@ pub async fn run_server_with_listener(
         .route("/api/v1/fs/read", get(api_read_file))
         .route("/api/v1/daemon/run", post(api_run))
         .route("/api/v1/daemon/shutdown", post(api_daemon_shutdown))
+        .route("/api/v1/daemon/process", get(api_daemon_process))
         .route("/api/v1/steps/catalog", get(api_step_catalog))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -271,6 +286,7 @@ pub async fn run_server_with_listener(
     let token = shutdown_token.clone();
     let active_ws = state.active_ws.clone();
     let last_request = state.last_request.clone();
+    let runtime_for_idle = state.rt.clone();
     let idle_project_root = project_root.clone();
     tokio::spawn(async move {
         loop {
@@ -283,11 +299,13 @@ pub async fn run_server_with_listener(
                 .lock()
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            if daemon_should_shutdown_for_idle(ws_count, idle) {
+            let sidecar_active = runtime_for_idle.sidecar.child_is_running();
+            if daemon_should_shutdown_for_idle(ws_count, sidecar_active, idle) {
                 tracing::info!(
-                    "idle watchdog: {:?} since last request, {} active WS — shutting down",
+                    "idle watchdog: {:?} since last request, {} active WS, sidecar_active={} — shutting down",
                     idle,
-                    ws_count
+                    ws_count,
+                    sidecar_active
                 );
                 token.cancel();
                 return;
@@ -302,19 +320,32 @@ pub async fn run_server_with_listener(
         token_ctrlc.cancel();
     });
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
-    .await?;
+    .await;
+
+    // The daemon owns the WinApp session. Always stop it before returning so
+    // a runas-started executor cannot outlive an idle/API/CTRL+C shutdown.
+    if let Err(error) = state.rt.sidecar.stop().await {
+        tracing::warn!(%error, "failed to stop browser sidecar during daemon shutdown");
+    }
+    *state.rt.project.browser_active.lock().unwrap() = false;
 
     // Clean up on exit
     if let Some(root) = idle_project_root {
-        teshi_engine::remove_daemon_manifest(&root);
+        if let Some(manifest) =
+            <teshi_engine::DaemonManifest as teshi_engine::DaemonManifestExt>::load_manifest(&root)
+        {
+            if manifest.pid == std::process::id() && manifest.port == port {
+                teshi_engine::remove_daemon_manifest_if_matches(&root, &manifest)?;
+            }
+        }
     }
 
-    Ok(())
+    serve_result.map_err(Into::into)
 }
 
 // ---- WebSocket ----
@@ -327,8 +358,12 @@ const PREVIEW_CONTROL_QUEUE_CAPACITY: usize = 8;
 const PREVIEW_RECONNECT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const DAEMON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-fn daemon_should_shutdown_for_idle(active_ws: usize, idle: std::time::Duration) -> bool {
-    active_ws == 0 && idle > DAEMON_IDLE_TIMEOUT
+fn daemon_should_shutdown_for_idle(
+    active_ws: usize,
+    sidecar_active: bool,
+    idle: std::time::Duration,
+) -> bool {
+    active_ws == 0 && !sidecar_active && idle > DAEMON_IDLE_TIMEOUT
 }
 
 /// Browser WebSocket upgrades are a separate trust gate from token
@@ -487,7 +522,7 @@ fn control_method_capability(method: &str) -> Option<HostedCapability> {
         return None;
     }
     let prefix = method.split('.').next()?;
-    if method == "bdd.run" {
+    if matches!(method, "bdd.run" | "bdd.begin_replay") {
         return Some(HostedCapability::BddRun);
     }
     Some(match prefix {
@@ -543,6 +578,8 @@ struct HostedBrowserSessionList {
     #[serde(default)]
     ambiguous_browser_target: bool,
     #[serde(default)]
+    broker_identity: Option<HostedBrowserBrokerIdentity>,
+    #[serde(default)]
     sessions: Vec<HostedBrowserSession>,
 }
 
@@ -557,9 +594,34 @@ struct HostedBrowserSession {
     #[serde(default)]
     last_heartbeat_age_ms: u64,
     #[serde(default)]
+    stream_generation: Option<u64>,
+    #[serde(default)]
     windows: Vec<HostedBrowserWindow>,
     #[serde(default)]
     lease: Option<HostedBrowserLease>,
+}
+
+/// Stable broker-generation metadata allowed across the daemon -> hosted Web
+/// boundary. Private WebSocket coordinates and credentials are intentionally
+/// not represented by this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct HostedBrowserBrokerIdentity {
+    #[serde(default)]
+    schema_version: u16,
+    #[serde(default)]
+    protocol_version: u16,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    broker_pid: u32,
+    #[serde(default)]
+    broker_start_id: String,
+    #[serde(default)]
+    broker_features: Vec<String>,
+    #[serde(default)]
+    broker_scope: String,
+    #[serde(default)]
+    bridge: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -858,6 +920,18 @@ fn redact_hosted_event_value(value: Value) -> Value {
     redact_hosted_value(value, None)
 }
 
+/// Restrict legacy event payloads according to the authenticated API role.
+/// Admin keeps the local event contract; automation roles receive the same
+/// private-coordinate and credential redaction used at the hosted boundary.
+fn event_payload_for_role(role: Role, payload: Value) -> Value {
+    match role {
+        Role::Admin => payload,
+        Role::AgentRecorder | Role::BatchRunner | Role::HostedWebUi => {
+            redact_hosted_event_value(payload)
+        }
+    }
+}
+
 fn hosted_control_value(state: &DaemonState, value: Value) -> Value {
     let project_root = state.rt.project.root.lock().unwrap().clone();
     redact_hosted_value(value, project_root.as_deref())
@@ -1004,6 +1078,64 @@ async fn dispatch_control_request(
                 .filter(|scenario| !hosted_private_path(&root, FsPath::new(&scenario.feature_path)))
                 .collect::<Vec<_>>();
             hosted_control_value(state, encode_control_value(scenarios)?)
+        }
+        "bdd.begin_replay" | "bdd.replay_history" | "bdd.replay_snapshot" | "bdd.replay_image" => {
+            let root = get_project_root(&state.rt)
+                .map(PathBuf::from)
+                .ok_or_else(|| handshake_error(ErrorCode::RequestFailed, "no project is open"))?;
+            let failure =
+                |error: anyhow::Error| handshake_error(ErrorCode::RequestFailed, error.to_string());
+            match method {
+                "bdd.begin_replay" => {
+                    let ids: Vec<String> = serde_json::from_value(
+                        params.get("scenario_ids").cloned().unwrap_or(Value::Null),
+                    )
+                    .map_err(|e| handshake_error(ErrorCode::InvalidMessage, e.to_string()))?;
+                    let listed = list_runnable_scenarios(&root);
+                    for id in &ids {
+                        let scenario = listed
+                            .iter()
+                            .find(|scenario| &scenario.id == id)
+                            .ok_or_else(|| {
+                                handshake_error(ErrorCode::InvalidMessage, "unknown scenario")
+                            })?;
+                        let relative = FsPath::new(&scenario.feature_path)
+                            .strip_prefix(&root)
+                            .map_err(|_| {
+                                handshake_error(ErrorCode::Forbidden, "feature is outside project")
+                            })?;
+                        hosted_feature_path(state, &relative.to_string_lossy())?;
+                    }
+                    json!(teshi_engine::start_replay_run(&root, &ids).map_err(failure)?)
+                }
+                "bdd.replay_history" => {
+                    let runs =
+                        teshi_engine::replay_evidence::list_replay_runs(&root).map_err(failure)?;
+                    let visible = runs
+                        .into_iter()
+                        .filter(|run| hosted_replay_snapshot(state, &root, &run.id).is_ok())
+                        .collect::<Vec<_>>();
+                    hosted_control_value(state, encode_control_value(visible)?)
+                }
+                "bdd.replay_snapshot" => {
+                    let id = control_param_string(&params, "run_id")?;
+                    hosted_control_value(
+                        state,
+                        encode_control_value(hosted_replay_snapshot(state, &root, &id)?)?,
+                    )
+                }
+                "bdd.replay_image" => {
+                    use base64::Engine as _;
+                    let id = control_param_string(&params, "run_id")?;
+                    let filename = control_param_string(&params, "filename")?;
+                    hosted_replay_snapshot(state, &root, &id)?;
+                    let bytes =
+                        teshi_engine::replay_evidence::load_replay_image(&root, &id, &filename)
+                            .map_err(failure)?;
+                    json!(base64::engine::general_purpose::STANDARD.encode(bytes))
+                }
+                _ => unreachable!("replay method matched by the outer dispatcher"),
+            }
         }
         "bdd.run" => {
             let mut body = decode_control_params::<RunApiBody>(params)?;
@@ -1241,7 +1373,7 @@ async fn dispatch_control_request(
             control_status(status)
         }
         "runtime.shutdown" => {
-            let status = api_daemon_shutdown(State(state.clone())).await;
+            let status = api_daemon_shutdown(State(state.clone()), HeaderMap::new()).await;
             control_status(status)
         }
         _ => {
@@ -1394,6 +1526,7 @@ async fn handle_control_socket(state: DaemonState, mut socket: WebSocket) {
     let mut session_watch = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {
         tokio::select! {
+            _ = state.shutdown_token.cancelled() => break,
             _ = session_watch.tick() => {
                 if state.sessions.get_session(&active_token).is_none() {
                     break;
@@ -1541,6 +1674,9 @@ async fn handle_control_socket(state: DaemonState, mut socket: WebSocket) {
     while request_tasks.join_next().await.is_some() {}
     drop(response_tx);
     drop(event_tx);
+    if state.shutdown_token.is_cancelled() {
+        writer.abort();
+    }
     let _ = writer.await;
     release_control_session(&state.active_control_sessions, &active_token);
 }
@@ -1641,6 +1777,7 @@ async fn handle_preview_socket(state: DaemonState, mut socket: WebSocket) {
     let mut missing_since = None;
     loop {
         tokio::select! {
+            _ = state.shutdown_token.cancelled() => break,
             _ = &mut relay => {
                 break;
             }
@@ -1662,10 +1799,19 @@ async fn handle_preview_socket(state: DaemonState, mut socket: WebSocket) {
     }
 }
 
-async fn events_ws(State(state): State<DaemonState>, ws: WebSocketUpgrade) -> Response {
+async fn events_ws(
+    State(state): State<DaemonState>,
+    Extension(role): Extension<Role>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let rt = state.rt.clone();
     let active_ws = state.active_ws.clone();
-    ws.on_upgrade(move |socket| handle_events_socket(rt, active_ws, socket))
+    ws.on_upgrade(move |socket| async move {
+        tokio::select! {
+            _ = state.shutdown_token.cancelled() => {},
+            _ = handle_events_socket(rt, active_ws, role, socket) => {},
+        }
+    })
 }
 
 struct WsGuard(Arc<AtomicUsize>);
@@ -1678,6 +1824,7 @@ impl Drop for WsGuard {
 async fn handle_events_socket(
     rt: SharedRuntime,
     active_ws: Arc<AtomicUsize>,
+    role: Role,
     mut socket: WebSocket,
 ) {
     active_ws.fetch_add(1, Ordering::Relaxed);
@@ -1688,7 +1835,10 @@ async fn handle_events_socket(
             msg = rx.recv() => {
                 match msg {
                     Ok(RuntimeEvent { name, payload }) => {
-                        let envelope = json!({ "event": name, "payload": payload });
+                        let envelope = json!({
+                            "event": name,
+                            "payload": event_payload_for_role(role, payload),
+                        });
                         let text = match serde_json::to_string(&envelope) {
                             Ok(t) => t,
                             Err(_) => continue,
@@ -1802,8 +1952,11 @@ async fn browser_stream_ws(State(state): State<DaemonState>, ws: WebSocketUpgrad
             .unwrap_or_else(|| "TargetApp.exe".into())
     });
     let active_ws = state.active_ws.clone();
-    ws.on_upgrade(move |socket| {
-        handle_browser_stream_socket(ws_url, attach_process, active_ws, socket, false)
+    ws.on_upgrade(move |socket| async move {
+        tokio::select! {
+            _ = state.shutdown_token.cancelled() => {},
+            _ = handle_browser_stream_socket(ws_url, attach_process, active_ws, socket, false) => {},
+        }
     })
 }
 
@@ -1817,7 +1970,20 @@ async fn handle_browser_stream_socket(
     active_ws.fetch_add(1, Ordering::Relaxed);
     let _guard = WsGuard(active_ws);
 
-    let mut upstream = match tokio_tungstenite::connect_async(&ws_url).await {
+    let authenticated_ws_url = match authenticated_sidecar_ws_url(&ws_url) {
+        Ok(url) => url,
+        Err(_error) => {
+            let payload = json!({
+                "type": "frame_error",
+                "error": "authenticate with preview sidecar failed",
+            });
+            let _ = downstream
+                .send(Message::Text(payload.to_string().into()))
+                .await;
+            return;
+        }
+    };
+    let mut upstream = match tokio_tungstenite::connect_async(&authenticated_ws_url).await {
         Ok((socket, _)) => socket,
         Err(_error) => {
             let payload = json!({
@@ -1963,7 +2129,7 @@ async fn handle_browser_stream_socket(
 /// session token, and an invalid token always fails closed.
 async fn auth_middleware(
     State(state): State<DaemonState>,
-    req: Request,
+    mut req: Request,
     next: middleware::Next,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let path = req.uri().path().to_string();
@@ -2013,6 +2179,7 @@ async fn auth_middleware(
         ));
     }
 
+    req.extensions_mut().insert(role);
     Ok(next.run(req).await)
 }
 
@@ -2314,6 +2481,21 @@ fn hosted_read_project_file(state: &DaemonState, requested: &str) -> Result<Stri
     let path = resolve_hosted_project_path(&project_root, requested)?;
     fs::read_to_string(path)
         .map_err(|_| handshake_error(ErrorCode::RequestFailed, "file is not readable text"))
+}
+
+fn hosted_replay_snapshot(
+    state: &DaemonState,
+    root: &FsPath,
+    id: &str,
+) -> Result<teshi_engine::replay_evidence::ReplayRunSnapshot, ProtocolError> {
+    let run = teshi_engine::replay_evidence::load_replay_run(root, id)
+        .map_err(|_| handshake_error(ErrorCode::RequestFailed, "replay run is unavailable"))?;
+    for event in &run.events {
+        if let Some(feature) = event.get("feature").and_then(Value::as_str) {
+            hosted_feature_path(state, feature)?;
+        }
+    }
+    Ok(run)
 }
 
 fn hosted_feature_path(state: &DaemonState, requested: &str) -> Result<String, ProtocolError> {
@@ -2763,28 +2945,68 @@ async fn api_highlight_locator(
 #[derive(Deserialize)]
 struct BrowserStartBody {
     mode: Option<String>,
+    #[serde(default)]
+    elevated: bool,
 }
 
-const BROWSER_BROKER_DISCOVERY_URL: &str = "http://127.0.0.1:17373/v1/bridge";
-
-fn browser_broker_client() -> Result<reqwest::Client, ApiError> {
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|error| ApiError::internal(format!("create browser broker client: {error}")))
-}
-
-fn browser_broker_unavailable(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+fn browser_operation_unavailable(
+    code: &str,
+    error: impl std::fmt::Display,
+    status: StatusCode,
+) -> (StatusCode, Json<Value>) {
     (
-        StatusCode::SERVICE_UNAVAILABLE,
+        status,
         Json(json!({
             "ok": false,
-            "code": "browser_unavailable",
-            "error": format!(
-                "local Chrome bridge is unavailable: {error}; click Connect Chrome and reload teshi-bridge"
-            ),
+            "code": code,
+            "error": error.to_string(),
         })),
+    )
+}
+
+fn browser_operation_error(error: BrowserAgentError) -> (StatusCode, Json<Value>) {
+    let status = match error.code.as_str() {
+        "browser_unavailable" | "browser_session_disconnected" => StatusCode::SERVICE_UNAVAILABLE,
+        "browser_session_busy"
+        | "invalid_browser_lease"
+        | "expired_browser_lease"
+        | "browser_target_not_found"
+        | "stale_browser_target" => StatusCode::CONFLICT,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    (status, Json(error.to_wire_value()))
+}
+
+async fn daemon_browser_client(
+    state: &DaemonState,
+) -> Result<BrowserOperations, (StatusCode, Json<Value>)> {
+    let project_root = get_project_root(&state.rt).ok_or_else(|| {
+        browser_operation_unavailable(
+            "browser_unavailable",
+            "no project is open in the daemon",
+            StatusCode::CONFLICT,
+        )
+    })?;
+    let started = start_browser_sidecar_with_options(
+        state.rt.clone(),
+        BrowserMode::Chrome,
+        false,
+    )
+    .await
+    .map_err(|error| {
+        browser_operation_unavailable(
+            "browser_unavailable",
+            format!(
+                "local Chrome broker is unavailable: {}; click Connect Chrome and reload teshi-bridge",
+                error.message
+            ),
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    Ok(
+        BrowserOperations::new(started.ws_url, Duration::from_secs(30))
+            .with_caller_label("teshi-daemon")
+            .with_project_root(project_root),
     )
 }
 
@@ -2792,29 +3014,11 @@ async fn api_browser_sessions(
     State(state): State<DaemonState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     state.touch();
-    let client =
-        browser_broker_client().map_err(|error| browser_broker_unavailable(error.message))?;
-    let response = client
-        .get(BROWSER_BROKER_DISCOVERY_URL)
-        .send()
-        .await
-        .map_err(browser_broker_unavailable)?;
-    if !response.status().is_success() {
-        return Err(browser_broker_unavailable(format!(
-            "broker returned HTTP {}",
-            response.status()
-        )));
-    }
-    response.json::<Value>().await.map(Json).map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "ok": false,
-                "code": "invalid_browser_response",
-                "error": format!("decode browser broker discovery response: {error}"),
-            })),
-        )
-    })
+    let client = daemon_browser_client(&state).await?;
+    client
+        .execute(&BrowserOperation::ListBrowserSessions)
+        .map(|response| Json(response.payload))
+        .map_err(browser_operation_error)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2829,50 +3033,54 @@ async fn api_browser_activate_tab(
     Json(body): Json<BrowserActivateTabBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     state.touch();
-    let project_root = get_project_root(&state.rt).ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "code": "browser_unavailable",
-                "error": "no project is open in the daemon",
-            })),
-        )
-    })?;
-    let client =
-        browser_broker_client().map_err(|error| browser_broker_unavailable(error.message))?;
-    let response = client
-        .post(format!("{BROWSER_BROKER_DISCOVERY_URL}/activate_tab"))
-        .json(&json!({
-            "project_root": project_root,
-            "extension_instance_id": body.extension_instance_id,
-            "window_id": body.window_id,
-            "tab_id": body.tab_id,
-        }))
-        .send()
-        .await
-        .map_err(browser_broker_unavailable)?;
-    if !response.status().is_success() {
-        return Err(browser_broker_unavailable(format!(
-            "broker returned HTTP {}",
-            response.status()
-        )));
+    let client = daemon_browser_client(&state).await?;
+    let target = BrowserTarget {
+        extension_instance_id: body.extension_instance_id.clone(),
+        window_id: body.window_id,
+        tab_id: body.tab_id,
+    };
+    let lease = client
+        .execute(&BrowserOperation::AcquireBrowserLease {
+            extension_instance_id: body.extension_instance_id.clone(),
+            owner_label: "teshi-daemon-ui".into(),
+            ttl_secs: 30,
+        })
+        .map_err(browser_operation_error)?;
+    let lease_token = lease
+        .payload
+        .get("lease_token")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            lease
+                .payload
+                .pointer("/lease/lease_token")
+                .and_then(Value::as_str)
+        })
+        .ok_or_else(|| {
+            browser_operation_unavailable(
+                "browser_operation_failed",
+                "browser lease response did not contain a lease token",
+                StatusCode::BAD_GATEWAY,
+            )
+        })?
+        .to_owned();
+    let result = client.execute(&BrowserOperation::ActivateBrowserTab {
+        target,
+        lease_token: lease_token.clone(),
+        focus_window: true,
+    });
+    let release = client.execute(&BrowserOperation::ReleaseBrowserLease {
+        extension_instance_id: body.extension_instance_id,
+        lease_token,
+    });
+    if let Err(error) = release {
+        if result.is_ok() {
+            return Err(browser_operation_error(error));
+        }
     }
-    let payload = response.json::<Value>().await.map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "ok": false,
-                "code": "invalid_browser_response",
-                "error": format!("decode browser tab activation response: {error}"),
-            })),
-        )
-    })?;
-    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
-        Ok(Json(payload))
-    } else {
-        Err((StatusCode::CONFLICT, Json(payload)))
-    }
+    result
+        .map(|response| Json(response.payload))
+        .map_err(browser_operation_error)
 }
 
 async fn api_browser_start(
@@ -2885,7 +3093,12 @@ async fn api_browser_start(
         Some("winapp") => BrowserMode::WinApp,
         _ => BrowserMode::Embedded,
     };
-    start_browser_sidecar(state.rt, mode)
+    if body.elevated && mode != BrowserMode::WinApp {
+        return Err(ApiError::from(
+            "elevation is only supported for the WinApp executor.".to_string(),
+        ));
+    }
+    start_browser_sidecar_with_options(state.rt, mode, body.elevated)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -2947,7 +3160,30 @@ async fn api_terminal_write(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn api_daemon_shutdown(State(state): State<DaemonState>) -> StatusCode {
+async fn api_daemon_process(State(state): State<DaemonState>) -> impl IntoResponse {
+    match state.process_endpoint {
+        Some(endpoint) => Json(endpoint).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn api_daemon_shutdown(State(state): State<DaemonState>, headers: HeaderMap) -> StatusCode {
+    if headers.contains_key("x-teshi-process-pid") || headers.contains_key("x-teshi-process-start")
+    {
+        let Some(endpoint) = &state.process_endpoint else {
+            return StatusCode::CONFLICT;
+        };
+        let pid = headers
+            .get("x-teshi-process-pid")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok());
+        let started = headers
+            .get("x-teshi-process-start")
+            .and_then(|value| value.to_str().ok());
+        if pid != Some(endpoint.process.pid) || started != Some(endpoint.process.started.as_str()) {
+            return StatusCode::CONFLICT;
+        }
+    }
     state.shutdown_token.cancel();
     StatusCode::OK
 }
@@ -3361,7 +3597,65 @@ mod integration {
             shutdown_token: CancellationToken::new(),
             active_control_sessions: Arc::new(StdMutex::new(HashSet::new())),
             hosted_session_gate: Arc::new(tokio::sync::RwLock::new(())),
+            process_endpoint: None,
         }
+    }
+
+    #[tokio::test]
+    async fn replay_control_keeps_history_scoped_and_rejects_private_features() {
+        let state = test_state();
+        let project =
+            std::env::temp_dir().join(format!("teshi-replay-control-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(project.join("features")).unwrap();
+        fs::write(
+            project.join("features/demo.feature"),
+            "Feature: Demo\n  Scenario: View\n    Then image is visible\n",
+        )
+        .unwrap();
+        *state.rt.project.root.lock().unwrap() = Some(project.clone());
+        let mut run = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&project).unwrap();
+        let id = run.id().to_string();
+        run.record(json!({"type":"start_case","feature":"features/demo.feature"}))
+            .unwrap();
+        run.record(json!({"type":"end_run","failed":1})).unwrap();
+        let history = dispatch_control_request(&state, "bdd.replay_history", json!({}))
+            .await
+            .unwrap();
+        assert!(history
+            .value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == id));
+        let snapshot =
+            dispatch_control_request(&state, "bdd.replay_snapshot", json!({"run_id":id}))
+                .await
+                .unwrap();
+        assert_eq!(snapshot.value["status"], "failed");
+        assert!(dispatch_control_request(
+            &state,
+            "bdd.replay_snapshot",
+            json!({"run_id":"../escape"})
+        )
+        .await
+        .is_err());
+        run.record(json!({"type":"start_case","feature":".teshi/private.feature"}))
+            .unwrap();
+        assert!(
+            dispatch_control_request(&state, "bdd.replay_snapshot", json!({"run_id":id}))
+                .await
+                .is_err()
+        );
+        let history = dispatch_control_request(&state, "bdd.replay_history", json!({}))
+            .await
+            .unwrap();
+        assert!(history.value.as_array().unwrap().is_empty());
+        assert_eq!(
+            control_method_capability("bdd.begin_replay"),
+            Some(HostedCapability::BddRun)
+        );
+        drop(run);
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
@@ -3385,6 +3679,17 @@ mod integration {
             "project_root": "C:/private/project",
             "extension_connected": true,
             "ambiguous_browser_target": false,
+            "broker_identity": {
+                "schema_version": 1,
+                "protocol_version": 1,
+                "mode": "chrome",
+                "ws_url": "ws://127.0.0.1:17373/",
+                "broker_pid": 42,
+                "broker_start_id": "generation-a",
+                "broker_features": ["transport.v1"],
+                "broker_scope": "user_session",
+                "bridge": "rust"
+            },
             "sessions": [{
                 "identity": {
                     "extension_instance_id": "ext-1",
@@ -3395,6 +3700,7 @@ mod integration {
                 "browser": {"name": "Chrome", "version": "1", "platform": "windows"},
                 "health": "ready",
                 "last_heartbeat_age_ms": 4,
+                "stream_generation": 7,
                 "windows": [{"id": 7, "focused": true, "tabs": [{
                     "id": 8,
                     "window_id": 7,
@@ -3413,10 +3719,13 @@ mod integration {
         assert!(!text.contains("extension_frame_ws_url"));
         assert!(!text.contains("project_root"));
         assert!(!text.contains("secret"));
+        assert_eq!(value["broker_identity"]["broker_start_id"], "generation-a");
+        assert_eq!(value["broker_identity"]["broker_pid"], 42);
         assert_eq!(
             value["sessions"][0]["identity"]["extension_instance_id"],
             "ext-1"
         );
+        assert_eq!(value["sessions"][0]["stream_generation"], 7);
         assert_eq!(value["sessions"][0]["windows"][0]["tabs"][0]["id"], 8);
     }
 
@@ -3429,6 +3738,27 @@ mod integration {
             "project_root": "C:/private/project"
         }));
         assert_eq!(value, json!({ "mode": "chrome", "nested": [{"ok": true}] }));
+    }
+
+    #[test]
+    fn restricted_event_roles_cannot_receive_sidecar_credentials() {
+        let payload = json!({
+            "mode": "winapp",
+            "ws_url": "ws://127.0.0.1:43123/?token=tk_sidecar_secret",
+            "nested": {"command_token": "tk_sidecar_secret"},
+        });
+
+        for role in [Role::AgentRecorder, Role::BatchRunner] {
+            let value = event_payload_for_role(role, payload.clone());
+            let text = value.to_string();
+            assert!(!text.contains("tk_sidecar_secret"), "role={role:?}");
+            assert!(value.get("ws_url").is_none(), "role={role:?}");
+        }
+
+        assert_eq!(
+            event_payload_for_role(Role::Admin, payload.clone()),
+            payload
+        );
     }
 
     #[test]
@@ -3477,6 +3807,7 @@ mod integration {
             pid: std::process::id(),
             port: address.port(),
             started: chrono::Utc::now(),
+            process_start: None,
         }
         .save_manifest(&project_root)
         .unwrap();
@@ -3490,6 +3821,9 @@ mod integration {
         ));
         let client = reqwest::Client::new();
         let url = format!("http://{}/api/v1/daemon/shutdown", address);
+        let (events, _) = tokio_tungstenite::connect_async(format!("ws://{address}/api/v1/events"))
+            .await
+            .unwrap();
         let mut shutdown_accepted = false;
         for _ in 0..40 {
             if let Ok(response) = client.post(&url).send().await {
@@ -3506,6 +3840,7 @@ mod integration {
             .expect("daemon shutdown timed out")
             .expect("daemon task panicked")
             .expect("daemon server failed");
+        drop(events);
         assert!(!DaemonManifest::manifest_path(&project_root).exists());
         assert!(std::net::TcpStream::connect_timeout(
             &address,
@@ -3513,6 +3848,36 @@ mod integration {
         )
         .is_err());
         std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_a_different_process_generation() {
+        let mut state = test_state();
+        let process = teshi_update::processes::inspect(std::process::id())
+            .unwrap()
+            .unwrap();
+        state.process_endpoint = Some(teshi_update::processes::DaemonEndpoint {
+            process: process.clone(),
+            port: 1,
+            project_root: None,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-teshi-process-pid",
+            process.pid.to_string().parse().unwrap(),
+        );
+        headers.insert("x-teshi-process-start", "wrong-generation".parse().unwrap());
+        assert_eq!(
+            api_daemon_shutdown(State(state.clone()), headers.clone()).await,
+            StatusCode::CONFLICT
+        );
+        assert!(!state.shutdown_token.is_cancelled());
+        headers.insert("x-teshi-process-start", process.started.parse().unwrap());
+        assert_eq!(
+            api_daemon_shutdown(State(state.clone()), headers).await,
+            StatusCode::OK
+        );
+        assert!(state.shutdown_token.is_cancelled());
     }
 
     #[test]
@@ -4122,11 +4487,22 @@ mod integration {
     fn idle_shutdown_requires_no_active_websocket_and_exceeds_timeout() {
         assert!(!daemon_should_shutdown_for_idle(
             1,
+            false,
             DAEMON_IDLE_TIMEOUT + std::time::Duration::from_secs(1)
         ));
-        assert!(!daemon_should_shutdown_for_idle(0, DAEMON_IDLE_TIMEOUT));
+        assert!(!daemon_should_shutdown_for_idle(
+            0,
+            false,
+            DAEMON_IDLE_TIMEOUT
+        ));
         assert!(daemon_should_shutdown_for_idle(
             0,
+            false,
+            DAEMON_IDLE_TIMEOUT + std::time::Duration::from_secs(1)
+        ));
+        assert!(!daemon_should_shutdown_for_idle(
+            0,
+            true,
             DAEMON_IDLE_TIMEOUT + std::time::Duration::from_secs(1)
         ));
     }

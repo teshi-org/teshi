@@ -41,3 +41,13 @@ Continue only when the command exits successfully. Consume the returned
 summary and diagnostics fields; do not recreate dialect keyword, separator,
 or structure rules in a Skill. teshi steps, teshi run, and replay commands also
 enforce this gate themselves.
+
+## WinApp desktop input permission
+
+Auto/background never authorize physical mouse/keyboard input or activation.
+`pointer_click`, tray clicks and foreground mutations require both
+`--mode foreground --allow-interactive-input`; pass them only with user authorization.
+Replay `--yes` does not grant input permission. Inspect structured
+`requires_interactive_input` and `action_result_uncertain` errors; never silently
+upgrade modes, retry uncertain mutations, or replace physical pointer semantics
+with PostMessage. Verify business results separately from provider completion.

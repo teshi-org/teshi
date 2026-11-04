@@ -76,6 +76,405 @@
       "lease_token": "fixture-secret-not-for-discovery"
     }
   },
+  "stateful": {
+    "profile_response_race": {
+      "requests": [
+        {
+          "extension_instance_id": "profile-a",
+          "window_id": 7,
+          "tab_id": 42,
+          "request_id": "request-a",
+          "result_url": "https://profile-a.example.test/"
+        },
+        {
+          "extension_instance_id": "profile-b",
+          "window_id": 7,
+          "tab_id": 42,
+          "request_id": "request-b",
+          "result_url": "https://profile-b.example.test/"
+        }
+      ],
+      "response_order": ["request-b", "request-a"]
+    },
+    "ambiguous_implicit_target": {
+      "targets": [
+        {
+          "extension_instance_id": "profile-a",
+          "window_id": 7,
+          "tab_id": 42
+        },
+        {
+          "extension_instance_id": "profile-b",
+          "window_id": 7,
+          "tab_id": 42
+        }
+      ],
+      "expected_error": "ambiguous_browser_target",
+      "expected_dispatched_commands": 0
+    },
+    "lease_scope_isolation": {
+      "owner": {
+        "extension_instance_id": "profile-a",
+        "project_root": "project-a",
+        "caller_label": "caller-a"
+      },
+      "mismatches": [
+        {
+          "name": "cross_profile",
+          "extension_instance_id": "profile-b",
+          "project_root": "project-a",
+          "caller_label": "caller-a"
+        },
+        {
+          "name": "cross_project",
+          "extension_instance_id": "profile-a",
+          "project_root": "project-b",
+          "caller_label": "caller-a"
+        },
+        {
+          "name": "cross_caller",
+          "extension_instance_id": "profile-a",
+          "project_root": "project-a",
+          "caller_label": "caller-b"
+        }
+      ],
+      "expected_error": "invalid_browser_lease",
+      "expected_dispatched_commands": 0
+    },
+    "cancel_response_race": {
+      "extension_instance_id": "profile-a",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "response_first_request_id": "cancel-race-response-first",
+      "cancel_first_request_id": "cancel-race-cancel-first",
+      "response_url": "https://response-first.example.test/",
+      "cancel_error": "browser_operation_cancelled",
+      "cancel_after_response_error": "browser_request_not_found",
+      "late_response_error": "mismatched_browser_response"
+    },
+    "timeout_late_response": {
+      "extension_instance_id": "profile-a",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "request_id": "timeout-late-response",
+      "timeout_ms": 1,
+      "timeout_error": "browser_operation_timeout",
+      "late_response_error": "mismatched_browser_response"
+    },
+    "generation_reconnect": {
+      "extension_instance_id": "profile-a",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "request_id": "generation-disconnect",
+      "old_generation": 10,
+      "new_generation": 11,
+      "disconnect_error": "browser_session_disconnected",
+      "old_generation_response_error": "mismatched_browser_response",
+      "reused_request_error": "duplicate_browser_mutation"
+    },
+    "queue_fairness": {
+      "blocked_profile": "profile-a",
+      "healthy_profile": "profile-b",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "blocked_request_id": "queue-full-a",
+      "healthy_request_id": "queue-healthy-b",
+      "healthy_url": "https://profile-b.example.test/healthy",
+      "blocked_error": "browser_session_busy",
+      "healthy_dispatched": true
+    }
+  },
+  "migration_contracts": {
+    "rust_cdp_endpoint": {
+      "mode": "chrome",
+      "ws_url": "ws://127.0.0.1:20254",
+      "bridge": "rust",
+      "schema_version": 1,
+      "protocol_version": 1,
+      "broker_pid": 1234,
+      "broker_start_id": "fixture-rust-generation",
+      "broker_features": [
+        "transport.v1",
+        "p0.control"
+      ],
+      "discovery_url": "http://127.0.0.1:17373/v1/bridge"
+    },
+    "discovery": {
+      "url": "http://127.0.0.1:17373/v1/bridge",
+      "protocol_version": 1,
+      "websocket_scheme": "ws",
+      "websocket_host": "127.0.0.1",
+      "websocket_port_is_dynamic": true,
+      "mutation_requires_bearer": true
+    },
+    "heartbeat_reconnect": {
+      "extension_instance_id": "profile-reconnect",
+      "first_url": "https://before-reconnect.example.test/",
+      "reconnected_url": "https://after-reconnect.example.test/",
+      "expected_session_count": 1,
+      "expected_current_url": "https://after-reconnect.example.test/"
+    },
+    "lease_lifecycle": {
+      "extension_instance_id": "profile-lease",
+      "owner": "agent-a",
+      "initial_ttl_seconds": 60,
+      "renewed_ttl_seconds": 120,
+      "renew_after_expiry_error": "invalid_browser_lease",
+      "released": true
+    },
+    "request_lifecycle": {
+      "duplicate_mutation_error": "duplicate_browser_mutation",
+      "disconnect_error": "browser_session_disconnected",
+      "mismatched_response_error": "mismatched_browser_response",
+      "late_response_may_complete_another_request": false
+    },
+    "locator_outcomes": {
+      "unique_match": { "match_count": 1, "verification": "verified" },
+      "missing_match": { "match_count": 0, "error": "browser_target_not_found" },
+      "ambiguous_match": { "match_count": 2, "verification": "ambiguous" },
+      "stale_revision": { "stale_page_context": true, "verification": "stale_page_context" }
+    },
+    "locator_semantics": {
+      "snapshot": {
+        "interactive_elements": [
+          {
+            "element_ref": "all-controls",
+            "tag": "input",
+            "role": "textbox",
+            "accessible_name": "Email",
+            "label": "Email address",
+            "placeholder": "name@example.test",
+            "text": "Email",
+            "attributes": {
+              "type": "email",
+              "data-testid": "email-input",
+              "data-qa": "email-field",
+              "id": "email",
+              "name": "email",
+              "aria-label": "Email",
+              "title": "Email field",
+              "alt": "Email input",
+              "class": "css-123"
+            },
+            "shortSelector": "input.css-123:nth-of-type(2)",
+            "context": { "frame": null, "shadow_root": null },
+            "visible": true
+          },
+          {
+            "element_ref": "frame-submit",
+            "tag": "button",
+            "role": "button",
+            "accessible_name": "Submit",
+            "text": "Submit",
+            "attributes": { "data-testid": "frame-submit" },
+            "shortSelector": "#frame-submit",
+            "context": {
+              "frame": "https://app.example.test/checkout-frame",
+              "shadow_root": null
+            },
+            "visible": true
+          },
+          {
+            "element_ref": "shadow-submit",
+            "tag": "button",
+            "role": "button",
+            "accessible_name": "Submit",
+            "text": "Submit",
+            "attributes": { "data-testid": "shadow-submit" },
+            "shortSelector": "#shadow-submit",
+            "context": { "frame": null, "shadow_root": "#checkout-widget" },
+            "visible": true
+          }
+        ]
+      },
+      "cases": [
+        {
+          "name": "all-supported-locator-semantics",
+          "intent": { "element_ref": "all-controls" },
+          "test_id_attributes": ["data-qa"],
+          "expected_element_ref": "all-controls",
+          "expected_candidates": [
+            {
+              "kind": "role",
+              "expression": "page.getByRole(\"textbox\", { name: \"Email\", exact: true })",
+              "score": 100
+            },
+            {
+              "kind": "label",
+              "expression": "page.getByLabel(\"Email address\", { exact: true })",
+              "score": 90
+            },
+            {
+              "kind": "placeholder",
+              "expression": "page.getByPlaceholder(\"name@example.test\", { exact: true })",
+              "score": 85
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[data-qa=\\\"email-field\\\"]\")",
+              "score": 80
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[id=\\\"email\\\"]\")",
+              "score": 70
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[name=\\\"email\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[aria-label=\\\"Email\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[title=\\\"Email field\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[alt=\\\"Email input\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "text",
+              "expression": "page.getByText(\"Email\", { exact: true })",
+              "score": 45
+            },
+            {
+              "kind": "css",
+              "expression": "page.locator(\"input.css-123:nth-of-type(2)\")",
+              "score": 39
+            }
+          ]
+        },
+        {
+          "name": "iframe-context",
+          "intent": { "element_ref": "frame-submit" },
+          "test_id_attributes": [],
+          "expected_element_ref": "frame-submit",
+          "expected_candidates": [
+            {
+              "kind": "role",
+              "expression": "page.getByRole(\"button\", { name: \"Submit\", exact: true })",
+              "score": 100
+            },
+            {
+              "kind": "test_id",
+              "expression": "page.getByTestId(\"frame-submit\")",
+              "score": 80
+            },
+            {
+              "kind": "css",
+              "expression": "page.locator(\"#frame-submit\")",
+              "score": 55
+            },
+            {
+              "kind": "text",
+              "expression": "page.getByText(\"Submit\", { exact: true })",
+              "score": 45
+            }
+          ],
+          "expected_context": { "frame": "https://app.example.test/checkout-frame" }
+        },
+        {
+          "name": "shadow-context",
+          "intent": { "element_ref": "shadow-submit" },
+          "test_id_attributes": [],
+          "expected_element_ref": "shadow-submit",
+          "expected_candidates": [
+            {
+              "kind": "role",
+              "expression": "page.getByRole(\"button\", { name: \"Submit\", exact: true })",
+              "score": 100
+            },
+            {
+              "kind": "test_id",
+              "expression": "page.getByTestId(\"shadow-submit\")",
+              "score": 80
+            },
+            {
+              "kind": "css",
+              "expression": "page.locator(\"#shadow-submit\")",
+              "score": 55
+            },
+            {
+              "kind": "text",
+              "expression": "page.getByText(\"Submit\", { exact: true })",
+              "score": 45
+            }
+          ],
+          "expected_context": { "shadow_root": "#checkout-widget" }
+        }
+      ],
+      "error_cases": [
+        {
+          "name": "structured-intent-mismatch",
+          "intent": { "role": "link", "text": "Missing" },
+          "expected_error": "browser_target_not_found"
+        },
+        {
+          "name": "element-has-no-supported-locator",
+          "snapshot": {
+            "interactive_elements": [
+              { "element_ref": "plain-container", "tag": "div" }
+            ]
+          },
+          "intent": { "element_ref": "plain-container" },
+          "expected_error": "browser_target_not_found"
+        }
+      ]
+    },
+    "evidence_limits": {
+      "screenshot_max_bytes": 52428800,
+      "websocket_max_message_bytes": 75497472,
+      "network_max_events_per_batch": 100,
+      "preview_frame_meta": { "tab_id": 42, "seq": 1 }
+    },
+    "authorization": {
+      "capability": "javascript",
+      "owner_project": "project-a",
+      "owner_caller": "agent-a",
+      "owner_profile": "profile-a",
+      "cross_project_error": "browser_capability_denied",
+      "revocation_rejects_existing_token": true
+    },
+    "network_sequence": {
+      "accepted_sequences": [1, 2],
+      "duplicate_ack_sequence": 2,
+      "clear_barrier_sequence": 4,
+      "oversized_event_count": 101,
+      "oversized_reason": "batch_too_large",
+      "far_ahead_sequence": 2001,
+      "far_ahead_ack_sequence": 0
+    },
+    "malformed_transport": {
+      "incomplete_content_length": {
+        "declared_bytes": 10,
+        "received_bytes": 5,
+        "expected_status": 400
+      },
+      "unknown_privileged_operation": {
+        "expected_dispatch_count": 0,
+        "fail_closed": true
+      },
+      "untrusted_discovery_origin": {
+        "origin": "https://ordinary.example.test",
+        "must_not_receive_bearer": true
+      }
+    }
+  },
   "filtered_network": {
     "start_command": {
       "cmd": "start_network_capture",

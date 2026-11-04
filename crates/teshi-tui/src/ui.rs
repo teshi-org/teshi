@@ -1,46 +1,33 @@
+use crate::theme;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, CaseDetail, ChangeKind, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus,
+    App, CaseDetail, ChangedStep, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus,
 };
 use crate::bdd_nav::{
     nav_body_char_range_in_buffer, row_is_in_background_block, structural_prefix_char_range,
 };
 use crate::highlight::{
-    StepHighlightState, highlight_line_with_state, leading_whitespace_chars,
+    StepHighlightState, highlight_line_with_state, kind_to_style, leading_whitespace_chars,
     step_keyword_gutter_pad, step_keyword_gutter_styled_span,
 };
-use crate::markdown::render_markdown;
-use teshi_agent::pipeline::GenerationStage;
+use crate::keymap::Action;
+use teshi_core::gherkin::{BddScenario, ScenarioKind};
 use teshi_core::gherkin_lang::{
     GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType,
 };
+use teshi_core::highlight::{HighlightKind, highlight_line_spans};
+
+pub(crate) mod chat;
+mod pointer_controls;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
-const PREVIEW_CURSOR_BG: Color = Color::DarkGray;
-const PREVIEW_CURSOR_FG: Color = Color::White;
-const STATUS_PENDING: Color = Color::DarkGray;
-const STATUS_RUNNING: Color = Color::Yellow;
-const STATUS_PASSED: Color = Color::Green;
-const STATUS_FAILED: Color = Color::Red;
-const STATUS_SKIPPED: Color = Color::Gray;
-const KEYWORD_GIVEN: Color = Color::Blue;
-const KEYWORD_WHEN: Color = Color::Yellow;
-const KEYWORD_THEN: Color = Color::Green;
-const KEYWORD_AND: Color = Color::Gray;
-const KEYWORD_BUT: Color = Color::Gray;
-const EXPLORE_SELECTED_FOCUSED_BG: Color = Color::Rgb(16, 64, 168);
-const EXPLORE_SELECTED_UNFOCUSED_BG: Color = Color::Rgb(125, 170, 242);
-const SELECTION_BG: Color = Color::Rgb(64, 96, 160);
-const SELECTION_FG: Color = Color::White;
-const HIGHLIGHT_SELECTED_FG: Color = Color::Yellow;
-const HIGHLIGHT_UNFOCUSED_FG: Color = Color::Cyan;
 const MAIN_TABS: &[(MainTab, &str)] = &[
     (MainTab::Explore, " Explore [1] "),
     (MainTab::MindMap, " MindMap [2] "),
@@ -48,6 +35,17 @@ const MAIN_TABS: &[(MainTab, &str)] = &[
     (MainTab::Requirements, " Requirements [4] "),
     (MainTab::TestPoints, " Test Points [5] "),
 ];
+const COMPACT_TABS: &[(MainTab, &str)] = &[
+    (MainTab::Explore, "Explore [1]"),
+    (MainTab::MindMap, "Map [2]"),
+    (MainTab::Ai, "AI [3]"),
+    (MainTab::Requirements, "Req [4]"),
+    (MainTab::TestPoints, "Points [5]"),
+];
+
+fn main_tabs(width: u16) -> &'static [(MainTab, &'static str)] {
+    if width < 85 { COMPACT_TABS } else { MAIN_TABS }
+}
 const TAB_PADDING_LEFT: &str = " ";
 const TAB_PADDING_RIGHT: &str = " ";
 const TAB_DIVIDER: &str = " ";
@@ -67,7 +65,7 @@ fn register_tab_regions(app: &mut App, area: Rect) {
     let padding_right_width = TAB_PADDING_RIGHT.width() as u16;
     let divider_width = TAB_DIVIDER.width() as u16;
 
-    for (index, &(tab, title)) in MAIN_TABS.iter().enumerate() {
+    for (index, &(tab, title)) in main_tabs(area.width).iter().enumerate() {
         x = x.saturating_add(padding_left_width.min(right.saturating_sub(x)));
         if x >= right {
             break;
@@ -94,16 +92,6 @@ fn register_tab_regions(app: &mut App, area: Rect) {
     }
 }
 
-/// Braille spinner frames for the thinking indicator.
-fn spinner_frame() -> &'static str {
-    const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as usize;
-    SPINNER[elapsed / 80 % SPINNER.len()]
-}
-
 /// Format token counts with thousands separators for display.
 fn fmt_count(n: u64) -> String {
     let s = n.to_string();
@@ -127,24 +115,6 @@ fn token_usage_label(in_tokens: u64, out_tokens: u64) -> String {
         fmt_count(in_tokens),
         fmt_count(out_tokens)
     )
-}
-
-fn selected_style(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .fg(HIGHLIGHT_SELECTED_FG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(HIGHLIGHT_UNFOCUSED_FG)
-    }
-}
-
-fn popup_highlight_block(title: &'static str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(EXPLORE_SELECTED_FOCUSED_BG))
-        .border_style(Style::default().fg(EXPLORE_SELECTED_UNFOCUSED_BG))
 }
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
@@ -274,22 +244,14 @@ fn step_line_display(
     (out, pad, pad_start)
 }
 
-fn status_color(status: RunStatus) -> Color {
-    match status {
-        RunStatus::Idle => STATUS_PENDING,
-        RunStatus::Running => STATUS_RUNNING,
-        RunStatus::Passed => STATUS_PASSED,
-        RunStatus::Failed => STATUS_FAILED,
-        RunStatus::Skipped => STATUS_SKIPPED,
-    }
-}
-
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // Validate the raw editor buffer on every redraw.  The parser-backed
     // project remains permissive; these diagnostics are only an editor aid
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
     app.clickable_regions.clear();
+    app.agent_mut().acp_controls_ui.clear_regions();
+    app.chat_history_rect = None;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -302,7 +264,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     let top_tabs = Tabs::new(
-        MAIN_TABS
+        main_tabs(chunks[0].width)
             .iter()
             .map(|&(_, title)| Line::from(title))
             .collect::<Vec<_>>(),
@@ -314,10 +276,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         MainTab::Requirements => 3,
         MainTab::TestPoints => 4,
     })
-    .style(Style::default().fg(Color::DarkGray))
+    .style(Style::default().fg(theme::TAB_INACTIVE))
     .highlight_style(
         Style::default()
-            .fg(Color::White)
+            .fg(theme::FG)
+            .bg(theme::TAB_ACTIVE_BG)
             .add_modifier(Modifier::BOLD),
     )
     .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
@@ -326,37 +289,95 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     register_tab_regions(app, chunks[0]);
 
+    let active_tab_rect = app
+        .clickable_regions
+        .iter()
+        .find_map(|region| match region {
+            ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
+            _ => None,
+        });
     let version_text = format!("v{}", app.version);
-    let version_width = version_text.width() as u16;
-    if !app.version.is_empty() && chunks[1].width > version_width + 1 {
-        let rule_width = chunks[1].width - version_width - 1;
-        let [rule_area, version_area] = Layout::horizontal([
-            Constraint::Length(rule_width),
-            Constraint::Length(version_width),
-        ])
-        .areas(chunks[1]);
-        let rule_w = rule_area.width as usize;
-        let divider_line = "─".repeat(rule_w.max(1));
+    // A long local build identity must not consume the active tab's underline.
+    // Clip only the version's viewport when both labels cannot fit on this row.
+    let version_room = active_tab_rect
+        .map(|rect| {
+            chunks[1]
+                .right()
+                .saturating_sub(rect.right().saturating_add(1))
+        })
+        .unwrap_or(chunks[1].width);
+    let version_width = (version_text.width() as u16).min(version_room);
+    frame.render_widget(
+        Paragraph::new("─".repeat(chunks[1].width as usize))
+            .style(Style::default().fg(theme::BORDER)),
+        chunks[1],
+    );
+    if let Some(rect) = active_tab_rect
+        && chunks[1].height > 0
+    {
         frame.render_widget(
-            Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
-            rule_area,
-        );
-        frame.render_widget(
-            Paragraph::new(version_text)
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Right),
-            version_area,
-        );
-    } else {
-        let divider_w = chunks[1].width as usize;
-        let divider_line = "─".repeat(divider_w.max(1));
-        frame.render_widget(
-            Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
-            chunks[1],
+            Paragraph::new("━".repeat(rect.width as usize))
+                .style(Style::default().fg(theme::PRIMARY)),
+            Rect::new(rect.x, chunks[1].y, rect.width, 1),
         );
     }
-
+    let project_label = format!(
+        " Project: {} ",
+        app.project_switch.active.identity.display_name()
+    );
+    let project_width = (project_label.width() as u16).min(
+        chunks[1]
+            .width
+            .saturating_sub(version_width.saturating_add(1)),
+    );
+    if project_width > 0 && chunks[1].height > 0 {
+        frame.render_widget(
+            Paragraph::new(project_label).style(theme::muted().add_modifier(Modifier::BOLD)),
+            Rect::new(chunks[1].x, chunks[1].y, project_width, 1),
+        );
+        app.clickable_regions.push(ClickableRegion::ProjectControl {
+            rect: Rect::new(chunks[1].x, chunks[1].y, project_width, 1),
+        });
+    }
+    if !app.version.is_empty() && version_width > 0 && chunks[1].height > 0 {
+        frame.render_widget(
+            Paragraph::new(version_text)
+                .style(theme::muted())
+                .alignment(Alignment::Right),
+            Rect::new(
+                chunks[1].right() - version_width,
+                chunks[1].y,
+                version_width,
+                1,
+            ),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
+        chunks[3],
+    );
+    // Quit stays pinned to the bottom-right of every tab so it is always
+    // discoverable and clickable. Exiting is a deliberate chord now, and the
+    // label is the only place it is advertised. Tab footers render into the
+    // remaining width and cannot cover the control.
+    const EXIT_LABEL: &str = " ^q 退出";
+    let full_footer = chunks[3];
+    // Very narrow terminals keep their tab footer intact: those rows already
+    // shed their key hints, and the chord remains the affordance there.
+    let exit_width = if full_footer.width >= 60 {
+        (EXIT_LABEL.width() as u16).min(full_footer.width)
+    } else {
+        0
+    };
+    let footer = Rect {
+        width: full_footer.width.saturating_sub(exit_width),
+        ..full_footer
+    };
+    // Shadow the layout so every tab footer below renders into the narrowed
+    // row and leaves the right edge to the exit control.
+    let chunks = [chunks[0], chunks[1], chunks[2], footer];
     render_main_panel(frame, app, chunks[2]);
+    render_tree_pointer_feedback(frame, app);
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
@@ -364,7 +385,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         let status_line = Line::from(vec![Span::styled(
             msg.as_str(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::WARNING)
+                .bg(theme::FOOTER_BG)
                 .add_modifier(Modifier::BOLD),
         )]);
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
@@ -373,35 +395,165 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::Ai {
         render_ai_footer(frame, app, chunks[3]);
     } else if app.active_tab == MainTab::Requirements {
-        frame.render_widget(
-            if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
-                Line::raw(match app.authoring_ui.editor_mode {
-                    crate::authoring_tab::RequirementsEditorMode::Browse => {
-                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration"
-                    }
-                    crate::authoring_tab::RequirementsEditorMode::Insert => {
-                        " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move"
-                    }
-                })
-            } else {
-                crate::authoring_tab::requirements_footer_line(
-                    &app.requirements_root,
-                    &app.authoring_ui.iteration_filter,
-                )
-            },
-            chunks[3],
-        );
+        use crate::authoring_tab::RequirementsEditorMode;
+        let mode = match app.authoring_ui.editor_mode {
+            RequirementsEditorMode::Browse => "[BROWSE]",
+            RequirementsEditorMode::Insert => "[INSERT]",
+            RequirementsEditorMode::VisualChar => "[VISUAL]",
+            RequirementsEditorMode::VisualLine => "[V-LINE]",
+        };
+        let controls = requirements_footer_controls(&app.authoring_ui, chunks[3].width);
+        render_action_bar(frame, app, chunks[3], mode, &controls, false);
     } else if app.active_tab == MainTab::TestPoints {
-        frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
+        let inserting = app.test_points_ui.editing;
+        if inserting {
+            render_action_bar(
+                frame,
+                app,
+                chunks[3],
+                "[INSERT] ",
+                &[
+                    ("Save [Ctrl+s] ", Action::Save),
+                    ("Normal [Esc]", Action::TpExitInsert),
+                ],
+                false,
+            );
+        } else if chunks[3].width < 40 {
+            render_action_bar(
+                frame,
+                app,
+                chunks[3],
+                "",
+                &[
+                    (" Save", Action::Save),
+                    (" Approve", Action::TpApprove),
+                    (" Reject", Action::TpReject),
+                ],
+                false,
+            );
+        } else {
+            let compact = chunks[3].width < 100;
+            let controls = [
+                (
+                    if compact { " Approve" } else { " Approve [a]" },
+                    Action::TpApprove,
+                ),
+                (
+                    if compact { " Reject" } else { " Reject [r]" },
+                    Action::TpReject,
+                ),
+                (
+                    if compact { " Batch" } else { " Batch [A]" },
+                    Action::TpBatchApprove,
+                ),
+                (
+                    if compact {
+                        " Continue"
+                    } else {
+                        " Continue [c]"
+                    },
+                    Action::TpContinueGeneration,
+                ),
+                (
+                    if compact { " Filter" } else { " Filter [f]" },
+                    Action::TpReviewFilter,
+                ),
+                (if compact { " Save" } else { " Save [s]" }, Action::Save),
+            ];
+            render_action_bar(
+                frame,
+                app,
+                chunks[3],
+                if compact {
+                    "[NORMAL] "
+                } else {
+                    "[NORMAL] i edit "
+                },
+                &controls,
+                false,
+            );
+        }
     } else {
-        let key_hints = footer_hints(app);
-        frame.render_widget(Paragraph::new(key_hints), chunks[3]);
+        let key_hints = theme::footer_line(footer_hints(app).spans);
+        let controls_width = chunks[3].width.min(31);
+        render_action_bar(
+            frame,
+            app,
+            Rect::new(chunks[3].x, chunks[3].y, controls_width, chunks[3].height),
+            "",
+            &[(" Save", Action::Save), (" Model", Action::ModelPanelOpen)],
+            false,
+        );
+        if chunks[3].width > controls_width {
+            frame.render_widget(
+                Paragraph::new(key_hints),
+                Rect::new(
+                    chunks[3].x + controls_width,
+                    chunks[3].y,
+                    chunks[3].width - controls_width,
+                    chunks[3].height,
+                ),
+            );
+        }
     }
 
+    if exit_width > 0 {
+        let exit_area = Rect::new(
+            full_footer.right().saturating_sub(exit_width),
+            full_footer.y,
+            exit_width,
+            1,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: exit_area,
+            action: Action::Quit,
+            modal: false,
+        });
+        frame.render_widget(
+            Paragraph::new(theme::footer_line([
+                Span::styled(
+                    " ^q ",
+                    Style::default()
+                        .fg(theme::PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("退出", Style::default().fg(theme::FOOTER_DESC)),
+            ])),
+            exit_area,
+        );
+    }
+
+    if app.auth_panel_active
+        || app.model_panel_active
+        || app.session_panel_active
+        || app.quit_pending_confirm
+        || app.approval_panel_active
+        || app.agent_profile_panel_active
+        || app.change_summary_visible
+        || app.screenshot.visible
+        || app.has_external_change_prompt()
+        || app.step_keyword_picker.is_some()
+        || app.has_agent_change_prompt()
+        || app.has_acp_permission_prompt()
+        || app.authoring_ui.overlay_active()
+        || app.generation_scope_prompt.is_some()
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
+    {
+        // Modal rendering replaces the interactive layer, not just its pixels.
+        app.clickable_regions.clear();
+    }
     render_external_change_prompt(frame, app, chunks[2]);
 
     // Change Summary overlay (MindMap tab)
     render_change_summary_panel(frame, app, chunks[2]);
+    if let Some(editor_area) = app.editor_panel_rect
+        && app.step_keyword_picker.is_some()
+    {
+        render_step_keyword_picker(frame, app, editor_area);
+    }
 
     if app.auth_panel_active {
         render_auth_panel(frame, app, frame.area());
@@ -435,9 +587,225 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         app.authoring_ui.overlay,
         crate::authoring_tab::RequirementsOverlay::None
     ) || app.generation_scope_prompt.is_some()
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
     {
         render_requirements_overlay(frame, app, frame.area());
     }
+    render_screenshot_overlay(frame, app, chunks[2]);
+    crate::acp_controls::render_picker(frame, app);
+    pointer_controls::render_pending_review(frame, app, chunks[2]);
+    if app.pending_delete.is_some() {
+        // The confirmation is the only interactive layer, including its mouse
+        // targets; covered list rows must not change the captured target.
+        app.clickable_regions.clear();
+        render_delete_confirmation(frame, app, frame.area());
+    }
+    render_pointer_feedback(frame, app);
+}
+
+fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
+    let Some((x, y)) = app.mouse_position else {
+        return;
+    };
+    if app.pending_delete.is_some()
+        || app.has_external_change_prompt()
+        || app.auth_panel_active
+        || app.model_panel_active
+        || app.session_panel_active
+        || app.agent_profile_panel_active
+        || app.approval_panel_active
+        || app.quit_pending_confirm
+        || !matches!(
+            app.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::None
+        )
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
+    {
+        return;
+    }
+    let mut rows = Vec::new();
+    let inner = |area: Rect| {
+        area.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        })
+    };
+    match app.active_tab {
+        MainTab::Requirements => {
+            let ui = &mut app.authoring_ui;
+            rows.push((
+                inner(ui.pane_areas[0]),
+                ui.tree_state.flatten(&ui.tree_items).len(),
+                ui.tree_state.get_offset(),
+            ));
+            rows.push((
+                inner(ui.pane_areas[2]),
+                ui.filtered_linked_test_points().len(),
+                ui.linked_scroll,
+            ));
+        }
+        MainTab::TestPoints => {
+            if let Some(area) = app.clickable_regions.iter().find_map(|r| match r {
+                ClickableRegion::TestPointsPane { pane: 0, rect } => Some(*rect),
+                _ => None,
+            }) {
+                let ui = &mut app.test_points_ui;
+                rows.push((
+                    inner(area),
+                    ui.tree_state.flatten(&ui.tree_items).len(),
+                    ui.tree_state.get_offset(),
+                ));
+            }
+        }
+        MainTab::MindMap => {
+            if let Some(area) = app.tree_panel_rect {
+                rows.push((
+                    area,
+                    app.tree_state.flatten(&app.mindmap_index.items).len(),
+                    app.tree_state.get_offset(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    for (area, count, offset) in rows {
+        if area.contains((x, y).into()) && offset + usize::from(y - area.y) < count {
+            paint_hover(frame, Rect::new(area.x, y, area.width, 1));
+        }
+    }
+}
+
+/// Tints a hovered target. Fills are lifted by `theme::hover_fill`, so an
+/// already selected row still answers the pointer without losing its label.
+fn paint_hover(frame: &mut Frame<'_>, area: Rect) {
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.bg = theme::hover_fill(cell.bg);
+        }
+    }
+}
+
+fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
+    let Some((x, y)) = app.mouse_position else {
+        return;
+    };
+    // Only registered, currently visible targets get feedback. Modal rendering
+    // already removes covered targets, so hover cannot imply a blocked action.
+    for region in app.clickable_regions.iter().rev() {
+        let rect = match region {
+            ClickableRegion::ActionButton { rect, .. }
+            | ClickableRegion::RequirementFilterOption { rect, .. }
+            | ClickableRegion::TestPointField { rect, .. }
+            | ClickableRegion::TestPointExcerpt { rect, .. }
+            | ClickableRegion::TestPointScenario { rect, .. }
+            | ClickableRegion::ModelProfileRow { rect, .. }
+            | ClickableRegion::ModelFormField { rect, .. }
+            | ClickableRegion::AgentProfileRow { rect, .. }
+            | ClickableRegion::ChangeSummaryRow { rect, .. }
+            | ClickableRegion::StepKeywordRow { rect, .. }
+            | ClickableRegion::SessionRow { rect, .. }
+            | ClickableRegion::MindMapLocation { rect, .. }
+            | ClickableRegion::Tab { rect, .. }
+            | ClickableRegion::ProjectRecent { rect, .. }
+            | ClickableRegion::ProjectOpenPath { rect, .. }
+            | ClickableRegion::ExploreHorizontalScrollbar { rect, .. } => *rect,
+            ClickableRegion::ExploreFeature {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ExploreDeletedFeature {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ExploreScenario {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ExploreStep {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ApprovalBadge {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ApprovalOption {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            } => Rect::new(*col_x, *row_y, col_right.saturating_sub(*col_x), 1),
+            _ => continue,
+        };
+        if rect.contains((x, y).into()) {
+            let visible = rect.intersection(frame.area());
+            paint_hover(frame, visible);
+            break;
+        }
+    }
+}
+
+fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let label = app
+        .pending_delete
+        .as_ref()
+        .map(|request| request.label.clone())
+        .unwrap_or_default();
+    let error = app
+        .pending_delete
+        .as_ref()
+        .and_then(|request| request.error.clone());
+    let height = if error.is_some() { 10 } else { 7 };
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(60) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        area.width.min(60),
+        area.height.min(height),
+    );
+    frame.render_widget(Clear, popup);
+    let block = theme::popup_block("Confirm deletion");
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Delete {label}?\nThis cannot be undone.{}",
+            error.map_or_else(String::new, |error| format!(
+                "\n\nCould not delete: {error}"
+            ))
+        ))
+        .wrap(ratatui::widgets::Wrap { trim: false }),
+        body,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Delete [Enter/y] ", Action::DeleteConfirm),
+            ("Cancel [Esc/n]", Action::DeleteCancel),
+        ],
+        true,
+    );
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -456,712 +824,21 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
+    if area.width < 90 {
+        chat::render_chat_panel(frame, app, area, true, chat::ChatPlacement::Tab);
+        return;
+    }
     // Layout: sidebar (left) + main panel (right)
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(area);
+        Layout::horizontal([Constraint::Length(22), Constraint::Min(10)]).areas(area);
 
-    render_agent_sidebar(frame, app, sidebar_area);
-    render_agent_chat(frame, app, main_area);
-}
-
-/// Renders the agent sidebar — list of agents with status indicators.
-fn render_agent_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    use crate::app::AiStatus;
-    if area.width < 5 || area.height < 3 {
-        return;
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Agents ")
-        .style(Style::default());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, agent) in app.agents.iter().enumerate() {
-        let is_selected = i == app.selected_agent;
-        let prefix = if is_selected { "▸" } else { " " };
-        let (status_char, status_color) = match agent.status {
-            AiStatus::Waiting => ("●", Color::Yellow),
-            AiStatus::AwaitingApproval => ("◆", Color::Cyan),
-            AiStatus::Error => ("●", Color::Red),
-            AiStatus::Idle => ("○", Color::Green),
-        };
-        let title = if agent.title.len() > 12 {
-            format!("{}..", &agent.title[..12])
-        } else {
-            agent.title.clone()
-        };
-        let text = format!("{prefix} {status_char} {title}");
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(status_color)
-        };
-        lines.push(Line::styled(text, style));
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        " a new  x close ",
-        Style::default().fg(Color::DarkGray),
-    ));
-    lines.push(Line::styled(
-        " j/k switch",
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
-}
-
-/// Number of visual (wrapped) rows the input text occupies when rendered in a
-/// widget of the given `width` (in columns).
-fn visual_line_count_for_width(input: &str, width: u16) -> u16 {
-    if width == 0 {
-        return input.lines().count().max(1) as u16;
-    }
-    let count: u16 = input
-        .lines()
-        .map(|line| {
-            let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
-            if w == 0 { 1 } else { w.div_ceil(width).max(1) }
-        })
-        .sum();
-    count.max(1)
-}
-
-/// Compute the visual (wrapped) (row, col) for a character index in a
-/// multi-line string rendered at the given `width`.
-fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u16) {
-    if width == 0 {
-        return (0, 0);
-    }
-    let before: String = input.chars().take(cursor_char_idx).collect();
-    let lines: Vec<&str> = before.split('\n').collect();
-    if lines.is_empty() {
-        return (0, 0);
-    }
-
-    let mut visual_row: u16 = 0;
-
-    // Complete logical lines before the cursor's line
-    if lines.len() > 1 {
-        for line in &lines[..lines.len() - 1] {
-            let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
-            visual_row += if w == 0 { 1 } else { w.div_ceil(width).max(1) };
-        }
-    }
-
-    // The partial line containing the cursor
-    let cursor_line = lines[lines.len() - 1];
-    let cursor_line_width: u16 = cursor_line
-        .chars()
-        .map(|c| c.width().unwrap_or(0) as u16)
-        .sum();
-    if cursor_line_width == 0 {
-        return (visual_row, 0);
-    }
-    let col = cursor_line_width % width;
-    visual_row += cursor_line_width / width;
-    (visual_row, col)
-}
-
-/// Renders the active agent's chat panel.
-fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    use crate::app::{AiRole, AiStatus};
-
-    if area.width < 10 || area.height < 3 {
-        return;
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" AI Chat — {} ", app.active_agent_profile().name));
-    let inner = block.inner(area);
-    frame.render_widget(&block, area);
-
-    // Render approval mode badge in the top-right corner
-    let badge_label = format!("[{}]", app.approval_mode.display_name());
-    let badge_width = badge_label.chars().count() as u16 + 2;
-    let badge_x = area.right().saturating_sub(badge_width + 1);
-    if badge_x > area.x {
-        // Register clickable region
-        app.clickable_regions.push(ClickableRegion::ApprovalBadge {
-            row_y: area.y,
-            col_x: badge_x,
-            col_right: area.right().saturating_sub(1),
-        });
-        // Badge styling based on mode
-        let mut badge_style = if app.approval_mode.requires_manual_approval() {
-            Style::default().fg(Color::Yellow)
-        } else if app.approval_mode.auto_accepts() {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        };
-        // Hover effect: reverse video to indicate clickability
-        if app.mouse_position.is_some_and(|(mx, my)| {
-            my == area.y && mx >= badge_x && mx < area.right().saturating_sub(1)
-        }) {
-            badge_style = badge_style.add_modifier(Modifier::REVERSED);
-        }
-        let badge = Paragraph::new(Line::styled(badge_label, badge_style));
-        let badge_area = Rect::new(badge_x, area.y, badge_width, 1);
-        frame.render_widget(badge, badge_area);
-    }
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    // Layout: chat history (top) + status bar + [suggestions] + input bar (bottom)
-    let status_height: u16 = 1;
-
-    // Dynamic input height: based on visual wrapped line count, grows with content
-    let input_text_width = inner.width.saturating_sub(2); // Borders::ALL on input block
-    let input_text_rows = visual_line_count_for_width(&app.agent().input, input_text_width)
-        .min((inner.height / 3).max(3));
-    let input_height: u16 = input_text_rows + 2; // +2 for top and bottom borders
-
-    // Compute filtered suggestion count so height adapts to what's shown
-    let filter = if app.slash_suggestion_active {
-        app.agent()
-            .input
-            .strip_prefix('/')
-            .unwrap_or("")
-            .to_lowercase()
-    } else {
-        String::new()
-    };
-    let sugg_count = if app.slash_suggestion_active {
-        crate::app::SLASH_COMMANDS
-            .iter()
-            .filter(|(name, _)| filter.is_empty() || name.starts_with(&filter))
-            .count() as u16
-    } else {
-        0
-    };
-
-    let sugg_height: u16 = if app.slash_suggestion_active && sugg_count > 0 {
-        let max_possible = inner
-            .height
-            .saturating_sub(status_height + input_height + 1);
-        (sugg_count + 1).min(max_possible) // +1 for the hint line
-    } else {
-        0
-    };
-
-    let chat_height = inner
-        .height
-        .saturating_sub(status_height + sugg_height + input_height);
-    let chat_area = Rect::new(inner.x, inner.y, inner.width, chat_height);
-    let [chat_body, scrollbar_v] =
-        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(chat_area);
-
-    let status_area = Rect::new(inner.x, inner.y + chat_height, inner.width, status_height);
-    let sugg_area = Rect::new(
-        inner.x,
-        inner.y + chat_height + status_height,
-        inner.width,
-        sugg_height,
-    );
-    let input_area = Rect::new(
-        inner.x,
-        inner.y + chat_height + status_height + sugg_height,
-        inner.width,
-        input_height,
-    );
-
-    // ── Chat history ────────────────────────────────────────────────
-    let mut chat_lines: Vec<Line<'static>> = Vec::new();
-
-    // Add a greeting if no messages
-    if app.agent().messages().is_empty() {
-        let greeting = Line::raw("Welcome to AI Chat! Type a message below and press Enter.");
-        chat_lines.push(greeting);
-        chat_lines.push(Line::raw(""));
-        if !crate::llm::is_configured() {
-            chat_lines.push(
-                Line::raw(
-                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
-                )
-                .style(Style::default().fg(Color::Yellow)),
-            );
-        }
-    }
-
-    for msg in app.agent().messages() {
-        // Render tool result messages with a distinct style
-        if matches!(msg.role, AiRole::Tool) {
-            let is_error = msg.content.starts_with("Error:");
-            let tool_id = msg.tool_call_id.as_deref().unwrap_or("?");
-            let status_icon = if is_error { "✗" } else { "✓" };
-            let status_color = if is_error {
-                Color::Red
-            } else {
-                Color::DarkGray
-            };
-            chat_lines.push(
-                Line::raw(format!("  {status_icon} Tool ({tool_id})")).style(
-                    Style::default()
-                        .fg(status_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            );
-            let md_lines = render_markdown(&msg.content);
-            for md_line in md_lines {
-                let mut spans = vec![Span::raw("    ")];
-                spans.extend(
-                    md_line
-                        .spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.to_string(), s.style)),
-                );
-                let mut line = Line::from(spans);
-                line.style = md_line.style;
-                chat_lines.push(line);
-            }
-            chat_lines.push(Line::raw(""));
-            continue;
-        }
-        let prefix = match msg.role {
-            AiRole::User => "▶ You",
-            AiRole::Assistant => "▷ 🥰",
-            _ => unreachable!(),
-        };
-        let role_color = match msg.role {
-            AiRole::User => Color::Cyan,
-            AiRole::Assistant => Color::Green,
-            _ => unreachable!(),
-        };
-        // Show source tag for MindMap-initiated messages
-        let source_tag = msg
-            .source
-            .as_ref()
-            .map(|s| format!("[{s}] "))
-            .unwrap_or_default();
-        let prefix_text = format!("{source_tag}{prefix}:");
-        chat_lines.push(
-            Line::raw(prefix_text)
-                .style(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
-        );
-        // Render message content as Markdown with a 2-space indent.
-        if !msg.content.is_empty() {
-            let md_lines = render_markdown(&msg.content);
-            for md_line in md_lines {
-                let mut spans = vec![Span::raw("  ")];
-                spans.extend(
-                    md_line
-                        .spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.to_string(), s.style)),
-                );
-                let mut line = Line::from(spans);
-                line.style = md_line.style;
-                chat_lines.push(line);
-            }
-        }
-        // Render tool call blocks with status indicators
-        if let Some(tcs) = &msg.tool_calls {
-            for tc in tcs {
-                let is_pending = app.agent().status == AiStatus::AwaitingApproval
-                    && app
-                        .pending_agent_changes
-                        .iter()
-                        .any(|c| c.tool_call_id == tc.id);
-                let has_tool_result = app.agent().messages().iter().any(|m| {
-                    matches!(m.role, AiRole::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
-                });
-                let is_error = has_tool_result
-                    && app.agent().messages().iter().any(|m| {
-                        matches!(m.role, AiRole::Tool)
-                            && m.tool_call_id.as_deref() == Some(&tc.id)
-                            && m.content.starts_with("Error:")
-                    });
-                let (icon, status_color) = if is_error {
-                    ("✗", Color::Red)
-                } else if has_tool_result {
-                    ("✓", Color::Green)
-                } else if is_pending {
-                    ("◆", Color::Yellow)
-                } else {
-                    ("⏳", Color::Yellow)
-                };
-                let duration_str = tc
-                    .execution_duration_ms
-                    .map(|ms| {
-                        if ms >= 1000 {
-                            format!("{:.1}s", ms as f64 / 1000.0)
-                        } else {
-                            format!("{ms}ms")
-                        }
-                    })
-                    .unwrap_or_default();
-                let tool_line = if duration_str.is_empty() {
-                    format!("  🔧 {}  {icon}", tc.name)
-                } else {
-                    format!("  🔧 {}  {icon} {duration_str}", tc.name)
-                };
-                chat_lines.push(
-                    Line::raw(tool_line).style(
-                        Style::default()
-                            .fg(status_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                );
-            }
-        }
-        chat_lines.push(Line::raw(""));
-    }
-
-    // ── Inline diff for pending changes ────────────────────────
-    if app.agent().status == AiStatus::AwaitingApproval && !app.pending_change_diffs.is_empty() {
-        let total_diffs = app.pending_change_diffs.len();
-        let title = if total_diffs > 1 {
-            format!(" Pending Change (1 of {total_diffs}) ")
-        } else {
-            " Pending Change ".to_string()
-        };
-        chat_lines.push(Line::raw(""));
-        chat_lines.push(
-            Line::raw(format!("  🔧{title}")).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        );
-        if let Some(diff) = app.pending_change_diffs.first() {
-            let max_lines = chat_body
-                .height
-                .saturating_sub(chat_lines.len() as u16)
-                .clamp(3, 20) as usize;
-            for dl in diff.iter().take(max_lines) {
-                let prefix = match dl.kind {
-                    ChangeKind::Added => "+",
-                    ChangeKind::Modified => "~",
-                    ChangeKind::Deleted => "-",
-                    ChangeKind::Unchanged => " ",
-                };
-                let color = match dl.kind {
-                    ChangeKind::Added => Color::Green,
-                    ChangeKind::Modified => Color::Yellow,
-                    ChangeKind::Deleted => Color::Red,
-                    ChangeKind::Unchanged => Color::DarkGray,
-                };
-                chat_lines.push(Line::styled(
-                    format!("    {} {}", prefix, dl.text),
-                    Style::default().fg(color),
-                ));
-            }
-        }
-        chat_lines.push(Line::raw(""));
-    }
-
-    // Show streaming partial response as a live assistant message
-    if !app.agent().partial_response().is_empty() {
-        chat_lines.push(
-            Line::raw("▷ 🥰:").style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        );
-        let md_lines = render_markdown(app.agent().partial_response());
-        for md_line in md_lines {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(
-                md_line
-                    .spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            let mut line = Line::from(spans);
-            line.style = md_line.style;
-            chat_lines.push(line);
-        }
-        // Append a blinking cursor
-        let last_line = chat_lines.pop().unwrap_or(Line::raw(""));
-        let mut spans: Vec<Span<'_>> = last_line.spans.into_iter().collect();
-        spans.push(Span::styled(
-            "▌",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::SLOW_BLINK),
-        ));
-        chat_lines.push(Line::from(spans));
-        chat_lines.push(Line::raw(""));
-    }
-
-    // Slice chat history based on scroll offset (0 = show bottom)
-    let total_lines = chat_lines.len();
-    let max_start = total_lines.saturating_sub(chat_body.height as usize);
-    let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let end = (start + chat_body.height as usize).min(total_lines);
-    let visible_lines: Vec<Line<'static>> = chat_lines[start..end].to_vec();
-
-    frame.render_widget(
-        Paragraph::new(Text::from(visible_lines))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(Style::default()),
-        chat_body,
-    );
-
-    // ── Scrollbar ────────────────────────────────────────────────────
-    if total_lines > chat_body.height as usize && scrollbar_v.width > 0 {
-        let thumb_len = {
-            let raw = chat_body.height as f64 * chat_body.height as f64 / total_lines as f64;
-            (raw.ceil().max(1.0) as u16).min(chat_body.height)
-        };
-        let thumb_pos = if total_lines <= chat_body.height as usize {
-            0
-        } else {
-            let scrollable = total_lines.saturating_sub(chat_body.height as usize);
-            let track = chat_body.height.saturating_sub(thumb_len);
-            (start * track as usize / scrollable.max(1)) as u16
-        };
-
-        let scrollbar_lines: Vec<Line<'static>> = (0..chat_body.height)
-            .map(|i| {
-                if i >= thumb_pos && i < thumb_pos + thumb_len {
-                    Line::styled("█", Style::default().fg(Color::White).bg(Color::DarkGray))
-                } else {
-                    Line::styled("░", Style::default().fg(Color::DarkGray))
-                }
-            })
-            .collect();
-
-        frame.render_widget(Paragraph::new(Text::from(scrollbar_lines)), scrollbar_v);
-    }
-
-    // ── Status bar (thinking / model name) ─────────────────────────
-    // Handle the new AwaitingApproval status
-    let status_text: String = match app.agent().status {
-        AiStatus::Waiting
-            if app.agent().partial_response().is_empty() && app.agent().tool_status.is_some() =>
-        {
-            let spinner = spinner_frame();
-            app.agent()
-                .tool_status
-                .clone()
-                .unwrap_or_else(|| format!("{spinner} Teshi is thinking..."))
-        }
-        AiStatus::Waiting if app.agent().partial_response().is_empty() => {
-            format!("{} Teshi is thinking...", spinner_frame())
-        }
-        AiStatus::AwaitingApproval => {
-            if matches!(app.generation_stage, GenerationStage::Confirming) {
-                format!(
-                    "◆ Changes pending — Press Y to accept, N to reject · {}",
-                    app.generation_stage.label()
-                )
-            } else {
-                "◆ Waiting for approval — Y/N".into()
-            }
-        }
-        AiStatus::Error => {
-            if app.status.starts_with("AI error:") {
-                app.status.clone()
-            } else {
-                "AI error — check TESHI_LLM_API_KEY and your network connection.".to_string()
-            }
-        }
-        _ => String::new(),
-    };
-    // Pipeline stage indicator (append to status_text when active)
-    // Skip when already showing in AwaitingApproval status
-    let status_text = if !matches!(
-        app.generation_stage,
-        GenerationStage::Idle | GenerationStage::Complete
-    ) && !matches!(app.agent().status, AiStatus::AwaitingApproval)
-    {
-        let stage_label = app.generation_stage.label();
-        if status_text.is_empty() {
-            stage_label.to_string()
-        } else {
-            format!("{status_text} · {stage_label}")
-        }
-    } else {
-        status_text
-    };
-    let model_label = app.active_model_label.as_deref().unwrap_or("");
-
-    if status_area.width > 0 {
-        let model_w = model_label.len() as u16;
-        let [status_left, status_right] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(model_w)])
-                .areas(status_area);
-
-        if !status_text.is_empty() {
-            match app.agent().status {
-                AiStatus::Error => {
-                    let error_lines = vec![
-                        Line::raw(status_text.clone()).style(Style::default().fg(Color::Red)),
-                        Line::raw("Press Enter to retry or Esc to clear")
-                            .style(Style::default().fg(Color::DarkGray)),
-                    ];
-                    frame.render_widget(Paragraph::new(Text::from(error_lines)), status_left);
-                }
-                _ => {
-                    let st_style = match app.agent().status {
-                        AiStatus::Waiting => Style::default().fg(Color::Yellow),
-                        AiStatus::AwaitingApproval => Style::default().fg(Color::Cyan),
-                        _ => Style::default().fg(Color::DarkGray),
-                    };
-                    frame.render_widget(
-                        Paragraph::new(Text::from(Line::raw(status_text).style(st_style))),
-                        status_left,
-                    );
-                }
-            }
-        }
-        if !model_label.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Text::from(
-                    Line::raw(model_label).style(Style::default().fg(Color::DarkGray)),
-                )),
-                status_right,
-            );
-        }
-    }
-
-    // ── Slash command suggestions ────────────────────
-    if app.slash_suggestion_active && sugg_height > 0 {
-        let mut sugg_lines: Vec<Line<'static>> = Vec::new();
-
-        // Filter commands based on what the user typed after "/"
-        let filtered: Vec<&(&str, &str)> = crate::app::SLASH_COMMANDS
-            .iter()
-            .filter(|(name, _)| filter.is_empty() || name.starts_with(&filter))
-            .collect();
-
-        // Clamp selection to filtered list
-        let selection = app
-            .slash_suggestion_selection
-            .min(filtered.len().saturating_sub(1));
-
-        for (i, (name, desc)) in filtered.iter().enumerate() {
-            let is_selected = i == selection;
-            let prefix = if is_selected { " ▸ " } else { "   " };
-            let text = format!("{prefix}/{name}  {desc}");
-            let style = if is_selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            sugg_lines.push(Line::styled(text, style));
-        }
-
-        // Hint line
-        sugg_lines.push(Line::styled(
-            " ↑↓ navigate · Enter/Tab select · Esc close ",
-            Style::default().fg(Color::DarkGray),
-        ));
-
-        let visible: Vec<Line<'static>> =
-            sugg_lines.into_iter().take(sugg_height as usize).collect();
-        frame.render_widget(
-            Paragraph::new(Text::from(visible)).style(Style::default()),
-            sugg_area,
-        );
-    }
-
-    // ── Input bar ───────────────────────────────────────────────────
-    let input_border_style = if app.ai_input_focused {
-        Style::default()
-            .fg(HIGHLIGHT_SELECTED_FG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let label = token_usage_label(
-        app.agent().total_input_tokens,
-        app.agent().total_output_tokens,
-    );
-    let input_block = if label.is_empty() {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(input_border_style)
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(input_border_style)
-            .title_top(Line::raw(label).alignment(Alignment::Right))
-    };
-    let input_inner = input_block.inner(input_area);
-    frame.render_widget(input_block, input_area);
-
-    let input_display: Text<'static> = if app.agent().input.is_empty() {
-        if app.ai_input_focused {
-            Text::raw("Type your message...")
-        } else {
-            Text::raw("")
-        }
-    } else {
-        // Build lines explicitly so Paragraph renders multi-line correctly
-        let raw = app.agent().input.as_str();
-        let lines: Vec<Line<'static>> = raw
-            .lines()
-            .map(|l| Line::from(Span::raw(l.to_string())))
-            .collect();
-        Text::from(lines)
-    };
-    frame.render_widget(
-        Paragraph::new(input_display)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(match app.agent().status {
-                AiStatus::Waiting => Style::default().fg(Color::DarkGray),
-                _ => Style::default(),
-            }),
-        input_inner,
-    );
-
-    // Show a visible cursor at the insertion point, accounting for wrapping.
-    if app.ai_input_focused && app.agent().status != AiStatus::Waiting {
-        let (vis_row, vis_col) = visual_cursor_pos(
-            &app.agent().input,
-            app.agent().input_cursor,
-            input_inner.width,
-        );
-        frame.set_cursor_position((input_inner.x + vis_col, input_inner.y + vis_row));
-    }
+    chat::render_agent_sidebar(frame, app, sidebar_area);
+    chat::render_chat_panel(frame, app, main_area, true, chat::ChatPlacement::Tab);
 }
 
 /// Renders the footer bar for the AI tab.
-fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let send_label = if app.ai_input_focused {
-        " Send [Enter] "
-    } else {
-        " Focus [Enter] "
-    };
-    let mut hint_spans = vec![
-        footer_pill(send_label),
-        Span::raw(" "),
-        footer_pill(" Clear [Esc] "),
-        Span::raw(" "),
-        footer_pill(" Model [m] "),
-    ];
-    if !app.ai_input_focused {
-        hint_spans.push(Span::raw(" "));
-        hint_spans.push(footer_pill(" Quit [q] "));
-    }
-    // Show tool execution status in the footer when the agent is acting
-    if let Some(ref tool_status) = app.agent().tool_status {
-        hint_spans.push(Span::raw("  "));
-        hint_spans.push(Span::styled(
-            tool_status.clone(),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    let hints = Line::from(hint_spans);
-    frame.render_widget(Paragraph::new(hints), area);
+fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    pointer_controls::render_ai_footer(frame, app, area);
 }
 
 /// Renders the MindMap layout: tree (55%) + right panel (45%) split vertically into
@@ -1189,6 +866,21 @@ fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 /// Renders the Explore tab: three-column feature/scenario/step browser.
+/// Two columns with supporting details below the main content; tiny terminals
+/// show only the focused pane, preserving all keyboard navigation targets.
+fn compact_panes(area: Rect, focus: usize) -> [Rect; 3] {
+    if area.width < 70 || area.height < 12 {
+        let mut panes = [Rect::default(); 3];
+        panes[focus.min(2)] = area;
+        return panes;
+    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
+    let [main, detail] =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(right);
+    [left, main, detail]
+}
+
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.explore_edit_mode {
         let cols = Layout::default()
@@ -1199,43 +891,173 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         render_reserved_panel(frame, app, cols[1]);
         return;
     }
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(30),
-            Constraint::Percentage(50),
-        ])
-        .split(area);
+    let cols = compact_panes(area, app.explore_focus.index());
 
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
     render_explore_steps(frame, app, cols[2]);
+    // Row bindings use logical list rows. Translate them through the same
+    // offsets used to draw the columns, and discard rows outside the viewport.
+    let views = app.explore_viewports;
+    app.clickable_regions.retain_mut(|region| {
+        let (column, row) = match region {
+            ClickableRegion::ExploreFeature { row_y, .. }
+            | ClickableRegion::ExploreDeletedFeature { row_y, .. } => (0, row_y),
+            ClickableRegion::ExploreScenario { row_y, .. } => (1, row_y),
+            ClickableRegion::ExploreStep { row_y, .. } => (2, row_y),
+            _ => return true,
+        };
+        let view = views[column];
+        let logical_row = row.saturating_sub(view.rect.y) as usize;
+        if logical_row < view.offset || logical_row >= view.offset + view.rect.height as usize {
+            return false;
+        }
+        *row = view.rect.y + (logical_row - view.offset) as u16;
+        true
+    });
     render_failure_detail(frame, app, area);
 }
 
 fn explore_select_style(focused: bool) -> Style {
-    selected_style(focused)
+    theme::selected_row(focused)
+}
+
+/// Capture marker for the Explore panes; the MindMap tree uses the same shape.
+fn capture_badge(count: usize) -> Span<'static> {
+    Span::styled(
+        format!(" ●{count}"),
+        Style::default()
+            .fg(theme::SUCCESS)
+            .add_modifier(Modifier::DIM),
+    )
 }
 
 fn explore_block(title: &str, focused: bool) -> Block<'_> {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(title_style)
+    theme::panel_block(title, focused)
 }
 
 fn feature_display_name(path: &std::path::Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "feature".to_string())
+}
+
+/// Render one Explore column with an independent, two-row horizontal scrollbar.
+fn render_explore_lines<'a>(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    column: ColumnFocus,
+    inner: Rect,
+    lines: Vec<Line<'a>>,
+) -> Rect {
+    render_explore_lines_selected(frame, app, column, inner, lines, None)
+}
+
+fn render_explore_lines_selected<'a>(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    column: ColumnFocus,
+    inner: Rect,
+    lines: Vec<Line<'a>>,
+    selected_row: Option<usize>,
+) -> Rect {
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let viewport_width = inner.width as usize;
+    let overflow = content_width > viewport_width && inner.height >= 3;
+    let content_area = if overflow {
+        Rect::new(inner.x, inner.y, inner.width, inner.height - 2)
+    } else {
+        inner
+    };
+    let max_scroll = content_width.saturating_sub(viewport_width);
+    let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
+    app.explore_horizontal_scroll[column.index()] = offset;
+    let selected = selected_row.unwrap_or_else(|| match column {
+        ColumnFocus::Feature => app.explore_selected_feature_row().unwrap_or(0),
+        ColumnFocus::Scenario => app.explore_selected_scenario,
+        ColumnFocus::Step => app.explore_selected_step,
+    });
+    let view = &mut app.explore_viewports[column.index()];
+    let owner = match column {
+        ColumnFocus::Feature => (0, None, None),
+        ColumnFocus::Scenario => (
+            app.explore_selected_feature,
+            app.explore_selected_deleted_feature,
+            None,
+        ),
+        ColumnFocus::Step => (
+            app.explore_selected_feature,
+            app.explore_selected_deleted_feature,
+            Some(app.explore_selected_scenario),
+        ),
+    };
+    if view.last_owner != Some(owner) {
+        view.offset = 0;
+        view.last_selected = None;
+        view.last_owner = Some(owner);
+    }
+    view.rect = content_area;
+    view.max_vertical = lines.len().saturating_sub(content_area.height as usize);
+    view.max_horizontal = max_scroll;
+    view.offset = view.offset.min(view.max_vertical);
+    if view.last_selected != Some(selected) {
+        if selected < view.offset {
+            view.offset = selected;
+        } else if selected >= view.offset + content_area.height as usize {
+            view.offset = selected
+                .saturating_add(1)
+                .saturating_sub(content_area.height as usize)
+                .min(view.max_vertical);
+        }
+        view.last_selected = Some(selected);
+    }
+    // Pad and render only the viewport, rather than allocating full-width
+    // backgrounds for every file in a large project.
+    let visible_lines = lines
+        .into_iter()
+        .skip(view.offset)
+        .take(content_area.height as usize)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(
+            visible_lines,
+            content_width.max(viewport_width).min(u16::MAX as usize) as u16,
+        )))
+        .scroll((0, offset.min(u16::MAX as usize) as u16)),
+        content_area,
+    );
+
+    if overflow {
+        let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2);
+        let scrollbar_line = theme::horizontal_scrollbar(content_width, viewport_width, offset);
+        frame.render_widget(
+            Paragraph::new(vec![scrollbar_line.clone(), scrollbar_line]),
+            scrollbar,
+        );
+        app.clickable_regions
+            .push(ClickableRegion::ExploreHorizontalScrollbar {
+                column,
+                rect: scrollbar,
+                content_width,
+                viewport_width,
+            });
+    }
+    content_area
+}
+
+fn git_file_status_style(status: teshi_core::git::FileGitStatus) -> Style {
+    use teshi_core::git::{DiffStatus, FileGitStatus};
+    theme::diff_style(match status {
+        FileGitStatus::Added | FileGitStatus::Untracked => DiffStatus::Added,
+        FileGitStatus::Modified => DiffStatus::Modified,
+        FileGitStatus::Deleted => DiffStatus::Deleted,
+        FileGitStatus::Unmodified => DiffStatus::Unchanged,
+    })
+    .add_modifier(Modifier::BOLD)
+}
+
+fn git_diff_status_style(status: teshi_core::git::DiffStatus) -> Style {
+    theme::diff_style(status).add_modifier(Modifier::BOLD)
 }
 
 fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
@@ -1257,64 +1079,237 @@ fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
     out
 }
 
+fn input_with_cursor(text: &str, cursor: usize, width: u16) -> String {
+    let chars: Vec<_> = text
+        .chars()
+        .map(|ch| match ch {
+            '\n' => '↵',
+            '\t' => '→',
+            ch => ch,
+        })
+        .collect();
+    let cursor = cursor.min(chars.len());
+    let mut start = 0;
+    let mut prefix_width: usize = chars[..cursor]
+        .iter()
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum();
+    while start < cursor && prefix_width + 1 > usize::from(width) {
+        prefix_width = prefix_width.saturating_sub(chars[start].width().unwrap_or(0));
+        start += 1;
+    }
+    let mut display: String = chars[start..cursor].iter().collect();
+    display.push('▏');
+    display.extend(chars[cursor..].iter());
+    truncate_string_to_cols(&display, width)
+}
+
 fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::feature_browser::Row;
     let focused = app.explore_focus == ColumnFocus::Feature;
-    let block = explore_block("Features", focused);
+    let mut title = if app.feature_browser.searching || !app.feature_browser.query.is_empty() {
+        format!("Features /{}", app.feature_browser.query)
+    } else {
+        if app.lazy_features.is_some() {
+            format!(
+                "Features ({}) [/] File search",
+                app.lazy_features
+                    .as_ref()
+                    .map_or(0, |catalog| catalog.paths.len())
+            )
+        } else {
+            "Features [/] Search".to_string()
+        }
+    };
+    if app.features_loading() {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let frame = (START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis()
+            / 100) as usize;
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        title.push_str(&format!(" {} Loading...", spinner[frame % spinner.len()]));
+    }
+    let block = explore_block(&title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-
-    let highlight_style = explore_select_style(focused);
-    let normal = Style::default();
-    let mut lines: Vec<Line> = Vec::new();
-
-    if app.project.features.is_empty() {
-        lines.push(Line::styled(
-            " (no features)",
-            Style::default().fg(Color::DarkGray),
-        ));
-    } else {
-        for (i, feature) in app.project.features.iter().enumerate() {
-            let label = feature_display_name(&feature.file_path);
-            let style = if i == app.explore_selected_feature {
-                highlight_style
+    let rows = app.feature_browser_rows();
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(if app.features_loading() {
+                "Scanning Feature files..."
             } else {
-                normal
-            };
-            let mut line = Line::from(Span::styled(format!(" {label}"), style));
-            line = truncate_line_to_cols(line, inner.width);
-            let trail = if i == app.explore_selected_feature {
-                highlight_style
-            } else {
-                Style::default()
-            };
-            line = pad_line_to_width(line, inner.width, trail);
-            lines.push(line);
-        }
+                app.lazy_features
+                    .as_ref()
+                    .and_then(|state| state.scan_error.as_deref())
+                    .unwrap_or("(no features)")
+            }),
+            inner,
+        );
+        return;
     }
-
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-
-    // Register clickable regions for each feature row
-    for (i, _feature) in app.project.features.iter().enumerate() {
-        app.clickable_regions.push(ClickableRegion::ExploreFeature {
-            feature_idx: i,
-            row_y: inner.y + i as u16,
-            col_x: inner.x,
-            col_right: inner.right(),
-        });
+    let selected = app.explore_selected_feature_row();
+    let lines = rows
+        .iter()
+        .enumerate()
+        .map(|(row, item)| {
+            let label = match item {
+                Row::Directory(path, depth) => format!(
+                    " {}{} {}/",
+                    "  ".repeat(*depth),
+                    if app.feature_directory_collapsed(path) {
+                        "▸"
+                    } else {
+                        "▾"
+                    },
+                    path.rsplit('/').next().unwrap_or(path)
+                ),
+                Row::File(index, label, deleted) => {
+                    let status = if *deleted {
+                        app.git_status.deleted[*index].file_status
+                    } else {
+                        let path = match &app.lazy_features {
+                            Some(catalog) => catalog.paths.get(*index),
+                            None => app
+                                .project
+                                .features
+                                .get(*index)
+                                .map(|feature| &feature.file_path),
+                        };
+                        path.map_or(teshi_core::git::FileGitStatus::Unmodified, |path| {
+                            app.git_status.file_status_at_path(path)
+                        })
+                    };
+                    return Line::from(vec![
+                        Span::styled(
+                            format!(" {:<2} ", status.marker()),
+                            git_file_status_style(status),
+                        ),
+                        Span::styled(
+                            label.clone(),
+                            if selected == Some(row) {
+                                explore_select_style(focused)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]);
+                }
+            };
+            Line::styled(
+                label,
+                if selected == Some(row) {
+                    explore_select_style(focused)
+                } else {
+                    Style::default()
+                },
+            )
+        })
+        .collect();
+    let content =
+        render_explore_lines_selected(frame, app, ColumnFocus::Feature, inner, lines, selected);
+    for (row, item) in rows.iter().enumerate() {
+        let region = match item {
+            Row::File(index, _, true) => ClickableRegion::ExploreDeletedFeature {
+                deleted_idx: *index,
+                row_y: content.y + row as u16,
+                col_x: content.x,
+                col_right: content.right(),
+            },
+            _ => ClickableRegion::ExploreFeature {
+                feature_idx: row,
+                row_y: content.y + row as u16,
+                col_x: content.x,
+                col_right: content.right(),
+            },
+        };
+        app.clickable_regions.push(region);
     }
 }
 
 fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if !app.catalog_selection_ready() {
+        frame.render_widget(
+            Paragraph::new(
+                app.lazy_features
+                    .as_ref()
+                    .and_then(|state| state.error.as_deref())
+                    .unwrap_or("Select a Feature; content loads on demand"),
+            )
+            .block(explore_block("Feature content", false)),
+            area,
+        );
+        return;
+    }
     let focused = app.explore_focus == ColumnFocus::Scenario;
     let scenarios_title = explore_scenarios_title(app);
     let block = explore_block(scenarios_title.as_str(), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if let Some(deleted_idx) = app.explore_selected_deleted_feature {
+        let deleted_scenarios: Vec<String> = app
+            .git_status
+            .deleted
+            .get(deleted_idx)
+            .map(|view| {
+                view.deleted_scenarios()
+                    .map(|scenario| scenario.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut lines = Vec::new();
+        if deleted_scenarios.is_empty() {
+            lines.push(Line::styled(
+                " (deleted Feature; see Git diff)",
+                Style::default().fg(theme::MUTED),
+            ));
+        } else {
+            for (scenario_idx, name) in deleted_scenarios.iter().enumerate() {
+                let selected = scenario_idx == app.explore_selected_scenario;
+                let mut line = Line::from(vec![
+                    Span::styled(
+                        "- ",
+                        git_diff_status_style(teshi_core::git::DiffStatus::Deleted),
+                    ),
+                    Span::styled(
+                        format!("Scenario: {name}"),
+                        if selected {
+                            explore_select_style(focused)
+                        } else {
+                            Style::default().fg(theme::ERROR)
+                        },
+                    ),
+                ]);
+                line = pad_line_to_width(
+                    line,
+                    inner.width,
+                    if selected {
+                        explore_select_style(focused)
+                    } else {
+                        Style::default()
+                    },
+                );
+                lines.push(line);
+            }
+        }
+        let content_area = render_explore_lines(frame, app, ColumnFocus::Scenario, inner, lines);
+        for (scenario_idx, _name) in deleted_scenarios.iter().enumerate() {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx,
+                    row_y: content_area.y + scenario_idx as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
+                });
+        }
         return;
     }
 
@@ -1326,20 +1321,27 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .features
         .get(app.explore_selected_feature)
         .map(|f| f.all_scenarios());
+    let deleted_scenarios: Vec<_> = app
+        .git_status
+        .current_at(app.explore_selected_feature)
+        .map(|view| view.deleted_scenarios().cloned().collect())
+        .unwrap_or_default();
 
-    if scenarios.as_ref().is_none_or(|s| s.is_empty()) {
+    if scenarios.as_ref().is_none_or(|s| s.is_empty()) && deleted_scenarios.is_empty() {
         lines.push(Line::styled(
             " (no scenarios)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
-    } else if let Some(scenarios) = scenarios {
+    }
+    let current_scenario_count = scenarios.as_ref().map_or(0, Vec::len);
+    if let Some(scenarios) = scenarios {
         for (i, scenario) in scenarios.iter().enumerate() {
             let status = app
                 .explore_case_status
                 .get(&(app.explore_selected_feature, i))
                 .copied()
                 .unwrap_or(RunStatus::Idle);
-            let status_dot = Span::styled("●", Style::default().fg(status_color(status)));
+            let status_dot = Span::styled("●", theme::status_style(status));
             let tp_ids = app
                 .authoring_ui
                 .artifacts
@@ -1356,12 +1358,25 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             } else {
                 format!(" [{}]", tp_ids.join(","))
             };
+            let git_status = app
+                .git_status
+                .current_at(app.explore_selected_feature)
+                .map(|view| view.scenario_status(scenario))
+                .unwrap_or_default();
+            let git_marker = Span::styled(
+                format!("{} ", git_status.marker()),
+                git_diff_status_style(git_status),
+            );
             let name = Span::styled(format!(" {}{}", scenario.name, tp_badge), normal);
-            let mut line = Line::from(vec![status_dot, name]);
+            let mut spans = vec![git_marker, status_dot, name];
+            let captures = app.explore_scenario_captures(i);
+            if captures > 0 {
+                spans.push(capture_badge(captures));
+            }
+            let mut line = Line::from(spans);
             if i == app.explore_selected_scenario {
                 line = apply_line_background(line, explore_select_style(focused));
             }
-            line = truncate_line_to_cols(line, inner.width);
             let trail = if i == app.explore_selected_scenario {
                 explore_select_style(focused)
             } else {
@@ -1372,7 +1387,36 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    for (deleted_idx, deleted) in deleted_scenarios.iter().enumerate() {
+        let scenario_idx = current_scenario_count + deleted_idx;
+        let selected = scenario_idx == app.explore_selected_scenario;
+        let mut line = Line::from(vec![
+            Span::styled(
+                "- ",
+                git_diff_status_style(teshi_core::git::DiffStatus::Deleted),
+            ),
+            Span::styled(
+                format!("Scenario: {}", deleted.name),
+                if selected {
+                    explore_select_style(focused)
+                } else {
+                    Style::default().fg(theme::ERROR)
+                },
+            ),
+        ]);
+        line = pad_line_to_width(
+            line,
+            inner.width,
+            if selected {
+                explore_select_style(focused)
+            } else {
+                Style::default()
+            },
+        );
+        lines.push(line);
+    }
+
+    let content_area = render_explore_lines(frame, app, ColumnFocus::Scenario, inner, lines);
 
     // Register clickable regions for each scenario row
     if let Some(scenarios) = app
@@ -1385,29 +1429,436 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx: i,
-                    row_y: inner.y + i as u16,
-                    col_x: inner.x,
-                    col_right: inner.right(),
+                    row_y: content_area.y + i as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
+                });
+        }
+        for (deleted_idx, _deleted) in deleted_scenarios.iter().enumerate() {
+            let scenario_idx = scenarios.len() + deleted_idx;
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx,
+                    row_y: content_area.y + scenario_idx as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
+                });
+        }
+    } else {
+        for (deleted_idx, _deleted) in deleted_scenarios.iter().enumerate() {
+            let scenario_idx = deleted_idx;
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx,
+                    row_y: content_area.y + scenario_idx as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
                 });
         }
     }
 }
 
 fn explore_scenarios_title(app: &App) -> String {
-    let count = app
+    if let Some(deleted_idx) = app.explore_selected_deleted_feature {
+        let count = app
+            .git_status
+            .deleted
+            .get(deleted_idx)
+            .map(|view| view.deleted_scenarios().count())
+            .unwrap_or(0);
+        return format!("Scenarios ({count})");
+    }
+    let current_count = app
         .project
         .features
         .get(app.explore_selected_feature)
         .map(|f| f.scenario_count())
         .unwrap_or(0);
-    format!("Scenarios ({count})")
+    let deleted_count = app
+        .git_status
+        .current_at(app.explore_selected_feature)
+        .map(|view| view.deleted_scenarios().count())
+        .unwrap_or(0);
+    format!("Scenarios ({})", current_count + deleted_count)
 }
 
-const DIFF_ADDED_BG: Color = Color::Rgb(24, 72, 36);
-const DIFF_MODIFIED_BG: Color = Color::Rgb(68, 56, 16);
-const DIFF_DELETED_BG: Color = Color::Rgb(72, 24, 24);
+/// Gherkin syntax spans for one source line. `keyword_kind` overrides the
+/// keyword colour when the caller already resolved it from the AST.
+///
+/// Diff rows must show the file exactly as written, so the highlighter's
+/// keyword gutter padding is removed and any line the highlighter would
+/// re-space (tags) is returned unstyled instead.
+fn gherkin_syntax_spans(
+    line: &str,
+    state: &mut StepHighlightState,
+    lang: &GherkinLanguage,
+    keyword_kind: Option<HighlightKind>,
+) -> Vec<Span<'static>> {
+    let mut tokens = highlight_line_spans(line, state, lang);
+    for token in &mut tokens {
+        if matches!(
+            token.kind,
+            HighlightKind::Given
+                | HighlightKind::When
+                | HighlightKind::Then
+                | HighlightKind::AndBut
+        ) {
+            token.text = token.text.trim_start().to_string();
+            if let Some(kind) = keyword_kind {
+                token.kind = kind;
+            }
+        }
+    }
+    let text: String = tokens.iter().map(|token| token.text.as_str()).collect();
+    if text != line {
+        return vec![Span::styled(
+            line.to_string(),
+            kind_to_style(HighlightKind::Default),
+        )];
+    }
+    tokens
+        .into_iter()
+        .map(|token| Span::styled(token.text, kind_to_style(token.kind)))
+        .collect()
+}
+
+/// Spans for a changed Step row; folded doc-string and table lines keep their
+/// own Gherkin colours.
+fn changed_step_spans(change: &ChangedStep, lang: &GherkinLanguage) -> Vec<Span<'static>> {
+    let mut state = StepHighlightState::default();
+    let mut lines = change.text.split('\n');
+    let mut spans = gherkin_syntax_spans(
+        lines.next().unwrap_or_default(),
+        &mut state,
+        lang,
+        change.keyword_kind,
+    );
+    for line in lines {
+        spans.push(Span::styled(" ↳ ", Style::default().fg(theme::MUTED)));
+        spans.extend(gherkin_syntax_spans(line, &mut state, lang, None));
+    }
+    spans
+}
+
+/// Shared diff garnish for one Explore row: a `+`/`-`/`~` gutter marker. The
+/// caller keeps the Gherkin syntax foregrounds, so a changed row never loses
+/// its colours and no row paints a background.
+fn decorate_diff_row(
+    spans: Vec<Span<'static>>,
+    status: teshi_core::git::DiffStatus,
+) -> Line<'static> {
+    let mut line = Vec::with_capacity(spans.len() + 1);
+    line.push(Span::styled(
+        format!("{} ", status.marker()),
+        theme::diff_style(status).add_modifier(Modifier::BOLD),
+    ));
+    line.extend(spans);
+    Line::from(line)
+}
+
+/// Maps the buffer-diff kind of a changed Step onto the Git diff status.
+fn change_status(kind: crate::app::ChangeKind) -> teshi_core::git::DiffStatus {
+    use teshi_core::git::DiffStatus;
+    match kind {
+        crate::app::ChangeKind::Added => DiffStatus::Added,
+        crate::app::ChangeKind::Modified => DiffStatus::Modified,
+        crate::app::ChangeKind::Deleted => DiffStatus::Deleted,
+        crate::app::ChangeKind::Unchanged => DiffStatus::Unchanged,
+    }
+}
+
+/// Gherkin language of the Feature currently open in Explore; removed Features
+/// fall back to the `HEAD` content.
+fn explore_gherkin_language(app: &App) -> &'static GherkinLanguage {
+    let code = app
+        .explore_selected_deleted_feature
+        .and_then(|index| app.git_status.deleted.get(index))
+        .and_then(|view| view.diff.as_ref()?.old_content.as_deref())
+        .map(GherkinLanguages::detect_from_content)
+        .or_else(|| {
+            app.project
+                .features
+                .get(app.explore_selected_feature)
+                .map(|feature| feature.language.as_str())
+        })
+        .unwrap_or("en");
+    GherkinLanguages::global().get(code)
+}
+
+fn render_git_diff_line(
+    diff_line: &teshi_core::git::GitDiffLine,
+    state: &mut StepHighlightState,
+    lang: &GherkinLanguage,
+) -> Line<'static> {
+    let spans = gherkin_syntax_spans(&diff_line.text, state, lang, None);
+    decorate_diff_row(spans, diff_line.status)
+}
+
+fn render_git_diff_lines(
+    lines: &[teshi_core::git::GitDiffLine],
+    state: &mut StepHighlightState,
+    lang: &GherkinLanguage,
+    output: &mut Vec<Line<'static>>,
+) {
+    for diff_line in lines {
+        output.push(render_git_diff_line(diff_line, state, lang));
+    }
+}
+
+fn render_git_steps(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    scenario: &BddScenario,
+    view: &teshi_core::git::FeatureGitView,
+) -> Vec<(usize, u16)> {
+    let focused = app.explore_focus == ColumnFocus::Step;
+    let block = explore_block("Steps (Git diff)", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return Vec::new();
+    }
+
+    let scenario_status = view.scenario_status(scenario);
+    let lang = explore_gherkin_language(app);
+    let mut highlight = StepHighlightState::default();
+    let old_scenario_line = view
+        .scenarios
+        .iter()
+        .find(|item| {
+            item.new_line_number == Some(scenario.line_number) && item.name == scenario.name
+        })
+        .and_then(|item| item.old_line_number);
+    let is_scenario_header = |diff_line: &teshi_core::git::GitDiffLine| {
+        diff_line.new_line_number == Some(scenario.line_number)
+            || old_scenario_line.is_some_and(|line| diff_line.old_line_number == Some(line))
+    };
+    let mut lines = Vec::new();
+    let mut step_rows = Vec::new();
+    if !view.feature_diff_lines.is_empty() {
+        lines.push(Line::styled(
+            " Feature",
+            Style::default()
+                .fg(theme::WARNING)
+                .add_modifier(Modifier::BOLD),
+        ));
+        render_git_diff_lines(&view.feature_diff_lines, &mut highlight, lang, &mut lines);
+        lines.push(Line::raw(""));
+    }
+    if let Some(background) = &view.background
+        && background.status != teshi_core::git::DiffStatus::Unchanged
+    {
+        lines.push(Line::styled(
+            " Background",
+            Style::default()
+                .fg(theme::WARNING)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for diff_line in &background.diff_lines {
+            lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    lines.push(Line::styled(
+        format!(
+            " {} {}",
+            scenario_status.marker(),
+            match scenario.kind {
+                ScenarioKind::Scenario => format!("Scenario: {}", scenario.name),
+                ScenarioKind::ScenarioOutline => format!("Scenario Outline: {}", scenario.name),
+            }
+        ),
+        git_diff_status_style(scenario_status),
+    ));
+    if scenario_status != teshi_core::git::DiffStatus::Unchanged {
+        let diff_lines = view.scenario_diff_lines(scenario).unwrap_or_default();
+        if diff_lines.is_empty() {
+            if let Some(diff) = &view.diff {
+                for diff_line in &diff.lines {
+                    if is_scenario_header(diff_line) {
+                        continue;
+                    }
+                    let row_y = inner.y + lines.len() as u16;
+                    lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
+                    if let Some(new_line) = diff_line.new_line_number
+                        && let Some(step_idx) = scenario
+                            .steps
+                            .iter()
+                            .position(|step| step.line_number == new_line)
+                    {
+                        step_rows.push((step_idx, row_y));
+                    }
+                }
+            }
+        } else {
+            for diff_line in diff_lines {
+                if is_scenario_header(diff_line) {
+                    continue;
+                }
+                let row_y = inner.y + lines.len() as u16;
+                lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
+                if let Some(new_line) = diff_line.new_line_number
+                    && let Some(step_idx) = scenario
+                        .steps
+                        .iter()
+                        .position(|step| step.line_number == new_line)
+                {
+                    step_rows.push((step_idx, row_y));
+                }
+            }
+        }
+    } else {
+        for step in &scenario.steps {
+            let row_y = inner.y + lines.len() as u16;
+            let spans = gherkin_syntax_spans(
+                &format!("  {} {}", step.keyword, step.text),
+                &mut highlight,
+                lang,
+                None,
+            );
+            lines.push(decorate_diff_row(
+                spans,
+                teshi_core::git::DiffStatus::Unchanged,
+            ));
+            if let Some(step_idx) = scenario
+                .steps
+                .iter()
+                .position(|candidate| candidate.line_number == step.line_number)
+            {
+                step_rows.push((step_idx, row_y));
+            }
+        }
+    }
+    for deleted in view.deleted_scenarios() {
+        if deleted.diff_lines.is_empty() {
+            continue;
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(" - Scenario: {}", deleted.name),
+            git_diff_status_style(teshi_core::git::DiffStatus::Deleted),
+        ));
+        for diff_line in &deleted.diff_lines {
+            if diff_line.old_line_number == deleted.old_line_number {
+                continue;
+            }
+            lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
+        }
+    }
+    render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
+    step_rows
+}
+
+fn render_git_file_fallback(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    view: &teshi_core::git::FeatureGitView,
+) {
+    let focused = app.explore_focus == ColumnFocus::Step;
+    let block = explore_block("Feature (Git diff)", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines = Vec::new();
+    if let Some(diff) = &view.diff {
+        let mut highlight = StepHighlightState::default();
+        render_git_diff_lines(
+            &diff.lines,
+            &mut highlight,
+            explore_gherkin_language(app),
+            &mut lines,
+        );
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            " (Git diff unavailable)",
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
+}
 
 fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let changes = app.explore_changed_steps();
+    // An explicitly opened pending-agent diff owns the pane until it is closed;
+    // the Git-diff view must not shadow the Diff action behind it.
+    if !changes.is_empty() && app.explore_diff_lines.is_none() {
+        let block = explore_block(
+            "Steps (Git diff) · j/k select · Shift+←/→ scroll",
+            app.explore_focus == ColumnFocus::Step,
+        );
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        // Keep document-level changes visible alongside independently selectable
+        // steps; replacing the old diff renderer must not hide title changes.
+        let view = app
+            .explore_selected_deleted_feature
+            .and_then(|index| app.git_status.deleted.get(index))
+            .or_else(|| app.git_status.current_at(app.explore_selected_feature));
+        let mut lines = Vec::new();
+        let lang = explore_gherkin_language(app);
+        if let Some(view) = view {
+            let mut highlight = StepHighlightState::default();
+            render_git_diff_lines(&view.feature_diff_lines, &mut highlight, lang, &mut lines);
+        }
+        let prefix_rows = lines.len();
+        lines.extend(changes.iter().enumerate().map(|(index, change)| {
+            let mut line =
+                decorate_diff_row(changed_step_spans(change, lang), change_status(change.kind));
+            if index == app.explore_selected_step {
+                // The selection fill replaces the diff tint, matching the other
+                // Explore columns and the MindMap tree.
+                let selection = theme::selected_row(true);
+                line.style = selection;
+                for span in &mut line.spans {
+                    span.style = span.style.patch(selection);
+                }
+            }
+            line
+        }));
+        let content = render_explore_lines_selected(
+            frame,
+            app,
+            ColumnFocus::Step,
+            inner,
+            lines,
+            Some(prefix_rows + app.explore_selected_step),
+        );
+        for index in 0..changes.len() {
+            // render_explore_panel translates logical rows once and removes
+            // off-screen hit targets after every pane has been rendered.
+            app.clickable_regions.push(ClickableRegion::ExploreStep {
+                step_idx: index,
+                row_y: content
+                    .y
+                    .saturating_add((prefix_rows + index).min(u16::MAX as usize) as u16),
+                col_x: content.x,
+                col_right: content.right(),
+            });
+        }
+        return;
+    }
+    if !app.catalog_selection_ready() {
+        frame.render_widget(
+            Paragraph::new(
+                app.lazy_features
+                    .as_ref()
+                    .and_then(|state| state.error.as_deref())
+                    .unwrap_or("Select a Feature; content loads on demand"),
+            )
+            .block(explore_block("Feature content", false)),
+            area,
+        );
+        return;
+    }
     let focused = app.explore_focus == ColumnFocus::Step;
     if app.explore_edit_mode {
         render_editor_panel(frame, app, area, false);
@@ -1437,7 +1888,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.push(Line::styled(
             format!(" {} changed line(s) — [D] close", diff_lines.len()),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::raw(""));
@@ -1454,33 +1905,72 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if relevant.is_empty() {
             lines.push(Line::styled(
                 " (no changes in this scenario)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
         } else {
+            let lang = explore_gherkin_language(app);
             for dl in relevant {
-                let (gutter_ch, gutter_color, bg_color) = match dl.kind {
-                    crate::app::ChangeKind::Added => ("+", Color::Green, DIFF_ADDED_BG),
-                    crate::app::ChangeKind::Modified => ("~", Color::Yellow, DIFF_MODIFIED_BG),
-                    crate::app::ChangeKind::Deleted => ("-", Color::Red, DIFF_DELETED_BG),
-                    crate::app::ChangeKind::Unchanged => (" ", Color::DarkGray, Color::Reset),
-                };
-                let line_style = Style::default().bg(bg_color);
-                let gutter_style = Style::default()
-                    .fg(gutter_color)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(bg_color);
-                let text_style = Style::default().bg(bg_color);
-                let gutter = Span::styled(format!("{gutter_ch} "), gutter_style);
-                let text = Span::styled(dl.text.clone(), text_style);
-                let mut line = Line::from(vec![gutter, text]);
-                line = truncate_line_to_cols(line, inner.width);
-                line = pad_line_to_width(line, inner.width, line_style);
-                lines.push(line);
+                let mut state = StepHighlightState::default();
+                let spans = gherkin_syntax_spans(&dl.text, &mut state, lang, None);
+                lines.push(decorate_diff_row(spans, change_status(dl.kind)));
             }
         }
 
-        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
         return;
+    }
+
+    if let Some(deleted_idx) = app.explore_selected_deleted_feature {
+        if let Some(view) = app.git_status.deleted.get(deleted_idx).cloned() {
+            render_git_file_fallback(frame, app, area, &view);
+        }
+        return;
+    }
+
+    let feature = app.project.features.get(app.explore_selected_feature);
+    let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
+    if let Some(view) = app
+        .git_status
+        .current_at(app.explore_selected_feature)
+        .cloned()
+    {
+        let feature_changed = !view.feature_diff_lines.is_empty();
+        if let Some(scenario) = scenario {
+            let scenario_status = view.scenario_status(scenario);
+            let background_changed = view.background.as_ref().is_some_and(|background| {
+                background.status != teshi_core::git::DiffStatus::Unchanged
+            });
+            let deleted_scenario = view.deleted_scenarios().next().is_some();
+            if scenario_status != teshi_core::git::DiffStatus::Unchanged
+                || background_changed
+                || deleted_scenario
+                || feature_changed
+            {
+                let scenario = scenario.clone();
+                let step_rows = render_git_steps(frame, app, area, &scenario, &view);
+                for (step_idx, row_y) in step_rows {
+                    app.clickable_regions.push(ClickableRegion::ExploreStep {
+                        step_idx,
+                        row_y,
+                        col_x: area.x,
+                        col_right: area.right(),
+                    });
+                }
+                return;
+            }
+            let has_mapped_change = view
+                .scenarios
+                .iter()
+                .any(|item| item.status != teshi_core::git::DiffStatus::Unchanged);
+            if view.file_status != teshi_core::git::FileGitStatus::Unmodified && !has_mapped_change
+            {
+                render_git_file_fallback(frame, app, area, &view);
+                return;
+            }
+        } else if view.file_status != teshi_core::git::FileGitStatus::Unmodified {
+            render_git_file_fallback(frame, app, area, &view);
+            return;
+        }
     }
 
     // ── Normal (browse) mode ──────────────────────────────────────────
@@ -1506,7 +1996,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if background_steps.is_empty() && scenario_steps.is_empty() {
         lines.push(Line::styled(
             " (no steps)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
         line_idx += 1;
     } else {
@@ -1521,35 +2011,32 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             lines.push(Line::styled(
                 background_label,
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme::MUTED)
                     .add_modifier(Modifier::BOLD),
             ));
             line_idx += 1;
             for step in background_steps {
                 let kw_color = match step.keyword_type {
                     StepKeywordType::Given => {
-                        last_major = Some(KEYWORD_GIVEN);
-                        KEYWORD_GIVEN
+                        last_major = Some(theme::PRIMARY);
+                        theme::PRIMARY
                     }
                     StepKeywordType::When => {
-                        last_major = Some(KEYWORD_WHEN);
-                        KEYWORD_WHEN
+                        last_major = Some(theme::WARNING);
+                        theme::WARNING
                     }
                     StepKeywordType::Then => {
-                        last_major = Some(KEYWORD_THEN);
-                        KEYWORD_THEN
+                        last_major = Some(theme::SUCCESS);
+                        theme::SUCCESS
                     }
-                    StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
-                    StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
+                    StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
+                    StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
                 };
                 let (kw_span, _) =
                     step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
-                let body_span = Span::styled(
-                    format!(" {}", step.text),
-                    Style::default().fg(Color::DarkGray),
-                );
+                let body_span =
+                    Span::styled(format!(" {}", step.text), Style::default().fg(theme::MUTED));
                 let mut line = Line::from(vec![kw_span, body_span]);
-                line = truncate_line_to_cols(line, inner.width);
                 line = pad_line_to_width(line, inner.width, Style::default());
                 lines.push(line);
                 line_idx += 1;
@@ -1563,7 +2050,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         {
             lines.push(Line::styled(
                 format!(" {}", scenario.tags.join(" ")),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
             line_idx += 1;
         }
@@ -1571,19 +2058,19 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         for (i, step) in scenario_steps.iter().enumerate() {
             let kw_color = match step.keyword_type {
                 StepKeywordType::Given => {
-                    last_major = Some(KEYWORD_GIVEN);
-                    KEYWORD_GIVEN
+                    last_major = Some(theme::PRIMARY);
+                    theme::PRIMARY
                 }
                 StepKeywordType::When => {
-                    last_major = Some(KEYWORD_WHEN);
-                    KEYWORD_WHEN
+                    last_major = Some(theme::WARNING);
+                    theme::WARNING
                 }
                 StepKeywordType::Then => {
-                    last_major = Some(KEYWORD_THEN);
-                    KEYWORD_THEN
+                    last_major = Some(theme::SUCCESS);
+                    theme::SUCCESS
                 }
-                StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
-                StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
+                StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
+                StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
             };
             let (kw_span, _) =
                 step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
@@ -1592,8 +2079,12 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             } else {
                 Span::raw(format!(" {}", step.text))
             };
-            let mut line = Line::from(vec![kw_span, body_span]);
-            line = truncate_line_to_cols(line, inner.width);
+            let captures = app.explore_step_captures(&step.text);
+            let mut spans = vec![kw_span, body_span];
+            if captures > 0 {
+                spans.push(capture_badge(captures));
+            }
+            let mut line = Line::from(spans);
             let trail = if i == app.explore_selected_step {
                 highlight_style
             } else {
@@ -1619,14 +2110,14 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 if !table.tags.is_empty() {
                     lines.push(Line::styled(
                         format!(" {}", table.tags.join(" ")),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED),
                     ));
                     line_idx += 1;
                 }
                 lines.push(Line::styled(
                     " Examples:",
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme::MUTED)
                         .add_modifier(Modifier::BOLD),
                 ));
                 line_idx += 1;
@@ -1639,7 +2130,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let _ = line_idx;
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
 }
 
 fn render_examples_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
@@ -1709,7 +2200,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = popup_highlight_block("Failure Details");
+    let block = theme::popup_block("Failure Details");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1717,11 +2208,28 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
+    // The hint is an addition; a popup too short for both must keep every
+    // detail line, and the run's message is the last thing to lose.
     let out_lines = truncate_lines(build_case_detail_lines(&scenario.name, detail), inner.width);
-    frame.render_widget(Paragraph::new(Text::from(out_lines)), inner);
+    let hint_fits = out_lines.len() < inner.height as usize;
+    let body = if hint_fits {
+        let [body, footer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                " i failed step screenshot · Enter/Esc close",
+                Style::default().fg(theme::MUTED),
+            )),
+            footer,
+        );
+        body
+    } else {
+        inner
+    };
+    frame.render_widget(Paragraph::new(Text::from(out_lines)), body);
 }
 
-fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.has_external_change_prompt() {
         return;
     }
@@ -1743,28 +2251,35 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(EXPLORE_SELECTED_FOCUSED_BG))
-        .border_style(Style::default().fg(EXPLORE_SELECTED_UNFOCUSED_BG));
+    let block = theme::popup_block(title);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
 
+    let [content, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     let lines = vec![
         Line::raw(format!("Detected external updates for {file_name}.")),
         Line::raw(""),
-        Line::raw("Reload latest input: [Enter] / [r]"),
-        Line::raw("Keep local buffer: [Esc] / [k]"),
     ];
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Reload [Enter] ", Action::ExternalChangeReload),
+            ("Keep [Esc]", Action::ExternalChangeKeepLocal),
+        ],
+        true,
+    );
 }
 
 /// Renders the Change Summary overlay with pending added/modified/deleted nodes.
-fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_change_summary_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.change_summary_visible || app.pending_change_summary.is_empty() {
         return;
     }
@@ -1781,21 +2296,31 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = popup_highlight_block("Change Summary");
-    let inner = block.inner(popup);
+    let block = theme::popup_block("Change Summary");
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
     frame.render_widget(block, popup);
     if inner.width < 10 || inner.height < 3 {
         return;
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let scroll = app
+        .change_summary_selection
+        .saturating_add(3)
+        .saturating_sub(inner.height as usize);
+    app.clickable_regions.push(ClickableRegion::ModalList {
+        rect: inner,
+        up: Action::ChangeSummaryUp,
+        down: Action::ChangeSummaryDown,
+    });
 
     // Header
     let header = format!(
         " {} change(s) pending — ↑↓ navigate, Enter jump, Esc close",
         app.pending_change_summary.len()
     );
-    lines.push(Line::styled(header, Style::default().fg(Color::DarkGray)));
+    lines.push(Line::styled(header, Style::default().fg(theme::MUTED)));
     lines.push(Line::raw(""));
 
     // List each change node
@@ -1806,11 +2331,15 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             "  "
         };
         let (label, label_color) = match node.kind {
-            crate::app::ChangeKind::Added => ("[+]", Color::Green),
-            crate::app::ChangeKind::Modified => ("[~]", Color::Yellow),
-            crate::app::ChangeKind::Deleted => ("[-]", Color::Red),
+            crate::app::ChangeKind::Added => ("[+]", theme::SUCCESS),
+            crate::app::ChangeKind::Modified => ("[~]", theme::WARNING),
+            crate::app::ChangeKind::Deleted => ("[-]", theme::ERROR),
             crate::app::ChangeKind::Unchanged => continue,
         };
+        if let Some(rect) = visible_content_rows(inner, lines.len(), 1, scroll) {
+            app.clickable_regions
+                .push(ClickableRegion::ChangeSummaryRow { rect, index: i });
+        }
         let label_span = Span::styled(
             format!("{}{} ", marker, label),
             Style::default()
@@ -1819,20 +2348,35 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         );
         let scenario_span = Span::styled(
             format!(" {}  ", node.scenario_name),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::PRIMARY),
         );
         let step_span = Span::raw(node.step_text.clone());
         let mut line = Line::from(vec![label_span, scenario_span, step_span]);
         // Highlight selected row
         if i == app.change_summary_selection {
-            line = apply_line_background(line, Style::default().bg(Color::Rgb(30, 30, 60)));
+            line = apply_line_background(line, theme::selected_row(true));
         }
         line = truncate_line_to_cols(line, inner.width);
         line = pad_line_to_width(line, inner.width, Style::default());
         lines.push(line);
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width)))
+            .scroll((scroll as u16, 0)),
+        inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Jump [Enter] ", Action::ChangeSummaryJump),
+            ("Close [Esc]", Action::ClearInputState),
+        ],
+        true,
+    );
 }
 
 fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
@@ -1850,12 +2394,21 @@ fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
 
 /// Renders the collapsible tree using `tui-tree-widget`.
 fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    if !app.mindmap_within_budget() {
+        frame.render_widget(Paragraph::new("This Feature exceeds the interactive MindMap budget. Its scenarios and steps remain available in Explore.")
+            .wrap(ratatui::widgets::Wrap { trim: true }).block(theme::panel_block("MindMap [current Feature]", focused)), area);
+        return;
+    }
     let items = &app.mindmap_index.items;
 
-    let highlight_style = selected_style(true);
+    let highlight_style = theme::selected_row(focused);
 
     // Build title with indicators when highlights/filter are active
-    let mut title_parts: Vec<&str> = vec!["MindMap"];
+    let mut title_parts: Vec<&str> = vec![if app.lazy_features.is_some() {
+        "MindMap [current Feature]"
+    } else {
+        "MindMap"
+    }];
     if app.mindmap_index.has_active_filter() {
         title_parts.push("[filtered]");
     }
@@ -1864,21 +2417,7 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
     }
     let title = title_parts.join(" ");
 
-    let block = if focused {
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(Style::default().fg(Color::DarkGray))
-    };
+    let block = theme::panel_block(title, focused);
 
     let block_inner = block.inner(area);
     let tree = Tree::new(items)
@@ -1900,23 +2439,17 @@ fn render_mindmap_scenario_preview(
     area: Rect,
     focused: bool,
 ) {
+    app.preview_panel_rect = Some(area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    }));
     if area.width < 10 || area.height < 3 {
         return;
     }
-
     let Some(buffer) = app.preview_buffer.as_ref() else {
         // No preview available — render an empty placeholder panel
         let title = "Preview";
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(if focused {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            });
+        let block = theme::panel_block(title, focused);
         frame.render_widget(block, area);
         return;
     };
@@ -1927,16 +2460,7 @@ fn render_mindmap_scenario_preview(
         app.preview_title.as_str()
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(if focused {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        });
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -1965,7 +2489,8 @@ fn render_mindmap_scenario_preview(
         && let Some(locations) = app.mindmap_index.locations_for(id)
         && !locations.is_empty()
     {
-        render_scenario_dropdown(frame, app, inner, locations);
+        let locations = locations.to_vec();
+        render_scenario_dropdown(frame, app, inner, &locations);
         return; // dropdown replaces preview content
     }
 
@@ -1984,7 +2509,7 @@ fn render_mindmap_scenario_preview(
 
     // Render lines with Gherkin syntax highlighting
     let mut step_state = crate::highlight::StepHighlightState::default();
-    let highlight_style = Style::default().fg(Color::Yellow);
+    let highlight_style = Style::default().bg(theme::CURRENT_LINE_BG).fg(theme::FG);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_lines);
 
     for i in 0..visible_lines {
@@ -2001,19 +2526,7 @@ fn render_mindmap_scenario_preview(
         let mut styled = highlight_line_with_state(&line, &mut step_state, buffer.language());
 
         if buf_row == cursor_row {
-            // Highlight the selected step in yellow, but keep step keywords
-            // (Given/When/Then/And/But) in their original colors.
-            let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(styled.spans.len());
-            for span in styled.spans.iter() {
-                if span.style.fg.is_some() {
-                    // Keyword, tag, string literal, etc. — keep original color
-                    new_spans.push(span.clone());
-                } else {
-                    // Description text / rest — highlight in yellow
-                    new_spans.push(Span::styled(span.content.clone(), highlight_style));
-                }
-            }
-            styled = Line::from(new_spans);
+            styled = apply_line_background(styled, highlight_style);
         }
 
         styled = truncate_line_to_cols(styled, inner.width);
@@ -2035,10 +2548,182 @@ fn render_mindmap_scenario_preview(
     }
 }
 
+/// Renders the replay screenshot viewer over the active tab.
+///
+/// Terminals without a pixel protocol keep pointing at the system viewer
+/// instead of drawing half-blocks, which show a UI screenshot as noise.
+fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if !app.screenshot.visible || area.width < 20 || area.height < 6 {
+        return;
+    }
+    // Explore keeps its Features column as context for the captures; a narrow
+    // terminal falls back to covering the whole tab.
+    let area = match app.screenshot.origin {
+        crate::image_view::ScreenshotOrigin::Explore => {
+            let right =
+                Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)])
+                    .split(area)[1];
+            if right.width >= 60 { right } else { area }
+        }
+        crate::image_view::ScreenshotOrigin::MindMap => area,
+    };
+    let popup = Rect::new(
+        area.x + area.width / 20,
+        area.y + area.height / 20,
+        area.width.saturating_sub(area.width / 10),
+        area.height.saturating_sub(area.height / 10),
+    );
+    frame.render_widget(Clear, popup);
+    let total = app.screenshot.refs.len();
+    let index = app.screenshot.index.min(total.saturating_sub(1));
+    let size = app
+        .screenshot
+        .rendered
+        .as_ref()
+        .map(|rendered| {
+            let source = format!("  {}×{}", rendered.pixels.0, rendered.pixels.1);
+            if app.screenshot.view.is_zoomed() {
+                format!("{source} @ {},{}", rendered.region.x, rendered.region.y)
+            } else {
+                source
+            }
+        })
+        .unwrap_or_default();
+    let view = app.screenshot.view.label();
+    let progress = if app.screenshot.loading {
+        " · Loading"
+    } else if app
+        .screenshot
+        .rendered
+        .as_ref()
+        .is_some_and(|image| image.is_drawing())
+    {
+        " · Drawing"
+    } else {
+        ""
+    };
+    let title = match app.screenshot.refs.get(index) {
+        Some(shot) if total > 0 => {
+            let step = shot.step_text.trim();
+            let step = if step.is_empty() {
+                "step capture"
+            } else {
+                step
+            };
+            format!(
+                "Screenshot {}/{}{} · {}{}  {} · {}",
+                index + 1,
+                total,
+                size,
+                view,
+                progress,
+                shot.scenario,
+                step
+            )
+        }
+        _ => "Screenshot".to_string(),
+    };
+    let title: String = title
+        .chars()
+        .take(popup.width.saturating_sub(4) as usize)
+        .collect();
+    let block = theme::popup_block(title);
+    let warning = app.screenshot.support_detail.contains("Windows Zellij")
+        && app.screenshot.support.is_pixels();
+    let [body, footer] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(if warning { 2 } else { 1 }),
+    ])
+    .areas(block.inner(popup));
+    frame.render_widget(block, popup);
+    if body.width == 0 || body.height == 0 {
+        return;
+    }
+    app.screenshot.request_viewport(body);
+    if let Some(rendered) = app.screenshot.rendered.as_mut() {
+        crate::image_view::render(frame, body, rendered);
+    } else {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        if let Some(error) = app.screenshot.error.as_ref() {
+            lines.push(Line::raw(format!("Cannot show capture: {error}")));
+            lines.push(Line::raw(
+                "Press o to open the original in the system viewer.",
+            ));
+        } else if app.screenshot.loading {
+            lines.push(Line::raw("Preparing image in the background..."));
+            lines.push(Line::raw("Zoom, switch steps, or press i/Esc to close."));
+        } else if app.screenshot.refs.is_empty() {
+            lines.push(Line::raw("No captured screenshots for this scenario."));
+            lines.push(Line::raw(String::new()));
+            let captured = &app.capture_index.entries;
+            if captured.is_empty() {
+                lines.push(Line::raw("Run a replay for this Feature to capture steps."));
+            } else {
+                lines.push(Line::styled(
+                    format!("Scenarios with captures ({}):", captured.len()),
+                    Style::default().fg(theme::MUTED),
+                ));
+                for entry in captured.iter().take(10) {
+                    lines.push(Line::raw(format!(
+                        "  {} · {} ({})",
+                        entry.feature, entry.scenario, entry.count
+                    )));
+                }
+                if captured.len() > 10 {
+                    lines.push(Line::styled(
+                        format!("  … {} more", captured.len() - 10),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+            }
+        } else {
+            if !app.screenshot.support.is_pixels() {
+                lines.push(Line::raw(format!(
+                    "This terminal has no image protocol ({}).",
+                    app.screenshot.support.label()
+                )));
+                if !app.screenshot.support_detail.is_empty() {
+                    lines.push(Line::styled(
+                        format!("  {}", app.screenshot.support_detail),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+                lines.push(Line::raw(String::new()));
+                lines.push(Line::raw(
+                    "Use a terminal with image support, or open the original externally.",
+                ));
+                lines.push(Line::raw(
+                    "Press o to open the capture in the system viewer.",
+                ));
+            }
+            if let Some(shot) = app.screenshot.refs.get(index) {
+                lines.push(Line::raw(
+                    crate::image_view::capture_path(&app.project.root_dir, shot)
+                        .display()
+                        .to_string(),
+                ));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), body);
+    }
+    let mut footer_lines = Vec::new();
+    if warning {
+        footer_lines.push(Line::styled(
+            " Windows Zellij may filter images; try direct Windows Terminal or press o.",
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    footer_lines.push(Line::styled(
+        " +/- zoom · 1 100% · 0 fit · arrows pan · j/k steps · o open · i/Esc close",
+        Style::default().fg(theme::MUTED),
+    ));
+    frame.render_widget(Paragraph::new(footer_lines), footer);
+}
+
 /// Renders the scenario location dropdown inside the preview panel.
 fn render_scenario_dropdown(
     frame: &mut Frame<'_>,
-    app: &App,
+    app: &mut App,
     area: Rect,
     locations: &[crate::mindmap::NodeLocation],
 ) {
@@ -2046,8 +2731,8 @@ fn render_scenario_dropdown(
 
     let count = locations.len();
     let selection = app.scenario_dropdown_selection.min(count.saturating_sub(1));
-    let max_items = (area.height as usize).saturating_sub(2).min(count);
-    let list_height = (max_items + 2).min(area.height as usize) as u16; // +2 for borders
+    let max_items = (area.height as usize).saturating_sub(3).min(count);
+    let list_height = (max_items + 2).min(area.height.saturating_sub(1) as usize) as u16;
 
     let dropdown_area = Rect::new(area.x, area.y, area.width, list_height.min(area.height));
     if dropdown_area.height < 3 {
@@ -2084,10 +2769,7 @@ fn render_scenario_dropdown(
     }
 
     // Render dropdown block
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Open Scenario")
-        .border_style(Style::default().fg(Color::Cyan));
+    let block = theme::popup_block("Open Scenario");
     let inner = block.inner(dropdown_area);
     frame.render_widget(Clear, dropdown_area);
     frame.render_widget(block, dropdown_area);
@@ -2099,31 +2781,54 @@ fn render_scenario_dropdown(
 
     for (i, item) in items[scroll_start..scroll_end].iter().enumerate() {
         let idx = scroll_start + i;
+        app.clickable_regions
+            .push(ClickableRegion::MindMapLocation {
+                rect: Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+                index: idx,
+            });
         let is_selected = idx == selection;
         let prefix = if is_selected { "▸ " } else { "  " };
         let style = if is_selected {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row(true)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme::FG)
         };
         let text = truncate_str(item, inner.width.saturating_sub(2) as usize);
         lines.push(Line::styled(format!("{}{}", prefix, text), style));
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width))),
+        inner,
+    );
 
     // Hint line at the bottom of the dropdown area
     if dropdown_area.y + dropdown_area.height < area.y + area.height {
         let hint_y = dropdown_area.y + dropdown_area.height;
-        let hint_line = Line::styled(
-            " j/k navigate · Enter select · Esc close ",
-            Style::default().fg(Color::DarkGray),
-        );
-        frame.render_widget(
-            Paragraph::new(hint_line),
+        render_action_bar(
+            frame,
+            app,
             Rect::new(area.x, hint_y, area.width, 1),
+            "",
+            &[
+                (
+                    if area.width < 25 {
+                        "Open "
+                    } else {
+                        "Open [Enter] "
+                    },
+                    Action::ScenarioDropdownSelect,
+                ),
+                (
+                    if area.width < 25 {
+                        "Close"
+                    } else {
+                        "Close [Esc]"
+                    },
+                    Action::ScenarioDropdownClose,
+                ),
+            ],
+            true,
         );
     }
 }
@@ -2157,429 +2862,7 @@ fn render_mindmap_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
     let focused = app.mindmap_focus == MindMapFocus::AiPanel;
-    render_agent_chat_inner(frame, app, area, focused);
-}
-
-/// Core chat UI used by both the AI tab (full) and the MindMap tab (bottom panel).
-/// `focused` controls border highlighting and input activation.
-pub(crate) fn render_agent_chat_inner(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    area: Rect,
-    focused: bool,
-) {
-    use crate::app::{AiRole, AiStatus};
-
-    if area.width < 10 || area.height < 3 {
-        return;
-    }
-
-    let border_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" AI Chat — {} ", app.active_agent_profile().name))
-        .border_style(border_style);
-    let inner = block.inner(area);
-    frame.render_widget(&block, area);
-
-    // Render approval badge in top-right corner
-    let badge_label = format!("[{}]", app.approval_mode.display_name());
-    let badge_width = badge_label.chars().count() as u16 + 2;
-    let badge_x = area.right().saturating_sub(badge_width + 1);
-    if badge_x > area.x {
-        app.clickable_regions.push(ClickableRegion::ApprovalBadge {
-            row_y: area.y,
-            col_x: badge_x,
-            col_right: area.right().saturating_sub(1),
-        });
-        let mut badge_style = if app.approval_mode.requires_manual_approval() {
-            Style::default().fg(Color::Yellow)
-        } else if app.approval_mode.auto_accepts() {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        };
-        // Hover effect: reverse video to indicate clickability
-        if app.mouse_position.is_some_and(|(mx, my)| {
-            my == area.y && mx >= badge_x && mx < area.right().saturating_sub(1)
-        }) {
-            badge_style = badge_style.add_modifier(Modifier::REVERSED);
-        }
-        let badge = Paragraph::new(Line::styled(badge_label, badge_style));
-        let badge_area = Rect::new(badge_x, area.y, badge_width, 1);
-        frame.render_widget(badge, badge_area);
-    }
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    // Layout: chat history (top) + status bar + input bar (bottom)
-    let status_height: u16 = 1;
-
-    let input_text_width = inner.width.saturating_sub(2); // Borders::ALL on input block
-    let input_text_rows = visual_line_count_for_width(&app.agent().input, input_text_width)
-        .min((inner.height / 3).max(3));
-    let input_height: u16 = input_text_rows + 2;
-
-    let chat_height = inner.height.saturating_sub(status_height + input_height);
-    let chat_area = Rect::new(inner.x, inner.y, inner.width, chat_height);
-    let status_area = Rect::new(inner.x, inner.y + chat_height, inner.width, status_height);
-    let input_area = Rect::new(
-        inner.x,
-        inner.y + chat_height + status_height,
-        inner.width,
-        input_height,
-    );
-
-    // ── Chat history ────────────────────────────────────────────────
-    let mut chat_lines: Vec<Line<'static>> = Vec::new();
-
-    if app.agent().messages().is_empty() {
-        chat_lines.push(Line::raw("Welcome to AI Chat!"));
-        chat_lines.push(Line::raw(""));
-        if !crate::llm::is_configured() {
-            chat_lines.push(
-                Line::raw(
-                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
-                )
-                .style(Style::default().fg(Color::Yellow)),
-            );
-        }
-    }
-
-    for msg in app.agent().messages() {
-        // Render tool result messages with a distinct style
-        if matches!(msg.role, AiRole::Tool) {
-            let is_error = msg.content.starts_with("Error:");
-            let tool_id = msg.tool_call_id.as_deref().unwrap_or("?");
-            let status_icon = if is_error { "✗" } else { "✓" };
-            let status_color = if is_error {
-                Color::Red
-            } else {
-                Color::DarkGray
-            };
-            chat_lines.push(
-                Line::raw(format!("  {status_icon} Tool ({tool_id})")).style(
-                    Style::default()
-                        .fg(status_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            );
-            let md_lines = render_markdown(&msg.content);
-            for md_line in md_lines {
-                let mut spans = vec![Span::raw("    ")];
-                spans.extend(
-                    md_line
-                        .spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.to_string(), s.style)),
-                );
-                let mut line = Line::from(spans);
-                line.style = md_line.style;
-                chat_lines.push(line);
-            }
-            chat_lines.push(Line::raw(""));
-            continue;
-        }
-        let prefix = match msg.role {
-            AiRole::User => "▶ You",
-            AiRole::Assistant => "▷ 🥰",
-            _ => unreachable!(),
-        };
-        let role_color = match msg.role {
-            AiRole::User => Color::Cyan,
-            AiRole::Assistant => Color::Green,
-            _ => unreachable!(),
-        };
-        let source_tag = msg
-            .source
-            .as_ref()
-            .map(|s| format!("[{s}] "))
-            .unwrap_or_default();
-        let prefix_text = format!("{source_tag}{prefix}:");
-        chat_lines.push(
-            Line::raw(prefix_text)
-                .style(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
-        );
-        // Render message content as Markdown with a 2-space indent.
-        if !msg.content.is_empty() {
-            let md_lines = render_markdown(&msg.content);
-            for md_line in md_lines {
-                let mut spans = vec![Span::raw("  ")];
-                spans.extend(
-                    md_line
-                        .spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.to_string(), s.style)),
-                );
-                let mut line = Line::from(spans);
-                line.style = md_line.style;
-                chat_lines.push(line);
-            }
-        }
-        // Render tool call blocks with status indicators
-        if let Some(tcs) = &msg.tool_calls {
-            for tc in tcs {
-                let is_pending = app.agent().status == AiStatus::AwaitingApproval
-                    && app
-                        .pending_agent_changes
-                        .iter()
-                        .any(|c| c.tool_call_id == tc.id);
-                let has_tool_result = app.agent().messages().iter().any(|m| {
-                    matches!(m.role, AiRole::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
-                });
-                let is_error = has_tool_result
-                    && app.agent().messages().iter().any(|m| {
-                        matches!(m.role, AiRole::Tool)
-                            && m.tool_call_id.as_deref() == Some(&tc.id)
-                            && m.content.starts_with("Error:")
-                    });
-                let (icon, status_color) = if is_error {
-                    ("✗", Color::Red)
-                } else if has_tool_result {
-                    ("✓", Color::Green)
-                } else if is_pending {
-                    ("◆", Color::Yellow)
-                } else {
-                    ("⏳", Color::Yellow)
-                };
-                let duration_str = tc
-                    .execution_duration_ms
-                    .map(|ms| {
-                        if ms >= 1000 {
-                            format!("{:.1}s", ms as f64 / 1000.0)
-                        } else {
-                            format!("{ms}ms")
-                        }
-                    })
-                    .unwrap_or_default();
-                let tool_line = if duration_str.is_empty() {
-                    format!("  🔧 {}  {icon}", tc.name)
-                } else {
-                    format!("  🔧 {}  {icon} {duration_str}", tc.name)
-                };
-                chat_lines.push(
-                    Line::raw(tool_line).style(
-                        Style::default()
-                            .fg(status_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                );
-            }
-        }
-        chat_lines.push(Line::raw(""));
-    }
-
-    // ── Inline diff for pending changes ────────────────────────
-    if app.agent().status == AiStatus::AwaitingApproval && !app.pending_change_diffs.is_empty() {
-        let total_diffs = app.pending_change_diffs.len();
-        let title = if total_diffs > 1 {
-            format!(" Pending Change (1 of {total_diffs}) ")
-        } else {
-            " Pending Change ".to_string()
-        };
-        chat_lines.push(Line::raw(""));
-        chat_lines.push(
-            Line::raw(format!("  🔧{title}")).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        );
-        if let Some(diff) = app.pending_change_diffs.first() {
-            let max_lines = chat_area
-                .height
-                .saturating_sub(chat_lines.len() as u16)
-                .clamp(3, 20) as usize;
-            for dl in diff.iter().take(max_lines) {
-                let prefix = match dl.kind {
-                    ChangeKind::Added => "+",
-                    ChangeKind::Modified => "~",
-                    ChangeKind::Deleted => "-",
-                    ChangeKind::Unchanged => " ",
-                };
-                let color = match dl.kind {
-                    ChangeKind::Added => Color::Green,
-                    ChangeKind::Modified => Color::Yellow,
-                    ChangeKind::Deleted => Color::Red,
-                    ChangeKind::Unchanged => Color::DarkGray,
-                };
-                chat_lines.push(Line::styled(
-                    format!("    {} {}", prefix, dl.text),
-                    Style::default().fg(color),
-                ));
-            }
-        }
-        chat_lines.push(Line::raw(""));
-    }
-
-    // Show streaming partial response
-    if !app.agent().partial_response().is_empty() {
-        chat_lines.push(
-            Line::raw("▷ 🥰:").style(
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        );
-        let md_lines = render_markdown(app.agent().partial_response());
-        for md_line in md_lines {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(
-                md_line
-                    .spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            let mut line = Line::from(spans);
-            line.style = md_line.style;
-            chat_lines.push(line);
-        }
-        let last_line = chat_lines.pop().unwrap_or(Line::raw(""));
-        let mut spans: Vec<Span<'_>> = last_line.spans.into_iter().collect();
-        spans.push(Span::styled(
-            "▌",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::SLOW_BLINK),
-        ));
-        chat_lines.push(Line::from(spans));
-        chat_lines.push(Line::raw(""));
-    }
-
-    // Slice chat history based on scroll offset
-    let total_lines = chat_lines.len();
-    let max_start = total_lines.saturating_sub(chat_area.height as usize);
-    let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let end = (start + chat_area.height as usize).min(total_lines);
-    let visible_lines: Vec<Line<'static>> = chat_lines[start..end].to_vec();
-
-    frame.render_widget(
-        Paragraph::new(Text::from(visible_lines))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(Style::default()),
-        chat_area,
-    );
-
-    // ── Status bar ────────────────────────────────────────────────
-    let status_text: String = match app.agent().status {
-        AiStatus::Waiting
-            if app.agent().partial_response().is_empty() && app.agent().tool_status.is_some() =>
-        {
-            let spinner = spinner_frame();
-            app.agent()
-                .tool_status
-                .clone()
-                .unwrap_or_else(|| format!("{spinner} Teshi is thinking..."))
-        }
-        AiStatus::Waiting if app.agent().partial_response().is_empty() => {
-            format!("{} Teshi is thinking...", spinner_frame())
-        }
-        AiStatus::AwaitingApproval => "◆ Waiting for approval — Y/N".into(),
-        AiStatus::Error => {
-            if app.status.starts_with("AI error:") {
-                app.status.clone()
-            } else {
-                "AI error — check TESHI_LLM_API_KEY and your network connection.".to_string()
-            }
-        }
-        _ => String::new(),
-    };
-    let model_label = app.active_model_label.as_deref().unwrap_or("");
-
-    if status_area.width > 0 {
-        let model_w = model_label.len() as u16;
-        let [status_left, status_right] =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(model_w)])
-                .areas(status_area);
-
-        if !status_text.is_empty() {
-            let st_style = match app.agent().status {
-                AiStatus::Waiting => Style::default().fg(Color::Yellow),
-                AiStatus::AwaitingApproval => Style::default().fg(Color::Cyan),
-                AiStatus::Error => Style::default().fg(Color::Red),
-                _ => Style::default().fg(Color::DarkGray),
-            };
-            frame.render_widget(
-                Paragraph::new(Text::from(Line::raw(status_text).style(st_style))),
-                status_left,
-            );
-        }
-        if !model_label.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Text::from(
-                    Line::raw(model_label).style(Style::default().fg(Color::DarkGray)),
-                )),
-                status_right,
-            );
-        }
-    }
-
-    // ── Input bar ───────────────────────────────────────────────────
-    let input_border_style = if focused && app.ai_input_focused {
-        Style::default()
-            .fg(HIGHLIGHT_SELECTED_FG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let label = token_usage_label(
-        app.agent().total_input_tokens,
-        app.agent().total_output_tokens,
-    );
-    let input_block = if label.is_empty() {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(input_border_style)
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(input_border_style)
-            .title_top(Line::raw(label).alignment(Alignment::Right))
-    };
-    let input_inner = input_block.inner(input_area);
-    frame.render_widget(input_block, input_area);
-
-    let input_display: Text<'static> = if app.agent().input.is_empty() {
-        if focused && app.ai_input_focused {
-            Text::raw("Type your message...")
-        } else {
-            Text::raw("")
-        }
-    } else {
-        let raw = app.agent().input.as_str();
-        let lines: Vec<Line<'static>> = raw
-            .lines()
-            .map(|l| Line::from(Span::raw(l.to_string())))
-            .collect();
-        Text::from(lines)
-    };
-    frame.render_widget(
-        Paragraph::new(input_display)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(match app.agent().status {
-                AiStatus::Waiting => Style::default().fg(Color::DarkGray),
-                _ => Style::default(),
-            }),
-        input_inner,
-    );
-
-    // Cursor in input, accounting for wrapping
-    if focused && app.ai_input_focused && app.agent().status != AiStatus::Waiting {
-        let (vis_row, vis_col) = visual_cursor_pos(
-            &app.agent().input,
-            app.agent().input_cursor,
-            input_inner.width,
-        );
-        frame.set_cursor_position((input_inner.x + vis_col, input_inner.y + vis_row));
-    }
+    chat::render_chat_panel(frame, app, area, focused, chat::ChatPlacement::Embedded);
 }
 
 /// Renders the editor panel showing the active feature file.
@@ -2605,7 +2888,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     } else {
         title_base
     };
-    let editor_block = Block::default().borders(Borders::ALL).title(title);
+    let editor_block = theme::panel_block(title, !preview);
     let editor_inner = editor_block.inner(area);
     frame.render_widget(editor_block, area);
     frame.render_widget(Clear, editor_inner);
@@ -2674,7 +2957,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     }
 
     let mut lines = Vec::with_capacity(visible_lines);
-    let preview_row_style = Style::default().bg(PREVIEW_CURSOR_BG).fg(PREVIEW_CURSOR_FG);
+    let preview_row_style = Style::default().bg(theme::CURRENT_LINE_BG).fg(theme::FG);
     let mut step_state = StepHighlightState::default();
     for &row in visible_rows.iter().take(scroll_idx) {
         if row >= buffer.line_count() {
@@ -2719,7 +3002,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             styled = apply_line_background(
                 styled,
                 Style::default()
-                    .fg(Color::Red)
+                    .fg(theme::ERROR)
                     .add_modifier(Modifier::UNDERLINED),
             );
         }
@@ -2737,7 +3020,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                 styled = apply_line_background(
                     styled,
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme::MUTED)
                         .add_modifier(Modifier::DIM),
                 );
             }
@@ -2746,10 +3029,12 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         if row == cursor_row && !preview {
             // Use a block-cursor background for edit mode so the cursor is visible
             // even when positioned at the end of the line (on a space character).
-            let edit_cursor_style = Style::default().fg(Color::White).bg(SELECTION_BG);
+            let edit_cursor_style = Style::default()
+                .fg(theme::FG)
+                .bg(theme::EDITOR_SELECTION_BG);
             let line_len = display_len;
             if app.is_editor_nav_mode() {
-                let focus_patch = selected_style(true);
+                let focus_patch = theme::selected_row(true);
                 let hl_range = nav_body_char_range_in_buffer(buffer, row, &line)
                     .or_else(|| structural_prefix_char_range(&line, buffer.language()));
                 if let Some(mut r) = hl_range
@@ -2796,7 +3081,9 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             let sel_lo = anchor.0.min(end.0);
             let sel_hi = anchor.0.max(end.0);
             if !preview && row >= sel_lo && row <= sel_hi {
-                let sel_style = Style::default().bg(SELECTION_BG).fg(SELECTION_FG);
+                let sel_style = Style::default()
+                    .bg(theme::EDITOR_SELECTION_BG)
+                    .fg(theme::FG);
                 let mut range = if sel_lo == sel_hi {
                     // Single row: highlight the exact column range
                     let lo_col = anchor.1.min(end.1);
@@ -2878,9 +3165,6 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         app.editor_panel_rect = Some(editor_area);
         render_buffer_diagnostics(frame, app, diagnostics_area);
     }
-    if !preview {
-        render_step_keyword_picker(frame, app, editor_area);
-    }
 }
 
 /// Render source-aware diagnostics without replacing the permissive editor
@@ -2892,10 +3176,7 @@ fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     let title = format!("Diagnostics ({})", app.buffer_diagnostics.len());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(Color::Yellow));
+    let block = theme::panel_block(title, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -2908,9 +3189,9 @@ fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .take(inner.height as usize)
         .map(|diagnostic| {
             let severity = match diagnostic.severity {
-                teshi_core::DiagnosticSeverity::Error => ("error", Color::Red),
-                teshi_core::DiagnosticSeverity::Warning => ("warning", Color::Yellow),
-                teshi_core::DiagnosticSeverity::Suggestion => ("suggestion", Color::Cyan),
+                teshi_core::DiagnosticSeverity::Error => ("error", theme::ERROR),
+                teshi_core::DiagnosticSeverity::Warning => ("warning", theme::WARNING),
+                teshi_core::DiagnosticSeverity::Suggestion => ("suggestion", theme::MUTED),
             };
             let suggestion = diagnostic
                 .suggestion
@@ -2937,7 +3218,7 @@ fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 /// Draws the step-keyword overlay when [`App::step_keyword_picker`] is active.
-fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rect) {
+fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &mut App, editor_area: Rect) {
     let Some(picker) = app.step_keyword_picker else {
         return;
     };
@@ -2953,9 +3234,9 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     // Use max display width for popup width, but ensure at least title width
     let title_width = TITLE.width();
     let inner_w_ch = max_kw_w.max(title_width).saturating_add(2);
-    let list_w = (inner_w_ch as u16).saturating_add(2);
+    let list_w = (inner_w_ch as u16).saturating_add(2).max(34);
     let n_items = keywords.len();
-    let list_h = (n_items as u16).saturating_add(2);
+    let list_h = (n_items as u16).saturating_add(3);
 
     let visible_lines = editor_area.height as usize;
     let row_in_view = picker.buffer_row.saturating_sub(app.scroll_row);
@@ -2980,8 +3261,9 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
 
     frame.render_widget(Clear, area);
 
-    let block = Block::default().borders(Borders::ALL).title(TITLE);
-    let inner = block.inner(area);
+    let block = theme::popup_block(TITLE);
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -2989,11 +3271,21 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     let row_width = inner.width as usize;
     let max_rows = inner.height as usize;
 
-    let selected_row_style = selected_style(true);
+    let selected_row_style = theme::selected_row(true);
     let normal = Style::default();
 
     let mut lines: Vec<Line> = Vec::with_capacity(max_rows.min(n_items));
-    for (i, kw) in keywords.iter().enumerate().take(max_rows) {
+    let start = picker.selected.saturating_add(1).saturating_sub(max_rows);
+    app.clickable_regions.push(ClickableRegion::ModalList {
+        rect: inner,
+        up: Action::StepKeywordPickerUp,
+        down: Action::StepKeywordPickerDown,
+    });
+    for (i, kw) in keywords.iter().enumerate().skip(start).take(max_rows) {
+        app.clickable_regions.push(ClickableRegion::StepKeywordRow {
+            rect: Rect::new(inner.x, inner.y + (i - start) as u16, inner.width, 1),
+            index: i,
+        });
         let style = if i == picker.selected {
             selected_row_style
         } else {
@@ -3009,14 +3301,22 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
 
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Confirm [Enter] ", Action::StepKeywordPickerConfirm),
+            ("Cancel [Esc]", Action::StepKeywordPickerCancel),
+        ],
+        true,
+    );
 }
 
 /// Renders the reserved panel placeholder (stage 3, right side).
 fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Run Details")
-        .style(Style::default().fg(Color::DarkGray));
+    let block = theme::panel_block("Run Details", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -3035,7 +3335,7 @@ fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         truncate_lines(no_run_detail_lines(), inner.width)
     };
-    let planned_style = Style::default().fg(Color::DarkGray);
+    let planned_style = Style::default().fg(theme::MUTED);
     let mut content = vec![
         Line::styled(
             "Planned features:",
@@ -3135,7 +3435,7 @@ fn no_run_detail_lines() -> Vec<Line<'static>> {
         Line::styled(
             "  No run details yet",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme::MUTED)
                 .add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -3161,7 +3461,7 @@ fn status_label(status: RunStatus) -> &'static str {
     }
 }
 
-fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_explore_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -3195,12 +3495,35 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         format!("0/{total} 通过")
     };
 
-    let width = area.width as usize;
+    let compact = area.width < 100;
+    let controls = [
+        (
+            if compact { " Run" } else { " Run [r]" },
+            Action::RunScenario,
+        ),
+        (
+            if compact {
+                " Detail"
+            } else {
+                " Detail [Enter]"
+            },
+            Action::ToggleFailureDetail,
+        ),
+        (
+            if compact { " Edit" } else { " Edit [e]" },
+            Action::EnterEdit,
+        ),
+    ];
+    let used = controls
+        .iter()
+        .map(|(label, _)| label.width() as u16)
+        .sum::<u16>();
+    let width = area.width.saturating_sub(used + 1) as usize;
     let left_w = UnicodeWidthStr::width(left.as_str());
     let right_w = UnicodeWidthStr::width(right.as_str());
 
     let text = if right_w >= width {
-        truncate_string_to_cols(right.as_str(), area.width)
+        truncate_string_to_cols(right.as_str(), width as u16)
     } else {
         let mut out = String::new();
         let mut left_trimmed = left;
@@ -3216,19 +3539,28 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         out
     };
 
-    frame.render_widget(Paragraph::new(text), area);
+    render_action_bar(frame, app, area, "", &controls, false);
+    if area.width > used + 1 {
+        frame.render_widget(
+            Paragraph::new(theme::footer_line([Span::raw(text)])),
+            Rect::new(area.x + used + 1, area.y, area.width - used - 1, 1),
+        );
+    }
 }
 
 fn footer_pill(label: &'static str) -> Span<'static> {
-    Span::styled(label, selected_style(false))
+    Span::raw(label)
 }
 
 fn footer_hints(app: &App) -> Line<'static> {
     if app.is_editor_active() {
+        if app.step_input_active {
+            return Line::raw("[INSERT] Enter commit · Esc normal · Ctrl+s save · Arrows move");
+        }
         return Line::from(vec![
-            footer_pill(" Edit [Enter] "),
+            footer_pill("[NORMAL] Edit [i/Enter] "),
             Span::raw(" "),
-            footer_pill(" Given/When/Then/And [Ctrl+g/w/t/a] "),
+            footer_pill(" Given/Then/And [Ctrl+g/t/a] "),
             Span::raw(" "),
             footer_pill(" Step [o/O] "),
             Span::raw(" "),
@@ -3251,27 +3583,21 @@ fn footer_hints(app: &App) -> Line<'static> {
         {
             // AI chat input focused — show AI-style hints
             Line::from(vec![
-                footer_pill(" Send [Enter] "),
+                footer_pill("[INPUT] Send [Enter] "),
                 Span::raw(" "),
                 footer_pill(" Back/Browse [Esc] "),
                 Span::raw(" "),
-                footer_pill(" Toggle Panel [p] "),
-                Span::raw(" "),
-                footer_pill(" Quit [q] "),
+                footer_pill(" Newline [Shift+Enter] "),
             ])
         }
         (MainTab::MindMap, _) if app.mindmap_focus == MindMapFocus::AiPanel => {
             // AI panel focused but input not focused
             Line::from(vec![
-                footer_pill(" Focus Input [Enter] "),
+                footer_pill("[NORMAL] Input [i/Enter] "),
                 Span::raw(" "),
-                footer_pill(" Scroll [Alt+↑↓] "),
+                footer_pill(" Scroll [hjkl/Arrows] "),
                 Span::raw(" "),
                 footer_pill(" Return Tree [Esc] "),
-                Span::raw(" "),
-                footer_pill(" Toggle Panel [p] "),
-                Span::raw(" "),
-                footer_pill(" Quit [q] "),
             ])
         }
         (MainTab::MindMap, _) => {
@@ -3294,8 +3620,6 @@ fn footer_hints(app: &App) -> Line<'static> {
                 hints.push(Span::raw(" "));
                 hints.push(footer_pill(" Show Panel [p] "));
             }
-            hints.push(Span::raw(" "));
-            hints.push(footer_pill(" Quit [q] "));
             Line::from(hints)
         }
         (MainTab::Explore, _) => Line::from(vec![
@@ -3310,14 +3634,13 @@ fn footer_hints(app: &App) -> Line<'static> {
             footer_pill(" Run [r] "),
             Span::raw(" "),
             footer_pill(" AI [a] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
         ]),
-        (MainTab::Ai, _) => Line::from(vec![
-            footer_pill(" Model [m] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
-        ]),
+        (MainTab::Ai, _) if app.ai_input_focused => {
+            Line::raw("[INPUT] Enter send · Shift+Enter newline · Esc normal · Ctrl+v paste")
+        }
+        (MainTab::Ai, _) => {
+            Line::raw("[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close")
+        }
         (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(
             &app.requirements_root,
             &app.authoring_ui.iteration_filter,
@@ -3327,7 +3650,7 @@ fn footer_hints(app: &App) -> Line<'static> {
 }
 
 /// Renders the auth management overlay panel over the entire screen.
-fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
     let panel_h = area.height.min(20);
     let panel_x = (area.width.saturating_sub(panel_w)) / 2;
@@ -3336,10 +3659,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Auth Management ")
-        .style(Style::default().fg(Color::White));
+    let block = theme::popup_block(" Auth Management ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3364,7 +3684,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             lines.push(Line::styled(
                 format!("Remove Provider: {}", provider),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::WARNING)
                     .add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(
@@ -3386,7 +3706,11 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 for profile in &app.model_profiles {
                     let has_key = !profile.api_key.is_empty();
                     let key_status = if has_key { "✓" } else { "✗" };
-                    let key_color = if has_key { Color::Green } else { Color::Red };
+                    let key_color = if has_key {
+                        theme::SUCCESS
+                    } else {
+                        theme::ERROR
+                    };
                     let active = if app.model_active_id.as_deref() == Some(profile.id.as_str()) {
                         " *"
                     } else {
@@ -3414,23 +3738,30 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 lines.push(Line::raw(""));
                 lines.push(Line::from(vec![
                     Span::raw("  Active id: "),
-                    Span::styled(active.as_str(), Style::default().fg(Color::Cyan)),
+                    Span::styled(active.as_str(), Style::default().fg(theme::PRIMARY)),
                 ]));
             }
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Esc to close",
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    let [content, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(theme::popup_rows(lines, content.width)),
+        content,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[("Close [Esc]", Action::AuthPanelClose)],
+        true,
+    );
 }
 
 /// Renders the model profile management overlay panel.
-fn render_model_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
     let panel_h = area.height.min(22);
     let panel_x = (area.width.saturating_sub(panel_w)) / 2;
@@ -3451,13 +3782,15 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 /// Renders the list of model profiles.
-fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Model Profiles ")
-        .style(Style::default().fg(Color::White));
-    let inner = block.inner(area);
+fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let block = theme::popup_block(" Model Profiles ");
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     frame.render_widget(block, area);
+    let scroll = app
+        .model_panel_selection
+        .saturating_add(2)
+        .saturating_sub(inner.height as usize);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::raw(""));
@@ -3467,14 +3800,18 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
             "  Press 'a' to add one, or place a TOML file in",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  ~/.config/teshi/models/",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )]));
     } else {
         for (i, profile) in app.model_profiles.iter().enumerate() {
+            if let Some(rect) = visible_content_rows(inner, lines.len(), 1, scroll) {
+                app.clickable_regions
+                    .push(ClickableRegion::ModelProfileRow { rect, index: i });
+            }
             let is_active = app.model_active_id.as_deref() == Some(&profile.id);
             let prefix = if i == app.model_panel_selection {
                 " ▸ "
@@ -3484,11 +3821,9 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
             let active_mark = if is_active { "  [ACTIVE]" } else { "" };
 
             let style = if i == app.model_panel_selection {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected_row(true)
             } else if is_active {
-                Style::default().fg(Color::Green)
+                Style::default().fg(theme::SUCCESS)
             } else {
                 Style::default()
             };
@@ -3499,29 +3834,38 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::raw("  "),
                 Span::styled(
                     format!("{} | {}", profile.provider, profile.model_id),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::PRIMARY),
                 ),
-                Span::styled(active_mark, Style::default().fg(Color::Green)),
+                Span::styled(active_mark, Style::default().fg(theme::SUCCESS)),
             ]));
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "a add · e edit · d delete · ↑↓ select · Enter activate · Esc close",
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(
+        Paragraph::new(theme::popup_rows(lines, inner.width)).scroll((scroll as u16, 0)),
+        inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Add [a] ", Action::ModelPanelAdd),
+            ("Edit [e] ", Action::ModelPanelEdit),
+            ("Del [dd/Del] ", Action::ModelPanelDelete),
+            ("Use [Enter] ", Action::ModelPanelActivate),
+            ("Close [Esc]", Action::ModelPanelClose),
+        ],
+        true,
+    );
 }
 
 /// Renders the model profile form (add or edit).
-fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .style(Style::default().fg(Color::White));
-    let inner = block.inner(area);
+fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Rect) {
+    let block = theme::popup_block(title);
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     frame.render_widget(block, area);
 
     // 7 form fields
@@ -3539,21 +3883,25 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
     lines.push(Line::raw(""));
 
     for (i, (label, value)) in fields.iter().enumerate() {
+        if let Some(rect) = visible_content_rows(inner, lines.len(), 1, 0) {
+            app.clickable_regions
+                .push(ClickableRegion::ModelFormField { rect, index: i });
+        }
         let focused = i == app.model_form_focus;
         let indicator = if focused { " ▸ " } else { "   " };
         let label_style = if focused {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row(true)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(theme::PRIMARY)
         };
         let val_style = if focused {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
+            theme::selected_row(true)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme::FG)
         };
-        let display_val = if value.is_empty() {
+        let display_val = if focused {
+            input_with_cursor(value, app.model_form_cursor, inner.width.saturating_sub(16))
+        } else if value.is_empty() {
             if focused {
                 "(type here...)".to_string()
             } else {
@@ -3561,8 +3909,13 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
             }
         } else {
             // Mask API key when not focused
-            if i == 4 && !focused && value.len() > 8 {
-                format!("{}...{}", &value[..4], &value[value.len() - 4..])
+            if i == 4 && value.chars().count() > 8 {
+                let chars: Vec<_> = value.chars().collect();
+                format!(
+                    "{}...{}",
+                    chars[..4].iter().collect::<String>(),
+                    chars[chars.len() - 4..].iter().collect::<String>()
+                )
             } else {
                 value.to_string()
             }
@@ -3576,18 +3929,22 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
         ]));
     }
 
-    let footer = Line::styled(
-        "Save [Enter]  Cancel [Esc]",
-        Style::default().fg(Color::DarkGray),
-    )
-    .alignment(Alignment::Center);
-    lines.push(footer);
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Save [Enter] ", Action::ModelPanelFormSubmit),
+            ("Cancel [Esc]", Action::ModelPanelFormCancel),
+        ],
+        true,
+    );
 }
 
 /// Renders the session browser overlay panel.
-fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
     let panel_h = area.height.min(20);
     let x = area.x + (area.width.saturating_sub(panel_w)) / 2;
@@ -3597,11 +3954,13 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     // Dim background
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Sessions ")
-        .style(Style::default());
-    let inner = block.inner(panel_area);
+    let block = theme::popup_block(if app.session_panel_legacy {
+        " Legacy / Unassigned "
+    } else {
+        " Project sessions "
+    });
+    let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+        .areas(block.inner(panel_area));
     frame.render_widget(block, panel_area);
 
     if inner.width < 10 || inner.height < 2 {
@@ -3609,6 +3968,14 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if app.session_panel_legacy {
+        lines.push(Line::raw(" Loading keeps history unassigned."));
+    } else {
+        lines.push(Line::raw(
+            " Active project only. /sessions legacy for old history.",
+        ));
+    }
 
     if app.session_list.is_empty() {
         lines.push(Line::raw("  No saved sessions."));
@@ -3618,36 +3985,51 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     } else {
         for (i, session) in app.session_list.iter().enumerate() {
+            if let Some(rect) = visible_content_rows(
+                inner,
+                lines.len(),
+                if session.model_label.is_some() { 2 } else { 1 },
+                0,
+            ) {
+                app.clickable_regions
+                    .push(ClickableRegion::SessionRow { rect, index: i });
+            }
             let is_selected = i == app.session_panel_selection;
             let prefix = if is_selected { " ▸ " } else { "   " };
             // Show created_at as readable date
             let date = session.created_at.as_str();
             let label = format!("{}{} msgs — {}", prefix, session.message_count, date);
             let style = if is_selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected_row(true)
             } else {
                 Style::default()
             };
             lines.push(Line::styled(label, style));
             if let Some(ref ml) = session.model_label {
                 lines.push(
-                    Line::raw(format!("    Model: {ml}"))
-                        .style(Style::default().fg(Color::DarkGray)),
+                    Line::raw(format!("    Model: {ml}")).style(Style::default().fg(theme::MUTED)),
                 );
             }
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        " ↑↓ select · Enter load · d delete · Esc close ",
-        Style::default().fg(Color::DarkGray),
-    ));
-
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
+        inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Load [Enter] ", Action::SessionPanelActivate),
+            ("Delete [dd/Del] ", Action::SessionPanelDelete),
+            ("Close [Esc]", Action::SessionPanelClose),
+        ],
+        true,
+    );
 }
 
 /// Render the quit confirmation popup panel.
@@ -3660,10 +4042,7 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Quit Teshi? ")
-        .border_style(Style::default().fg(Color::Red));
+    let block = theme::popup_block(" Quit Teshi? ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3675,7 +4054,7 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
     lines.push(Line::styled(
         format!("{}{}", " ".repeat(msg_pad), msg),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme::FG),
     ));
     lines.push(Line::raw(""));
 
@@ -3712,33 +4091,25 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         col_right: col_no_start + 6,
     });
 
-    let yes_style = if yes_hovered {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD)
-    } else if yes_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+    let yes_style = if yes_focused {
+        theme::selected_row(true)
     } else {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        theme::chip("", theme::ERROR).style
+    };
+    let yes_style = if yes_hovered {
+        yes_style.add_modifier(Modifier::REVERSED)
+    } else {
+        yes_style
+    };
+    let no_style = if no_focused {
+        theme::selected_row(true)
+    } else {
+        theme::chip("", theme::BORDER).style
     };
     let no_style = if no_hovered {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    } else if no_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+        no_style.add_modifier(Modifier::REVERSED)
     } else {
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+        no_style
     };
 
     let btn_line = Line::from(vec![
@@ -3763,18 +4134,22 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(56);
     // Layout: top border + 3 items × (title + desc) + separator line + bottom border
     let item_rows: u16 = (modes.len() * 2 + 1) as u16; // +1 for separator
-    let panel_h = item_rows + 3; // +3 for borders + padding
+    let panel_h = (item_rows + 4).min(area.height);
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
     let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
 
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Approval Mode ")
-        .border_style(Style::default().fg(Color::Cyan));
-    let inner = block.inner(panel_area);
+    let overridden = app.agent().backend.acp_controls().is_some()
+        && std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto");
+    let block = theme::popup_block(if overridden {
+        " Approvals (environment override: Auto) "
+    } else {
+        " Approval Mode "
+    });
+    let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+        .areas(block.inner(panel_area));
     frame.render_widget(block, panel_area);
 
     // Track which rows are rendered so we can register clickable regions
@@ -3782,7 +4157,7 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     for (i, mode) in modes.iter().enumerate() {
-        let is_current = *mode == app.approval_mode;
+        let is_current = *mode == app.effective_approval_mode();
         let is_selected = i == app.approval_panel_selection;
         let label = mode.display_name();
         let desc = mode.description();
@@ -3790,12 +4165,12 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         // ── Title line ──
         let (main_fg, desc_fg, marker) = if is_selected {
             // Selected item: always yellow with arrow, regardless of current
-            (Color::Yellow, Color::DarkGray, "\u{25b6}")
+            (theme::WARNING, theme::MUTED, "\u{25b6}")
         } else if is_current {
             // Current but not selected: dimmed with circle
-            (Color::DarkGray, Color::DarkGray, "\u{25cb}")
+            (theme::MUTED, theme::MUTED, "\u{25cb}")
         } else {
-            (Color::White, Color::Gray, "  ")
+            (theme::FG, theme::TAB_INACTIVE, "  ")
         };
         let title = format!(" {} {}", marker, label);
         let mut title_style =
@@ -3806,6 +4181,9 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 } else {
                     Modifier::empty()
                 });
+        if is_selected {
+            title_style = theme::selected_row(true);
+        }
         // Hover effect: reverse video to indicate clickability
         let is_hovered = app
             .mouse_position
@@ -3837,28 +4215,71 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
+        inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[("Close [Esc]", Action::ClearInputState)],
+        true,
+    );
 }
 
 /// Sidebar width for the agent configuration modal (matches AI agent sidebar).
 const AGENT_PROFILE_SIDEBAR_WIDTH: u16 = 28;
 const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
 
-fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel);
     let title = match app.agent_panel_mode {
-        crate::app::AgentPanelMode::SelectBackend => " Select Agent for this session ",
-        crate::app::AgentPanelMode::InstalledAcp => " Installed ACP Agents ",
-        crate::app::AgentPanelMode::Registry => " Official ACP Registry ",
-        _ => " Agents ",
+        crate::app::AgentPanelMode::SelectBackend => " Select Agent for this session ".to_string(),
+        crate::app::AgentPanelMode::InstalledAcp => format!(
+            " Installed ACP Agents ({}) ",
+            app.installed_acp_agents.len()
+        ),
+        crate::app::AgentPanelMode::Registry => format!(
+            " Official ACP Registry ({} agents) ",
+            app.acp_registry_agents.len()
+        ),
+        _ => " Agents ".to_string(),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Cyan));
+    let block = theme::popup_block(title);
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
+    let [list_area, footer_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .areas(inner);
+    let mut controls = vec![(
+        if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
+            "Install [Enter] "
+        } else {
+            "Use [Enter] "
+        },
+        Action::AgentPanelSelect,
+    )];
+    if app.agent_panel_mode == crate::app::AgentPanelMode::InstalledAcp {
+        controls.push(("Registry [i] ", Action::AgentPanelAdd));
+    }
+    controls.push(("Close [Esc]", Action::AgentPanelClose));
+    render_action_bar(frame, app, footer_area, "", &controls, true);
+
+    let muted = Style::default().fg(theme::MUTED);
+    let id_style = Style::default().fg(theme::PRIMARY);
+    let detail_width = list_area.width.saturating_sub(4) as usize;
+    let selected_style = theme::selected_row(true);
+    let rows = |index| {
+        if index == app.agent_profile_panel_selection {
+            selected_style
+        } else {
+            Style::default()
+        }
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
     if app.agent_panel_mode == crate::app::AgentPanelMode::SelectBackend {
         let marker = if app.agent_profile_panel_selection == 0 {
@@ -3872,7 +4293,11 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             ""
         };
-        lines.push(Line::from(format!("{marker}Teshi Native{active}")));
+        lines.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled("Teshi Native", rows(0)),
+            Span::styled(active, Style::default().fg(theme::SUCCESS)),
+        ]));
     }
     match app.agent_panel_mode {
         crate::app::AgentPanelMode::SelectBackend | crate::app::AgentPanelMode::InstalledAcp => {
@@ -3891,19 +4316,13 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 } else {
                     ""
                 };
-                lines.push(Line::from(format!(
-                    "{marker}{} ({}) [installed]{active}",
-                    agent.name, agent.id
-                )));
-            }
-            if app.agent_panel_mode == crate::app::AgentPanelMode::InstalledAcp {
-                lines.push(Line::from(""));
-                lines.push(Line::from(
-                    "Press i to browse and install from the Registry.",
-                ));
-                lines.push(Line::from(
-                    "Custom: /acp add <id> [\"program\",\"arg\",...]",
-                ));
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(agent.name.clone(), rows(row)),
+                    Span::styled(format!(" ({}) ", agent.id), id_style),
+                    theme::chip("[installed]", theme::SUCCESS),
+                    Span::styled(active, Style::default().fg(theme::SUCCESS)),
+                ]));
             }
         }
         crate::app::AgentPanelMode::Registry => {
@@ -3913,35 +4332,78 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 } else {
                     "  "
                 };
-                let installed = if app
+                let (badge, badge_style) = if app
                     .installed_acp_agents
                     .iter()
                     .any(|item| item.id == agent.id)
                 {
-                    "installed"
+                    ("[installed]", Style::default().fg(theme::SUCCESS))
                 } else {
-                    "available"
+                    ("[available]", muted)
                 };
-                lines.push(Line::from(format!(
-                    "{marker}{} ({}) [{installed}]",
-                    agent.name.as_deref().unwrap_or(&agent.id),
-                    agent.id
-                )));
-                lines.push(Line::from(format!(
-                    "   {}",
-                    agent.description.as_deref().unwrap_or("No description")
-                )));
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(agent.name.clone().unwrap_or(agent.id.clone()), rows(index)),
+                    Span::styled(format!(" ({}) ", agent.id), id_style),
+                    Span::styled(badge, badge_style),
+                ]));
+                let description = agent.description.as_deref().unwrap_or("No description");
+                lines.push(Line::styled(
+                    format!("   {}", truncate_str_to_width(description, detail_width)),
+                    muted,
+                ));
+                lines.push(Line::raw(""));
             }
         }
         _ => {}
     }
-    let selected_line = if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
-        app.agent_profile_panel_selection * 2
+    if lines.is_empty() {
+        let label = match app.agent_panel_mode {
+            crate::app::AgentPanelMode::Registry if app.acp_registry_rx.is_some() => {
+                "Loading official ACP Registry..."
+            }
+            crate::app::AgentPanelMode::Registry => "No agents published in the registry",
+            crate::app::AgentPanelMode::InstalledAcp => {
+                "No ACP agents installed · press i to browse the Registry"
+            }
+            _ => "No agents available",
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(label, muted)).alignment(Alignment::Center),
+            Rect::new(
+                list_area.x,
+                list_area.y + list_area.height / 2,
+                list_area.width,
+                1,
+            ),
+        );
+        return;
+    }
+    let per_row = if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
+        3
     } else {
-        app.agent_profile_panel_selection
+        1
     };
-    let scroll = selected_line.saturating_sub(inner.height.saturating_sub(3) as usize);
-    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
+    let selected_line = app.agent_profile_panel_selection * per_row;
+    let scroll = selected_line
+        .saturating_add(per_row)
+        .saturating_sub(list_area.height as usize);
+    let count = match app.agent_panel_mode {
+        crate::app::AgentPanelMode::SelectBackend => app.installed_acp_agents.len() + 1,
+        crate::app::AgentPanelMode::InstalledAcp => app.installed_acp_agents.len(),
+        crate::app::AgentPanelMode::Registry => app.acp_registry_agents.len(),
+        crate::app::AgentPanelMode::List => 0,
+    };
+    for index in 0..count {
+        if let Some(rect) = visible_content_rows(list_area, index * per_row, per_row, scroll) {
+            app.clickable_regions
+                .push(ClickableRegion::AgentProfileRow { rect, index });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(theme::popup_rows(lines, inner.width)).scroll((scroll as u16, 0)),
+        list_area,
+    );
 }
 const AGENT_PROFILE_PANEL_MAX_WIDTH: u16 = 100;
 const AGENT_PROFILE_PANEL_MIN_HEIGHT: u16 = 18;
@@ -3959,26 +4421,36 @@ fn agent_profile_panel_rect(area: Rect) -> Rect {
     ) as u16;
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    Rect::new(panel_x, panel_y, panel_w, panel_h)
+    Rect::new(
+        panel_x,
+        panel_y,
+        panel_w.min(area.width),
+        panel_h.min(area.height),
+    )
 }
 
 /// Render the agent profile configuration overlay (chrys-style layout).
-fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_area = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Agent Configuration ")
-        .border_style(Style::default().fg(Color::Cyan))
-        .title_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let block = theme::popup_block(" Agent Configuration ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
+
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Apply [Enter] ", Action::AgentPanelSelect),
+            ("Close [Esc]", Action::AgentPanelClose),
+        ],
+        true,
+    );
 
     let [sidebar_area, main_area] = Layout::default()
         .direction(Direction::Horizontal)
@@ -3993,15 +4465,24 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 /// Left sidebar: profile list with two-line entries (name + description).
-fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(theme::MUTED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let scroll = app
+        .agent_profile_panel_selection
+        .saturating_mul(3)
+        .saturating_add(2)
+        .saturating_sub(inner.height as usize);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, profile) in app.agent_registry.iter().enumerate() {
+        if let Some(rect) = visible_content_rows(inner, lines.len(), 2, scroll) {
+            app.clickable_regions
+                .push(ClickableRegion::AgentProfileRow { rect, index: i });
+        }
         let is_active = app
             .agent()
             .profile_id
@@ -4019,19 +4500,21 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             "  "
         };
         let main_fg = if is_selected {
-            Color::Yellow
+            theme::WARNING
         } else if is_active {
-            Color::Green
+            theme::SUCCESS
         } else {
-            Color::White
+            theme::FG
         };
-        let name_style = Style::default()
-            .fg(main_fg)
-            .add_modifier(if is_selected || is_active {
+        let name_style = if is_selected {
+            theme::selected_row(true)
+        } else {
+            Style::default().fg(main_fg).add_modifier(if is_active {
                 Modifier::BOLD
             } else {
                 Modifier::empty()
-            });
+            })
+        };
 
         let desc = if profile.description.is_empty() {
             "(no description)".to_string()
@@ -4046,7 +4529,7 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ]));
         lines.push(Line::styled(
             format!("    {}", desc_trunc),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
         if i + 1 < app.agent_registry.len() {
             lines.push(Line::raw(""));
@@ -4056,12 +4539,15 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if app.agent_registry.is_empty() {
         lines.push(Line::styled(
             "  No profiles",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     }
 
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width)))
+            .scroll((scroll as u16, 0)),
+        inner,
+    );
 }
 
 /// Right panel: read-only profile summary.
@@ -4086,10 +4572,10 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
 
     let section = Style::default()
-        .fg(Color::Cyan)
+        .fg(theme::PRIMARY)
         .add_modifier(Modifier::BOLD);
-    let muted = Style::default().fg(Color::DarkGray);
-    let body = Style::default().fg(Color::White);
+    let muted = Style::default().fg(theme::MUTED);
+    let body = Style::default().fg(theme::FG);
 
     lines.push(Line::styled("Profile", section));
     lines.push(Line::raw(""));
@@ -4153,7 +4639,7 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     ]));
 
     lines.push(Line::raw(""));
-    lines.push(Line::styled("Enter apply · Esc close", muted));
+    lines.push(theme::action_line("Enter apply · Esc close"));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), area);
@@ -4187,14 +4673,11 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
             let pad = " ".repeat(4);
             lines.push(Line::styled(
                 format!("{pad}{label}{pad}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
         } else if row > 1 && row < h.saturating_sub(1) {
             let hatch = " ╲ ".repeat(8);
-            lines.push(Line::styled(
-                hatch,
-                Style::default().fg(Color::Rgb(40, 40, 40)),
-            ));
+            lines.push(Line::styled(hatch, Style::default().fg(theme::BORDER)));
         } else {
             lines.push(Line::raw(""));
         }
@@ -4202,29 +4685,113 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// Draw overflow indicators on panel borders, preserving the content viewport.
+fn render_requirement_scrollbars(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::authoring_tab::AuthoringUiState,
+    pane: usize,
+    area: Rect,
+    extent: (usize, usize),
+    offset: (usize, usize),
+) {
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let (width, height) = extent;
+    ui.scroll_limits[pane] = [
+        width.saturating_sub(inner.width as usize),
+        height.saturating_sub(inner.height as usize),
+    ];
+    if width > inner.width as usize && inner.width > 0 {
+        let line = theme::horizontal_scrollbar(width, inner.width as usize, offset.0);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+        );
+    }
+    if height > inner.height as usize && inner.height > 0 {
+        frame.render_widget(
+            Paragraph::new(theme::scrollbar_lines(
+                height,
+                inner.height as usize,
+                offset.1,
+            )),
+            Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
+        );
+    }
+}
+
 /// Requirements tab: tree, Markdown editor, and linked test points.
+/// Footer controls for the focused Requirements pane.
+///
+/// The tree shows view settings plus the Space menu, which holds every row operation;
+/// the editor shows document commands. Labels shorten below 100 columns and only the
+/// essentials remain below 55.
+fn requirements_footer_controls(
+    ui: &crate::authoring_tab::AuthoringUiState,
+    width: u16,
+) -> Vec<(&'static str, Action)> {
+    let tree = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
+    let label = |full: &'static str, short: &'static str| if width < 100 { short } else { full };
+    if width < 55 {
+        return if tree {
+            vec![
+                (" Actions", Action::ReqActionMenu),
+                (" New", Action::ReqNewDocument),
+                (" Filter", Action::ReqFilterOverlay),
+            ]
+        } else {
+            vec![
+                (" Save", Action::Save),
+                (" New", Action::ReqNewDocument),
+                (" Point", Action::ReqNewTestPoint),
+            ]
+        };
+    }
+    if !tree {
+        return vec![
+            (label(" Save [Ctrl+s]", " Save"), Action::Save),
+            (label(" Point [n]", " Point"), Action::ReqNewTestPoint),
+            (
+                label(" Iteration [I]", " Iteration"),
+                Action::ReqEditIteration,
+            ),
+            (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+        ];
+    }
+    let mut controls = vec![
+        (label(" Scope [o]", " Scope"), Action::ReqProjectScope),
+        (label(" View [g]", " View"), Action::ReqGroupToggle),
+        (label(" Filter [i]", " Filter"), Action::ReqFilterOverlay),
+    ];
+    if ui.is_project_scope() {
+        controls.push((
+            label(" Completed [H]", " Completed"),
+            Action::ReqCompletedToggle,
+        ));
+    }
+    controls.extend([
+        (label(" Actions [Space]", " Actions"), Action::ReqActionMenu),
+        (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+    ]);
+    controls
+}
+
 fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.authoring_ui.pane_areas = [Rect::default(); 3];
+    app.authoring_ui.scroll_limits = [[0; 2]; 3];
     if area.width < 20 || area.height < 3 {
         return;
     }
-    let layout = if area.width < 60 {
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
-    } else if area.width < 100 {
-        Layout::horizontal([
-            Constraint::Percentage(22),
-            Constraint::Percentage(48),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    } else {
-        Layout::horizontal([
-            Constraint::Percentage(20),
-            Constraint::Percentage(50),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    };
+    let layout = compact_panes(
+        area,
+        match app.authoring_ui.focus {
+            crate::authoring_tab::RequirementsFocus::Tree => 0,
+            crate::authoring_tab::RequirementsFocus::Editor => 1,
+            crate::authoring_tab::RequirementsFocus::LinkedTestPoints => 2,
+        },
+    );
 
     {
         let ui = &mut app.authoring_ui;
@@ -4244,6 +4811,15 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             render_requirements_linked(frame, ui, layout[2], linked_focused);
         }
     }
+    if app.authoring_ui.current_document_meta().is_some() && layout[1].width > 2 {
+        let pane = layout[1];
+        let width = 17.min(pane.width.saturating_sub(2));
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: Rect::new(pane.right().saturating_sub(width + 1), pane.y, width, 1),
+            action: Action::ReqEditPriority,
+            modal: false,
+        });
+    }
 }
 
 fn render_requirements_tree(
@@ -4252,45 +4828,110 @@ fn render_requirements_tree(
     area: Rect,
     focused: bool,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(crate::authoring_tab::requirements_tree_title(
-            &ui.iteration_filter,
-        ))
-        .title_style(title_style);
+    let block = theme::panel_block(ui.tree_status_title(), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
 
+    if let Some(error) = &ui.project_identity_error {
+        frame.render_widget(
+            Paragraph::new(format!("Project identity: {error}"))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(Style::default().fg(theme::ERROR)),
+            inner,
+        );
+        return;
+    }
     if !ui.discovered {
         frame.render_widget(
-            Paragraph::new("No requirement artifacts. Ctrl+n to create.")
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(
+                "No requirement artifacts. Ctrl+n to create. Scope [o]: all / no project.",
+            )
+            .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
     }
 
-    let highlight_style = selected_style(focused);
+    if ui.tree_items.is_empty() {
+        ui.scroll_limits[0] = [0, 0];
+        frame.render_widget(Paragraph::new("No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project").wrap(ratatui::widgets::Wrap { trim: false }).style(Style::default().fg(theme::MUTED)), inner);
+        return;
+    }
+    let visible = ui.tree_state.flatten(&ui.tree_items);
+    let height = visible.len();
+    let width = visible
+        .iter()
+        .map(|node| {
+            let id = node.item.identifier();
+            let label_width = if let Some(label) = ui.tree_labels.get(id) {
+                UnicodeWidthStr::width(label.as_str())
+            } else if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
+                ui.artifacts
+                    .as_ref()
+                    .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
+                    .map(|d| {
+                        UnicodeWidthStr::width(
+                            crate::authoring_tab::requirement_document_tree_label(d).as_str(),
+                        )
+                    })
+                    .unwrap_or(0)
+            } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
+                UnicodeWidthStr::width(name)
+            } else {
+                UnicodeWidthStr::width(
+                    id.rsplit('/')
+                        .next()
+                        .unwrap_or(id)
+                        .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX),
+                )
+            };
+            node.depth() * 2 + 2 + label_width
+        })
+        .max()
+        .unwrap_or(0)
+        .min(u16::MAX.saturating_sub(inner.x) as usize);
+    ui.horizontal_scroll[0] =
+        ui.horizontal_scroll[0].min(width.saturating_sub(inner.width as usize));
+    // Render at full width so clipping does not discard text before horizontal scrolling.
+    let wide = Rect::new(
+        inner.x,
+        inner.y,
+        width.max(inner.width as usize) as u16,
+        inner.height,
+    );
+    let mut buffer = ratatui::buffer::Buffer::empty(wide);
     let tree = Tree::new(&ui.tree_items)
         .expect("requirement tree")
-        .highlight_style(highlight_style);
-    frame.render_stateful_widget(tree, inner, &mut ui.tree_state);
+        .highlight_style(theme::selected_row(focused));
+    ratatui::widgets::StatefulWidget::render(tree, wide, &mut buffer, &mut ui.tree_state);
+    for y in inner.y..inner.bottom() {
+        for x in 0..inner.width {
+            frame.buffer_mut()[(inner.x + x, y)] =
+                buffer[(inner.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
+        }
+    }
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        0,
+        area,
+        (width, height),
+        (ui.horizontal_scroll[0], ui.tree_state.get_offset()),
+    );
 
     let diag_lines: Vec<Line> = ui
         .visible_diagnostics()
         .iter()
         .take(3)
-        .map(|d| Line::styled(format!("! {}", d.message), Style::default().fg(Color::Red)))
+        .map(|d| {
+            Line::styled(
+                format!("! {}", d.message),
+                Style::default().fg(theme::ERROR),
+            )
+        })
         .collect();
     if !diag_lines.is_empty() {
         let diag_height = diag_lines.len() as u16;
@@ -4317,6 +4958,7 @@ fn render_requirements_editor(
         .current_document_meta()
         .map(|m| m.title.clone())
         .unwrap_or_else(|| "Source".to_string());
+    let priority = ui.current_document_meta().and_then(|meta| meta.priority);
     let missing = ui.current_document_missing();
     let display_title = if missing {
         format!("{title} (missing file)")
@@ -4325,23 +4967,53 @@ fn render_requirements_editor(
     } else {
         title
     };
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
+    let (mode, mode_color) = match ui.editor_mode {
+        crate::authoring_tab::RequirementsEditorMode::Browse => ("[BROWSE]", theme::PRIMARY),
+        crate::authoring_tab::RequirementsEditorMode::Insert => ("[INSERT]", theme::ACCENT),
+        crate::authoring_tab::RequirementsEditorMode::VisualChar => ("[VISUAL]", theme::WARNING),
+        crate::authoring_tab::RequirementsEditorMode::VisualLine => ("[V-LINE]", theme::WARNING),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(
-            "{display_title} [{}]",
-            match ui.editor_mode {
-                crate::authoring_tab::RequirementsEditorMode::Browse => "BROWSE",
-                crate::authoring_tab::RequirementsEditorMode::Insert => "INSERT",
-            }
-        ))
-        .title_style(title_style);
+    let mut heading = vec![Span::raw(format!("{display_title} "))];
+    if let Some(priority) = priority {
+        let priority_color = match priority {
+            teshi_core::authoring::RequirementPriority::P0 => theme::ERROR,
+            teshi_core::authoring::RequirementPriority::P1 => theme::WARNING,
+            teshi_core::authoring::RequirementPriority::P2 => theme::ACCENT,
+            teshi_core::authoring::RequirementPriority::P3 => theme::MUTED,
+        };
+        heading.push(theme::chip(format!("[{priority}]"), priority_color));
+        heading.push(Span::raw(" "));
+    }
+    if let teshi_core::authoring::RequirementProjectFilter::Project(id) = &ui.project_filter
+        && let Some(status) = ui
+            .current_document_meta()
+            .and_then(|meta| meta.projects.get(id))
+    {
+        let label = match status {
+            teshi_core::authoring::RequirementProjectStatus::Planned => "[planned]",
+            teshi_core::authoring::RequirementProjectStatus::Implemented => "[implemented]",
+            teshi_core::authoring::RequirementProjectStatus::Verified => "[verified]",
+        };
+        heading.push(theme::chip(label, theme::MUTED));
+        heading.push(Span::raw(" "));
+    }
+    heading.push(theme::chip(mode, mode_color));
+    let priority_title = ui.current_document_meta().map(|_| {
+        let label = priority.map_or_else(|| "Unset".to_string(), |value| value.to_string());
+        format!(" Priority: {label} ")
+    });
+    let heading_width = area.width.saturating_sub(2).saturating_sub(
+        priority_title
+            .as_ref()
+            .map_or(0, |title| title.len() as u16),
+    );
+    let mut block = theme::panel_block(
+        truncate_line_to_cols(Line::from(heading), heading_width),
+        focused,
+    );
+    if let Some(title) = priority_title {
+        block = block.title_top(Line::from(title).right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4352,24 +5024,37 @@ fn render_requirements_editor(
     if missing {
         frame.render_widget(
             Paragraph::new("Indexed document file is missing on disk.")
-                .style(Style::default().fg(Color::Red)),
+                .style(Style::default().fg(theme::ERROR)),
             inner,
         );
         return;
     }
 
-    let buffer = &ui.buffer;
-    let cursor_row = ui.cursor_row;
+    ui.horizontal_scroll[1] = 0;
+    let resized = ui.editor_wrap_width != inner.width as usize;
+    ui.wrap_editor_rows(inner.width as usize);
+    let cursor = (ui.cursor_row, ui.cursor_col);
+    let cursor_display_row = ui
+        .editor_display_rows
+        .iter()
+        .position(|&(row, start, end)| {
+            row == ui.cursor_row && start <= ui.cursor_col && ui.cursor_col < end
+        })
+        .unwrap_or(0);
     let visible_lines = inner.height as usize;
-    let line_count = buffer.line_count();
-    let max_scroll = line_count.saturating_sub(visible_lines);
-    if cursor_row < ui.scroll_row {
-        ui.scroll_row = cursor_row;
-    } else if cursor_row >= ui.scroll_row + visible_lines {
-        ui.scroll_row = cursor_row.saturating_sub(visible_lines.saturating_sub(1));
+    let line_count = ui.editor_display_rows.len();
+    if focused && (resized || ui.rendered_cursor != Some(cursor)) {
+        if cursor_display_row < ui.scroll_row {
+            ui.scroll_row = cursor_display_row;
+        } else if cursor_display_row >= ui.scroll_row + visible_lines {
+            ui.scroll_row = cursor_display_row.saturating_sub(visible_lines - 1);
+        }
     }
-    let scroll_row = ui.scroll_row.min(max_scroll);
-    ui.scroll_row = scroll_row;
+    ui.rendered_cursor = Some(cursor);
+    ui.scroll_row = ui.scroll_row.min(line_count.saturating_sub(visible_lines));
+    let scroll_row = ui.scroll_row;
+    let cursor_row = ui.cursor_row;
+    let buffer = &ui.buffer;
 
     let highlight_ranges = ui
         .highlight_test_point_id
@@ -4378,12 +5063,12 @@ fn render_requirements_editor(
         .unwrap_or_default();
 
     let mut lines = Vec::with_capacity(visible_lines);
-    for visible_idx in 0..visible_lines {
-        let row = scroll_row + visible_idx;
-        if row >= line_count {
-            lines.push(Line::raw(""));
-            continue;
-        }
+    for &(row, start, end) in ui
+        .editor_display_rows
+        .iter()
+        .skip(scroll_row)
+        .take(visible_lines)
+    {
         let line_text = buffer.line(row);
         let mut styled = Line::from(line_text.clone());
 
@@ -4393,7 +5078,7 @@ fn render_requirements_editor(
                 range,
                 buffer,
                 row,
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::PRIMARY),
             );
         }
 
@@ -4402,23 +5087,28 @@ fn render_requirements_editor(
             let sel_hi = anchor.0.max(end.0);
             if row >= sel_lo && row <= sel_hi {
                 let line_len = line_text.chars().count();
-                let (lo_col, hi_col) = if sel_lo == sel_hi {
-                    (anchor.1.min(end.1), anchor.1.max(end.1).min(line_len))
-                } else if row == sel_lo {
-                    let col = if anchor.0 < end.0 { anchor.1 } else { end.1 };
-                    (col, line_len)
-                } else if row == sel_hi {
-                    let col = if anchor.0 > end.0 { anchor.1 } else { end.1 }.min(line_len);
-                    (0, col)
-                } else {
-                    (0, line_len)
-                };
+                let (lo_col, hi_col) =
+                    if ui.editor_mode == crate::authoring_tab::RequirementsEditorMode::VisualLine {
+                        (0, line_len)
+                    } else if sel_lo == sel_hi {
+                        (anchor.1.min(end.1), anchor.1.max(end.1).min(line_len))
+                    } else if row == sel_lo {
+                        let col = if anchor.0 < end.0 { anchor.1 } else { end.1 };
+                        (col, line_len)
+                    } else if row == sel_hi {
+                        let col = if anchor.0 > end.0 { anchor.1 } else { end.1 }.min(line_len);
+                        (0, col)
+                    } else {
+                        (0, line_len)
+                    };
                 if lo_col < hi_col {
                     styled = apply_col_range_highlight(
                         styled,
                         lo_col,
                         hi_col,
-                        Style::default().bg(SELECTION_BG).fg(SELECTION_FG),
+                        Style::default()
+                            .bg(theme::EDITOR_SELECTION_BG)
+                            .fg(theme::FG),
                     );
                 }
             }
@@ -4427,7 +5117,9 @@ fn render_requirements_editor(
         if focused && row == cursor_row {
             let line_len = line_text.chars().count();
             let cursor_col = ui.cursor_col.min(line_len);
-            let cursor_style = Style::default().fg(Color::White).bg(SELECTION_BG);
+            let cursor_style = Style::default()
+                .fg(theme::FG)
+                .bg(theme::EDITOR_SELECTION_BG);
             if line_len == 0 {
                 styled = Line::from(vec![Span::styled(" ", cursor_style)]);
             } else if cursor_col < line_len {
@@ -4440,12 +5132,35 @@ fn render_requirements_editor(
             }
         }
 
-        styled = truncate_line_to_cols(styled, inner.width);
-        styled = pad_line_to_width(styled, inner.width, Style::default());
-        lines.push(styled);
+        // Slice styled source characters using the same wrap map as mouse hit testing.
+        let mut col = 0;
+        let spans = styled
+            .spans
+            .into_iter()
+            .filter_map(|span| {
+                let len = span.content.chars().count();
+                let text: String = span
+                    .content
+                    .chars()
+                    .skip(start.saturating_sub(col))
+                    .take(end.saturating_sub(col.max(start)))
+                    .collect();
+                col += len;
+                (!text.is_empty()).then(|| Span::styled(text, span.style))
+            })
+            .collect::<Vec<_>>();
+        lines.push(Line::from(spans));
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        1,
+        area,
+        (inner.width as usize, line_count),
+        (0, scroll_row),
+    );
 }
 
 fn apply_col_range_highlight(
@@ -4490,17 +5205,7 @@ fn render_requirements_linked(
     area: Rect,
     focused: bool,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Linked test points")
-        .title_style(title_style);
+    let block = theme::panel_block("Linked test points", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4512,29 +5217,138 @@ fn render_requirements_linked(
     if linked.is_empty() {
         lines.push(Line::styled(
             " (no linked test points)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     } else {
         for (i, tp) in linked.iter().enumerate() {
             let badge = crate::authoring_tab::review_state_label(tp.review_state);
             let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
-            let label = truncate_string_to_cols(&tp.title, inner.width.saturating_sub(4));
+            let label = tp.title.clone();
             let style = if i == ui.selected_linked_index {
-                selected_style(focused)
+                theme::selected_row(focused)
             } else {
                 Style::default()
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("[{badge}] "), badge_style),
+                Span::styled(
+                    if i == ui.selected_linked_index {
+                        "› "
+                    } else {
+                        "  "
+                    },
+                    style,
+                ),
+                theme::chip(
+                    format!("[{badge}] "),
+                    badge_style.fg.unwrap_or(theme::MUTED),
+                ),
                 Span::styled(label, style),
             ]));
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let height = lines.len();
+    let width = lines.iter().map(Line::width).max().unwrap_or(0);
+    ui.linked_scroll = ui
+        .linked_scroll
+        .min(height.saturating_sub(inner.height as usize));
+    if ui.rendered_linked_selection != Some(ui.selected_linked_index) {
+        if ui.selected_linked_index < ui.linked_scroll {
+            ui.linked_scroll = ui.selected_linked_index;
+        } else if ui.selected_linked_index >= ui.linked_scroll + inner.height as usize {
+            ui.linked_scroll = ui.selected_linked_index + 1 - inner.height as usize;
+        }
+    }
+    ui.rendered_linked_selection = Some(ui.selected_linked_index);
+    ui.horizontal_scroll[2] =
+        ui.horizontal_scroll[2].min(width.saturating_sub(inner.width as usize));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((
+            ui.linked_scroll.min(u16::MAX as usize) as u16,
+            ui.horizontal_scroll[2].min(u16::MAX as usize) as u16,
+        )),
+        inner,
+    );
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        2,
+        area,
+        (width, height),
+        (ui.horizontal_scroll[2], ui.linked_scroll),
+    );
 }
 
-fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// Centers a `width` x `height` popup in `area`, shrinking it to fit.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+/// Draws clickable popup controls on the second-to-last row of `panel`.
+fn render_overlay_footer(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    panel: Rect,
+    controls: &[(&str, Action)],
+) {
+    render_action_bar(
+        frame,
+        app,
+        Rect::new(
+            panel.x + 1,
+            panel.bottom().saturating_sub(2),
+            panel.width.saturating_sub(2),
+            1,
+        ),
+        "",
+        controls,
+        true,
+    );
+}
+
+/// One labeled text field; the focused field shows a block cursor.
+fn form_input_line<'a>(
+    label: &'a str,
+    input: &'a crate::authoring_tab::LineInput,
+    focused: bool,
+) -> Line<'a> {
+    let label_style = if focused {
+        Style::default().fg(theme::PRIMARY)
+    } else {
+        theme::muted()
+    };
+    let mut spans = vec![Span::styled(format!("{label}: "), label_style)];
+    if !focused {
+        spans.push(Span::raw(input.text()));
+        return Line::from(spans);
+    }
+    let (before, after) = input.split_at_cursor();
+    let mut rest = after.chars();
+    let under = rest.next().map_or(" ".to_string(), String::from);
+    spans.extend([
+        Span::raw(before),
+        Span::styled(
+            under,
+            Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
+        ),
+        Span::raw(rest.as_str()),
+    ]);
+    Line::from(spans)
+}
+
+fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::project_context::SwitchOverlay;
+    if !matches!(app.project_switch.overlay, SwitchOverlay::None) {
+        render_project_switch_overlay(frame, app, area);
+        return;
+    }
     use crate::authoring_tab::RequirementsOverlay;
     match &app.authoring_ui.overlay {
         RequirementsOverlay::None => {}
@@ -4554,16 +5368,31 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .unwrap_or("Requirement");
             frame.render_widget(Clear, panel);
             frame.render_widget(
-                Paragraph::new(format!(
-                    "{title} has unsaved changes.\n\n[S] Save   [D] Discard   [Esc] Cancel"
-                ))
+                Paragraph::new(vec![
+                    Line::raw(format!("{title} has unsaved changes.")),
+                    Line::raw(""),
+                    Line::raw(""),
+                ])
                 .wrap(ratatui::widgets::Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Unsaved requirement "),
-                ),
+                .block(theme::popup_block(" Unsaved requirement ")),
                 panel,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel.x + 1,
+                    panel.bottom().saturating_sub(2),
+                    panel.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[
+                    (" [S] Save", Action::OverlayInsert('s')),
+                    (" [D] Discard", Action::OverlayInsert('d')),
+                    (" [Esc] Cancel", Action::OverlayCancel),
+                ],
+                true,
             );
         }
         RequirementsOverlay::FilterPicker { selection } => {
@@ -4577,10 +5406,24 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 panel_h,
             );
             frame.render_widget(Clear, panel_area);
+            let visible = panel_area.height.saturating_sub(4) as usize;
+            let start = selection.saturating_sub(visible.saturating_sub(1));
             let lines: Vec<Line> = options
                 .iter()
                 .enumerate()
+                .skip(start)
+                .take(visible)
                 .map(|(i, filter)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel_area.x + 1,
+                                panel_area.y + 1 + (i - start) as u16,
+                                panel_area.width.saturating_sub(2),
+                                1,
+                            ),
+                            index: i,
+                        });
                     let label = match filter {
                         teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
                         teshi_core::authoring::RequirementIterationFilter::Unassigned => {
@@ -4591,9 +5434,7 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         }
                     };
                     let style = if i == *selection {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
+                        theme::selected_row(true)
                     } else {
                         Style::default()
                     };
@@ -4601,12 +5442,300 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 })
                 .collect();
             frame.render_widget(
-                Paragraph::new(lines).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Filter iteration "),
-                ),
+                Paragraph::new(theme::popup_rows(lines, panel_area.width.saturating_sub(2)))
+                    .block(theme::popup_block(" Filter iteration ")),
                 panel_area,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[(" Cancel [Esc]", Action::OverlayCancel)],
+                true,
+            );
+        }
+        RequirementsOverlay::ActionMenu { target, selection } => {
+            let items = app.authoring_ui.menu_items(target);
+            let title = app.authoring_ui.menu_title(target);
+            let selection = *selection;
+            let label_width = items
+                .iter()
+                .map(|item| UnicodeWidthStr::width(item.label))
+                .max()
+                .unwrap_or(0);
+            let content_width = (label_width + 12).max(UnicodeWidthStr::width(title.as_str()) + 2);
+            let panel = centered_rect(
+                area,
+                (content_width as u16 + 2).clamp(32, 64),
+                items.len() as u16 + 4,
+            );
+            frame.render_widget(Clear, panel);
+            let lines = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel.x + 1,
+                                panel.y + 1 + index as u16,
+                                panel.width.saturating_sub(2),
+                                1,
+                            ),
+                            index,
+                        });
+                    let style = if index == selection {
+                        theme::selected_row(true)
+                    } else {
+                        Style::default()
+                    };
+                    let pad = label_width - UnicodeWidthStr::width(item.label);
+                    Line::from(vec![
+                        Span::styled(format!("  {}{}  ", item.label, " ".repeat(pad)), style),
+                        Span::styled(item.hint, style.patch(theme::muted())),
+                    ])
+                })
+                .collect();
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
+                    .block(theme::popup_block(title)),
+                panel,
+            );
+            render_overlay_footer(
+                frame,
+                app,
+                panel,
+                &[
+                    (" Select [Enter]", Action::OverlayConfirm),
+                    (" Close [Esc]", Action::OverlayCancel),
+                ],
+            );
+        }
+        RequirementsOverlay::FolderPicker {
+            document_id,
+            options,
+            checked,
+            selection,
+        } => {
+            let title = app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .and_then(|a| a.index.documents.iter().find(|d| &d.id == document_id))
+                .map_or(document_id.clone(), |d| d.title.clone());
+            let rows = options.len().max(1) as u16;
+            let panel = centered_rect(area, 64, rows + 6);
+            frame.render_widget(Clear, panel);
+            let visible = (panel.height.saturating_sub(6) as usize).max(1);
+            let start = selection.saturating_sub(visible.saturating_sub(1));
+            let mut lines: Vec<Line> = if options.is_empty() {
+                vec![Line::styled(
+                    "  No folders yet. Close, select Inbox, and choose New folder….",
+                    theme::muted(),
+                )]
+            } else {
+                options
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(visible)
+                    .map(|(index, (id, path))| {
+                        app.clickable_regions
+                            .push(ClickableRegion::RequirementFilterOption {
+                                rect: Rect::new(
+                                    panel.x + 1,
+                                    panel.y + 1 + (index - start) as u16,
+                                    panel.width.saturating_sub(2),
+                                    1,
+                                ),
+                                index,
+                            });
+                        let style = if index == *selection {
+                            theme::selected_row(true)
+                        } else {
+                            Style::default()
+                        };
+                        let mark = if checked.contains(id) { "[x]" } else { "[ ]" };
+                        Line::styled(format!("  {mark} {path}"), style)
+                    })
+                    .collect()
+            };
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                if checked.is_empty() {
+                    "  No folder checked: the requirement is listed in Inbox."
+                } else {
+                    "  The requirement is listed in every checked folder."
+                },
+                theme::muted(),
+            ));
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
+                    .block(theme::popup_block(format!(" Folders of {title} "))),
+                panel,
+            );
+            render_overlay_footer(
+                frame,
+                app,
+                panel,
+                &[
+                    (" Toggle [Space]", Action::OverlayInsert(' ')),
+                    (" Save [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
+            );
+        }
+        RequirementsOverlay::OrganizationForm(form) => {
+            use crate::authoring_tab::OrganizationForm;
+            let (title, mut lines, query) = match form {
+                OrganizationForm::NewFolder {
+                    parent_path, name, ..
+                } => (
+                    parent_path
+                        .as_ref()
+                        .map_or(" New folder ".to_string(), |parent| {
+                            format!(" New subfolder in {parent} ")
+                        }),
+                    vec![
+                        form_input_line("Name", name, true),
+                        Line::raw(""),
+                        Line::styled(
+                            "Use / to create nested folders, e.g. Chat/Archive.",
+                            theme::muted(),
+                        ),
+                    ],
+                    false,
+                ),
+                OrganizationForm::Rename { query, name, .. } => (
+                    if *query {
+                        " Rename saved query ".to_string()
+                    } else {
+                        " Rename folder ".to_string()
+                    },
+                    vec![
+                        form_input_line("Name", name, true),
+                        Line::raw(""),
+                        Line::styled(
+                            "Requirements and queries keep their references.",
+                            theme::muted(),
+                        ),
+                    ],
+                    false,
+                ),
+                OrganizationForm::Query {
+                    query_id,
+                    name,
+                    condition,
+                    condition_focused,
+                } => {
+                    let preview = match app.authoring_ui.query_form_preview() {
+                        Some(Ok(count)) => Line::styled(
+                            if count == 1 {
+                                "Matches 1 requirement".to_string()
+                            } else {
+                                format!("Matches {count} requirements")
+                            },
+                            Style::default().fg(theme::SUCCESS),
+                        ),
+                        Some(Err(error)) => {
+                            Line::styled(format!("! {error}"), Style::default().fg(theme::ERROR))
+                        }
+                        None => Line::raw(""),
+                    };
+                    (
+                        if query_id.is_some() {
+                            " Edit saved query ".to_string()
+                        } else {
+                            " New saved query ".to_string()
+                        },
+                        vec![
+                            form_input_line("Name     ", name, !condition_focused),
+                            form_input_line("Condition", condition, *condition_focused),
+                            preview,
+                            Line::raw(""),
+                            Line::styled(
+                                "Fields: status, priority, iteration, title, folder",
+                                theme::muted(),
+                            ),
+                            Line::styled(
+                                "& = and, | = or, ! = not; & binds tighter than |",
+                                theme::muted(),
+                            ),
+                            Line::styled(
+                                "Example: status=planned & priority=P1 | folder=AI/Chat",
+                                theme::muted(),
+                            ),
+                        ],
+                        true,
+                    )
+                }
+            };
+            lines.insert(0, Line::raw(""));
+            let panel = centered_rect(area, 72, lines.len() as u16 + 4);
+            frame.render_widget(Clear, panel);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(theme::popup_block(title)),
+                panel,
+            );
+            let mut controls = vec![(" Save [Enter]", Action::OverlayConfirm)];
+            if query {
+                controls.push((" Next field [Tab]", Action::OverlayMoveDown));
+            }
+            controls.push((" Cancel [Esc]", Action::OverlayCancel));
+            render_overlay_footer(frame, app, panel, &controls);
+        }
+        RequirementsOverlay::RemoveCollection {
+            name,
+            query,
+            inbox_returns,
+            ..
+        } => {
+            let (title, lines) = if *query {
+                (
+                    " Delete saved query ",
+                    vec![
+                        Line::raw(format!("Delete saved query '{name}'?")),
+                        Line::raw("Requirements are not changed."),
+                    ],
+                )
+            } else {
+                (
+                    " Delete folder ",
+                    vec![
+                        Line::raw(format!("Delete folder '{name}' and its subfolders?")),
+                        Line::raw(match inbox_returns {
+                            0 => "No requirement returns to Inbox.".to_string(),
+                            1 => "1 requirement returns to Inbox.".to_string(),
+                            n => format!("{n} requirements return to Inbox."),
+                        }),
+                        Line::raw("Requirement documents are never deleted."),
+                    ],
+                )
+            };
+            let panel = centered_rect(area, 64, lines.len() as u16 + 4);
+            frame.render_widget(Clear, panel);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(theme::popup_block(title)),
+                panel,
+            );
+            render_overlay_footer(
+                frame,
+                app,
+                panel,
+                &[
+                    (" Delete [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
             );
         }
         RequirementsOverlay::IterationEdit { buffer } => {
@@ -4620,17 +5749,129 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             );
             frame.render_widget(Clear, panel_area);
             frame.render_widget(
-                Paragraph::new(format!("Iteration: {buffer}")).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Set iteration (empty = Unassigned) "),
-                ),
+                Paragraph::new(format!("Iteration: {buffer}"))
+                    .block(theme::popup_block(" Set iteration (empty = Unassigned) ")),
                 panel_area,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[
+                    (" Confirm [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
+                true,
+            );
+        }
+        RequirementsOverlay::PriorityEdit { selection, .. } => {
+            let options = [
+                "Unset".to_string(),
+                "P0".to_string(),
+                "P1".to_string(),
+                "P2".to_string(),
+                "P3".to_string(),
+            ];
+            let panel_w = area.width.min(36);
+            let panel_h = (options.len() as u16 + 4).min(area.height);
+            let panel_area = Rect::new(
+                (area.width.saturating_sub(panel_w)) / 2,
+                (area.height.saturating_sub(panel_h)) / 2,
+                panel_w,
+                panel_h,
+            );
+            frame.render_widget(Clear, panel_area);
+            let lines = options
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel_area.x + 1,
+                                panel_area.y + 1 + index as u16,
+                                panel_area.width.saturating_sub(2),
+                                1,
+                            ),
+                            index,
+                        });
+                    let style = if index == *selection {
+                        theme::selected_row(true)
+                    } else {
+                        Style::default()
+                    };
+                    Line::styled(format!("  {label}"), style)
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel_area.width.saturating_sub(2)))
+                    .block(theme::popup_block(" Requirement priority ")),
+                panel_area,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[(" Cancel [Esc]", Action::OverlayCancel)],
+                true,
+            );
+        }
+        RequirementsOverlay::DeleteConfirmation { document_id, title } => {
+            let panel_w = area.width.min(72);
+            let panel_h = 7.min(area.height);
+            let panel_area = Rect::new(
+                (area.width.saturating_sub(panel_w)) / 2,
+                (area.height.saturating_sub(panel_h)) / 2,
+                panel_w,
+                panel_h,
+            );
+            frame.render_widget(Clear, panel_area);
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::raw(format!("Delete requirement '{title}' ({document_id})?")),
+                    Line::raw("This removes it from the global requirement library."),
+                    Line::raw("Linked test points stay and become missing-source links."),
+                    Line::raw(""),
+                ])
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(theme::popup_block(" Delete requirement ")),
+                panel_area,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[
+                    (" Confirm [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
+                true,
             );
         }
     }
 
-    if let Some(prompt) = &app.generation_scope_prompt {
+    // The iteration picker owns input while open; keep its parent beneath it.
+    if let Some(prompt) = &app.generation_scope_prompt
+        && !app.authoring_ui.overlay_active()
+    {
         let panel_w = area.width.min(72);
         let panel_h = 10.min(area.height);
         let panel_area = Rect::new(
@@ -4661,41 +5902,215 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             )),
             Line::raw(format!("Store ID: {store_id}")),
             Line::raw(format!("Iteration scope: {filter}")),
+            Line::raw(format!(
+                "Project scope: {}",
+                app.authoring_ui.project_scope_label()
+            )),
             Line::raw(""),
-            Line::raw("Enter confirm · Esc cancel · i change iteration"),
         ];
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Confirm generation source scope "),
-            ),
-            panel_area,
+        let block = theme::popup_block(" Confirm generation source scope ");
+        let [content, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+            .areas(block.inner(panel_area));
+        frame.render_widget(block, panel_area);
+        frame.render_widget(Paragraph::new(lines), content);
+        render_action_bar(
+            frame,
+            app,
+            footer,
+            "",
+            &[
+                ("Confirm [Enter] ", Action::GenerationScopeConfirm),
+                ("Iteration [i] ", Action::GenerationScopeChangeIteration),
+                ("Cancel [Esc]", Action::GenerationScopeCancel),
+            ],
+            true,
         );
     }
+}
+
+fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selection: usize) {
+    let width = area.width.min(100);
+    let inner_width = width.saturating_sub(2) as usize;
+    if inner_width == 0 || area.height < 4 {
+        return;
+    }
+    let footer = chat::wrap_line_to_width(
+        theme::action_line("[O] Open path · ↑/↓ select · Enter open · Esc cancel"),
+        inner_width,
+    );
+    let mut rows = Vec::new();
+    let mut selected_start = 0;
+    let mut selected_end = 0;
+    for (index, entry) in app.project_switch.recent.iter().enumerate() {
+        let label = Line::styled(
+            format!(
+                "{}{}  {}",
+                if index == selection { "> " } else { "  " },
+                entry.display_name,
+                entry.root
+            ),
+            if index == selection {
+                theme::selected_row(true)
+            } else {
+                Style::default()
+            },
+        );
+        if index == selection {
+            selected_start = rows.len();
+        }
+        rows.extend(
+            chat::wrap_line_to_width(label, inner_width)
+                .into_iter()
+                .map(|line| (Some(index), line)),
+        );
+        if index == selection {
+            selected_end = rows.len();
+        }
+    }
+    if rows.is_empty() {
+        rows.push((None, Line::raw("No recent projects")));
+    }
+    // Reserve the controls before allocating path rows. Wrapping and hit tests
+    // share these physical rows, including continuation lines of long paths.
+    let reserved = footer.len() + 3;
+    let list_height = rows
+        .len()
+        .min((area.height as usize).saturating_sub(reserved));
+    let start = selected_end
+        .saturating_sub(list_height)
+        .min(selected_start)
+        .min(rows.len().saturating_sub(list_height));
+    let height = (list_height + reserved).min(area.height as usize) as u16;
+    let panel = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let mut lines = Vec::new();
+    for (offset, (index, line)) in rows.iter().skip(start).take(list_height).enumerate() {
+        lines.push(line.clone());
+        if let Some(index) = index {
+            app.clickable_regions
+                .push(crate::app::ClickableRegion::ProjectRecent {
+                    index: *index,
+                    rect: Rect::new(
+                        panel.x + 1,
+                        panel.y + 1 + offset as u16,
+                        inner_width as u16,
+                        1,
+                    ),
+                });
+        }
+    }
+    lines.push(Line::raw(""));
+    let open_y = panel.y + 2 + list_height as u16;
+    lines.extend(footer);
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::popup_block(" Open project ")),
+        panel,
+    );
+    if open_y < panel.bottom().saturating_sub(1) {
+        app.clickable_regions
+            .push(crate::app::ClickableRegion::ProjectOpenPath {
+                rect: Rect::new(panel.x + 1, open_y, inner_width as u16, 1),
+            });
+    }
+}
+
+fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::project_context::SwitchOverlay;
+    let overlay = app.project_switch.overlay.clone();
+    let (title, lines, width, height) = match overlay {
+        SwitchOverlay::None => return,
+        SwitchOverlay::Picker { selection } => {
+            render_project_picker(frame, app, area, selection);
+            return;
+        }
+        SwitchOverlay::OpenPath { input } => (
+            " Open project path ",
+            vec![
+                Line::raw("Type a project directory and press Enter:"),
+                Line::styled(format!("> {input}"), Style::default().fg(theme::FG)),
+                Line::raw(""),
+                theme::action_line("Enter open · Backspace edit · Esc cancel"),
+            ],
+            area.width.min(100),
+            6.min(area.height),
+        ),
+        SwitchOverlay::Dirty { target } => {
+            let mut rows = vec![
+                Line::raw(format!("Switch to {}", target.root().display())),
+                Line::raw("Unsaved project state must be resolved first."),
+            ];
+            if let Some(request) = &app.project_switch.pending {
+                rows.extend(request.dirty.iter().map(|item| {
+                    Line::styled(
+                        format!("  • {}", item.label()),
+                        Style::default().fg(theme::WARNING),
+                    )
+                }));
+            }
+            rows.push(Line::raw(""));
+            rows.push(theme::action_line(
+                "[S] Save and switch   [D] Discard and switch   [Esc] Cancel",
+            ));
+            (
+                " Resolve project state ",
+                rows,
+                area.width.min(86),
+                10.min(area.height),
+            )
+        }
+        SwitchOverlay::Busy { target } => (
+            " Stop project tasks ",
+            vec![
+                Line::raw(format!("Switch to {}", target.root().display())),
+                Line::raw("A project-owned task is still running."),
+                Line::raw("[S] Stop tasks and switch   [Esc] Cancel"),
+                Line::raw("Wait for owned tasks to exit before switching."),
+            ],
+            area.width.min(86),
+            8.min(area.height),
+        ),
+    };
+    let panel = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(theme::popup_block(title)),
+        panel,
+    );
 }
 
 fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 20 || area.height < 3 {
         return;
     }
-    let layout = if area.width < 60 {
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
-    } else if area.width < 100 {
-        Layout::horizontal([
-            Constraint::Percentage(22),
-            Constraint::Percentage(48),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    } else {
-        Layout::horizontal([
-            Constraint::Percentage(20),
-            Constraint::Percentage(50),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    };
+    let layout = compact_panes(
+        area,
+        match app.test_points_ui.focus {
+            crate::test_points_tab::TestPointsFocus::Tree => 0,
+            crate::test_points_tab::TestPointsFocus::Details => 1,
+            crate::test_points_tab::TestPointsFocus::Excerpts => 2,
+        },
+    );
+
+    // Register the exact pane rectangles used by the render pass.  The
+    // pointer path uses these regions to focus the same pane as Tab/arrow
+    // navigation, and the list is rebuilt every frame so resize and tab
+    // switches cannot leave stale hit targets behind.
+    for (pane, rect) in layout.iter().copied().enumerate() {
+        app.clickable_regions
+            .push(ClickableRegion::TestPointsPane { pane, rect });
+    }
 
     let ui = &mut app.test_points_ui;
     let artifacts = app.authoring_ui.artifacts.as_ref();
@@ -4703,14 +6118,83 @@ fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     render_test_points_tree(frame, ui, artifacts, layout[0], tree_focused);
 
     if layout.len() == 2 {
-        render_test_points_details(frame, ui, artifacts, layout[1], true);
+        render_test_points_details(
+            frame,
+            ui,
+            artifacts,
+            layout[1],
+            true,
+            &mut app.clickable_regions,
+        );
         return;
     }
 
     let details_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Details;
     let excerpts_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
-    render_test_points_details(frame, ui, artifacts, layout[1], details_focused);
-    render_test_points_excerpts(frame, ui, artifacts, layout[2], excerpts_focused);
+    render_test_points_details(
+        frame,
+        ui,
+        artifacts,
+        layout[1],
+        details_focused,
+        &mut app.clickable_regions,
+    );
+    render_test_points_excerpts(
+        frame,
+        ui,
+        artifacts,
+        layout[2],
+        excerpts_focused,
+        &mut app.clickable_regions,
+    );
+}
+
+fn render_action_bar(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    prefix: &str,
+    controls: &[(&str, Action)],
+    modal: bool,
+) {
+    let mut spans = vec![Span::raw(prefix.to_string())];
+    let mut used = prefix.width() as u16;
+    for (label, action) in controls {
+        let width = label.width() as u16;
+        // A clipped label is not an actionable control. The compact variants
+        // fit the supported narrow width without invisible hit targets.
+        if used + width > area.width {
+            break;
+        }
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: Rect::new(area.x + used, area.y, width, 1),
+            action: action.clone(),
+            modal,
+        });
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(theme::PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ));
+        used += width;
+    }
+    frame.render_widget(Paragraph::new(theme::footer_line(spans)), area);
+}
+
+fn visible_content_rows(inner: Rect, row: usize, count: usize, offset: usize) -> Option<Rect> {
+    let start = row.max(offset);
+    let end = row
+        .saturating_add(count)
+        .min(offset + inner.height as usize);
+    (start < end).then(|| {
+        Rect::new(
+            inner.x,
+            inner.y + (start - offset) as u16,
+            inner.width,
+            (end - start) as u16,
+        )
+    })
 }
 
 fn render_test_points_tree(
@@ -4728,17 +6212,7 @@ fn render_test_points_tree(
         crate::test_points_tab::ReviewFilter::NeedsReview => "needs review",
     };
     let title = format!("Test points ({filter_label})");
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(title_style);
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4748,13 +6222,13 @@ fn render_test_points_tree(
     if artifacts.is_none() || ui.tree_items.is_empty() {
         frame.render_widget(
             Paragraph::new("No test points yet. Create links from Requirements [4].")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
     }
 
-    let highlight_style = selected_style(focused);
+    let highlight_style = theme::selected_row(focused);
     let tree = Tree::new(&ui.tree_items)
         .expect("test point tree")
         .highlight_style(highlight_style);
@@ -4767,18 +6241,14 @@ fn render_test_points_details(
     artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
     area: Rect,
     focused: bool,
+    regions: &mut Vec<ClickableRegion>,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+    let title = if ui.editing {
+        "Intent & review [INSERT]"
     } else {
-        Style::default().fg(Color::DarkGray)
+        "Intent & review [NORMAL]"
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Intent & review")
-        .title_style(title_style);
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4788,7 +6258,7 @@ fn render_test_points_details(
     let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
         frame.render_widget(
             Paragraph::new("Select a test point in the tree.")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
@@ -4798,7 +6268,7 @@ fn render_test_points_details(
     else {
         frame.render_widget(
             Paragraph::new("Selected test point is unavailable.")
-                .style(Style::default().fg(Color::Red)),
+                .style(Style::default().fg(theme::ERROR)),
             inner,
         );
         return;
@@ -4860,28 +6330,38 @@ fn render_test_points_details(
     let badge = crate::authoring_tab::review_state_label(tp.review_state);
     let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
     lines.push(Line::from(vec![
-        Span::styled(format!("[{badge}] "), badge_style),
+        theme::chip(
+            format!("[{badge}] "),
+            badge_style.fg.unwrap_or(theme::MUTED),
+        ),
         Span::styled(
             crate::test_points_tab::review_state_name(tp.review_state),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::FG),
         ),
         Span::raw(format!("  id: {}", tp.id)),
     ]));
 
+    let mut field_rows = Vec::new();
+    let mut scenario_rows = Vec::new();
     for (field, label, value) in fields {
+        field_rows.push((lines.len(), field));
         let active = ui.detail_field == field;
-        let label_style = if active && focused {
-            selected_style(true)
+        let label_style = if active {
+            theme::selected_row(focused)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme::MUTED)
         };
-        let value_style = if active && focused {
-            selected_style(true)
+        let value_style = if active {
+            theme::selected_row(focused)
         } else {
             Style::default()
         };
-        let display =
-            truncate_string_to_cols(&value, inner.width.saturating_sub(label.len() as u16 + 3));
+        let width = inner.width.saturating_sub(label.len() as u16 + 3);
+        let display = if active && focused && ui.editing {
+            input_with_cursor(&value, ui.field_cursor, width)
+        } else {
+            truncate_string_to_cols(&value, width)
+        };
         lines.push(Line::from(vec![
             Span::styled(format!("{label}: "), label_style),
             Span::styled(display, value_style),
@@ -4892,16 +6372,17 @@ fn render_test_points_details(
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Realized scenarios [o]:",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
         for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
+            scenario_rows.push((lines.len(), i));
             let label = sc_ref
                 .scenario_name
                 .clone()
                 .unwrap_or_else(|| format!("line {}", sc_ref.scenario_line.unwrap_or(0)));
             let selected = i == ui.selected_scenario_ref_index;
             let style = if selected && focused {
-                selected_style(true)
+                theme::selected_row(true)
             } else {
                 Style::default()
             };
@@ -4912,7 +6393,23 @@ fn render_test_points_details(
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let rows = theme::popup_rows(lines, inner.width);
+    let max_scroll = rows.len().saturating_sub(inner.height as usize);
+    ui.scroll_offsets[1] = ui.scroll_offsets[1].min(max_scroll);
+    for (row, field) in field_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
+            regions.push(ClickableRegion::TestPointField { rect, field });
+        }
+    }
+    for (row, index) in scenario_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
+            regions.push(ClickableRegion::TestPointScenario { rect, index });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows).scroll((ui.scroll_offsets[1] as u16, 0)),
+        inner,
+    );
 }
 
 fn render_test_points_excerpts(
@@ -4921,18 +6418,9 @@ fn render_test_points_excerpts(
     artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
     area: Rect,
     focused: bool,
+    regions: &mut Vec<ClickableRegion>,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Requirement excerpts")
-        .title_style(title_style);
+    let block = theme::panel_block("Requirement excerpts", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4951,13 +6439,15 @@ fn render_test_points_excerpts(
     };
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut excerpt_rows = Vec::new();
     if excerpts.is_empty() {
         lines.push(Line::styled(
             " (no linked excerpts)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     } else {
         for (i, excerpt) in excerpts.iter().enumerate() {
+            excerpt_rows.push((lines.len(), i));
             let res_label = match excerpt.resolution {
                 teshi_core::authoring::ResolutionState::Resolved => "ok",
                 teshi_core::authoring::ResolutionState::Stale => "stale",
@@ -4967,7 +6457,7 @@ fn render_test_points_excerpts(
                 truncate_string_to_cols(&excerpt.document_title, inner.width.saturating_sub(8));
             let quote = truncate_string_to_cols(&excerpt.quote, inner.width.saturating_sub(4));
             let row_style = if i == ui.selected_excerpt_index {
-                selected_style(focused)
+                theme::selected_row(focused)
             } else {
                 Style::default()
             };
@@ -4982,7 +6472,18 @@ fn render_test_points_excerpts(
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    let rows = theme::popup_rows(lines, inner.width);
+    let max_scroll = rows.len().saturating_sub(inner.height as usize);
+    ui.scroll_offsets[2] = ui.scroll_offsets[2].min(max_scroll);
+    for (row, index) in excerpt_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 2, ui.scroll_offsets[2]) {
+            regions.push(ClickableRegion::TestPointExcerpt { rect, index });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows).scroll((ui.scroll_offsets[2] as u16, 0)),
+        inner,
+    );
 }
 
 #[cfg(test)]
@@ -4990,10 +6491,161 @@ mod truncate_tests {
     use std::path::PathBuf;
 
     use super::{
-        Line, Span, build_case_detail_lines, explore_scenarios_title, truncate_line_to_cols,
+        Line, Span, build_case_detail_lines, explore_scenarios_title, render, truncate_line_to_cols,
     };
-    use crate::app::{App, CaseDetail, RunStatus};
+    use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
+    use crate::keymap::Action;
+    use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
+
+    #[test]
+    fn long_local_version_does_not_clip_active_tab_underline() {
+        let mut app = App::from_args().expect("app init");
+        app.version = "0.7.10-local.20261014.1700+0800 (1234567)".into();
+        app.active_tab = crate::app::MainTab::TestPoints;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::Tab {
+                    tab: crate::app::MainTab::TestPoints,
+                    rect,
+                } => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        for x in rect.x..rect.right() {
+            assert_eq!(
+                terminal.backend().buffer()[(x, 1)].symbol(),
+                "━",
+                "column {x}"
+            );
+        }
+        assert_eq!(
+            terminal.backend().buffer()[(119, 1)].fg,
+            crate::theme::MUTED
+        );
+    }
+
+    #[test]
+    fn requirements_mode_footer_keeps_text_and_emphasizes_plain_keys() {
+        use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
+        for (focus, mode, expected, first_key) in [
+            (
+                RequirementsFocus::Editor,
+                RequirementsEditorMode::Browse,
+                "[BROWSE] Save [Ctrl+s] Point [n] Iteration [I] New doc [Ctrl+n]",
+                "[Ctrl+s]",
+            ),
+            (
+                RequirementsFocus::Editor,
+                RequirementsEditorMode::Insert,
+                "[INSERT] Save [Ctrl+s] Point [n] Iteration [I] New doc [Ctrl+n]",
+                "[Ctrl+s]",
+            ),
+            (
+                RequirementsFocus::Tree,
+                RequirementsEditorMode::Browse,
+                "[BROWSE] Scope [o] View [g] Filter [i]",
+                "[Space]",
+            ),
+        ] {
+            let mut app = App::from_args().expect("app init");
+            app.active_tab = crate::app::MainTab::Requirements;
+            app.status_message = None;
+            app.authoring_ui.focus = focus;
+            app.authoring_ui.editor_mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..160)
+                .map(|x| buffer[(x, 23)].symbol())
+                .collect::<String>();
+            // The tab's own action bar keeps every label; the pinned exit
+            // control owns the right edge of the same row.
+            assert!(text.starts_with(expected), "{text}");
+            let exit = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: Action::Quit,
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .expect("bottom-right exit control");
+            assert_eq!(exit.y, 23);
+            assert_eq!(exit.right(), 160);
+            let offset = text.find(first_key).unwrap() as u16;
+            for x in offset..offset + first_key.len() as u16 {
+                assert_eq!(buffer[(x, 23)].fg, crate::theme::PRIMARY);
+                assert!(
+                    buffer[(x, 23)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exit_control_is_pinned_to_the_bottom_right_in_every_tab() {
+        use crate::app::MainTab;
+        for (index, tab) in [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut app = App::from_args().expect("app init");
+            app.active_tab = tab;
+            app.status_message = None;
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let exit = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: Action::Quit,
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("tab {index} has no clickable exit control"));
+            assert_eq!(exit.y, 23, "tab {index}");
+            assert_eq!(exit.right(), 100, "tab {index}");
+            let label = (exit.x..exit.right())
+                .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
+                .collect::<String>();
+            assert!(label.contains("^q"), "tab {index}: {label}");
+            assert!(label.contains('退'), "tab {index}: {label}");
+        }
+    }
+
+    #[test]
+    fn narrow_footer_keeps_tab_actions_without_the_exit_control() {
+        let mut app = App::from_args().expect("app init");
+        app.status_message = None;
+        let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(!app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ActionButton {
+                action: Action::Quit,
+                ..
+            }
+        )));
+    }
 
     #[test]
     fn truncate_line_to_cols_limits_display_width() {
@@ -5092,6 +6744,720 @@ Feature: Rule only
         app.project.features = vec![feature];
         app.explore_selected_feature = 0;
         assert_eq!(explore_scenarios_title(&app), "Scenarios (1)");
+    }
+
+    #[test]
+    fn explore_feature_list_renders_modified_git_marker() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a snapshot exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Feature;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("M  backup"), "screen was: {screen}");
+        assert!(!screen.contains("backup.feature"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn pointer_hover_keeps_the_selected_feature_row_readable() {
+        let mut app = App::from_args().expect("app init");
+        app.active_tab = crate::app::MainTab::Explore;
+        app.explore_focus = crate::app::ColumnFocus::Feature;
+        app.project.features = vec![
+            gherkin::parse_feature(
+                "Feature: Alpha\n  Scenario: A\n    Given a step\n",
+                PathBuf::from("alpha.feature"),
+            ),
+            gherkin::parse_feature(
+                "Feature: Beta\n  Scenario: B\n    Given a step\n",
+                PathBuf::from("beta.feature"),
+            ),
+        ];
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let rows = app
+            .clickable_regions
+            .iter()
+            .filter_map(|region| match region {
+                ClickableRegion::ExploreFeature {
+                    feature_idx,
+                    row_y,
+                    col_x,
+                    col_right,
+                } => Some((*feature_idx, *row_y, *col_x, *col_right)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (_, selected_y, selected_x, _) = rows[0];
+        let (_, other_y, other_x, _) = rows[1];
+
+        app.mouse_position = Some((selected_x + 1, selected_y));
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let (x, y) = cell_at_text(&terminal, "alpha").expect("selected row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::hover_fill(crate::theme::CURSOR_BG)
+        );
+        assert_ne!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::CURSOR_BG
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].fg,
+            crate::theme::CURSOR_FG
+        );
+
+        app.mouse_position = Some((other_x + 1, other_y));
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let (x, y) = cell_at_text(&terminal, "beta").expect("hovered row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::HOVER_BG
+        );
+
+        app.mouse_position = None;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let (x, y) = cell_at_text(&terminal, "alpha").expect("selected row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::CURSOR_BG
+        );
+    }
+
+    #[test]
+    fn explore_feature_list_marks_rows_whose_ast_is_not_loaded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let loaded = root.path().join("loaded.feature");
+        let other = root.path().join("other.feature");
+        let source = "Feature: Loaded\n  Scenario: S\n    Given a step\n";
+        std::fs::write(&loaded, source).expect("write Feature");
+        std::fs::write(&other, "Feature: Other\n  Scenario: S\n    Given a step\n")
+            .expect("write Feature");
+        let mut app = App::from_args().expect("app init");
+        app.active_tab = crate::app::MainTab::Explore;
+        app.explore_focus = crate::app::ColumnFocus::Feature;
+        app.project.root_dir = root.path().to_path_buf();
+        app.project.features = vec![gherkin::parse_feature(source, loaded.clone())];
+        let mut lazy = crate::lazy_features::LazyFeatures::new(root.path().to_path_buf(), true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lazy.ready {
+            assert!(std::time::Instant::now() < deadline, "catalog scan stalled");
+            lazy.poll_catalog();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        lazy.selected = Some(loaded);
+        app.lazy_features = Some(lazy);
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            repository_root: Some(root.path().to_path_buf()),
+            statuses: std::collections::HashMap::from([(
+                "other.feature".into(),
+                teshi_core::git::FileGitStatus::Modified,
+            )]),
+            ..Default::default()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("M  other"), "screen was: {screen}");
+        assert!(screen.contains("  loaded"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn requirements_editor_scrollbars_reveal_overflow_and_disappear_when_content_fits() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            (0..20)
+                .map(|_| "abcdefghijklmnopqrstuvwxyz")
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        ui.horizontal_scroll[1] = 10;
+        ui.cursor_row = 19;
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[1], [0, 56]);
+        assert_eq!(ui.scroll_row, 54);
+        assert_eq!(terminal.backend().buffer()[(1, 1)].symbol(), "a");
+        assert!((1..5).any(|y| terminal.backend().buffer()[(11, y)].symbol() == "┃"));
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string("short".into());
+        ui.cursor_row = 0;
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[1], [0, 0]);
+        assert_eq!(ui.horizontal_scroll[1], 0);
+        assert_eq!(ui.scroll_row, 0);
+    }
+
+    #[test]
+    fn requirements_editor_wraps_unicode_and_tracks_cursor_after_resize() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        let original = "ab中文cdefghijklmnop";
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string(original.into());
+        ui.cursor_col = original.chars().count();
+        let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[1], [0, 2]);
+        assert_eq!(ui.scroll_row, 2);
+        ui.set_pane_scroll(1, 1, 0);
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_row, 0);
+        assert_eq!(ui.cursor_col, original.chars().count());
+        assert_eq!(ui.editor_position_at(0, 1), Some((0, 4)));
+        assert_eq!(ui.editor_position_at(3, 0), Some((0, 2)));
+        assert_eq!(ui.editor_position_at(4, 0), Some((0, 3)));
+        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "c");
+        let mut narrow = Terminal::new(TestBackend::new(6, 4)).expect("terminal");
+        narrow
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert!(ui.scroll_row > 0);
+        assert_eq!(ui.scroll_limits[1][0], 0);
+        assert_eq!(ui.buffer.as_string(), original);
+    }
+
+    #[test]
+    fn requirements_linked_scrollbars_follow_selection_and_reveal_long_titles() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.create_document("req.md", "A very long requirement title")
+            .unwrap();
+        ui.artifacts.as_mut().unwrap().index.store_id =
+            Some(teshi_core::authoring::RequirementStoreId::parse("reqstore-test").unwrap());
+        ui.selection_anchor = Some((0, 0));
+        ui.selection_end = Some((0, 25));
+        for _ in 0..10 {
+            ui.create_test_point_from_selection().expect("test point");
+        }
+        ui.selection_anchor = None;
+        ui.selection_end = None;
+        ui.horizontal_scroll[2] = 5;
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_linked(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert!(ui.scroll_limits[2][0] > 0);
+        assert_eq!(ui.scroll_limits[2][1], 6);
+        assert_eq!(ui.linked_scroll, 6);
+        ui.selected_linked_index = 0;
+        terminal
+            .draw(|frame| super::render_requirements_linked(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.linked_scroll, 0);
+    }
+
+    #[test]
+    fn requirements_tree_scrollbars_track_expanded_rows() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.discovered = true;
+        ui.tree_items = (0..10)
+            .map(|i| {
+                tui_tree_widget::TreeItem::new_leaf(
+                    format!("req-iter:long-iteration-{i}"),
+                    format!("long-iteration-{i}"),
+                )
+            })
+            .collect();
+        ui.horizontal_scroll[0] = 5;
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert!(ui.scroll_limits[0][0] > 0);
+        assert_eq!(ui.scroll_limits[0][1], 6);
+        ui.tree_items.clear();
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[0], [0, 0]);
+    }
+
+    #[test]
+    fn explore_feature_overflow_gets_thick_horizontal_scrollbar() {
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("a-very-long-feature-file-name-for-horizontal-scrolling.feature");
+        app.project.features = vec![gherkin::parse_feature(
+            "Feature: Long name\n  Scenario: Short\n    Given a step\n",
+            path,
+        )];
+        app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()] = usize::MAX;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        let scrollbar = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ExploreHorizontalScrollbar {
+                    column,
+                    rect,
+                    content_width,
+                    viewport_width,
+                } if *column == crate::app::ColumnFocus::Feature => {
+                    Some((*rect, *content_width, *viewport_width))
+                }
+                _ => None,
+            });
+        let (rect, content_width, viewport_width) = scrollbar.expect("feature scrollbar");
+        assert_eq!(rect.height, 2);
+        assert!(content_width > viewport_width);
+        assert_eq!(
+            app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()],
+            content_width - viewport_width
+        );
+    }
+
+    #[test]
+    fn deleted_feature_is_selectable_and_renders_git_diff() {
+        let old = "Feature: Deleted\n  Scenario: Removed\n    Given old content\n";
+        let path = PathBuf::from("deleted.feature");
+        let mut app = App::from_args().expect("app init");
+        app.project.features.clear();
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            deleted: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Deleted,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), None),
+            )],
+            ..Default::default()
+        };
+        app.explore_selected_deleted_feature = Some(0);
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(screen.contains("D  deleted"), "screen was: {screen}");
+        assert!(!screen.contains("deleted.feature"), "screen was: {screen}");
+        assert!(
+            screen.contains("- Feature: Deleted"),
+            "screen was: {screen}"
+        );
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreDeletedFeature { deleted_idx: 0, .. }
+        )));
+    }
+
+    #[test]
+    fn current_feature_renders_head_deleted_scenarios_when_all_are_removed() {
+        let old = "Feature: Current\n  Scenario: Removed\n    Given old content\n";
+        let new = "Feature: Current\n";
+        let path = PathBuf::from("current.feature");
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(screen.contains("Scenario: Removed"), "screen was: {screen}");
+        assert!(!screen.contains("(no scenarios)"), "screen was: {screen}");
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreScenario {
+                scenario_idx: 0,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn current_feature_head_deleted_scenario_uses_after_current_row_index() {
+        let old = "Feature: Current\n  Scenario: Keep\n    Given keep\n  Scenario: Removed\n    Given old content\n";
+        let new = "Feature: Current\n  Scenario: Keep\n    Given keep\n";
+        let path = PathBuf::from("current.feature");
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_selected_scenario = 1;
+        app.explore_focus = crate::app::ColumnFocus::Scenario;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreScenario {
+                scenario_idx: 1,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn explore_steps_render_deleted_and_added_git_lines() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is closed\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is not running\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("-     And the application is closed"));
+        assert!(screen.contains("+     And the application is not running"));
+    }
+
+    /// Coordinates of the first cell whose row contains `needle` (ASCII only).
+    fn cell_at_text(terminal: &Terminal<TestBackend>, needle: &str) -> Option<(u16, u16)> {
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(index) = row.find(needle) {
+                // Border glyphs are multi-byte, so convert to a cell index.
+                return Some((row[..index].chars().count() as u16, y));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn changed_steps_keep_gherkin_colors() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is closed\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is not running\n    And the cache is warm\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        // Keep the selection off the rows under test: it repaints the row.
+        app.explore_selected_step = app
+            .explore_changed_steps()
+            .iter()
+            .position(|change| change.text.contains("cache"))
+            .expect("third changed step");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        // The added Step keeps a Gherkin keyword colour and inherits `Given`,
+        // exactly like the browse view.
+        let (x, y) =
+            cell_at_text(&terminal, "And the application is not running").expect("added row");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.fg, crate::theme::PRIMARY);
+
+        // Removed Steps have no AST counterpart, so they fall back to the plain
+        // continuation colour.
+        let (x, y) = cell_at_text(&terminal, "And the application is closed").expect("removed row");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.fg, crate::theme::TAB_INACTIVE);
+    }
+
+    #[test]
+    fn diff_rows_paint_no_background() {
+        let row = super::decorate_diff_row(
+            vec![Span::raw("Given a user exists")],
+            teshi_core::git::DiffStatus::Added,
+        );
+        assert!(row.style.bg.is_none());
+        assert!(row.spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn selected_changed_step_uses_the_selection_fill() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a snapshot exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        app.explore_selected_step = app
+            .explore_changed_steps()
+            .iter()
+            .position(|change| change.text.contains("snapshot"))
+            .expect("added step");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        let (x, y) = cell_at_text(&terminal, "Given a snapshot exists").expect("selected row");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.fg, crate::theme::CURSOR_FG);
+        assert_eq!(cell.bg, crate::theme::CURSOR_BG);
+    }
+
+    #[test]
+    fn explore_steps_render_feature_level_diff_without_scenarios() {
+        let old = "Feature: Old title\n  Old description\n";
+        let new = "Feature: New title\n  New description\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("empty.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Feature (Git diff)"));
+        assert!(screen.contains("- Feature: Old title"));
+        assert!(screen.contains("+ Feature: New title"));
+    }
+
+    #[test]
+    fn explore_steps_render_feature_and_scenario_changes_together() {
+        let old = "Feature: Old title\n  Scenario: Restore\n    Given a backup exists\n";
+        let new = "Feature: New title\n  Scenario: Restore\n    Given a snapshot exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Steps (Git diff)"));
+        assert!(screen.contains("- Feature: Old title"));
+        assert!(screen.contains("+ Feature: New title"));
+        assert!(screen.contains("-     Given a backup exists"));
+        assert!(screen.contains("+     Given a snapshot exists"));
+    }
+
+    #[test]
+    fn changed_step_scroll_and_pointer_rows_include_feature_header_offset() {
+        let old = format!(
+            "Feature: Old title\n  Scenario: Steps\n{}",
+            (0..20)
+                .map(|n| format!("    Given old step {n}\n"))
+                .collect::<String>()
+        );
+        let new = format!(
+            "Feature: New title\n  Scenario: Steps\n{}",
+            (0..20)
+                .map(|n| format!("    Given new step {n}\n"))
+                .collect::<String>()
+        );
+        let path = PathBuf::from("steps.feature");
+        let mut app = App::from_args().unwrap();
+        app.project.features = vec![gherkin::parse_feature(&new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(&old), Some(&new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        app.explore_selected_step = app.explore_changed_steps().len() - 1;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let viewport = &app.explore_viewports[crate::app::ColumnFocus::Step.index()];
+        assert!(viewport.offset > 0);
+        let mut selected_visible = false;
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ExploreStep {
+                step_idx, row_y, ..
+            } = region
+            {
+                assert!(*row_y >= viewport.rect.y && *row_y < viewport.rect.bottom());
+                let row: String = (viewport.rect.x..viewport.rect.right())
+                    .map(|x| terminal.backend().buffer()[(x, *row_y)].symbol())
+                    .collect();
+                assert!(
+                    row.contains(app.explore_changed_steps()[*step_idx].text.trim()),
+                    "{row}"
+                );
+                selected_visible |= *step_idx == app.explore_selected_step;
+            }
+        }
+        assert!(selected_visible);
+    }
+
+    #[test]
+    fn explore_steps_render_deleted_scenario_git_lines() {
+        let old = "Feature: Backup\n  Scenario: Keep\n    Given a backup exists\n  Scenario: Removed\n    Given the old flow\n";
+        let new = "Feature: Backup\n  Scenario: Keep\n    Given a backup exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("- Scenario: Removed"));
+        assert!(screen.contains("-     Given the old flow"));
     }
 
     #[test]
@@ -5212,6 +7578,37 @@ Feature: Rule only
                 );
             } else {
                 prev_body_start = Some(body_start);
+            }
+        }
+    }
+    #[test]
+    fn requirements_visual_line_highlights_every_selected_source_line() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string("alpha\nbeta\ngamma".into());
+        ui.cursor_row = 1;
+        ui.editor_mode = crate::authoring_tab::RequirementsEditorMode::VisualLine;
+        ui.selection_anchor = Some((0, 0));
+        ui.selection_end = Some((1, 0));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 12)).unwrap();
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (text, selected) in [("alpha", true), ("beta", true), ("gamma", false)] {
+            let (x, y) = (0..12)
+                .find_map(|y| {
+                    let row = (0..50).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+                    row.find(text)
+                        .map(|offset| (row[..offset].chars().count() as u16, y))
+                })
+                .expect("source line must render");
+            for offset in 0..text.len() as u16 {
+                assert_eq!(
+                    buffer[(x + offset, y)].bg == super::theme::EDITOR_SELECTION_BG,
+                    selected,
+                    "{text}"
+                );
             }
         }
     }

@@ -32,12 +32,50 @@ pub enum AgentBackendDecision {
     Cancelled,
 }
 
+/// One option offered by an external ACP agent when it asks for permission.
+#[derive(Debug, Clone)]
+pub struct PermissionChoice {
+    pub id: String,
+    pub label: Option<String>,
+    pub kind: Option<String>,
+}
+
+/// Optional structured facts supplied by an external tool, without guessing from its title.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolActivityInfo {
+    /// ACP tool kind, such as `read`, `search`, `edit`, or `execute`.
+    pub kind: Option<String>,
+    /// Tool arguments when the agent elects to expose them.
+    pub input: Option<serde_json::Value>,
+    /// Paths explicitly reported by the tool's locations.
+    #[serde(default)]
+    pub locations: Vec<String>,
+}
+
+impl PermissionChoice {
+    /// Best available display text for a frontend list.
+    pub fn display_label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.id)
+    }
+}
+
 /// Events seen by a frontend. Neither provider nor ACP wire messages cross
 /// this boundary.
 #[derive(Debug)]
 pub enum AgentBackendEvent {
     MessageChunk {
         content: String,
+    },
+    /// Visible reasoning supplied by the external agent.
+    ReasoningChunk {
+        content: String,
+    },
+    /// An external ACP agent asked the frontend to choose a permission option.
+    /// The frontend answers through the backend with the matching
+    /// `request_id`; the turn stays parked until it does.
+    PermissionRequest {
+        request_id: u64,
+        options: Vec<PermissionChoice>,
     },
     Completed {
         model: String,
@@ -52,8 +90,10 @@ pub enum AgentBackendEvent {
     },
     /// Progress from a tool owned and executed by the external ACP agent.
     ExternalToolActivity {
+        tool_call_id: Option<String>,
         title: String,
         status: Option<String>,
+        details: ToolActivityInfo,
     },
     Failed(String),
     Ignored,

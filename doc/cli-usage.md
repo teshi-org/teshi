@@ -5,27 +5,58 @@
 ### Open files (TUI)
 
 ```bash
-teshi                              # scan current directory for .feature files
-teshi path/to/features/            # open directory of .feature files
-teshi path/to/file.feature         # open single .feature file
+teshi                    # load the current project's localized features/
+teshi .                  # same Feature loading as teshi
+teshi path/to/project/   # load path/to/project/features/ with the same language rules
+teshi -R                 # recursively scan the entire current directory
+teshi path/to/project -R # recursively scan the entire selected project
+teshi path/to/file.feature # open a single file directly
 ```
 
-If no `.feature` files are found, the TUI opens an empty project buffer.
+Without `-R`, all directory forms prefer the selected project's `features` folder:
+
+- Without language subdirectories, load all `.feature` files recursively under `features`.
+- With language directories such as `zh-CN` or `en-US`, load only the matching system UI
+  language and its descendants, excluding root-level files and other languages.
+- Match the complete language tag case-insensitively (`en-GB` does not fall back to `en-US`).
+  On Windows use the user's preferred UI language. An explicit `TESHI_FEATURE_LANGUAGE`
+  environment override is also supported, including for deterministic acceptance fixtures.
+- Missing `features` loads only `.feature` files directly in the project root, including
+  during background refresh. Subdirectories require `-R`/`--recursive`. If no files match,
+  the project opens empty without creating `features`.
+- A missing language match reports an error.
+
+`-R`/`--recursive` explicitly disables language selection and scans all Feature files in
+its target directory. `teshi -R` and `teshi . -R` are equivalent. The unrestricted initial
+walk and periodic directory discovery run in a single background worker per active
+project so directory traversal does not block terminal input. Switching projects discards
+results from the previous worker. No new directory exclusions are implied by `-R`.
+
+Background discovery retains the startup scope. Project configuration, history, and
+relative runner working directories stay rooted at the selected project, not the language
+folder or the launcher's cwd. Bare `teshi` preserves the All projects requirements view;
+explicit directory arguments preserve the Current project view.
+
+Performance thresholds and the directory exclusion/cancellation policy remain separate
+acceptance decisions; asynchronous scanning alone is not a quantified performance pass.
 
 Global flag (all subcommands): `--requirements-root PATH` overrides the user-level requirement library for this process.
 
 ### Application updates (`teshi update`)
 
 ```bash
-teshi update                         # check, confirm, download, and hand off installation
+teshi update                         # check, download, and hand off installation automatically
 teshi update --check                 # metadata only; no archive, helper, or install
 teshi update --check --json          # one JSON object; progress still goes to stderr
-teshi update --channel nightly       # explicit channel switch (requires confirmation)
-teshi update --yes                   # skip Teshi confirmation (not OS elevation)
+teshi update --channel nightly       # explicit channel switch
+teshi update --yes                   # compatibility flag; automatic installation is already default
 teshi update --status                # last local helper result without contacting GitHub
+teshi update --retry-install         # retry the last cached installation offline
+teshi update --force-close           # close remaining processes from this installation after a graceful-exit timeout
+teshi update --retry-install --force-close
 ```
 
-`--json` prints one final object. Installation in a non-TTY or with `--json` also requires `--yes`; otherwise the command fails before download.
+`teshi update` starts installation automatically after it finds a verified candidate. `--yes` is retained for compatibility and does not bypass operating-system elevation, process coordination, or installation ownership checks. `--check` remains metadata-only and never downloads or installs a payload. `--json` prints one final object; progress still goes to stderr.
 
 | Exit code | Meaning |
 |-----------|---------|
@@ -34,9 +65,56 @@ teshi update --status                # last local helper result without contacti
 | 2 | Invalid arguments |
 | 3 | Helper accepted a pending installation; the next invocation reports the persisted result |
 
-Pending MUST NOT be printed as installed. Only the Windows per-user setup.exe install can replace files. Portable archives, MSI/WinGet, source/Cargo builds, and explicitly externally managed installs can check for a release but cannot replace files. See [Installation](installation.md) for the install matrix, first-release bootstrap, checksum trust boundary, and proxy/TLS notes.
+Pending MUST NOT be printed as installed. Only the Windows per-user setup.exe install can replace files. Portable archives, MSI, source/Cargo builds, and explicitly externally managed installs can check for a release but cannot replace files. See [Installation](installation.md) for the install matrix, first-release bootstrap, checksum trust boundary, and proxy/TLS notes.
 
 GitHub metadata and payload downloads follow `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and the static Windows/macOS system proxy. PAC/WPAD is not supported. Windows update TLS skips online CRL lookups but still verifies certificates; it never uses `danger_accept_invalid_certs`.
+
+Interrupted payloads are retained and resumed with HTTP Range. A server returning a full
+response restarts that transfer; every completed payload is checked against its declared
+size and SHA256. Transfers have at most three attempts per invocation. Verified payloads
+survive setup, staging and helper failures, and regular `update` reuses them after checking
+release metadata and revalidating the cached bytes.
+
+`--retry-install` uses the last cached candidate for this installation without contacting
+GitHub or initializing a network client. It requires a complete verified payload and an
+unchanged installed build; missing, damaged or stale cache is refused with instructions
+to run regular `update`. It conflicts with `--check`, `--channel` and `--status`. Both paths
+retain the installation lock, helper transaction, inventory validation, smoke check and
+rollback. `--status` includes `last_failure` with its phase, error code, pinned payload
+identity and expected retry behavior, in addition to `previous_transaction`.
+
+During helper handoff, Teshi requests normal shutdown of registered daemons and desktop
+windows from the same installation. It waits for process exit before replacing files.
+TUI/MCP processes that remain open are reported by PID and executable path; the default
+operation fails safely after the exit deadline. `--force-close` explicitly permits the
+helper to terminate remaining processes from that installation after the deadline and
+can discard unsaved work. It never means “kill every teshi.exe”: executable paths must
+match the installed inventory, and OS creation identities are rechecked on process
+handles before termination. Other installation directories are excluded.
+
+The permission applies to one invocation and must be supplied again on an offline retry.
+`--yes` does not grant force-close permission. `--force-close` conflicts with `--check`
+and `--status`; `--status` itself is read-only and includes `running_processes`.
+Each transaction records process-close attempts in `processes.json`; failure diagnostics
+distinguish `process_exit` from file commit failures. Legacy processes without a verified
+shutdown endpoint may need to be closed manually or with explicit `--force-close`.
+
+### Stop the project daemon
+
+Run from the intended project directory:
+
+```powershell
+teshi daemon stop          # request graceful shutdown and confirm process exit
+teshi daemon stop --force  # force-close the verified daemon if graceful shutdown fails
+```
+
+Stop remains available while an updater holds the installation gate. The command bypasses
+HTTP proxies for loopback requests, checks HTTP status and daemon process/project identity,
+and only reports success after the captured process generation exits. Failed shutdowns
+retain the manifest; cleanup cannot remove a replacement daemon's manifest. Force close
+requires a matching process creation identity recorded by the daemon, and uses Windows
+process handles or Linux pidfds. Legacy manifests without that identity are refused for
+force close. Other Unix platforms support graceful shutdown but not force close.
 
 ### Requirement library (`teshi requirements`)
 
@@ -48,7 +126,10 @@ teshi requirements import-project --dry-run
 teshi requirements import-project --yes
 teshi --requirements-root D:\Docs\teshi-requirements requirements path
 
-teshi requirements list
+teshi requirements list                         # current working directory project
+teshi requirements list --project ../other
+teshi requirements list --all-projects
+teshi requirements list --unassigned-project    # no project associations
 teshi requirements list --iteration "Sprint 12" --json
 teshi requirements list --unassigned
 teshi requirements show doc-12
@@ -84,7 +165,7 @@ Document arguments (`<REF>`) resolve in this order: exact document ID, then stor
 
 Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown only; `show --json` adds the same metadata plus `body`.
 
-`edit` on a TTY copies the current body to a temporary `.md` file and opens `$VISUAL`, then `$EDITOR`. On Windows, if both are unset, Teshi falls back to `notepad`. After the editor exits, Teshi writes through the store API and updates `_teshi.json` revision. Non-interactive agents should pass `--file` or stdin; a non-TTY with neither input fails instead of launching an editor. If the on-disk revision changed during the edit, Teshi refuses to overwrite unless `--force` is set and leaves the temp file path in the error.
+`edit` on a TTY copies the current body to a temporary `.md` file and opens `$VISUAL`, then `$EDITOR`. On Windows, if both are unset, Teshi falls back to `notepad`. After the editor exits, Teshi writes through the store API and updates `_teshi.json` revision and title from the first-line H1 (`# Title`). Renaming preserves the document ID and file path. Empty titles or a missing first-line H1 fail with `invalid_requirement_title` without changing the saved document. Non-interactive agents should pass `--file` or stdin; a non-TTY with neither input fails instead of launching an editor. If the on-disk revision changed during the edit, Teshi refuses to overwrite unless `--force` is set and leaves the temp file path in the error.
 
 `--iteration` and `--unassigned` cannot be combined. The iteration value for `set-iteration` must be `--iteration <name>` so multiple refs can be listed.
 
@@ -95,6 +176,57 @@ Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown onl
 | macOS | `dirs::data_dir()/teshi/requirements` |
 
 Path resolution: `--requirements-root` → non-empty `TESHI_REQUIREMENTS_DIR` → `<app_data>/requirements`. Put the store in a separate Git repo if you want version control independent of application projects. Import copies legacy `<project>/requirements/` into the current store and rewrites that project's test-point links; it does not delete the source directory.
+
+See [Requirements shared across projects](requirement-projects.md) for `link-project`,
+`unlink-project`, `set-project-status`, and `export-project`, including identity
+sharing and legacy unassigned documents.
+
+### Test points (`teshi testpoints`) — 0.7.10+
+
+Test points are per-project (`testpoints/testpoints.json`), while their requirement links point into the **user-level requirement store**. These commands therefore resolve both at once: `--project` (default: current directory) for the test points and `--requirements-root` (or the default store) for the linked documents.
+
+```bash
+teshi testpoints list --project .
+teshi testpoints list --project . --json
+
+teshi testpoints link add    tp-1 --project . --document doc-9 --range 0:14 --json
+teshi testpoints link remove tp-1 --project . --document doc-12 --json
+teshi testpoints link update tp-1 --project . --to-document doc-9 --to-range 0:14 --json
+```
+
+Ranges are `START:END` half-open **Unicode scalar** offsets into the target document body, matching the anchors the TUI writes.
+
+`list --json` returns a stable envelope:
+
+```json
+{
+  "ok": true,
+  "store_id": "reqstore-...",
+  "test_points": [
+    {
+      "id": "tp-1",
+      "title": "Login",
+      "review_state": "proposed",
+      "links": [
+        {
+          "document_id": "doc-9",
+          "store_id": "reqstore-...",
+          "revision": "...",
+          "position": { "start": 0, "end": 14 },
+          "resolution": "resolved",
+          "quote": "# Checkout\n\nSh"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`resolution` is recomputed on every read, so `list` reports `stale` as soon as an edited document no longer contains a link's quoted text. `review_state` is one of `proposed`, `approved`, `rejected`, `needs_review`.
+
+`link remove` and `link update` select the affected link with `--document` and/or `--range`; with no selector the test point must have exactly one link. `link add` always appends, while `link update` replaces the matched link in place. Any link change on an `approved` test point resets it to `proposed`: approving is a human-only action in the Test Points tab (`5`, then `A`), and no command moves a test point back to `approved`.
+
+`--json` failures print `{ "code": "...", "error": "..." }` to stdout and exit `1`. Codes: `unknown_test_point`, `unknown_document`, `invalid_range`, `link_not_found`, `ambiguous_link`, `requirement_store_uninitialized`, `testpoints_io`.
 
 ### Browser GUI (`teshi web`)
 
@@ -437,13 +569,15 @@ in the installed Desktop/web build; the UI control name is version-dependent.
 
 ```bash
 teshi winapp list-windows
+teshi winapp status
 teshi winapp attach --hwnd 12345
 teshi winapp attach --title 'My App'
 teshi winapp attach --process-name MyApp.exe
 teshi winapp snapshot
 teshi winapp highlight 'uia:automation_id=LoginButton'
 teshi winapp execute --selector 'uia:automation_id=LoginButton' --action click
-teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click
+teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click --mode foreground --allow-interactive-input
+teshi winapp launch --elevated 'C:\path\to\Enhook.exe'
 teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes] [--dry-run] \
   [--launch 'C:\path\to\App.exe']
 ```
@@ -451,6 +585,13 @@ teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes
 WinApp `click` prefers UIA activation and does not guarantee real pointer
 hover or pressed state. `pointer_click` moves the system pointer and sends a
 foreground left-click for controls that depend on real mouse input.
+
+`status` reports the executor and attached target Integrity Level. `launch
+--elevated` starts only the WinApp executor and target through the Windows UAC
+`runas` boundary; the Teshi CLI, daemon, Agent, and Web UI remain at their
+existing integrity level. UAC cancellation is reported as an elevation
+cancellation/denial, and the elevated executor is stopped with its WinApp
+session.
 
 `replay` checks that a window is attached before running bindings. Use `attach` or `--launch` when detached.
 
@@ -490,3 +631,33 @@ Typical fields: `id`, `name`, `provider`, `api_style`, `model_id`, `base_url`, `
 - Desktop Settings, TUI model panel (`m`), `teshi auth`, and daemon `/api/v1/llm/profiles` all read/write this store.
 - Public listings mask API keys; empty key on save preserves the previously stored key.
 - When no active profile has a key, runtime falls back to `TESHI_LLM_*`.
+
+WinApp physical pointer and shell tray actions require both `--mode foreground`
+and `--allow-interactive-input`. Foreground mutations require the same permission.
+Auto/background never grant physical input, including when `--yes` is used.
+Inspect `requires_interactive_input` and `action_result_uncertain` JSON codes;
+see [WinApp input and result contracts](winapp-modes.md#supported-actions).
+
+
+## Direct requirement creation
+
+```text
+teshi requirements create --title "Sign in" --file sign-in.md --priority P1 --project . --json
+teshi requirements create --title "Sign in" --stdin --json
+```
+
+`--file` and `--stdin` supply the complete Markdown document; its first H1 must
+match `--title`. With neither, a heading-only document is created. `--iteration`
+is optional. Omitting `--project` creates no association, including no implicit
+association with the current working directory. JSON contains `ok`, `id`, `path`,
+`revision`, `priority`, `iteration`, and `projects`. Store errors return a nonzero
+exit code and a JSON diagnostic when requested. Use `--requirements-root` for
+isolated fixtures. New default filenames use UTC microseconds; historical IDs,
+paths and links are preserved. See [the implementation record](requirements-delivery-2026-10-27.md).
+
+## WinApp owned instances and visual exploration
+
+See [the WinApp extension contract](winapp-exploration.md) for `instance`,
+`visual-plan`, and `external-check`. Check the installed executable's version
+and help first: source implementation does not establish installed capability.
+These extensions were authored without executing tests or window acceptance.

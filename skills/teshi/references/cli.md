@@ -80,3 +80,34 @@ Read the family's help when the task needs it:
 | `auth` | Credential management; avoid printing credential values into task reports. |
 
 In a source checkout, `doc/cli-usage.md` provides extended examples and `teshi.toml` configuration. Prefer the running executable's help when its interface differs.
+
+
+## New source-checkout creation and WinApp extensions
+
+Check `--version` and family help before using these commands: they may be absent
+from an older installed executable. This implementation round has not run tests.
+
+- `requirements create --title TITLE [--file PATH | --stdin] [--priority P0|P1|P2]
+  [--iteration NAME] [--project DIR] [--json]` creates directly in the selected
+  library. Markdown H1 must match the title. No project is linked unless explicit.
+  New filenames use UTC microseconds; stable IDs and historical paths remain intact.
+  Never replace an ID-conflicted TUI draft by overwriting the index.
+- `winapp instance --file request.json` accepts `launch` with an `argv` array,
+  or `status`, `wait`, `stop` with the returned opaque `instance` token.
+  Use optional `expected_alive`, `expected_exit_code`, `expected_windows` for
+  assertions. Ownership is executor-local: after a restart, report unknown; never
+  fall back to process-name killing or a bare PID.
+- `winapp visual-plan --file plan.json` accepts bounded sequential observations.
+  Physical mutations additionally require `--mode foreground --allow-interactive-input`
+  and authorization for the requested actions. Use only newly observed client-pixel
+  coordinates. Movement, resize, DPI or incarnation changes invalidate observations.
+  Never retry an uncertain result. Journals are exploration evidence, not bindings.
+- `winapp external-check --file check.json` runs an explicitly requested read-only
+  checker with `argv`, JSON `input`, and a bounded `check_timeout_ms`. It must emit
+  `business_result` and cannot report passed with unverified thresholds.
+
+Snapshot capability diagnostics distinguish usable controls, complete container-only
+traversal and incomplete/failed traversal. Prefer effective UIA selectors; otherwise
+observe through the supported visual plan. Never infer an application's capabilities
+from its brand, promise CEF/CDP access, or equate capture/provider completion with
+business success. For the full schema see `doc/winapp-exploration.md` in the source checkout.

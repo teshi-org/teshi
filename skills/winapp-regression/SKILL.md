@@ -11,7 +11,7 @@ Complete the requested native regression: feature → verified binding → confi
 
 Work from the intended project root. Check `teshi --version`, `teshi winapp --help`, and `teshi steps --help`; do not rely on a minimum historical version as proof of current capabilities.
 
-WinApp commands require a live native Windows sidecar and project `.teshi/cdp-endpoint.json` with `mode: "winapp"`. `winapp attach` selects a window through that sidecar; it does not start the sidecar. If the endpoint is absent, stale, or in another mode, report the missing connection and use setup supported by the installed application. Do not fabricate the endpoint or assume current GPUI exposes a legacy **Connect WinUI3 App** button. The current WinApp GPUI surface is a screenshot stream, not an embedded terminal or Gherkin editor.
+WinApp commands require a live native Windows sidecar and project `.teshi/cdp-endpoint.json` with `mode: "winapp"`. `winapp attach` selects a window through that sidecar; current source CLI commands ensure a sidecar is available. Check installed behavior before relying on automatic startup. If the endpoint is absent, stale, or in another mode, report the missing connection and use setup supported by the installed application. Do not fabricate the endpoint or assume current GPUI exposes a legacy **Connect WinUI3 App** button. The current WinApp GPUI surface is a screenshot stream, not an embedded terminal or Gherkin editor.
 
 ## Write and select a regression
 
@@ -51,20 +51,34 @@ Use only the actual discovered selector and the action/value supplied by the ste
 
 ## Choose the click action deliberately
 
-- `click` prefers UIA activation (`InvokePattern`), then the existing UIA click
-  fallback chain. It is suitable for ordinary stable automation, but it does
-  not guarantee real pointer hover or pressed state.
+- `click` prefers non-intrusive UIA activation (`InvokePattern`, then other
+  SelectionItem/Toggle before Legacy default actions). It never silently becomes a real system-pointer
+  click. Use it for ordinary stable automation.
 - `pointer_click` moves the real system pointer to the unique visible
   interactive element and sends a foreground left-button click. Use it for
   hover, pressed state, WinUI3 custom title bars, caption islands, non-client
   area interaction, and controls that depend on real mouse messages.
-- `pointer_click` requires `--mode foreground`; it must not be downgraded to
-  background `PostMessage` input.
+- `pointer_click` requires `--mode foreground --allow-interactive-input`.
+  Auto/background reject physical input even when the flag is present. Never
+  downgrade it to PostMessage or restore mouse coordinates to conceal movement.
+- Foreground mutations and shell tray clicks require the same explicit permission.
+  `--yes`, bindings, and replay prompts are not permission. Only pass the flag
+  when the user has authorized desktop interference.
+- `requires_interactive_input` means stop the intrusive action. An
+  `action_result_uncertain` response means input may have executed: inspect the
+  business result before retrying. UIA completion/input injection reports
+  `business_result: unverified`; verify with a separate assertion.
+
+Do not use `pointer_click` merely because `click` failed once. First inspect
+the control and determine whether it actually requires physical pointer
+semantics. A missing or broken UIA pattern, ambiguous selector, integrity
+mismatch, stale attachment, or transient provider error is not evidence that
+real pointer input is required.
 
 For example:
 
 ```text
-teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
+teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click --mode foreground --allow-interactive-input
 ```
 
 ## Propose and confirm
@@ -105,3 +119,38 @@ The behave exporter currently does not support the native `pointer_click`
 action. A feature using that action must use native `winapp replay`, or provide
 a custom behave step definition; export otherwise fails with
 `unsupported export action: pointer_click`.
+
+UIA mutations require the actual shared client's AutoSetFocus policy to be off;
+Teshi fails closed if it cannot disable/read back this setting. A direct API guard
+alone does not cover UIA's internal automatic focus. For navigation, inspect
+`input_method` and verify the destination: a Legacy default-action return is not
+proof of navigation. Authorized keyboard/pointer input may still be rejected by
+Windows foreground rules; do not use focus hacks to force it.
+
+
+## Capability-aware visual exploration
+
+Inspect `snapshot` capability diagnostics before choosing a route. A complete tree
+with effective controls favors semantic UIA. A complete container-only tree favors
+`winapp visual-plan --file plan.json` when the installed help exposes it. Truncated
+or failed traversal is uncertain, not proof that controls do not exist. Do not loop
+snapshot indefinitely or invent a brand-specific accessibility rule.
+
+A plan has 1..32 `steps`: `observe` (window/client/region), `wait_stable`, `click`,
+`double_click`, `scroll`, `drag`, `text`, `keys`, `resize`, `maximize`, `restore`.
+Start with observation. Coordinate inputs use physical client pixels and the returned
+observation; changing position, size, DPI or target identity invalidates it. Input
+requires both foreground mode and explicit interactive-input permission. A sequence
+stops at its first error or missing post-action screenshot and retains a journal.
+Stable pixels and provider completion do not verify business behavior. Never
+resume by blindly rerunning the whole plan or retry an uncertain mutation.
+
+`instance --file request.json` uses executor-owned launch tokens, exit handles and
+window counts; `stop` affects only that token. Lost ownership must fail, never fall
+back to killing by executable name. `external-check --file check.json` provides
+bounded, explicitly supplied read-only business checks. Uncalibrated thresholds
+cannot produce an accepted pass. New extension code has no runtime acceptance in
+this delivery; inspect help/version and retain success, failure and blocked evidence.
+
+Exploration must still pass human review before becoming confirmed regression
+bindings. These commands do not automatically bind, replay, or mark a Feature passed.

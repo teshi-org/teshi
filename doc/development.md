@@ -8,7 +8,53 @@
 
 > The `.githooks/` in this repo are stale and not enabled by default. Rely on the commands below as the real quality gates.
 
+## Branching and merge policy
+
+`main` is the only long-lived branch and the repository default. Every change reaches it through a pull request:
+
+1. Branch from an up-to-date `main` as `dev/<github-handle>/<topic>`, for example `dev/lilinfangrelax/chat-dock`.
+2. Push the branch and open a pull request against `main`.
+3. CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) must pass. `main` is protected: direct pushes are rejected, and a pull request cannot merge while a required check is failing or the branch is behind `main`.
+4. Merge the pull request and delete the branch.
+
+Feature branches are short-lived, and `dev/` is only a branch-name prefix — there is no shared `dev` branch to sync with `main`.
+
 ## Building
+
+### Terminal application tests
+
+The Rust TUI runner uses the existing `tui-test-rs` framework and has an isolated
+Cargo workspace because its Unicode dependency conflicts with Ratatui 0.29.
+Native workspace checks do not include this runner; run its gates explicitly:
+
+```bash
+cargo build -p teshi-cli --locked
+cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked
+cargo clippy --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --all-targets -- -D warnings
+TESHI_SELF_TEST_BIN="$PWD/target/debug/teshi" cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
+```
+
+On Windows, set `$env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path`
+and `$env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1`
+before the final command. The latter selects Cargo's exact unit-test executable
+for the console lifecycle fixture. CI runs the real PTY backend and self-regressions on
+Windows and Linux. The self-tests launch the actual Teshi TUI with isolated data
+directories, replay the English and Chinese `@tui` Features, and verify saved file
+contents after navigation, running a scenario from Explore, editing, saving and
+exit. These regressions have also been verified locally on Windows and Linux
+(WSL). The CI matrix keeps both platforms covered independently. WSL is an
+optional development environment for Linux shell scripts, not a prerequisite
+for the Windows Rust build or the TUI runner.
+
+For another application, install the runner with
+`cargo install --path crates/teshi-tui-runner --profile dev --locked`, record a
+`name.tui.json` sidecar next to `name.feature`, then run `teshi tui name.feature`.
+Use `--scenario NAME` to select a scenario and `--runner-cmd PATH` or
+`TESHI_TUI_RUNNER` to locate the runner. `teshi run` and Explore select it when all
+selected Features have TUI sidecars and no external runner is configured.
+Explicit external runner configuration retains precedence. See
+[the runner guide](../crates/teshi-tui-runner/README.md) for the action schema,
+failure evidence and current Gherkin limitations.
 
 `teshi-web` is the web GPUI shell and compiles only for `wasm32-unknown-unknown`. On native hosts (Linux/macOS/Windows), exclude it from workspace commands:
 
@@ -27,6 +73,85 @@ bash scripts/build-teshi-web.sh
 
 This requires the nightly toolchain, the `wasm32-unknown-unknown` target, and the `wasm-bindgen` CLI.
 
+## Installing the local build (development loop)
+
+Install the CLI from the checkout so `teshi` resolves from any directory and every
+agent tool picks up the same binary:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local.ps1   # Windows
+bash scripts/install-local.sh                                                   # Linux / WSL
+```
+
+Both wrappers run `cargo install --path apps/teshi-cli --profile dev`.
+
+`--profile dev` is not optional. `cargo install` defaults to `release`, and
+`[profile.release]` enables `lto = true`, so a bare install rebuilds and relinks the
+whole workspace every iteration (~4 min) instead of reusing the `target/debug` cache
+that `cargo build` maintains. Measured with the dev profile: ~14 s after a one-line
+edit, ~4 s when nothing changed.
+
+No Cargo config key changes the default install profile — Cargo ignores unknown keys
+silently, so `[install] profile = "dev"` has no effect and the omitted flag silently
+costs a full release build. Use the wrappers, or pass the flag explicitly.
+
+Reserve the packaged `setup.exe` flow below for work that targets the installer or the
+update stream; that path cannot be exercised any other way, and it is what pays for the
+full release build.
+
+### Update failure and offline-retry acceptance (Windows)
+
+```powershell
+cargo build -p teshi-cli -p teshi-update-helper --locked
+$env:TESHI_UPDATE_CLI_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path
+$env:TESHI_UPDATE_HELPER_TEST_BIN = (Resolve-Path target/debug/teshi-update-helper.exe).Path
+cargo test -p teshi-update --locked manager::acceptance::interrupted_download_setup_failure_offline_retry_and_helper_rollback -- --ignored --exact --nocapture
+```
+
+This opt-in test requires Inno Setup 6. It isolates `LOCALAPPDATA` in a child process,
+uses a disposable marked installation, and transfers a real Inno package over a loopback
+HTTP fault server. It verifies Range after disconnection, setup failure diagnostics,
+offline retries through the actual CLI, helper mutual exclusion, smoke-check rollback,
+successful commit and preservation of user files. The Inno fixture omits registry,
+shortcut and uninstall registration; it does not replace release-installer packaging
+acceptance. Production GitHub proxy/TLS behavior is covered separately by
+`cargo test -p teshi-update --test proxy_transport --locked`.
+
+The same acceptance also launches disposable daemon and STDIO MCP processes. It verifies
+`daemon stop` while the helper gate is locked, update-driven graceful daemon shutdown,
+default refusal to kill an MCP blocker, explicit `--force-close`, and survival of a
+same-named MCP process from another directory. It never targets the developer's running
+Teshi sessions. Daemon server tests additionally keep a WebSocket open during shutdown
+and reject mismatched process-generation headers.
+
+## Local source build identity
+
+`crates/teshi-core/build.rs` derives a complete `local` identity automatically
+whenever the build injects no `TESHI_BUILD_*` variable at all, so plain `cargo run`,
+`cargo build`, and `cargo install --path apps/teshi-cli` already report as local
+source builds; no manual export is needed for day-to-day iteration. The fallback is
+all-or-nothing: if any `TESHI_BUILD_*` variable is set, the rest are passed through
+untouched, so a half-configured CI job still fails closed to `dev` rather than
+looking like a deliberate local build.
+
+To pin identity explicitly, which is what release automation does, use
+`TESHI_BUILD_CHANNEL=local` for a deliberately identified source build,
+separate from GitHub stable/nightly streams. Set `TESHI_GIT_SHA` to the full
+source commit, `TESHI_BUILD_TIMESTAMP` to a UTC RFC3339 timestamp,
+`TESHI_BUILD_DATE` to its `YYYYMMDD` date, and `TESHI_BUILD_SEQUENCE` to a positive
+local build sequence (for example Unix time). Compile every bundled executable
+with the same values. Record uncommitted source changes separately when building
+a dirty checkout.
+
+Set `TESHI_BUILD_LOCAL_TIMESTAMP` to the same instant in the build machine's
+current timezone, including its RFC3339 offset. The displayed local version
+includes that local minute and offset, for example
+`0.7.10-local.20261013.2003+0800 (26fd0b6)`. The bundle's machine-readable channel is
+`local`; the manifest retains the full timestamp. Local builds do not perform
+automatic release checks. Rebuild locally for another local version, or explicitly
+choose `teshi update --channel stable` / `--channel nightly` to switch streams.
+Local identities are rejected by published release manifests.
+
 ## Testing
 
 ```bash
@@ -39,8 +164,8 @@ cargo fmt --all --check                                           # check format
 ### Test layout
 
 - Unit tests live at the bottom of each source file (in `#[cfg(test)]` modules)
-- Product Gherkin: `features/en-US/`, `features/zh-CN/`, and `features/winapp/`; every Feature has an explicit verification route and runner tag (`@web-ui`, `@cli`, `@validation-e2e`, `@api`, or `@winapp`)
-- Feature catalog ownership is checked by `python scripts/check-feature-e2e-catalog.py`; Core, architecture, CI packaging, and protocol-internal contracts belong in OpenSpec or Rust/workflow tests
+- Product Gherkin: `features/en-US/`, `features/zh-CN/`, and `features/winapp/`; every Feature has an explicit verification route and runner tag (`@tui`, `@web-ui`, `@cli`, `@validation-e2e`, `@api`, or `@winapp`)
+- Feature catalog ownership is checked by `python scripts/check-feature-e2e-catalog.py`; Core, architecture, CI packaging, and protocol-internal contracts belong in Rust unit/integration tests, workflow contract tests, or documentation. See [Test Strategy](test-strategy.md)
 - Requirement CLI E2E is executed by `teshi run` and `teshi-requirement-cli-runner` (`tests/steps/requirement-cli`) against requirement-tagged CLI files (English `requirement_*.feature`, Chinese titles such as `需求列表.feature` and `需求标签页.feature`)
 - Validation self-bootstrap E2E is executed by `validation_cli_bdd.rs` with `teshi-validation-cli-runner` (`tests/steps/validation-cli`). It creates malformed source as isolated fixture data, then starts the exact built Teshi binary as a child process; it does not use the target validator API for assertions.
 - Key test areas:
@@ -172,19 +297,18 @@ Run `python scripts/release.py` (dry-run) to verify version consistency across c
 
 Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
-WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is configured. Legacy standalone workflow: [`.github/workflows/winget.yml`](../.github/workflows/winget.yml).
-
 ### Nightly (pre-release) builds
 
-Nightly builds publish the Windows per-user **setup.exe** from the `dev` branch as GitHub **pre-releases** (no Linux/macOS archives, MSI, or WinGet submission). Stable releases still publish the full asset set.
+Nightly builds publish the Windows per-user **setup.exe** from `main` as GitHub **pre-releases** (no Linux/macOS archives or MSI). Stable releases still publish the full asset set.
 
 | Trigger | Workflow |
 |---------|----------|
-| Push to `dev` | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) |
-| Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active). Catch-up only: skipped when `dev` HEAD already has a nightly tag. |
+| Daily 06:00 UTC | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml). Catch-up only: skipped when `main` HEAD already has a nightly tag or its CI run is not green. |
 | Manual | `gh workflow run nightly.yml` |
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects `TESHI_BUILD_CHANNEL`, `TESHI_BUILD_DATE`, and `TESHI_GIT_SHA` so `teshi -V` prints `0.7.10 (nightly 2026-09-07, cb4361a)` instead of writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `main` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects its build identity without writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
+
+New Nightly builds also show a workflow run number, for example `0.7.10-nightly.101 (2026.09.07, cb4361a)`, in `teshi -V` and the TUI. The GitHub release title includes the same number. Numbers increase with Nightly workflow runs and can have gaps when a run is skipped or fails; reruns retain their number. The tag retains its existing format so already-installed updaters can validate and install the release. The update manifest retains its separate globally ordered build sequence. Stable version bumps remain independent.
 
 ```powershell
 gh run list --workflow=nightly.yml --limit 3
@@ -192,7 +316,7 @@ gh release list --prerelease
 gh release download v0.7.9-nightly.20260801.dc6c942 --dir ./nightly-check
 ```
 
-Stable releases remain tag-driven on `main` (`vX.Y.Z`). Merge `dev` → `main` and run `scripts/release.py` for production releases.
+Stable releases remain tag-driven on `main` (`vX.Y.Z`). Land the release change in `main` through a pull request and run `scripts/release.py` for production releases.
 
 Windows installer source: `wix/` (WiX Toolset).
 

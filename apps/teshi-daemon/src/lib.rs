@@ -12,8 +12,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use teshi_engine::{
     default_browser_service_script, default_winapp_service_script, find_project_root, open_project,
-    remove_daemon_manifest, spawn_daemon_background, DaemonManifest, DaemonManifestExt,
-    RuntimeConfig, TeshiEngine,
+    spawn_daemon_background, DaemonManifest, DaemonManifestExt, RuntimeConfig, TeshiEngine,
 };
 use tracing::info;
 
@@ -62,7 +61,10 @@ fn existing_daemon_port(project_root: &std::path::Path) -> Option<u16> {
         Some(manifest.port)
     } else {
         // A stale manifest must never be reused as a launch target.
-        remove_daemon_manifest(project_root);
+        if let Err(error) = teshi_engine::remove_daemon_manifest_if_matches(project_root, &manifest)
+        {
+            tracing::warn!(%error, "failed to remove stale daemon manifest");
+        }
         None
     }
 }
@@ -279,26 +281,28 @@ pub async fn run_daemon_internal(opts: DaemonInternalOptions) -> Result<()> {
         pid: std::process::id(),
         port: bound_addr.port(),
         started: chrono::Utc::now(),
+        process_start: teshi_update::processes::inspect(std::process::id())?
+            .map(|process| process.started),
     };
     manifest.save_manifest(&opts.project_root)?;
     info!("teshi daemon listening on {bound_addr}");
 
-    // Graceful shutdown: cleanup manifest on exit
-    let project_root = opts.project_root.clone();
-    let shutdown = async move {
-        // Wait for Ctrl+C
-        tokio::signal::ctrl_c().await.ok();
-        info!("daemon shutting down");
-        remove_daemon_manifest(&project_root);
-    };
-    tokio::spawn(shutdown);
+    let server_result =
+        run_server_with_listener(listener, rt, dist, Some(opts.project_root.clone()))
+            .await
+            .context("daemon server");
 
-    run_server_with_listener(listener, rt, dist, Some(opts.project_root.clone()))
-        .await
-        .context("daemon server")?;
-
-    remove_daemon_manifest(&opts.project_root);
-    Ok(())
+    // Registration can fail after publishing the project manifest. Always clean
+    // up our own manifest while preserving the original server error.
+    if let Err(error) =
+        teshi_engine::remove_daemon_manifest_if_matches(&opts.project_root, &manifest)
+    {
+        if server_result.is_ok() {
+            return Err(error);
+        }
+        tracing::warn!(%error, "failed to remove daemon manifest after server failure");
+    }
+    server_result
 }
 
 // ---- Auto-spawn client logic ----
@@ -394,6 +398,7 @@ mod tests {
             pid: std::process::id(),
             port: 0,
             started: Utc::now(),
+            process_start: None,
         };
         stale.save_manifest(&root).unwrap();
         assert_eq!(existing_daemon_port(&root), None);
@@ -404,6 +409,7 @@ mod tests {
             pid: std::process::id(),
             port: listener.local_addr().unwrap().port(),
             started: Utc::now(),
+            process_start: None,
         };
         live.save_manifest(&root).unwrap();
         assert_eq!(existing_daemon_port(&root), Some(live.port));

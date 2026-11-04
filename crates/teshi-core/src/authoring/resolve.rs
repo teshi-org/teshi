@@ -130,6 +130,27 @@ pub fn re_resolve_document_links(
     }
 }
 
+/// Marks every link to a removed document as stale without changing its
+/// document id or quote anchor.
+///
+/// The document id remains in the test-point file so a later recovery or
+/// inspection can report the missing source instead of silently retargeting
+/// the link to a newly created document.
+pub fn mark_document_links_missing(document_id: &str, test_points: &mut [TestPoint]) {
+    for tp in test_points.iter_mut() {
+        let mut affected = false;
+        for link in tp.requirement_links.iter_mut() {
+            if link.document_id == document_id {
+                link.resolution = ResolutionState::Stale;
+                affected = true;
+            }
+        }
+        if affected && tp.review_state == ReviewState::Approved {
+            tp.review_state = ReviewState::NeedsReview;
+        }
+    }
+}
+
 fn position_matches_quote(text: &str, position: TextRange, quote: &str) -> bool {
     slice_by_char_range(text, position).as_deref() == Some(quote)
 }
@@ -366,5 +387,26 @@ mod tests {
             tp.requirement_links[0].resolution,
             ResolutionState::Resolved
         );
+    }
+
+    #[test]
+    fn missing_document_marks_links_stale_and_reopens_approval() {
+        let mut tp = TestPoint {
+            id: "tp-1".into(),
+            title: "Login".into(),
+            objective: "Verify login".into(),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
+            review_state: ReviewState::Approved,
+            requirement_links: vec![link_at("login", 0, 5)],
+            scenario_refs: Vec::new(),
+        };
+
+        mark_document_links_missing("doc-1", std::slice::from_mut(&mut tp));
+
+        assert_eq!(tp.review_state, ReviewState::NeedsReview);
+        assert_eq!(tp.requirement_links[0].resolution, ResolutionState::Stale);
+        assert_eq!(tp.requirement_links[0].document_id, "doc-1");
     }
 }

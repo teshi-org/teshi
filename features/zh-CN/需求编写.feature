@@ -50,6 +50,32 @@
     那么 命令成功
     并且 文档 "doc-12" 的修订未改变
 
+  场景: 替换正文的标题会同步到存储的标题
+    当 测试人员将文档 "doc-12" 的正文替换为:
+      """
+      # Sign In
+
+      Updated authentication flow.
+      """
+    那么 命令成功
+    当 测试人员以 JSON 显示文档 "doc-12"
+    那么 JSON 显示信封的 id 为 "doc-12"、标题 "Sign In"、路径 "auth/login.md" 和迭代 "Sprint 12"
+
+  场景: 替换正文缺少开头标题时被拒绝且文档保持不变
+    当 测试人员以 JSON 将文档 "doc-12" 的正文替换为:
+      """
+      Updated authentication flow without a heading.
+      """
+    那么 命令失败
+    并且 JSON 错误码为 "invalid_requirement_title"
+    并且 文档 "doc-12" 的修订未改变
+    并且 文档 "doc-12" 的正文为:
+      """
+      # Login
+
+      Users can sign in.
+      """
+
   场景: 非交互编辑且未提供正文时被拒绝
     当 测试人员在未提供正文的情况下以 JSON 编辑文档 "doc-12"
     那么 命令失败

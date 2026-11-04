@@ -67,7 +67,7 @@ pub fn claim_check(
     let interval = match bundle.identity.channel {
         ReleaseChannel::Stable => 3600,
         ReleaseChannel::Nightly => 900,
-        ReleaseChannel::Dev => return Ok(false),
+        ReleaseChannel::Dev | ReleaseChannel::Local => return Ok(false),
     };
     let Some(root) = installation.root.as_deref() else {
         return Ok(false);

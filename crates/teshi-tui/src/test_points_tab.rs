@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::theme;
 use anyhow::{Context, Result};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, RequirementLink, ResolutionState, ReviewState, TestPoint, TextRange,
@@ -64,6 +65,14 @@ pub struct TestPointsUiState {
     /// Scratch buffer while editing a detail field.
     pub field_buffer: String,
     pub field_dirty: bool,
+    /// Insert mode owns printable keys; Normal mode owns review commands.
+    pub editing: bool,
+    /// Character offset in the active field, never a UTF-8 byte offset.
+    pub field_cursor: usize,
+    /// Vertical offsets for the rendered details and excerpt panes. The tree
+    /// keeps its own offset in `TreeState`; index 1 and 2 correspond to these
+    /// two text panes.
+    pub scroll_offsets: [usize; 3],
 }
 
 impl TestPointsUiState {
@@ -81,6 +90,21 @@ impl TestPointsUiState {
             review_filter: ReviewFilter::All,
             field_buffer: String::new(),
             field_dirty: false,
+            editing: false,
+            field_cursor: 0,
+            scroll_offsets: [0; 3],
+        }
+    }
+
+    /// Move one text pane viewport without changing the selected test point.
+    pub fn scroll_pane(&mut self, pane: usize, delta: isize) {
+        let Some(offset) = self.scroll_offsets.get_mut(pane) else {
+            return;
+        };
+        if delta.is_negative() {
+            *offset = offset.saturating_sub(delta.unsigned_abs());
+        } else {
+            *offset = offset.saturating_add(delta as usize);
         }
     }
 
@@ -109,20 +133,34 @@ impl TestPointsUiState {
                     self.field_dirty = false;
                 }
             } else {
-                self.tree_state
-                    .select(vec![format!("{TREE_TP_PREFIX}{id}")]);
+                self.select_tree_leaf(&id);
             }
         }
     }
 
     /// Selects a test point by id and loads the active field buffer.
     pub fn select_test_point(&mut self, tp_id: &str) {
+        self.editing = false;
         self.selected_test_point_id = Some(tp_id.to_string());
         self.selected_excerpt_index = 0;
         self.selected_scenario_ref_index = 0;
-        self.tree_state
-            .select(vec![format!("{TREE_TP_PREFIX}{tp_id}")]);
+        self.scroll_offsets[1] = 0;
+        self.scroll_offsets[2] = 0;
+        self.select_tree_leaf(tp_id);
         self.load_field_buffer();
+    }
+
+    fn select_tree_leaf(&mut self, tp_id: &str) {
+        if let Some(path) = crate::authoring_tab::find_tree_path(
+            &self.tree_items,
+            &format!("{TREE_TP_PREFIX}{tp_id}"),
+        ) {
+            for depth in 1..path.len() {
+                self.tree_state.open(path[..depth].to_vec());
+            }
+            self.tree_state.select(path);
+            self.tree_state.scroll_selected_into_view();
+        }
     }
 
     /// Selects a test point from a tree node id.
@@ -134,6 +172,7 @@ impl TestPointsUiState {
     }
 
     pub fn focus_next_column(&mut self) {
+        self.editing = false;
         self.commit_field_if_dirty();
         self.focus = match self.focus {
             TestPointsFocus::Tree => TestPointsFocus::Details,
@@ -143,6 +182,7 @@ impl TestPointsUiState {
     }
 
     pub fn focus_prev_column(&mut self) {
+        self.editing = false;
         self.commit_field_if_dirty();
         self.focus = match self.focus {
             TestPointsFocus::Tree => TestPointsFocus::Tree,
@@ -171,10 +211,10 @@ impl TestPointsUiState {
             .and_then(|id| self.visible_leaf_ids.iter().position(|x| x == id))
             .unwrap_or(0);
         let next = if delta < 0 {
-            current.saturating_sub(1)
+            current.saturating_sub(delta.unsigned_abs())
         } else {
             current
-                .saturating_add(1)
+                .saturating_add(delta as usize)
                 .min(self.visible_leaf_ids.len() - 1)
         };
         if let Some(id) = self.visible_leaf_ids.get(next).cloned() {
@@ -196,9 +236,9 @@ impl TestPointsUiState {
             .position(|f| *f == self.detail_field)
             .unwrap_or(0);
         let next = if delta < 0 {
-            pos.saturating_sub(1)
+            pos.saturating_sub(delta.unsigned_abs())
         } else {
-            pos.saturating_add(1).min(fields.len() - 1)
+            pos.saturating_add(delta as usize).min(fields.len() - 1)
         };
         self.detail_field = fields[next];
         self.load_field_buffer();
@@ -210,9 +250,12 @@ impl TestPointsUiState {
             return;
         }
         let next = if delta < 0 {
-            self.selected_excerpt_index.saturating_sub(1)
+            self.selected_excerpt_index
+                .saturating_sub(delta.unsigned_abs())
         } else {
-            self.selected_excerpt_index.saturating_add(1).min(count - 1)
+            self.selected_excerpt_index
+                .saturating_add(delta as usize)
+                .min(count - 1)
         };
         self.selected_excerpt_index = next;
     }
@@ -220,11 +263,13 @@ impl TestPointsUiState {
     pub fn load_field_buffer(&mut self) {
         self.field_buffer.clear();
         self.field_dirty = false;
+        self.field_cursor = 0;
     }
 
     pub fn load_field_buffer_from(&mut self, tp: &TestPoint) {
         self.field_buffer = field_value(tp, self.detail_field);
         self.field_dirty = false;
+        self.field_cursor = 0;
     }
 
     pub fn commit_field_if_dirty(&mut self) {
@@ -280,21 +325,79 @@ impl TestPointsUiState {
     }
 
     pub fn insert_char(&mut self, ch: char) {
-        self.field_buffer.push(ch);
+        let byte = self.cursor_byte();
+        self.field_buffer.insert(byte, ch);
+        self.field_cursor += 1;
         self.field_dirty = true;
     }
 
     pub fn backspace(&mut self) {
-        if self.field_buffer.pop().is_some() {
-            self.field_dirty = true;
+        if self.field_cursor > 0 {
+            self.field_cursor -= 1;
+            self.delete_forward();
         }
     }
 
     pub fn delete_forward(&mut self) {
-        if !self.field_buffer.is_empty() {
-            self.field_buffer.remove(0);
+        let byte = self.cursor_byte();
+        if byte < self.field_buffer.len() {
+            self.field_buffer.remove(byte);
             self.field_dirty = true;
         }
+    }
+
+    fn cursor_byte(&self) -> usize {
+        self.field_buffer
+            .char_indices()
+            .nth(self.field_cursor)
+            .map_or(self.field_buffer.len(), |(byte, _)| byte)
+    }
+
+    /// Moves the field cursor by characters, clamped to the current text.
+    pub fn move_field_cursor(&mut self, delta: isize) {
+        self.field_cursor = self
+            .field_cursor
+            .saturating_add_signed(delta)
+            .min(self.field_buffer.chars().count());
+    }
+
+    /// Moves to the start or end of the current logical line.
+    pub fn field_line_boundary(&mut self, end: bool) {
+        let chars: Vec<_> = self.field_buffer.chars().collect();
+        self.field_cursor = self.field_cursor.min(chars.len());
+        if end {
+            while self.field_cursor < chars.len() && chars[self.field_cursor] != '\n' {
+                self.field_cursor += 1;
+            }
+        } else {
+            while self.field_cursor > 0 && chars[self.field_cursor - 1] != '\n' {
+                self.field_cursor -= 1;
+            }
+        }
+    }
+
+    /// Moves one logical line while retaining the column where possible.
+    pub fn field_line_vertical(&mut self, down: bool) {
+        let cursor = self.field_cursor;
+        self.field_line_boundary(false);
+        let column = cursor.saturating_sub(self.field_cursor);
+        if down {
+            self.field_line_boundary(true);
+            if self.field_cursor == self.field_buffer.chars().count() {
+                self.field_cursor = cursor;
+                return;
+            }
+            self.field_cursor += 1;
+        } else if self.field_cursor == 0 {
+            self.field_cursor = cursor;
+            return;
+        } else {
+            self.field_cursor -= 1;
+            self.field_line_boundary(false);
+        }
+        let start = self.field_cursor;
+        self.field_line_boundary(true);
+        self.field_cursor = (start + column).min(self.field_cursor);
     }
 
     /// Returns whether the test point can be approved (resolved links, eligible state).
@@ -505,22 +608,25 @@ fn document_excerpt(artifacts: &AuthoringArtifacts, link: &RequirementLink) -> (
 
 /// Footer hint line for the Test Points tab.
 pub fn test_points_footer_line() -> Line<'static> {
-    Line::from(vec![
-        Span::styled(" Focus [Tab] ", Style::default().fg(Color::DarkGray)),
+    theme::footer_line(vec![
+        Span::styled(" Focus [Tab] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Approve [a] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Approve [a] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Reject [r] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Reject [r] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Batch [A] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Batch [A] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Continue [c] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Continue [c] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Open scenario [o] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " Open scenario [o] ",
+            Style::default().fg(theme::FOOTER_DESC),
+        ),
         Span::raw(" "),
-        Span::styled(" Filter [f] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Filter [f] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Save [s] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
     ])
 }
 
@@ -537,8 +643,8 @@ pub fn review_state_name(state: ReviewState) -> &'static str {
 /// Style for excerpt resolution badges in the right pane.
 pub fn excerpt_resolution_style(resolution: ResolutionState) -> Style {
     match resolution {
-        ResolutionState::Resolved => Style::default().fg(Color::Green),
-        ResolutionState::Stale => Style::default().fg(Color::Red),
+        ResolutionState::Resolved => Style::default().fg(theme::SUCCESS),
+        ResolutionState::Stale => Style::default().fg(theme::ERROR),
     }
 }
 
@@ -582,6 +688,57 @@ mod tests {
             ReviewFilter::All,
         );
         assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn field_cursor_edits_unicode_at_the_cursor_and_clamps_to_logical_lines() {
+        let mut ui = TestPointsUiState::empty();
+        ui.field_buffer = "甲🙂尾\nabc\nz".into();
+        ui.field_cursor = 2;
+        ui.insert_char('中');
+        assert_eq!(ui.field_buffer, "甲🙂中尾\nabc\nz");
+        ui.backspace();
+        ui.delete_forward();
+        assert_eq!(ui.field_buffer, "甲🙂\nabc\nz");
+        ui.field_line_vertical(true);
+        assert_eq!(ui.field_cursor, 5);
+        ui.field_line_vertical(true);
+        assert_eq!(ui.field_cursor, 8);
+        ui.field_line_vertical(false);
+        assert_eq!(ui.field_cursor, 4);
+        ui.field_line_boundary(false);
+        assert_eq!(ui.field_cursor, 3);
+        ui.field_line_boundary(true);
+        assert_eq!(ui.field_cursor, 6);
+        ui.move_field_cursor(isize::MAX);
+        assert_eq!(ui.field_cursor, ui.field_buffer.chars().count());
+    }
+
+    #[test]
+    fn selecting_nested_test_point_retains_visible_ancestor_path() {
+        let mut ui = TestPointsUiState::empty();
+        ui.tree_items = build_test_point_tree(
+            &[sample_tp(
+                "tp-1",
+                ReviewState::Proposed,
+                vec!["Auth", "Login"],
+            )],
+            ReviewFilter::All,
+        );
+        ui.select_test_point("tp-1");
+        assert_eq!(
+            ui.tree_state.selected(),
+            &["tp-dir:Auth", "tp-dir:Auth/Login", "tp-leaf:tp-1"]
+        );
+        assert!(
+            ui.tree_state
+                .opened()
+                .contains(&vec!["tp-dir:Auth".to_string()])
+        );
+        assert!(ui.tree_state.opened().contains(&vec![
+            "tp-dir:Auth".to_string(),
+            "tp-dir:Auth/Login".to_string()
+        ]));
     }
 
     #[test]

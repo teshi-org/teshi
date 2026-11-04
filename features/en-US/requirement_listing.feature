@@ -13,6 +13,7 @@ Feature: Requirement listing
 
   Background:
     Given an isolated requirement library with sample login and checkout documents
+    And project A owns the sample requirements
 
   Scenario: Named iteration JSON list includes only assigned documents
     When the tester lists requirements in iteration "Sprint 12" as JSON
@@ -60,3 +61,32 @@ Feature: Requirement listing
     When the tester shows the document titled "Login" as JSON
     Then the command fails with exit code 2
     And the JSON error code is "ambiguous_requirement_ref"
+
+  Scenario: Project list shows only linked shared documents
+    When the tester lists requirements for project "B" as JSON
+    Then the command succeeds
+    And project B has no listed requirements
+    When the tester links document "doc-12" to project "B"
+    Then the command succeeds
+    When the tester lists requirements for project "B" as JSON
+    Then the command succeeds
+    And the JSON list contains only document "doc-12"
+
+  Scenario: Shared requirement records independent project delivery states
+    When the tester links document "doc-12" to project "B"
+    Then the command succeeds
+    When the tester records status "doc-12" for project "B" as "implemented"
+    Then the command succeeds
+    And project "doc-12" has recorded project status for "A" as "planned" and "B" as "implemented"
+
+  Scenario: Unlinking a project leaves the shared document unassigned
+    When the tester unlinks document "doc-12" from project "A"
+    Then the command succeeds
+    When the tester lists unassigned project requirements as JSON
+    Then the command succeeds
+    And the JSON list contains only document "doc-12"
+
+  Scenario: Portable snapshot contains the linked source documents
+    When the tester exports a requirements snapshot for project "A"
+    Then the command succeeds
+    And project "A" snapshot contains every project source

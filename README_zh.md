@@ -89,7 +89,7 @@ cargo run -- run path/to/file.feature   # 运行 BDD 测试（基于 NDJSON 的�
 | `Ctrl+/` | 撤销（完整缓冲区快照） |
 | `Ctrl+Y` | 重做 |
 | `s` | 保存当前文件 |
-| `q` | 退出（缓冲区有未保存更改时需按两次） |
+| `Ctrl+Q` | 退出（`q` / `Ctrl+C` 不再退出；缓冲区有未保存更改时需按两次） |
 
 ## 外部测试运行器
 

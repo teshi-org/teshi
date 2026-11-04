@@ -11,8 +11,16 @@ use teshi_engine::llm::{LlmConfig, LlmEvent, LlmHandle, LlmRequest};
 
 mod acp_backend;
 pub mod backend;
+pub mod tool_bridge;
+
+pub use acp_backend::AcpControls;
+pub use acp_backend::ChannelPermissionHost;
 
 /// Conversation record shared with frontends and persisted sessions.
+/// ACP display records use `acp_reasoning` or `acp_activity` as their source.
+/// Activity records store the title in `content`, the latest status in
+/// `reasoning_content`, and the external call ID in `tool_call_id`; frontends
+/// exclude these display records from model requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatMessage {
     pub role: AiRole,
@@ -21,6 +29,9 @@ pub struct AiChatMessage {
     pub tool_call_id: Option<String>,
     pub reasoning_content: Option<String>,
     pub source: Option<String>,
+    /// Structured external tool details; older sessions omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<teshi_agent::backend::ToolActivityInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +65,10 @@ pub enum NativeContinuation {
 /// Progress emitted to a frontend after the native runtime consumes a model event.
 #[derive(Debug)]
 pub enum NativeRuntimeEvent {
+    /// Reasoning explicitly returned by the provider during a turn.
+    ReasoningChunk {
+        content: String,
+    },
     MessageChunk {
         content: String,
     },
@@ -85,8 +100,11 @@ pub struct NativeToolExecution {
 pub struct NativeAgentRuntime {
     pub messages: Vec<AiChatMessage>,
     pub partial_response: String,
+    /// Reasoning accumulated during the current streaming response.
+    pub partial_reasoning: String,
     pub llm_handle: Option<LlmHandle>,
     pub llm_rx: Option<Receiver<LlmEvent>>,
+    retiring_models: Vec<LlmHandle>,
     model_config: Option<LlmConfig>,
     state: NativeTurnState,
     loops: u32,
@@ -97,7 +115,10 @@ pub struct NativeAgentRuntime {
 impl Drop for NativeAgentRuntime {
     fn drop(&mut self) {
         if let Some(handle) = &self.llm_handle {
-            handle.cancel();
+            handle.request_shutdown();
+        }
+        for handle in &self.retiring_models {
+            handle.request_shutdown();
         }
     }
 }
@@ -107,8 +128,10 @@ impl NativeAgentRuntime {
         Self {
             messages: Vec::new(),
             partial_response: String::new(),
+            partial_reasoning: String::new(),
             llm_handle: None,
             llm_rx: None,
+            retiring_models: Vec::new(),
             model_config: None,
             state: NativeTurnState::Idle,
             loops: 0,
@@ -130,9 +153,11 @@ impl NativeAgentRuntime {
         {
             self.state = NativeTurnState::Cancelled;
             self.partial_response.clear();
+            self.partial_reasoning.clear();
         }
         if let Some(handle) = self.llm_handle.take() {
-            handle.cancel();
+            handle.request_shutdown();
+            self.retiring_models.push(handle);
         }
         self.llm_rx = None;
         self.model_config = Some(config.clone());
@@ -187,6 +212,10 @@ impl NativeAgentRuntime {
             return NativeRuntimeEvent::Ignored;
         }
         match event {
+            LlmEvent::ReasoningChunk { content } => {
+                self.partial_reasoning.push_str(&content);
+                NativeRuntimeEvent::ReasoningChunk { content }
+            }
             LlmEvent::Chunk { content } => {
                 self.append_chunk(&content);
                 NativeRuntimeEvent::MessageChunk { content }
@@ -240,6 +269,7 @@ impl NativeAgentRuntime {
         self.loops = 0;
         self.final_request_sent = false;
         self.partial_response.clear();
+        self.partial_reasoning.clear();
         self.state = NativeTurnState::WaitingForModel;
     }
 
@@ -253,6 +283,9 @@ impl NativeAgentRuntime {
         if !self.accepts_model_event() {
             return;
         }
+        let streamed_reasoning = std::mem::take(&mut self.partial_reasoning);
+        let reasoning_content = reasoning_content
+            .or_else(|| (!streamed_reasoning.is_empty()).then_some(streamed_reasoning));
         let content = if self.partial_response.is_empty() {
             full_text
         } else {
@@ -265,6 +298,7 @@ impl NativeAgentRuntime {
             tool_call_id: None,
             reasoning_content,
             source: None,
+            activity: None,
         });
         self.complete();
     }
@@ -278,6 +312,9 @@ impl NativeAgentRuntime {
             self.state = NativeTurnState::Failed;
             return None;
         }
+        let streamed_reasoning = std::mem::take(&mut self.partial_reasoning);
+        let reasoning_content = reasoning_content
+            .or_else(|| (!streamed_reasoning.is_empty()).then_some(streamed_reasoning));
         self.messages.push(AiChatMessage {
             role: AiRole::Assistant,
             content: std::mem::take(&mut self.partial_response),
@@ -285,6 +322,7 @@ impl NativeAgentRuntime {
             tool_call_id: None,
             reasoning_content,
             source: None,
+            activity: None,
         });
         Some(self.messages.len() - 1)
     }
@@ -297,6 +335,7 @@ impl NativeAgentRuntime {
             tool_call_id: Some(tool_call_id),
             reasoning_content: None,
             source: None,
+            activity: None,
         });
     }
 
@@ -347,6 +386,7 @@ impl NativeAgentRuntime {
                             tool_call_id: None,
                             reasoning_content: None,
                             source: Some("browser_visual_observation".into()),
+                            activity: None,
                         });
                     }
                 }
@@ -378,13 +418,25 @@ impl NativeAgentRuntime {
     }
 
     pub fn cancel(&mut self) {
-        if let Some(handle) = &self.llm_handle {
-            handle.cancel();
+        if let Some(handle) = self.llm_handle.take() {
+            handle.request_shutdown();
+            self.retiring_models.push(handle);
         }
-        self.llm_handle = None;
         self.llm_rx = None;
         self.partial_response.clear();
+        self.partial_reasoning.clear();
         self.state = NativeTurnState::Cancelled;
+    }
+
+    /// Whether cancelled/replaced model workers still need exit acknowledgement.
+    pub fn shutdown_pending(&self) -> bool {
+        !self.retiring_models.is_empty()
+    }
+
+    /// Reap stopped model workers while preserving ownership of live transports.
+    pub fn poll_shutdown(&mut self) {
+        self.retiring_models
+            .retain_mut(|handle| !handle.poll_shutdown());
     }
 
     pub fn after_tools(
@@ -449,6 +501,31 @@ pub fn max_agent_iterations() -> u32 {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn streamed_reasoning_is_visible_then_retained_once_on_completion() {
+        let mut runtime = NativeAgentRuntime::new(2);
+        runtime.start();
+        assert!(matches!(
+            runtime.consume_model_event(LlmEvent::ReasoningChunk {
+                content: "Inspect ".into()
+            }),
+            NativeRuntimeEvent::ReasoningChunk { .. }
+        ));
+        runtime.consume_model_event(LlmEvent::ReasoningChunk {
+            content: "project".into(),
+        });
+        assert_eq!(runtime.partial_reasoning, "Inspect project");
+        runtime.finish_text("Answer".into(), Some("Inspect project".into()));
+        assert!(runtime.partial_reasoning.is_empty());
+        assert_eq!(runtime.messages.len(), 1);
+        assert_eq!(
+            runtime.messages[0].reasoning_content.as_deref(),
+            Some("Inspect project")
+        );
+        runtime.start();
+        assert!(runtime.partial_reasoning.is_empty());
+    }
 
     #[test]
     fn multi_loop_limit_and_final_request() {

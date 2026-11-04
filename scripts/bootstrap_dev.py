@@ -496,7 +496,7 @@ def _probe_teshi_cli(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
         ext_detail = ", ".join(f"PID {pid}" for pid, _ in external_installs)
         if status == ItemStatus.HEALTHY:
             status = ItemStatus.WARN
-        detail = f"{detail}; WinGet/PATH teshi running ({ext_detail}) — stop if unused"
+        detail = f"{detail}; installed/PATH teshi running ({ext_detail}) — stop if unused"
 
     expected = _expected_debug_teshi_count(supervisor)
     if expected > 0 and len(debug_pids) == expected:

@@ -1,5 +1,19 @@
 # User Guide
 
+## Opening a project
+
+Run `teshi` in the project directory to recursively load `.feature` files from
+`./features`. When `features` has language directories such as `zh-CN` and
+`en-US`, only the one matching your system UI language is loaded. Without
+language directories, all Feature files under `features` are included. A missing
+`features` directory falls back to `.feature` files directly in the project root,
+without scanning subdirectories or creating `features`. If none exist, the project
+opens empty. A missing language match reports an error.
+
+Use `teshi .` for the same loading rules, or `teshi project/` to open another project.
+Use `teshi -R` or `teshi project/ -R` to recursively scan the entire target directory.
+See [CLI startup rules](cli-usage.md#open-files-tui) for details.
+
 ## Tabs
 
 teshi has five core tabs:
@@ -69,13 +83,18 @@ Override for this process with `teshi --requirements-root PATH`, or persistently
 
 `<project>/requirements/` is **not** loaded at runtime. If Teshi finds that legacy directory, it shows a migration diagnostic. Preview with `teshi requirements import-project --dry-run`, then import (IDs/paths are kept or remapped; project test-point links get the target `store_id`; source files are left in place).
 
-- **Tree** — indexed documents from the current store's `_teshi.json`. Title shows the active iteration filter. Press `i` to filter by All / Unassigned / a named iteration, `g` to group by path or iteration, `I` to set the selected document's iteration (empty = Unassigned). Filter and group preferences are saved per `store_id` in user settings.
+- **Tree** — defaults to documents associated with the current project. Press `o` in the tree to cycle Current project / All projects / No project, and `b` to link or unlink the selected saved document. The title shows both the project window and iteration filter. Press `i` to filter by All / Unassigned / a named iteration, `g` to group by path or iteration, `I` to set the selected document's iteration (empty = Unassigned). Iteration and group preferences are saved per library and project in user settings. Opening a project always starts with its Current project window.
 - **Editor** — Markdown body with range selection and linked-range highlights
 - **Linked test points** — filtered by the active selection when present; test points themselves stay in `<project>/testpoints/testpoints.json`
 
-Select text and press `n` to create a `Proposed` test point linked to that exact range (identity is `(store_id, document_id)`). Press `Ctrl+n` for a new document.
+Select text and press `n` to create a `Proposed` test point linked to that exact range (identity is `(store_id, document_id)`). Press `Ctrl+n` for a new document, automatically associated with the current project. Older documents remain unassigned until explicitly linked; use All projects or No project to find them. Unlinking keeps the shared document and other project associations. Delete still removes the document from the shared library for every project.
 
-`/generate` asks you to confirm the source scope (store path, store ID, iteration). The Requirements filter is only a suggestion; it does not silently bind the AI session. Pasted chat text is not a requirement-library source.
+To rename a requirement, edit its first line (`# Title`) and press `Ctrl+s`.
+Saving synchronizes the name in the Requirements tree while preserving the
+document ID, file path, and test-point links. An empty title or a first line
+without an H1 heading prevents saving and leaves the existing document intact.
+
+`/generate` asks you to confirm the source scope (store path, store ID, iteration, project window). The confirmed scope is fixed for that generation session; subsequent view changes do not change it. Agent reads recheck live project and iteration membership. Pasted chat text is not a requirement-library source.
 
 Agents and scripts should use the same store through `teshi requirements` rather than editing `_teshi.json` directly:
 
@@ -87,6 +106,9 @@ teshi requirements edit doc-12 --file body.md
 ```
 
 Refs may be a document ID, relative path, or unique title. `edit` without `--file` opens `$VISUAL` / `$EDITOR` (Windows falls back to `notepad`). See [cli-usage.md](cli-usage.md) for the JSON envelope, revision guard, and `--force`.
+
+Project association, per-project delivery states, and portable snapshots are documented
+in [Requirements shared across projects](requirement-projects.md).
 
 ### Test Points
 

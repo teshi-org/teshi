@@ -13,19 +13,33 @@ dunce = "1"
 dirs = "6"
 fd-lock = "4"
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 notify = "7.0"
 portable-pty = "0.8"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = { workspace = true }
 teshi-core = { workspace = true }
+teshi-replay-evidence = { path = "../teshi-replay-evidence" }
+teshi-browser-broker = { path = "../teshi-browser-broker" }
 toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
+url = "2"
 vte = "0.15"
 tungstenite = "0.24"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }

@@ -154,7 +154,7 @@ pub async fn read_next<R: AsyncBufRead + Unpin>(
 }
 
 pub struct JsonRpcPeer<W> {
-    writer: Arc<Mutex<W>>,
+    writer: Arc<Mutex<Option<W>>>,
     pending: Arc<Mutex<HashMap<JsonRpcId, oneshot::Sender<AcpResult<Value>>>>>,
     next_id: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -172,7 +172,7 @@ impl<W> Clone for JsonRpcPeer<W> {
 impl<W: AsyncWrite + Unpin + Send + 'static> JsonRpcPeer<W> {
     pub fn new(writer: W) -> Self {
         Self {
-            writer: Arc::new(Mutex::new(writer)),
+            writer: Arc::new(Mutex::new(Some(writer))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
@@ -213,7 +213,10 @@ impl<W: AsyncWrite + Unpin + Send + 'static> JsonRpcPeer<W> {
         let msg = request(id.clone(), method, params);
         let write_result = {
             let mut writer = self.writer.lock().await;
-            write_message(&mut *writer, &msg).await
+            match writer.as_mut() {
+                Some(writer) => write_message(writer, &msg).await,
+                None => Err(AcpError::ProcessExited),
+            }
         };
         if let Err(e) = write_result {
             self.pending.lock().await.remove(&id);
@@ -225,21 +228,36 @@ impl<W: AsyncWrite + Unpin + Send + 'static> JsonRpcPeer<W> {
     pub async fn notify(&self, method: &str, params: Value) -> AcpResult<()> {
         let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         let mut writer = self.writer.lock().await;
-        write_message(&mut *writer, &msg).await
+        write_message(writer.as_mut().ok_or(AcpError::ProcessExited)?, &msg).await
     }
 
+    /// Close and release the shared output handle, including for surviving clones.
+    /// Repeated closes succeed; subsequent writes fail with `ProcessExited`.
+    ///
+    /// # Errors
+    /// Returns `ProcessExited` if the writer cannot shut down. Its handle is
+    /// released even on that error path.
     pub async fn close(&self) -> AcpResult<()> {
-        self.writer
-            .lock()
-            .await
-            .shutdown()
-            .await
-            .map_err(|_| AcpError::ProcessExited)
+        // AsyncWrite::shutdown does not necessarily close a Windows child
+        // pipe. Drop the owned handle even while reader/dispatcher clones live,
+        // so a cooperative agent observes EOF before the shutdown deadline.
+        let writer = self.writer.lock().await.take();
+        if let Some(mut writer) = writer {
+            writer
+                .shutdown()
+                .await
+                .map_err(|_| AcpError::ProcessExited)?;
+        }
+        Ok(())
     }
 
     pub async fn respond(&self, id: JsonRpcId, result: Value) -> AcpResult<()> {
         let mut writer = self.writer.lock().await;
-        write_message(&mut *writer, &response(id, result)).await
+        write_message(
+            writer.as_mut().ok_or(AcpError::ProcessExited)?,
+            &response(id, result),
+        )
+        .await
     }
 
     pub async fn respond_error(
@@ -249,7 +267,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> JsonRpcPeer<W> {
         message: impl Into<String>,
     ) -> AcpResult<()> {
         let mut writer = self.writer.lock().await;
-        write_message(&mut *writer, &error_response(id, code, message)).await
+        write_message(
+            writer.as_mut().ok_or(AcpError::ProcessExited)?,
+            &error_response(id, code, message),
+        )
+        .await
     }
 
     pub async fn complete_response(&self, id: &JsonRpcId, value: AcpResult<Value>) -> bool {
@@ -366,6 +388,40 @@ mod tests {
             Err(AcpError::Timeout(_))
         ));
         assert!(peer.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_releases_child_stdin_while_peer_clones_survive() {
+        let mut command = if cfg!(windows) {
+            let mut command = tokio::process::Command::new("cmd.exe");
+            command.args(["/d", "/c", "more >nul"]);
+            command
+        } else {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "cat >/dev/null"]);
+            command
+        };
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let peer = JsonRpcPeer::new(child.stdin.take().unwrap());
+        let other = peer.clone();
+        peer.close().await.unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .expect("cooperative child must observe EOF before all peers are dropped")
+            .unwrap();
+        assert!(status.success());
+        assert!(matches!(
+            other.request("closed", Value::Null).await,
+            Err(AcpError::ProcessExited)
+        ));
+        assert!(peer.pending.lock().await.is_empty());
+        other.close().await.unwrap();
     }
 
     #[tokio::test]

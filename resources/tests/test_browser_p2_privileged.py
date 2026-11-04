@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_browser_two_profile_p0 import BrowserTwoProfileP0Tests, REPO_ROOT, TESHI_CLI
 
@@ -15,6 +17,7 @@ class BrowserP2PrivilegedTests(BrowserTwoProfileP0Tests):
     async def asyncSetUp(self) -> None:
         self.policy_path = REPO_ROOT / ".teshi" / "browser-policy.json"
         self.original_policy = self.policy_path.read_bytes() if self.policy_path.exists() else None
+        self.addCleanup(self._restore_browser_policy)
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
         self.policy_path.write_text(
             json.dumps(
@@ -27,16 +30,17 @@ class BrowserP2PrivilegedTests(BrowserTwoProfileP0Tests):
             ),
             encoding="utf-8",
         )
-        await super().asyncSetUp()
-
-    async def asyncTearDown(self) -> None:
         try:
-            await super().asyncTearDown()
-        finally:
-            if self.original_policy is None:
-                self.policy_path.unlink(missing_ok=True)
-            else:
-                self.policy_path.write_bytes(self.original_policy)
+            await super().asyncSetUp()
+        except BaseException:
+            self._restore_browser_policy()
+            raise
+
+    def _restore_browser_policy(self) -> None:
+        if self.original_policy is None:
+            self.policy_path.unlink(missing_ok=True)
+        else:
+            self.policy_path.write_bytes(self.original_policy)
 
     @unittest.skip("P0 control loop is covered by test_browser_two_profile_p0.py")
     async def test_two_profiles_execute_concurrently_without_cross_routing(self) -> None:
@@ -122,6 +126,39 @@ class BrowserP2PrivilegedTests(BrowserTwoProfileP0Tests):
             self.assertNotIn(grant["grant"]["grant_token"], result.stderr)
         finally:
             await self.cli("lease", "release", "--session", target["session"], "--lease-token", lease_token)
+
+
+class BrowserP2SetupCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_setup_failure_restores_policy_bytes_or_removes_new_file(self) -> None:
+        async def fail_base_setup(_case: BrowserTwoProfileP0Tests) -> None:
+            raise RuntimeError("simulated browser startup failure")
+
+        for original in (None, b'{"privileged":{"allow":[]}}\n'):
+            with self.subTest(original_exists=original is not None):
+                with tempfile.TemporaryDirectory(prefix="teshi-p2-policy-") as temp_dir:
+                    project_root = Path(temp_dir)
+                    policy_path = project_root / ".teshi" / "browser-policy.json"
+                    if original is not None:
+                        policy_path.parent.mkdir(parents=True)
+                        policy_path.write_bytes(original)
+
+                    case = BrowserP2PrivilegedTests(
+                        "test_two_profiles_execute_only_with_profile_bound_grants"
+                    )
+                    with (
+                        patch(f"{__name__}.REPO_ROOT", project_root),
+                        patch.object(BrowserTwoProfileP0Tests, "asyncSetUp", fail_base_setup),
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "simulated browser startup failure"
+                        ):
+                            await case.asyncSetUp()
+                        case.doCleanups()
+
+                    if original is None:
+                        self.assertFalse(policy_path.exists())
+                    else:
+                        self.assertEqual(policy_path.read_bytes(), original)
 
 
 if __name__ == "__main__":

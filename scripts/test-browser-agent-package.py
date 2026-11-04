@@ -13,12 +13,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from package_runtime import copy_runtime, probe_rust_broker
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SOURCE = REPO_ROOT / "agent-packages" / "teshi-browser-testing"
 EXTENSION_SOURCE = REPO_ROOT / "extension" / "teshi-bridge"
-BROKER_SOURCE = REPO_ROOT / "resources" / "browser_agent_broker.py"
-BROWSER_SERVICE_SOURCE = REPO_ROOT / "resources" / "browser_service.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -72,9 +72,16 @@ def load_staged_broker(path: Path):
     return module
 
 
-def resolve_built_cli() -> Path | None:
+def resolve_built_cli(platform: str = sys.platform) -> Path | None:
     """Return a packaged teshi binary when one exists locally or in CI artifacts."""
-    exe_name = "teshi.exe" if os.name == "nt" else "teshi"
+    native_targets = {
+        "win32": ("teshi.exe", "x86_64-pc-windows-msvc"),
+        "linux": ("teshi", "x86_64-unknown-linux-gnu"),
+        "darwin": ("teshi", "aarch64-apple-darwin"),
+    }
+    if platform not in native_targets:
+        return None
+    exe_name, target = native_targets[platform]
     env_cli = os.environ.get("TESHI_CLI", "").strip()
     candidates = []
     if env_cli:
@@ -83,8 +90,10 @@ def resolve_built_cli() -> Path | None:
         [
             REPO_ROOT / "target" / "debug" / exe_name,
             REPO_ROOT / "target" / "release" / exe_name,
-            REPO_ROOT / "artifacts" / "teshi-x86_64-unknown-linux-gnu" / "teshi",
-            REPO_ROOT / "artifacts" / "teshi-x86_64-pc-windows-msvc" / "teshi.exe",
+            # Publication can download only Windows artifacts on Ubuntu.
+            # Run native smoke there only when a native binary is available;
+            # the Windows build job already probes its packaged broker.
+            REPO_ROOT / "artifacts" / f"teshi-{target}" / exe_name,
         ]
     )
     for path in candidates:
@@ -158,9 +167,22 @@ def smoke_test() -> None:
             package_root / "extension" / "teshi-bridge",
         )
         runtime = package_root / "runtime"
-        runtime.mkdir()
-        shutil.copy2(BROKER_SOURCE, runtime / BROKER_SOURCE.name)
-        shutil.copy2(BROWSER_SERVICE_SOURCE, runtime / BROWSER_SERVICE_SOURCE.name)
+        copy_runtime(runtime, ("browser_service.py",))
+        # Run from the shipped folder without checkout PYTHONPATH. This catches
+        # missing imports that loading only the broker oracle cannot detect.
+        service_probe = subprocess.run(
+            [sys.executable, "-E", "-B", str(runtime / "browser_service.py"), "--help"],
+            cwd=isolated, capture_output=True, text=True, timeout=20, check=False,
+        )
+        require(service_probe.returncode == 0, f"staged Embedded imports failed: {service_probe.stderr}")
+        retired_chrome_probe = subprocess.run(
+            [sys.executable, "-E", "-B", str(runtime / "browser_service.py"),
+             "--port", "0", "--mode", "chrome"],
+            cwd=isolated, capture_output=True, text=True, timeout=20, check=False,
+        )
+        require(retired_chrome_probe.returncode == 2
+                and "invalid choice" in retired_chrome_probe.stderr,
+                "staged Python service still accepts Chrome startup")
 
         exe_name = "teshi.exe" if os.name == "nt" else "teshi"
         built_cli = resolve_built_cli()
@@ -173,20 +195,7 @@ def smoke_test() -> None:
             shutil.copy2(built_cli, installed_cli)
             if os.name != "nt":
                 installed_cli.chmod(installed_cli.stat().st_mode | 0o111)
-            shutil.copy2(
-                BROWSER_SERVICE_SOURCE,
-                installed_share / BROWSER_SERVICE_SOURCE.name,
-            )
-            shutil.copy2(BROKER_SOURCE, installed_share / BROKER_SOURCE.name)
-
-        # Give the isolated project a runnable Python environment without copying
-        # the whole checkout-local virtualenv. The runtime resolves the base
-        # interpreter from pyvenv.cfg, while PYTHONPATH supplies its installed deps.
-        source_pyvenv = REPO_ROOT / ".venv" / "pyvenv.cfg"
-        if source_pyvenv.is_file():
-            isolated_venv = isolated / ".venv"
-            isolated_venv.mkdir()
-            shutil.copy2(source_pyvenv, isolated_venv / "pyvenv.cfg")
+            copy_runtime(installed_share, ("browser_service.py",))
 
         previous_cwd = Path.cwd()
         os.chdir(isolated)
@@ -228,6 +237,14 @@ def smoke_test() -> None:
             require(compatibility["package_version"] == version, "compatibility version drift")
             require(extension["version"] == version, "extension/CLI version drift")
             require(compatibility["broker_protocol"] == 1, "broker protocol drift")
+            runtime_contract = compatibility["chrome_runtime"]
+            require(runtime_contract["default_implementation"] == "rust", "Chrome default runtime drift")
+            require(runtime_contract["endpoint_bridge"] == "rust", "Chrome endpoint marker drift")
+            require(runtime_contract["python_required"] is False, "Chrome Python dependency drift")
+            require(runtime_contract["automatic_fallback"] is False, "Chrome fallback policy drift")
+            require(runtime_contract.get("rejected_legacy_selector") == "TESHI_BROWSER_BROKER_IMPLEMENTATION=python"
+                    and "legacy_implementation_selector" not in runtime_contract,
+                    "retired Chrome selector compatibility drift")
             require(compatibility["browser_agent_schema"] == 1, "agent schema drift")
             require(compatibility["phases"]["p0.control"]["cli"], "P0 CLI missing")
             require(compatibility["phases"]["p0.control"]["extension"], "P0 extension missing")
@@ -267,32 +284,9 @@ def smoke_test() -> None:
                 "MCP STDIO arguments drifted",
             )
 
-            if installed_cli is not None and source_pyvenv.is_file():
-                cli_env = os.environ.copy()
-                site_packages = REPO_ROOT / ".venv" / (
-                    "Lib/site-packages" if os.name == "nt" else "lib/python3/site-packages"
-                )
-                if site_packages.is_dir():
-                    cli_env["PYTHONPATH"] = str(site_packages)
-                cli_result = subprocess.run(
-                    [str(installed_cli), "browser", "sessions"],
-                    cwd=isolated,
-                    env=cli_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
-                    check=False,
-                )
-                require(
-                    cli_result.returncode == 0,
-                    "installed CLI broker bootstrap failed: "
-                    f"stdout={cli_result.stdout!r} stderr={cli_result.stderr!r}",
-                )
-                require(
-                    (isolated / ".teshi" / "cdp-endpoint.json").is_file(),
-                    "installed CLI did not write project compatibility data",
-                )
-                json.loads(cli_result.stdout)
+            if installed_cli is not None:
+                probe_rust_broker(installed_cli)
+                require(not (isolated / ".venv").exists(), "package probe must not supply a venv")
 
             broker_module = load_staged_broker(runtime / "browser_agent_broker.py")
             broker = broker_module.BrowserSessionBroker()

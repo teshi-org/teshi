@@ -141,7 +141,7 @@ impl World {
     pub fn seed_selected_directory_features(&self) -> Result<()> {
         self.write_feature(
             "selected/ok.feature",
-            "Feature: Selected\n  Scenario: Works\n    Given the page is open\n    When the action runs\n    Then the result is visible\n",
+            "@cli\nFeature: Selected\n  Scenario: Works\n    Given the project contains a valid Feature with prose and step attachments\n    When the tester runs teshi check for the valid Feature as JSON\n    Then the command succeeds\n",
         )?;
         self.write_feature(
             "sibling/broken.feature",
@@ -261,27 +261,10 @@ impl World {
 
     pub fn run_selected_directory(&mut self) -> Result<()> {
         let mut args = vec!["run".to_string(), "selected".to_string()];
-        if cfg!(windows) {
-            args.extend([
-                "--runner-cmd".to_string(),
-                "cmd.exe".to_string(),
-                "--runner-arg".to_string(),
-                "/C".to_string(),
-                "--runner-arg".to_string(),
-                "exit".to_string(),
-                "--runner-arg".to_string(),
-                "0".to_string(),
-            ]);
-        } else {
-            args.extend([
-                "--runner-cmd".to_string(),
-                "sh".to_string(),
-                "--runner-arg".to_string(),
-                "-c".to_string(),
-                "--runner-arg".to_string(),
-                "exit 0".to_string(),
-            ]);
-        }
+        args.extend([
+            "--runner-cmd".to_string(),
+            std::env::current_exe()?.to_string_lossy().into_owned(),
+        ]);
         self.run(&args).map(|_| ())
     }
 

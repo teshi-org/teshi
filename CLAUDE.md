@@ -141,6 +141,10 @@ Use comments to explain intent and decisions, not obvious syntax.
 - Add/extend tests with `cargo test`; include edge cases for parsing, bounds, and error paths.
 - Document public APIs with rustdoc comments (`/// ...`) and keep examples minimal but correct.
 - When modifying dependencies/versions, run `cargo update` (if desired) and re-run clippy + tests.
+- Install the local CLI with `cargo install --path apps/teshi-cli --profile dev` (or the
+  `scripts/install-local.ps1` / `.sh` wrappers). Never omit `--profile dev`: `cargo install`
+  defaults to `release`, which enables `lto = true` and costs a full release build each
+  iteration. No Cargo config key changes this default. See `AGENTS.md`.
 
 ## Cargo Quality Gates (`**/*.rs`)
 

@@ -15,10 +15,14 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-/// Streams and verifies a release archive into a new file.
+/// Streams a payload, resuming an existing partial file when supported.
+///
+/// The caller must hold an exclusive reservation for the destination. Network
+/// interruptions and cancellation retain partial bytes; integrity errors remove
+/// them. Every completed download is checked against the full size and SHA256.
 ///
 /// # Errors
-/// Returns cancellation, network, space, length or checksum errors. Removes partial files.
+/// Returns cancellation, network, space, length or checksum errors.
 pub fn download(
     http: &impl Http,
     candidate: &Candidate,
@@ -29,33 +33,82 @@ pub fn download(
     let parent = destination
         .parent()
         .ok_or_else(|| crate::invalid("Missing download directory"))?;
-    if fs2::available_space(parent)? < candidate.asset.size.saturating_mul(3) {
+    crate::install::reject_links(
+        parent,
+        destination
+            .strip_prefix(parent)
+            .map_err(|_| crate::invalid("Invalid payload path"))?,
+    )?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(UpdateError::new(ErrorCode::Cancelled, "Download cancelled"));
+    }
+    let mut size = match destination.metadata() {
+        Ok(metadata) if metadata.is_file() => metadata.len(),
+        Ok(_) => return Err(crate::invalid("Payload is not a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    if size >= candidate.asset.size && destination.exists() {
+        if size == candidate.asset.size && file_hash(destination)? == candidate.asset.sha256 {
+            return Ok(());
+        }
+        fs::remove_file(destination)?;
+        size = 0;
+    }
+    if fs2::available_space(parent)? < candidate.asset.size.saturating_sub(size) {
         return Err(UpdateError::new(
             ErrorCode::Io,
-            "Insufficient free space to download and stage update",
+            "Insufficient free space to download update",
         ));
     }
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(destination)?;
     let result = (|| {
-        let response = http.get(&candidate.download_url, None)?;
-        if response.status != 200 {
-            return Err(UpdateError::new(
-                ErrorCode::Network,
-                format!("Download returned HTTP {}", response.status),
-            ));
+        let mut response = if size > 0 {
+            http.get_range(&candidate.download_url, size)?
+        } else {
+            http.get(&candidate.download_url, None)?
+        };
+        if size > 0 && response.status == 416 {
+            response = http.get(&candidate.download_url, None)?;
         }
+        match response.status {
+            200 => size = 0,
+            206 if size > 0
+                && valid_range(
+                    response.content_range.as_deref(),
+                    size,
+                    candidate.asset.size,
+                ) => {}
+            206 => {
+                return Err(UpdateError::new(
+                    ErrorCode::Verification,
+                    "Invalid Content-Range for resumed payload",
+                ));
+            }
+            status => {
+                return Err(UpdateError::new(
+                    ErrorCode::Network,
+                    format!("Download returned HTTP {status}"),
+                ));
+            }
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(size == 0)
+            .append(size > 0)
+            .write(true)
+            .open(destination)?;
         let mut body = response.body;
-        let mut hash = Sha256::new();
-        let mut size = 0u64;
         let mut buffer = [0u8; 64 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(UpdateError::new(ErrorCode::Cancelled, "Download cancelled"));
             }
-            let count = body.read(&mut buffer)?;
+            let count = body.read(&mut buffer).map_err(|error| {
+                UpdateError::new(
+                    ErrorCode::Network,
+                    format!("Payload transfer interrupted: {error}"),
+                )
+            })?;
             if count == 0 {
                 break;
             }
@@ -66,7 +119,6 @@ pub fn download(
                     "Download exceeds declared size",
                 ));
             }
-            hash.update(&buffer[..count]);
             file.write_all(&buffer[..count])?;
             emit(UpdateEvent {
                 status: UpdateStatus::Downloading,
@@ -74,27 +126,44 @@ pub fn download(
                 detail: candidate.asset.name.clone(),
             });
         }
+        file.sync_all()?;
+        drop(file);
+        if size != candidate.asset.size {
+            return Err(UpdateError::new(
+                ErrorCode::Network,
+                "Payload transfer ended before declared size; partial download retained",
+            ));
+        }
         emit(UpdateEvent {
             status: UpdateStatus::Verifying,
             progress: None,
             detail: candidate.asset.name.clone(),
         });
-        if size != candidate.asset.size
-            || format!("{:x}", hash.finalize()) != candidate.asset.sha256
-        {
+        if file_hash(destination)? != candidate.asset.sha256 {
             return Err(UpdateError::new(
                 ErrorCode::Verification,
-                "Downloaded payload failed size/SHA256 validation",
+                "Downloaded payload failed SHA256 validation",
             ));
         }
-        file.sync_all()?;
         Ok(())
     })();
-    drop(file);
-    if result.is_err() {
-        let _ = fs::remove_file(destination);
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code == ErrorCode::Verification)
+    {
+        fs::remove_file(destination).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })?;
     }
     result
+}
+
+fn valid_range(header: Option<&str>, start: u64, total: u64) -> bool {
+    header == Some(format!("bytes {start}-{}/{total}", total.saturating_sub(1)).as_str())
 }
 
 /// Hashes a regular file with bounded memory.

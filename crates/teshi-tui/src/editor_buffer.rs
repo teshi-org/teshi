@@ -128,6 +128,51 @@ impl EditorBuffer {
         false
     }
 
+    /// Replace the character range between two logical source positions and
+    /// return the removed text. Positions use Unicode scalar indices, never
+    /// display-cell offsets.
+    pub fn replace_range(
+        &mut self,
+        start: (usize, usize),
+        end: (usize, usize),
+        replacement: &str,
+    ) -> String {
+        let ((start_row, start_col), (end_row, end_col)) =
+            if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+        let lo = self.line_col_to_char_idx(start_row, start_col);
+        let hi = self.line_col_to_char_idx(end_row, end_col).max(lo);
+        let removed = self.rope.slice(lo..hi).to_string();
+        self.rope.remove(lo..hi);
+        if !replacement.is_empty() {
+            self.rope.insert(lo, replacement);
+        }
+        removed
+    }
+
+    /// Delete one logical source line, including its following newline when
+    /// possible. The final remaining line becomes empty.
+    pub fn delete_line(&mut self, row: usize) -> bool {
+        if self.line_count() == 0 {
+            return false;
+        }
+        let row = row.min(self.line_count().saturating_sub(1));
+        let start = self.rope.line_to_char(row);
+        let end = if row + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(row + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        if start == end {
+            return false;
+        }
+        self.rope.remove(start..end);
+        true
+    }
+
     /// Insert a new line after `after_row` with `text` as its content.
     ///
     /// If `after_row` is beyond the last line, the text is appended at the end.
@@ -295,5 +340,22 @@ mod tests {
     fn test_text_range_full_lines() {
         let buffer = EditorBuffer::from_string("line1\nline2\nline3".to_string());
         assert_eq!(buffer.text_range((0, 0), (2, 5)), "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_replace_range_is_unicode_safe() {
+        let mut buffer = EditorBuffer::from_string("你好🙂世界".to_string());
+        let removed = buffer.replace_range((0, 2), (0, 3), "Teshi");
+        assert_eq!(removed, "🙂");
+        assert_eq!(buffer.as_string(), "你好Teshi世界");
+    }
+
+    #[test]
+    fn test_delete_line_preserves_following_source() {
+        let mut buffer = EditorBuffer::from_string("a\nb\nc".to_string());
+        assert!(buffer.delete_line(1));
+        assert_eq!(buffer.as_string(), "a\nc");
+        assert!(buffer.delete_line(1));
+        assert_eq!(buffer.as_string(), "a\n");
     }
 }

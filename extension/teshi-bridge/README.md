@@ -20,12 +20,45 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 
 1. In **Google Chrome** (or another Chromium browser), open the tabs you need on an **http(s)** page. Use one dedicated browser profile per concurrent agent.
 2. In teshi-desktop, open your project and click **Connect Chrome** in the Browser panel.
-3. Open the extension popup, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
+3. Open the extension popup, run `teshi browser pairing approve <extension-id>` with the displayed ID, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
 4. `teshi browser sessions` starts or reuses the per-user broker on `127.0.0.1:17373`; Desktop attaches to that same process. The extension sends metadata heartbeats and opens a session-authenticated WebSocket for screencast frames, low-latency correlated commands, and acknowledged network-capture batches. Heartbeat delivery is the bounded command fallback.
 5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
 6. For browser inspection and actions, use the packaged **playwright-locator** skill under `share/teshi-browser-testing/skills/`. For Gherkin binding and replay, use the **teshi** skill's binding workflow, including CLI step selection.
 
-After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then **Disconnect / Connect Chrome** in teshi-desktop so `browser_service.py` restarts if needed.
+## Extension identity upgrades
+
+Unpacked Chrome extensions do not have a stable ID across every install path, so
+`manifest.json` intentionally has no `key`. The Rust broker accepts only exact
+paired origins of the form `chrome-extension://<32-character-a-p-id>`; it never
+wildcards an extension ID or self-authorizes an extension that asks for discovery.
+The popup displays the full Chrome extension ID so it can be paired without
+guessing. Chrome startup defaults to the shared Rust broker and requires no
+Python installation or project venv. Pair the displayed ID explicitly:
+
+```bash
+teshi browser pairing list
+teshi browser pairing approve <extension-id>
+```
+
+Pairing persists per OS user, with at most 16 exact origins. Approval also updates
+a running Rust broker. Use `teshi browser pairing remove <old-extension-id>` only
+after verifying the replacement; removal revokes the origin and closes its live
+extension streams. The former `TESHI_BROWSER_BROKER_IMPLEMENTATION=python`
+switch is rejected; unset it or set it to `rust`. Teshi never falls back on a
+Rust startup failure. Embedded Playwright and WinApp still use Python.
+
+When moving an unpacked installation or changing distribution channels:
+
+1. Keep the old extension/profile installed and copy the new extension ID from its popup.
+2. Explicitly add/pair the new exact origin, then click **Connect to teshi** and verify that the existing profile label and session reconnect.
+3. Confirm that the opaque `extension_instance_id` is still present in the new installation's `chrome.storage.local` profile state and that the intended profile appears in discovery.
+4. Only after verification, remove the old extension and its old exact allowlist entry.
+
+Moving a folder may create a new Chrome ID and therefore requires re-pairing; no
+wildcard or automatic migration grant is supported. The old ID remains unchanged
+until the explicit removal step.
+
+After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then click **Connect to teshi** in the popup and refresh the Browser panel. Desktop detach does not stop the shared Rust broker.
 
 If the preview is idle or stalled:
 
@@ -60,10 +93,26 @@ Protocol version 1 is the current contract. Legacy single-profile heartbeats rem
 - `[4B magic 'TSH1'][4B meta_len LE][meta JSON][JPEG bytes]`
 - `stream_hello` JSON with `project_root`, `extension_instance_id`, and protocol version; the bridge authenticates the session before accepting binary frames.
 
-**Commands** carry a unique request ID and composite instance/window/tab target. P0 supports revision-bound snapshot refs, structured-candidate re-verification, DOM and CDP-pointer activation, typed input/waits, and lease-scoped tab/window/group lifecycle. Direct WebSocket dispatch requires the same broker-start token and atomically claims a command from the heartbeat queue; send failure restores the same request once. Replies echo request, instance, and target and mismatches are quarantined.
+**Commands** carry a unique request ID and composite instance/window/tab target. P0 supports revision-bound snapshot refs, structured-candidate re-verification, DOM and CDP-pointer activation, typed input/waits, and lease-scoped tab/window/group lifecycle. Direct WebSocket dispatch requires the same broker-start token and atomically claims a command from the heartbeat queue; only a definite pre-send failure restores the same request once, while an ambiguous transport error is never retried because the browser may already have received the mutation. Replies echo request, instance, and target and mismatches are quarantined.
+
+For reading page content, use `teshi browser scan --text-only` with the same explicit
+`--session`, `--window`, `--tab`, and `--lease-token` as a snapshot. The observational
+MCP equivalent is `get_page_text`. This operation requires P0 control and an extension
+advertising `get_page_text`; reload an older unpacked extension after updating it.
+No arbitrary-JavaScript grant is required.
+
+The collector reads rendered DOM text, includes open shadow roots and accessible
+frame documents, preserves paragraph boundaries, describes form fields, and omits
+password values and hidden content. It includes text below the viewport, but cannot
+read canvas text, closed shadow roots, or inaccessible frames. Frame access failures
+appear in `warnings`. Use `--selector` to restrict the content, `--limit` (1–100000,
+default 35000) to bound a response, and `--offset` to page through Unicode characters.
+Responses include `text`, `total_chars`, `returned_chars`, `truncated`, and
+`next_offset`. Pagination reads the current DOM on each call; restart from zero if
+the page changes. DOM traversal stops at 100000 nodes and reports `dom_node_limit`.
 
 **Filtered network capture** — the extension advertises `p1.filtered_network_capture` and `p1.network_batch_transport`. `start_network_capture` requires a broker-issued `capture_id`, one or more exact `allowed_hostnames`, `capture_request_bodies`, and `max_request_body_bytes`. The extension filters parsed HTTP(S) hostnames before body retrieval, retains bounded raw UTF-8 request bodies when enabled, and sends bounded `network_batch` messages over the authenticated WebSocket. Each event has a monotonic sequence number. Events remain in a bounded retry queue until a matching target/capture `network_ack` acknowledges a contiguous sequence; reconnects resend unacknowledged data and include cumulative drop totals.
 
 Debugger attachments are owned per tab by independent preview, command, console, and network roles. Moving the active tab migrates only preview, so captures can continue on several tabs in one profile. Tab closure or an external debugger detach terminates and reports only the affected capture. An active capture or unacknowledged batch keeps the WebSocket reconnecting even when preview is disabled.
 
-**Discovery** — `GET /v1/bridge` includes `sessions[]` with identities, health, browser versions, windows/tabs, public lease state, `extension_frame_ws_url`, and stream diagnostics. Legacy flat fields are populated only when exactly one eligible target exists.
+**Discovery** — `GET /v1/bridge` includes `sessions[]` with identities, health, browser versions, windows/tabs, public lease state, `extension_frame_ws_url`, and stream diagnostics. Legacy flat fields are populated only when exactly one eligible target exists. The extension uses a JSON `POST /v1/bridge`; Rust returns a credential only when Chromium supplies the exact configured extension `Origin`, while the public GET remains project-neutral and credential-free.

@@ -8,11 +8,12 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use teshi_core::authoring::{
-    legacy_project_requirements_dir, re_resolve_document_links, resolve_requirement_store_path,
-    testpoints_file, validate_loaded_artifacts, validate_requirement_path, AuthoringArtifacts,
-    AuthoringDiagnostic, AuthoringSeverity, DocumentRevision, RequirementDocumentContent,
-    RequirementDocumentIndex, TestPointsFile,
+    legacy_project_requirements_dir, mark_document_links_missing, re_resolve_document_links,
+    requirement_title, resolve_requirement_store_path, testpoints_file, validate_loaded_artifacts,
+    validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity,
+    DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
 };
 
 use crate::fs_util::{with_exclusive_lock, write_atomic, write_json_unlocked};
@@ -26,6 +27,11 @@ pub const DEFAULT_TESTPOINTS_DIR: &str = "testpoints";
 /// Requirement index filename inside the requirement store root.
 pub const REQUIREMENTS_INDEX_FILE: &str = "_teshi.json";
 
+/// Recoverable tombstone file inside the requirement store root.
+pub const REQUIREMENTS_TRASH_FILE: &str = "_teshi-trash.json";
+
+const REQUIREMENT_TRASH_VERSION: u32 = 1;
+
 /// Result of loading authoring artifacts from disk.
 #[derive(Debug, Clone)]
 pub struct AuthoringLoadResult {
@@ -35,8 +41,138 @@ pub struct AuthoringLoadResult {
     pub discovered: bool,
 }
 
+/// Saved content kept after a document is removed from the active index.
+///
+/// This is intentionally store-local and private to the engine boundary. The
+/// document id and body remain available for recovery, while active readers
+/// only see documents still present in `_teshi.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RequirementTombstone {
+    pub meta: teshi_core::authoring::RequirementDocumentMeta,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RequirementTrash {
+    #[serde(default = "default_requirement_trash_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub documents: Vec<RequirementTombstone>,
+}
+
+impl Default for RequirementTrash {
+    fn default() -> Self {
+        Self {
+            version: REQUIREMENT_TRASH_VERSION,
+            documents: Vec::new(),
+        }
+    }
+}
+
+fn default_requirement_trash_version() -> u32 {
+    REQUIREMENT_TRASH_VERSION
+}
+
 fn index_path(requirements_root: &Path) -> PathBuf {
     requirements_root.join(REQUIREMENTS_INDEX_FILE)
+}
+
+pub(crate) fn trash_path(requirements_root: &Path) -> PathBuf {
+    requirements_root.join(REQUIREMENTS_TRASH_FILE)
+}
+
+pub(crate) fn read_requirement_trash_unlocked(
+    requirements_root: &Path,
+) -> Result<RequirementTrash> {
+    let path = trash_path(requirements_root);
+    if !path.is_file() {
+        return Ok(RequirementTrash::default());
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let trash: RequirementTrash =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    for tombstone in &trash.documents {
+        validate_requirement_path(&tombstone.meta.path).with_context(|| {
+            format!(
+                "requirement tombstone '{}' has an unsafe path '{}'",
+                tombstone.meta.id, tombstone.meta.path
+            )
+        })?;
+    }
+    Ok(trash)
+}
+
+pub(crate) fn write_requirement_trash_unlocked(
+    requirements_root: &Path,
+    trash: &RequirementTrash,
+) -> Result<()> {
+    for tombstone in &trash.documents {
+        validate_requirement_path(&tombstone.meta.path).with_context(|| {
+            format!(
+                "requirement tombstone '{}' has an unsafe path '{}'",
+                tombstone.meta.id, tombstone.meta.path
+            )
+        })?;
+    }
+    let path = trash_path(requirements_root);
+    if trash.documents.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+        return Ok(());
+    }
+    write_json_unlocked(&path, trash).with_context(|| format!("write {}", path.display()))
+}
+
+/// Repairs an interrupted delete while the store lock is held.
+///
+/// A tombstone with an active index entry means the index replacement did not
+/// commit. Restore the body and discard that tombstone. A tombstone without an
+/// active entry is a committed deletion; remove any identical leftover body
+/// but retain the tombstone so its id stays reserved.
+pub(crate) fn recover_requirement_store_unlocked(requirements_root: &Path) -> Result<()> {
+    let index = read_requirement_index_unlocked(requirements_root)?;
+    let mut trash = read_requirement_trash_unlocked(requirements_root)?;
+    if trash.documents.is_empty() {
+        return Ok(());
+    }
+    let Some(index) = index else {
+        return Ok(());
+    };
+
+    let mut retained = Vec::with_capacity(trash.documents.len());
+    let mut changed = false;
+    for tombstone in trash.documents.drain(..) {
+        let active = index
+            .documents
+            .iter()
+            .find(|doc| doc.id == tombstone.meta.id);
+        let markdown_path =
+            resolve_requirement_store_path(requirements_root, &tombstone.meta.path)?;
+        if active.is_some() {
+            if !markdown_path.is_file() {
+                replace_markdown(&markdown_path, tombstone.body.as_bytes())?;
+            }
+            changed = true;
+        } else {
+            if markdown_path.is_file()
+                && fs::read_to_string(&markdown_path)
+                    .with_context(|| format!("read {}", markdown_path.display()))?
+                    == tombstone.body
+            {
+                fs::remove_file(&markdown_path)
+                    .with_context(|| format!("remove {}", markdown_path.display()))?;
+            }
+            retained.push(tombstone);
+        }
+    }
+    trash.documents = retained;
+    if changed {
+        write_requirement_trash_unlocked(requirements_root, &trash)?;
+    }
+    Ok(())
 }
 
 /// Runs `f` while holding the exclusive lock for `_teshi.json`.
@@ -120,7 +256,13 @@ fn merge_requirement_indexes(
             .iter_mut()
             .find(|existing| existing.id == doc.id)
         {
+            let persisted_priority = slot.priority;
+            let persisted_projects = slot.projects.clone();
             *slot = doc.clone();
+            // Priority has its own compare-and-set API. Generic index saves
+            // must not clear or overwrite a value from a stale caller.
+            slot.priority = persisted_priority;
+            slot.projects = persisted_projects;
         } else {
             merged.documents.push(doc.clone());
         }
@@ -154,7 +296,13 @@ fn upsert_saved_document(
             .iter_mut()
             .find(|existing| existing.id == meta.id)
         {
+            let persisted_priority = slot.priority;
+            let persisted_projects = slot.projects.clone();
             *slot = meta.clone();
+            // Body saves carry an in-memory snapshot and therefore cannot
+            // safely author metadata from that snapshot.
+            slot.priority = persisted_priority;
+            slot.projects = persisted_projects;
         } else {
             merged.documents.push(meta.clone());
         }
@@ -294,6 +442,11 @@ pub fn load_authoring_artifacts(
     requirements_root: &Path,
 ) -> Result<AuthoringLoadResult> {
     let index_file = index_path(requirements_root);
+    if index_file.is_file() && trash_path(requirements_root).is_file() {
+        with_requirement_store_lock(requirements_root, || {
+            recover_requirement_store_unlocked(requirements_root)
+        })?;
+    }
     let testpoints_path = testpoints_file(project_root);
     let has_index = index_file.is_file();
     let has_testpoints = testpoints_path.is_file();
@@ -396,6 +549,32 @@ pub fn load_authoring_artifacts(
     })
 }
 
+/// Returns whether a document id belongs to a committed deletion tombstone.
+///
+/// Active documents always win over a stale tombstone, which lets recovery
+/// clear an interrupted operation before an allocator makes a decision.
+pub fn is_requirement_document_id_reserved(
+    requirements_root: &Path,
+    document_id: &str,
+) -> Result<bool> {
+    if !requirements_root.exists() {
+        return Ok(false);
+    }
+    with_requirement_store_lock(requirements_root, || {
+        recover_requirement_store_unlocked(requirements_root)?;
+        let active = read_requirement_index_unlocked(requirements_root)?
+            .is_some_and(|index| index.documents.iter().any(|doc| doc.id == document_id));
+        if active {
+            return Ok(false);
+        }
+        let trash = read_requirement_trash_unlocked(requirements_root)?;
+        Ok(trash
+            .documents
+            .iter()
+            .any(|tombstone| tombstone.meta.id == document_id))
+    })
+}
+
 /// Atomically writes the requirement document index.
 ///
 /// Reloads the on-disk index under the store lock and merges incoming documents
@@ -417,7 +596,7 @@ pub fn save_requirement_document_index(
     })
 }
 
-/// Writes requirement Markdown and updates the matching index entry revision.
+/// Writes requirement Markdown and synchronizes its first-line H1 title and revision.
 ///
 /// Creates parent directories as needed. The caller must ensure `relative_path` is
 /// indexed in `index` before calling. The on-disk index is reloaded under the
@@ -426,37 +605,85 @@ pub fn save_requirement_document_index(
 ///
 /// # Errors
 ///
-/// Returns an error when the path is unsafe, the file cannot be written, or the
-/// index save fails.
+/// Returns an error when the title or path is invalid, the document is not
+/// indexed, or persistence fails. An index write failure restores the old body.
 pub fn save_requirement_markdown(
     requirements_root: &Path,
     index: &mut RequirementDocumentIndex,
     relative_path: &str,
     body: &str,
 ) -> Result<()> {
-    let markdown_path = resolve_requirement_store_path(requirements_root, relative_path)
+    resolve_requirement_store_path(requirements_root, relative_path)
         .with_context(|| format!("unsafe requirement path '{relative_path}'"))?;
+    let title = requirement_title(body)?;
 
     with_requirement_store_lock(requirements_root, || {
-        fs::create_dir_all(requirements_root).context("create requirements directory")?;
-        if let Some(parent) = markdown_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        fs::write(&markdown_path, body)
-            .with_context(|| format!("write {}", markdown_path.display()))?;
-
-        let revision = compute_document_revision(body);
-        if let Some(meta) = index.documents.iter_mut().find(|d| d.path == relative_path) {
-            meta.revision = revision;
-        }
-
+        // Work on a candidate so a failed save leaves the caller's metadata intact.
+        let mut candidate = index.clone();
+        let meta = candidate
+            .documents
+            .iter_mut()
+            .find(|d| d.path == relative_path)
+            .context("requirement document is not indexed")?;
+        meta.title = title.to_string();
+        meta.revision = compute_document_revision(body);
         let disk =
             read_requirement_index_unlocked(requirements_root)?.unwrap_or_else(|| index.clone());
-        let merged = upsert_saved_document(disk, index, relative_path)?;
-        write_requirement_index_unlocked(requirements_root, &merged)?;
+        let merged = upsert_saved_document(disk, &candidate, relative_path)?;
+        write_requirement_markdown_unlocked(requirements_root, &merged, relative_path, body)?;
         *index = merged;
         Ok(())
     })
+}
+
+/// Commits the body and index under the caller's store lock, restoring the body
+/// if the index cannot be replaced. Each individual replacement is atomic.
+///
+/// # Errors
+///
+/// Returns an error for unsafe paths, failed writes, or failed body restoration.
+pub(crate) fn write_requirement_markdown_unlocked(
+    requirements_root: &Path,
+    index: &RequirementDocumentIndex,
+    relative_path: &str,
+    body: &str,
+) -> Result<()> {
+    validate_index_document_paths(index)?;
+    let markdown_path = resolve_requirement_store_path(requirements_root, relative_path)?;
+    let previous = match fs::read(&markdown_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", markdown_path.display()))
+        }
+    };
+    replace_markdown(&markdown_path, body.as_bytes())?;
+    if let Err(error) = write_requirement_index_unlocked(requirements_root, index) {
+        let rollback = match previous {
+            Some(bytes) => replace_markdown(&markdown_path, &bytes),
+            None => fs::remove_file(&markdown_path).context("remove unsaved requirement document"),
+        };
+        rollback
+            .with_context(|| format!("{error:#}; could not restore previous requirement body"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn replace_markdown(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("requirement document has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let temp = parent.join(format!(".teshi-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+        fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Atomically updates a document's iteration without changing IDs, path, body, or revision.
@@ -509,14 +736,31 @@ fn refresh_link_resolutions(artifacts: &mut AuthoringArtifacts) {
             &mut artifacts.test_points.test_points,
         );
     }
+    let known_ids: HashSet<&str> = artifacts
+        .index
+        .documents
+        .iter()
+        .map(|doc| doc.id.as_str())
+        .collect();
+    let missing_ids: HashSet<String> = artifacts
+        .test_points
+        .test_points
+        .iter()
+        .flat_map(|tp| tp.requirement_links.iter())
+        .filter(|link| !known_ids.contains(link.document_id.as_str()))
+        .map(|link| link.document_id.clone())
+        .collect();
+    for document_id in missing_ids {
+        mark_document_links_missing(&document_id, &mut artifacts.test_points.test_points);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use teshi_core::authoring::{
-        HierarchyPath, QuoteSelector, RequirementDocumentMeta, RequirementLink, ResolutionState,
-        ReviewState, TestPoint, TextRange,
+        HierarchyPath, QuoteSelector, RequirementDocumentMeta, RequirementLink,
+        RequirementPriority, ResolutionState, ReviewState, TestPoint, TextRange,
     };
 
     fn write_sample_store(store_root: &Path, project_root: &Path) {
@@ -656,6 +900,97 @@ mod tests {
             artifacts.test_points.test_points[0].review_state,
             teshi_core::authoring::ReviewState::Proposed
         );
+    }
+
+    #[test]
+    fn reload_keeps_deleted_links_missing_and_reopens_approved_points() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_sample_store(store.path(), project.path());
+
+        let path = testpoints_file(project.path());
+        let mut test_points: TestPointsFile =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        test_points.test_points[0].review_state = ReviewState::Approved;
+        save_test_points(project.path(), &test_points).unwrap();
+
+        let index = read_requirement_index_unlocked(store.path())
+            .unwrap()
+            .expect("initialized index");
+        crate::authoring::delete_requirement_document(
+            store.path(),
+            "doc-1",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap();
+
+        let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
+        let artifacts = loaded.artifacts.expect("artifacts");
+        assert!(artifacts.documents.is_empty());
+        assert_eq!(artifacts.test_points.test_points.len(), 1);
+        let point = &artifacts.test_points.test_points[0];
+        assert_eq!(point.review_state, ReviewState::NeedsReview);
+        assert_eq!(
+            point.requirement_links[0].resolution,
+            ResolutionState::Stale
+        );
+    }
+
+    #[test]
+    fn reload_marks_deleted_links_missing_in_each_project() {
+        let store = tempfile::tempdir().unwrap();
+        let project_a = tempfile::tempdir().unwrap();
+        let project_b = tempfile::tempdir().unwrap();
+        write_sample_store(store.path(), project_a.path());
+
+        let points_path = testpoints_file(project_a.path());
+        let points: TestPointsFile =
+            serde_json::from_str(&fs::read_to_string(points_path).unwrap()).unwrap();
+        save_test_points(project_b.path(), &points).unwrap();
+
+        let index = read_requirement_index_unlocked(store.path())
+            .unwrap()
+            .expect("initialized index");
+        crate::authoring::delete_requirement_document(
+            store.path(),
+            "doc-1",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap();
+
+        for project in [project_a, project_b] {
+            let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
+            let artifacts = loaded.artifacts.expect("artifacts");
+            let point = &artifacts.test_points.test_points[0];
+            assert_eq!(point.requirement_links[0].document_id, "doc-1");
+            assert_eq!(
+                point.requirement_links[0].resolution,
+                ResolutionState::Stale
+            );
+        }
+    }
+
+    #[test]
+    fn reload_after_committed_delete_keeps_tombstone_and_reserves_id() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_sample_store(store.path(), project.path());
+        let index = read_requirement_index_unlocked(store.path())
+            .unwrap()
+            .expect("initialized index");
+
+        crate::authoring::delete_requirement_document(
+            store.path(),
+            "doc-1",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap();
+        let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
+        let artifacts = loaded.artifacts.expect("artifacts");
+        assert!(artifacts.index.documents.is_empty());
+        assert!(artifacts.documents.is_empty());
+        assert!(is_requirement_document_id_reserved(store.path(), "doc-1").unwrap());
+        assert!(trash_path(store.path()).is_file());
     }
 
     #[test]
@@ -906,7 +1241,7 @@ mod tests {
 
         let mut caller = index.clone();
         caller.documents.retain(|d| d.id == "doc-a");
-        save_requirement_markdown(store.path(), &mut caller, "a.md", "A-updated").unwrap();
+        save_requirement_markdown(store.path(), &mut caller, "a.md", "# A-updated").unwrap();
 
         let reloaded: RequirementDocumentIndex = serde_json::from_str(
             &fs::read_to_string(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
@@ -916,7 +1251,115 @@ mod tests {
         assert!(reloaded.documents.iter().any(|d| d.id == "doc-b"));
         assert_eq!(
             fs::read_to_string(store.path().join("a.md")).unwrap(),
-            "A-updated"
+            "# A-updated"
         );
+    }
+
+    #[test]
+    fn generic_index_and_markdown_saves_preserve_persisted_priority() {
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        index.documents = vec![RequirementDocumentMeta::new(
+            "doc-a",
+            "a.md",
+            "A",
+            compute_document_revision("# A\n"),
+        )];
+        fs::write(store.path().join("a.md"), "# A\n").unwrap();
+        save_requirement_document_index(store.path(), &index).unwrap();
+        super::super::service::update_requirement_document_priority(
+            store.path(),
+            "doc-a",
+            Some(RequirementPriority::P1),
+            Some(None),
+        )
+        .unwrap();
+
+        let mut stale = index.clone();
+        stale.documents[0].priority = None;
+        stale.documents[0].iteration = Some("Sprint 13".into());
+        save_requirement_document_index(store.path(), &stale).unwrap();
+
+        let mut body_snapshot = stale.clone();
+        save_requirement_markdown(store.path(), &mut body_snapshot, "a.md", "# Renamed\n").unwrap();
+        let reloaded: RequirementDocumentIndex = serde_json::from_str(
+            &fs::read_to_string(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+        )
+        .unwrap();
+        let meta = &reloaded.documents[0];
+        assert_eq!(meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(meta.iteration.as_deref(), Some("Sprint 13"));
+        assert_eq!(meta.title, "Renamed");
+    }
+
+    #[test]
+    fn markdown_save_rolls_back_body_and_metadata_when_index_write_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-1",
+            "doc-1.md",
+            "Original",
+            compute_document_revision("# Original\n"),
+        ));
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", "# Original\n").unwrap();
+        let before = index.clone();
+        let index_bytes = fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap();
+        fs::create_dir(store.path().join("_teshi.tmp")).unwrap();
+
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", "# Renamed\n")
+            .expect_err("index replacement must fail");
+        assert_eq!(index, before);
+        assert_eq!(
+            fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+            index_bytes
+        );
+        assert_eq!(
+            fs::read_to_string(store.path().join("doc-1.md")).unwrap(),
+            "# Original\n"
+        );
+
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-2",
+            "doc-2.md",
+            "New",
+            compute_document_revision("# New\n"),
+        ));
+        let before = index.clone();
+        save_requirement_markdown(store.path(), &mut index, "doc-2.md", "# New\n")
+            .expect_err("new document must not survive a failed index write");
+        assert_eq!(index, before);
+        assert!(!store.path().join("doc-2.md").exists());
+        assert_eq!(
+            fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+            index_bytes
+        );
+    }
+
+    #[test]
+    fn markdown_save_rejects_invalid_titles_before_mutating_body_or_index() {
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-1",
+            "doc-1.md",
+            "Original",
+            compute_document_revision("# Original\n"),
+        ));
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", "# Original\n").unwrap();
+        let before = index.clone();
+        let index_bytes = fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap();
+        for body in ["#", "#   \nBody", "## Wrong level", "Body\n# Later"] {
+            save_requirement_markdown(store.path(), &mut index, "doc-1.md", body).unwrap_err();
+            assert_eq!(index, before);
+            assert_eq!(
+                fs::read_to_string(store.path().join("doc-1.md")).unwrap(),
+                "# Original\n"
+            );
+            assert_eq!(
+                fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+                index_bytes
+            );
+        }
     }
 }

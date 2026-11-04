@@ -162,7 +162,7 @@ pub async fn call_llm_with_tool_config(
 
         for event in events {
             match event {
-                LlmEvent::Chunk { .. } => {}
+                LlmEvent::Chunk { .. } | LlmEvent::ReasoningChunk { .. } => {}
                 LlmEvent::ToolCallRequest { tool_calls, .. } => {
                     let tool_call = tool_calls
                         .into_iter()
@@ -288,6 +288,8 @@ pub enum LlmRequest {
 /// An event emitted by the LLM background thread.
 #[derive(Debug, Clone)]
 pub enum LlmEvent {
+    /// A streaming reasoning fragment explicitly returned by the provider.
+    ReasoningChunk { content: String },
     /// A streaming text chunk.
     Chunk { content: String },
     /// The completion finished successfully with a text response.
@@ -326,11 +328,18 @@ pub enum LlmEvent {
 pub struct LlmHandle {
     tx: Sender<LlmRequest>,
     cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl LlmHandle {
     /// Send a request to the LLM background thread.
     pub fn send(&self, request: LlmRequest) -> Result<()> {
+        anyhow::ensure!(
+            !self.shutdown.load(Ordering::SeqCst),
+            "LLM worker is stopping"
+        );
         self.tx
             .send(request)
             .context("LLM background thread has exited")
@@ -339,6 +348,30 @@ impl LlmHandle {
     /// Request cancellation of the currently in-progress request.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    /// Stop accepting requests and wake a blocked model transport or idle worker.
+    /// Retain this handle until [`Self::poll_shutdown`] confirms thread exit.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.cancel();
+    }
+
+    /// Join an exited worker without blocking the caller on an active request.
+    /// Returns false while the worker still owns its transport or queued work.
+    pub fn poll_shutdown(&mut self) -> bool {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return false;
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        true
     }
 }
 
@@ -355,13 +388,35 @@ pub fn spawn_llm(config: LlmConfig) -> (LlmHandle, Receiver<LlmEvent>) {
     let (evt_tx, evt_rx) = mpsc::channel::<LlmEvent>();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let wake_clone = Arc::clone(&wake);
 
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name("teshi-llm".into())
-        .spawn(move || run_llm_worker(config, req_rx, evt_tx, cancel_clone))
+        .spawn(move || {
+            run_llm_worker(
+                config,
+                req_rx,
+                evt_tx,
+                cancel_clone,
+                shutdown_clone,
+                wake_clone,
+            )
+        })
         .expect("failed to spawn LLM worker thread");
 
-    (LlmHandle { tx: req_tx, cancel }, evt_rx)
+    (
+        LlmHandle {
+            tx: req_tx,
+            cancel,
+            shutdown,
+            wake,
+            worker: Some(worker),
+        },
+        evt_rx,
+    )
 }
 
 // ── Background worker ────────────────────────────────────────────────────────
@@ -371,6 +426,8 @@ fn run_llm_worker(
     req_rx: Receiver<LlmRequest>,
     evt_tx: Sender<LlmEvent>,
     cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -385,7 +442,17 @@ fn run_llm_worker(
         }
     };
 
-    while let Ok(request) = req_rx.recv() {
+    while !shutdown.load(Ordering::SeqCst) {
+        let request = match req_rx.recv_timeout(std::time::Duration::from_millis(25)) {
+            Ok(request) => request,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        // A shutdown is permanent; do not reset it when a queued turn races
+        // with the UI's cancellation request.
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         // Reset cancel flag for new request
         cancel.store(false, Ordering::SeqCst);
         match request {
@@ -394,9 +461,26 @@ fn run_llm_worker(
                 messages,
                 tools,
             } => {
-                rt.block_on(process_chat_request(
-                    &config, system, messages, tools, &evt_tx, &cancel,
-                ));
+                rt.block_on(async {
+                    tokio::select! {
+                        _ = process_chat_request(&config, system, messages, tools, &evt_tx, &cancel) => {},
+                        _ = async {
+                            loop {
+                                let notified = wake.notified();
+                                if cancel.load(Ordering::SeqCst) || shutdown.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                notified.await;
+                            }
+                        } => {
+                            // Dropping the request future closes stalled HTTP
+                            // reads as well as backoff timers before thread exit.
+                            let _ = evt_tx.send(LlmEvent::Error {
+                                message: "Request cancelled by user".into(),
+                            });
+                        }
+                    }
+                });
             }
         }
     }
@@ -734,7 +818,9 @@ fn serialize_chat_content(
                     }
                     ContentBlock::Image { source } => {
                         if role != "user" {
-                            anyhow::bail!("DeepSeek Chat Completions only supports image content in user messages");
+                            anyhow::bail!(
+                                "DeepSeek Chat Completions only supports image content in user messages"
+                            );
                         }
                         let url = match source {
                             ImageSource::Url(url)
@@ -1041,6 +1127,14 @@ async fn read_chat_completions_sse(
                 let v: serde_json::Value =
                     serde_json::from_str(data).context("malformed chat-completions SSE JSON")?;
 
+                if let Some(error) = v.get("error").filter(|error| !error.is_null()) {
+                    let message = error
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("provider reported an error");
+                    anyhow::bail!("chat-completions streaming error: {message}");
+                }
+
                 if model_name.is_empty() {
                     if let Some(m) = v["model"].as_str() {
                         model_name = m.to_string();
@@ -1069,6 +1163,9 @@ async fn read_chat_completions_sse(
                     // DeepSeek V4 reasoning_content — accumulate and preserve
                     if let Some(rc) = delta["reasoning_content"].as_str() {
                         full_reasoning.push_str(rc);
+                        let _ = evt_tx.send(LlmEvent::ReasoningChunk {
+                            content: rc.to_string(),
+                        });
                     }
 
                     // Tool calls
@@ -1169,6 +1266,24 @@ mod tests {
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn idle_worker_shutdown_acknowledges_without_dropping_handle() {
+        let (mut handle, _events) = spawn_llm(base_config());
+        handle.request_shutdown();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !handle.poll_shutdown() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(handle.poll_shutdown());
+        assert!(handle
+            .send(LlmRequest::Chat {
+                system: None,
+                messages: Vec::new(),
+                tools: None
+            })
+            .is_err());
     }
 
     #[test]
@@ -1498,6 +1613,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_sse_error_preserves_partial_chunks_without_completing() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Partial result\"}}]}\n\n",
+                "data: {\"error\":{\"message\":\"controlled failure\"}}\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let error = read_chat_completions_sse(response, &tx, &Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("controlled failure"));
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Chunk { content } if content == "Partial result")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::Done { .. })));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn deepseek_sse_accumulates_reasoning_content_usage_and_finish_reason() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1550,6 +1707,16 @@ mod tests {
                 ..
             } => {
                 assert_eq!(reasoning_content.as_deref(), Some("ab"));
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter_map(|event| match event {
+                            LlmEvent::ReasoningChunk { content } => Some(content.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                    "ab"
+                );
                 assert_eq!(*input_tokens, Some(3));
                 assert_eq!(*output_tokens, Some(4));
                 assert_eq!(finish_reason.as_deref(), Some("stop"));
@@ -1607,7 +1774,11 @@ mod tests {
             );
             assert_eq!(body["thinking"]["type"], "enabled");
             let response = r#"{"model":"deepseek-flash","choices":[{"message":{"content":"recognized"},"finish_reason":"stop"}]}"#;
-            let http = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response);
+            let http = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
             socket.write_all(http.as_bytes()).await.unwrap();
         });
 

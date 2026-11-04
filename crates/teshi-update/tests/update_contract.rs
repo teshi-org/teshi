@@ -68,6 +68,7 @@ impl Http for FakeHttp {
             },
             etag: Some("test-etag".into()),
             retry_after: Some(60),
+            content_range: None,
             body: Box::new(Cursor::new(
                 self.pages
                     .get(url)
@@ -100,7 +101,7 @@ fn add_dated_release(
             format!("v{}-nightly.20260908.{}", build.semver, &build.git_sha[..7])
         }
         ReleaseChannel::Stable => format!("v{}", build.semver),
-        ReleaseChannel::Dev => format!("v{}-dev", build.semver),
+        ReleaseChannel::Dev | ReleaseChannel::Local => format!("v{}-dev", build.semver),
     };
     let prerelease = build.channel == ReleaseChannel::Nightly;
     let asset = ReleaseAsset {
@@ -308,7 +309,7 @@ fn candidate(bytes: &[u8]) -> Candidate {
 }
 
 #[test]
-fn truncated_download_and_cancellation_remove_partial_files() {
+fn truncated_download_and_cancellation_retain_resumable_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let mut http = FakeHttp::default();
     http.pages
@@ -324,9 +325,9 @@ fn truncated_download_and_cancellation_remove_partial_files() {
         )
         .unwrap_err()
         .code,
-        ErrorCode::Verification
+        ErrorCode::Network
     );
-    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"short");
     assert_eq!(
         download::download(
             &http,
@@ -339,7 +340,7 @@ fn truncated_download_and_cancellation_remove_partial_files() {
         .code,
         ErrorCode::Cancelled
     );
-    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"short");
 }
 
 #[test]
@@ -748,7 +749,7 @@ fn ownership_uses_manifest_not_package_manager_presence() {
         "teshi"
     });
     std::fs::write(&exe, b"cli").unwrap();
-    std::fs::write(unmarked.join("winget.exe"), b"pm").unwrap();
+    std::fs::write(unmarked.join("package-manager.exe"), b"pm").unwrap();
     let unknown = Installation::detect(&exe, &identity(1, 'a')).unwrap();
     assert_eq!(unknown.kind, InstallKind::Unknown);
     assert!(!unknown.can_install());
@@ -883,4 +884,19 @@ fn manifest_rejects_case_alias_and_reserved_inventory_path() {
     assert!(bundle.validate().is_ok());
     bundle.files.push(file(".teshi-update/journal.json"));
     assert!(bundle.validate().is_err());
+}
+
+#[test]
+fn local_identity_cannot_be_published_as_a_release() {
+    let mut local = identity(1, 'a');
+    local.channel = ReleaseChannel::Local;
+    teshi_update::manifest::validate_identity(&local).unwrap();
+    let published = ReleaseManifest {
+        schema: 1,
+        minimum_updater: 1,
+        identity: local,
+        tag: "v0.7.10-local.20261013.1203".into(),
+        assets: vec![],
+    };
+    assert!(published.validate().is_err());
 }

@@ -143,11 +143,18 @@ fn directory_run_validates_only_the_selected_directory() {
         .output()
         .expect("run selected directory");
 
+    // A zero exit without NDJSON completion cannot satisfy execution/evidence
+    // acceptance. It still proves the selected directory reached its runner.
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        stdout.contains("runner_exit code=Some(0) success=false"),
+        "{stdout}"
     );
+    let history = teshi_engine::replay_evidence::list_replay_runs(project.path()).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].test_status, "interrupted");
+    assert_eq!(history[0].evidence.not_executed, 3);
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("missing_step_separator"),
         "sibling diagnostic leaked into selected run: {}",

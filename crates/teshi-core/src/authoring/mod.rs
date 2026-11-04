@@ -18,15 +18,17 @@ pub use positions::{
     slice_by_char_range,
 };
 pub use requirements::{
-    DocumentRevision, InvalidIterationName, InvalidRequirementPath, InvalidRequirementStoreId,
-    REQUIREMENT_INDEX_FILE, REQUIREMENT_INDEX_VERSION, RequirementDocumentIndex,
-    RequirementDocumentMeta, RequirementGroupMode, RequirementIterationFilter, RequirementStoreId,
+    DocumentRevision, InvalidIterationName, InvalidRequirementPath, InvalidRequirementPriority,
+    InvalidRequirementStoreId, InvalidRequirementTitle, REQUIREMENT_INDEX_FILE,
+    REQUIREMENT_INDEX_VERSION, RequirementDocumentIndex, RequirementDocumentMeta,
+    RequirementGroupMode, RequirementIterationFilter, RequirementPriority,
+    RequirementProjectFilter, RequirementProjectStatus, RequirementStoreId,
     UNASSIGNED_ITERATION_LABEL, is_safe_requirement_path, normalize_iteration_name,
-    resolve_requirement_store_path, validate_requirement_path,
+    requirement_title, resolve_requirement_store_path, validate_requirement_path,
 };
 pub use resolve::{
-    ANCHOR_CONTEXT_CHARS, create_requirement_link, re_resolve_document_links,
-    resolve_requirement_link,
+    ANCHOR_CONTEXT_CHARS, create_requirement_link, mark_document_links_missing,
+    re_resolve_document_links, resolve_requirement_link,
 };
 pub use scenario_links::{
     TESHI_TP_TAG_PREFIX, format_teshi_tp_tag, merge_scenario_tags, parse_teshi_tp_tags,

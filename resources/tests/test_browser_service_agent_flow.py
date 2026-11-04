@@ -8,19 +8,16 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
 
-from browser_agent_broker import BrokerError  # noqa: E402
+from browser_agent_broker import MAX_COMMAND_QUEUE, BrokerError  # noqa: E402
 from browser_service import (  # noqa: E402
     MAX_BROWSER_ARTIFACT_BYTES,
     MAX_BROWSER_WS_MESSAGE_BYTES,
-    ChromeBridge,
-    _http_response,
-    authenticated_http_post,
-    authenticated_websocket_path,
     cleanup_managed_browser_artifacts,
     load_browser_privileged_policy,
     managed_browser_artifact_path,
@@ -29,10 +26,23 @@ from browser_service import (  # noqa: E402
     validate_browser_upload_files,
 )
 
+from chrome_broker_oracle import ChromeBridge, _http_response, authenticated_http_post, authenticated_websocket_path
+
 from test_browser_agent_broker import heartbeat, target  # noqa: E402
 
 
 class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_shared_evidence_limits_match_python_wire_contract(self) -> None:
+        fixture = json.loads(
+            (RESOURCES / "browser_contract_fixtures.json").read_text(encoding="utf-8")
+        )["migration_contracts"]["evidence_limits"]
+        self.assertEqual(MAX_BROWSER_ARTIFACT_BYTES, fixture["screenshot_max_bytes"])
+        self.assertEqual(
+            MAX_BROWSER_WS_MESSAGE_BYTES, fixture["websocket_max_message_bytes"]
+        )
+        self.assertEqual(fixture["preview_frame_meta"]["tab_id"], 42)
+        self.assertEqual(fixture["preview_frame_meta"]["seq"], 1)
+
     def test_encoded_artifact_fits_bounded_command_transport(self) -> None:
         encoded_bytes = ((MAX_BROWSER_ARTIFACT_BYTES + 2) // 3) * 4
         envelope_allowance = 1024 * 1024
@@ -67,12 +77,19 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_privileged_grant_cli_flow_is_default_deny_and_lists_no_token(self) -> None:
         await self.register("profile-a")
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=self.project_root,
+            caller_label="teshi-cli",
+        )
         command = {
             "cmd": "create_browser_capability_grant",
             "request_id": "grant-1",
             "target": target("profile-a"),
             "lease_token": lease["lease_token"],
+            "project_root": str(self.project_root),
             "capability": "javascript",
             "caller_label": "teshi-cli",
             "non_interactive": True,
@@ -107,7 +124,13 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             ["execute_privileged_javascript", "execute_privileged_cdp"]
         )
         await self.bridge.handle_heartbeat(payload)
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=self.project_root,
+            caller_label="teshi-cli",
+        )
         policy = self.project_root / ".teshi" / "browser-policy.json"
         policy.parent.mkdir(parents=True, exist_ok=True)
         policy.write_text(
@@ -148,6 +171,7 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         common = {
             "target": target("profile-a"),
             "lease_token": lease["lease_token"],
+            "project_root": str(self.project_root),
             "caller_label": "teshi-cli",
         }
         denied = await self.bridge.forward_command(
@@ -214,7 +238,13 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             "extension_management": True,
         }
         await self.bridge.handle_heartbeat(payload)
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=self.project_root,
+            caller_label="teshi-cli",
+        )
 
         def grant(capability: str) -> dict:
             return self.bridge.broker.create_capability_grant(
@@ -262,6 +292,7 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.bridge._direct_command_callback = direct
         base = {
             "target": target("profile-a"), "lease_token": lease["lease_token"],
+            "project_root": str(self.project_root),
             "caller_label": "teshi-cli",
         }
         metadata = await self.bridge.forward_command({
@@ -321,6 +352,10 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             17373,
             "ws://127.0.0.1:20254/extension/frames",
         )
+        # These legacy flow fixtures intentionally exercise the pre-scope
+        # direct Broker API. The production ChromeBridge path enables scoped
+        # leases; the dedicated scope test covers its fail-closed behavior.
+        self.bridge.broker.enforce_scoped_leases = False
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -408,7 +443,13 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(artifact["path"]).exists())
 
         await self.register("profile-a")
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=other_root,
+            caller_label="teshi-cli",
+        )
         policy = other_root / ".teshi" / "browser-policy.json"
         policy.parent.mkdir(parents=True, exist_ok=True)
         policy.write_text(
@@ -619,6 +660,60 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             self.profile_heartbeat("profile-a")
         )
         self.assertIsNone(heartbeat_result["cmd"])
+
+    async def test_ambiguous_direct_send_is_not_retried_by_heartbeat(self) -> None:
+        await self.register("profile-a")
+        lease = await self.acquire("profile-a")
+
+        async def ambiguous_direct(instance_id: str, command: dict) -> bool:
+            asyncio.create_task(
+                self.respond_to_snapshot(instance_id, command, "Save Ambiguous")
+            )
+            raise RuntimeError("transport failed after the write may have completed")
+
+        self.bridge._direct_command_callback = ambiguous_direct
+        result = await self.bridge.forward_command(
+            {
+                "cmd": "get_page_snapshot",
+                "request_id": "ambiguous-direct",
+                "target": target("profile-a"),
+                "lease_token": lease,
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["request_id"], "ambiguous-direct")
+        heartbeat_result = await self.bridge.handle_heartbeat(
+            self.profile_heartbeat("profile-a")
+        )
+        self.assertIsNone(heartbeat_result["cmd"])
+
+    async def test_full_fallback_queue_fails_without_overflowing_the_queue(self) -> None:
+        await self.register("profile-a")
+        lease = await self.acquire("profile-a")
+        record = self.bridge.broker.sessions["profile-a"]
+
+        async def unavailable_direct(_instance_id: str, _command: dict) -> bool:
+            record.command_queue.extend(
+                {"request_id": f"queue-filler-{index}"}
+                for index in range(MAX_COMMAND_QUEUE)
+            )
+            return False
+
+        self.bridge._direct_command_callback = unavailable_direct
+        result = await self.bridge.forward_command(
+            {
+                "cmd": "get_page_snapshot",
+                "request_id": "fallback-queue-full",
+                "target": target("profile-a"),
+                "lease_token": lease,
+            }
+        )
+        self.assertEqual(result["code"], "browser_session_busy")
+        self.assertEqual(len(record.command_queue), MAX_COMMAND_QUEUE)
+        self.assertNotIn(
+            "fallback-queue-full",
+            [command.get("request_id") for command in record.command_queue],
+        )
 
     async def test_structured_candidate_is_reverified_and_forwarded_without_css_loss(self) -> None:
         await self.register("profile-a")
@@ -882,6 +977,26 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(item["target"]["extension_instance_id"] == "profile-a" for item in delivered)
         )
+
+    async def test_activate_tab_releases_scoped_ui_lease_when_queue_rejects(self) -> None:
+        await self.register("profile-a")
+        self.bridge.broker.enforce_scoped_leases = True
+        with patch.object(
+            self.bridge.broker,
+            "queue_command",
+            side_effect=BrokerError("browser_session_busy", "test queue rejection"),
+        ):
+            result = await self.bridge.handle_activate_tab_http(
+                {
+                    "project_root": str(self.project_root),
+                    "extension_instance_id": "profile-a",
+                    "window_id": 7,
+                    "tab_id": 42,
+                }
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "browser_session_busy")
+        self.assertIsNone(self.bridge.broker.sessions["profile-a"].lease)
 
     async def test_two_extensions_complete_in_reverse_order_without_crossing(self) -> None:
         await self.register("profile-a")
@@ -1428,6 +1543,10 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         actions = [item for item in delivered if item["cmd"] == "execute_locator"]
         self.assertEqual(len(actions), 1)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["code"], "browser_wait_timeout")
+        self.assertTrue(result["recovery"]["action_executed"])
+        self.assertIn("do not retry", result["recovery"]["retry"])
         self.assertTrue(actions[0]["monitor"])
         self.assertTrue(result["action_outcome"]["ok"])
         self.assertEqual(result["wait_outcome"]["code"], "browser_wait_timeout")

@@ -114,6 +114,12 @@ impl AgentLoader {
     /// the success list. Non-fatal issues (missing sub-agent) are recorded
     /// in the agent's `missing_sub_agents` field but the agent itself loads.
     pub fn load_all(&self) -> (Vec<AgentDefinition>, Vec<LoadError>) {
+        let (definitions, errors, _) = self.load_with_origin();
+        (definitions, errors)
+    }
+
+    /// Retains fallback provenance so a custom profile named Default is not hidden.
+    pub(crate) fn load_with_origin(&self) -> (Vec<AgentDefinition>, Vec<LoadError>, bool) {
         // Phase 1: scan all tiers → raw definitions
         let mut raws: HashMap<String, AgentDefinitionRaw> = HashMap::new();
         let mut dirs: HashMap<String, PathBuf> = HashMap::new();
@@ -133,12 +139,13 @@ impl AgentLoader {
         // If no agents found on disk, use the built-in minimal fallback.
         // This is the only scenario where built-in code runs.
         if raws.is_empty() {
-            return (vec![builtin_minimal()], vec![]);
+            return (vec![builtin_minimal()], vec![], true);
         }
 
         // Phase 2 & 3: resolve paths + sub-agents
         let mut resolver = Resolver::new(raws, dirs, self.project_dir.clone());
-        resolver.resolve_all()
+        let (definitions, errors) = resolver.resolve_all();
+        (definitions, errors, false)
     }
 }
 

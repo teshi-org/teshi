@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 7,
+      "text": "a chat using the built-in Default profile",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:/Dev/Rust/teshi/dev/target/debug/teshi.exe",
+            "args": [
+              "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/project",
+              "--requirements-root",
+              "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/requirements"
+            ],
+            "cwd": "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture",
+            "env": [
+              [
+                "APPDATA",
+                "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:/Dev/Rust/teshi/dev/.teshi/feature-replays/fixture/sessions"
+              ],
+              [
+                "TESHI_TUI_RUNNER",
+                "D:/Dev/Rust/teshi/dev/target/debug/teshi-tui-runner.exe"
+              ]
+            ],
+            "cols": 140,
+            "rows": 40
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 8,
+      "text": "I open the chat",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 9,
+      "text": "the title omits the Default suffix",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "AI Chat",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "Agent: Default",
+          "visible": false,
+          "timeout_ms": 3000,
+          "stable_ms": 500
+        }
+      ]
+    }
+  ]
+}

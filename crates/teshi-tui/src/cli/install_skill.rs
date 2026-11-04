@@ -25,7 +25,7 @@ const REQUIRED_SKILL: &str = "playwright-locator";
 
 const MISSING_SOURCE_HINT: &str = "\
 could not find bundled skills at share/teshi-browser-testing/skills next to the teshi CLI.
-Install teshi with WinGet (`winget install teshi-org.teshi`) or a GitHub Release archive \
+Install teshi with the Windows MSI or a GitHub Release archive \
 so the share tree is installed beside the CLI, then retry `teshi install-skill`.
 Do not download SKILL.md from GitHub.";
 
@@ -520,12 +520,12 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_source_points_at_winget_not_github_skill_download() {
+    fn test_missing_source_points_at_msi_not_github_skill_download() {
         let root = TempDir::new().unwrap();
         let exe = root.path().join("empty").join("teshi");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         let error = resolve_skill_roots(&exe).unwrap_err().to_string();
-        assert!(error.contains("winget install teshi-org.teshi"), "{error}");
+        assert!(error.contains("Windows MSI"), "{error}");
         assert!(
             error.contains("Do not download SKILL.md from GitHub"),
             "{error}"

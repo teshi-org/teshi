@@ -1,0 +1,4751 @@
+//! Bounded loopback HTTP and authenticated WebSocket transport.
+
+use std::collections::HashMap;
+use std::io::{self, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::body::Bytes;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, OriginalUri, State};
+use axum::http::header::{
+    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN, VARY,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
+use tokio::net::TcpListener;
+use tokio::sync::{RwLock, Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{interval, timeout};
+use tower::ServiceBuilder;
+use tower::limit::ConcurrencyLimitLayer;
+use uuid::Uuid;
+
+use crate::credential::{PrivateBrokerCredential, PrivateCredentialStore, create_identity_proof};
+use crate::pairing::{PairingStore, TrustedExtensionOrigin, validate_origin};
+use crate::protocol::{
+    BROWSER_BROKER_IDENTITY_CHALLENGE_PATH, BROWSER_BROKER_PROTOCOL_VERSION,
+    BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode, BrokerIdentityChallenge,
+    BrowserTarget, DiscoveryResponse, EndpointRecord, ExtensionHeartbeat, ExtensionResponse,
+    ExtensionStreamMessage, MAX_CONTROL_MESSAGE_BYTES, MAX_HTTP_BODY_BYTES,
+    MAX_WEBSOCKET_CONNECTIONS, MAX_WEBSOCKET_MESSAGE_BYTES, NetworkBatch, OperationRequest,
+    PreviewFrameMetadata,
+};
+
+const EXTENSION_FRAME_WS_PATH: &str = "/extension/frames";
+const TSH1_MAGIC: &[u8; 4] = b"TSH1";
+const MAX_PREVIEW_META_BYTES: usize = 65_536;
+const MAX_PREVIEW_JPEG_BYTES: usize = 50 * 1024 * 1024;
+const MAX_PREVIEW_WIDTH: u16 = 1_920;
+const MAX_PREVIEW_HEIGHT: u16 = 1_080;
+const MAX_PREVIEW_PIXELS: u32 = (MAX_PREVIEW_WIDTH as u32) * (MAX_PREVIEW_HEIGHT as u32);
+const MAX_EVENT_RESPONSE_WAIT: Duration = Duration::from_secs(30);
+const WS_WRITE_BUFFER_BYTES: usize = 64 * 1024;
+const WS_MAX_WRITE_BUFFER_BYTES: usize = MAX_WEBSOCKET_MESSAGE_BYTES;
+const HTTP_CONCURRENCY: usize = 64;
+const MAX_REQUEST_HEADER_BYTES: usize = 4 * 1024;
+const MAX_REQUEST_HEADER_COUNT: usize = 64;
+const MAX_EXTENSION_STREAMS: usize = 8;
+const MAX_EVENT_QUEUE_CAPACITY: usize = 1024;
+const MAX_PUBLICATION_QUEUE_CAPACITY: usize = 64;
+const MAX_BROKER_FEATURES: usize = 64;
+const EXTENSION_OUTBOUND_QUEUE_CAPACITY: usize = 16;
+const MAX_CLIENT_IN_FLIGHT_OPERATIONS: usize = 64;
+struct BrokerOutgoingMessage {
+    message: Message,
+    _budget: tokio::sync::OwnedSemaphorePermit,
+}
+struct ClientOutgoingMessage {
+    message: Message,
+    _budget: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+type ExtensionStreamSender = mpsc::Sender<BrokerOutgoingMessage>;
+type StreamRegistry = Arc<RwLock<HashMap<String, (u64, ExtensionStreamSender)>>>;
+type StreamOrigin = (u64, Arc<str>);
+type StreamOriginRegistry = Arc<RwLock<HashMap<String, StreamOrigin>>>;
+
+/// Settings for one in-process broker server. Production callers use loopback and
+/// port 17373; tests may bind port zero to avoid touching a user's running broker.
+#[derive(Clone)]
+pub struct BrokerServerConfig {
+    /// Must be a loopback address; non-loopback binds are rejected.
+    pub discovery_addr: SocketAddr,
+    /// Exact Chrome extension Origins explicitly paired with this OS user.
+    pub trusted_extension_origins: Vec<String>,
+    /// Optional durable per-user pairing store. Development/test origins in
+    /// `trusted_extension_origins` are merged at runtime but never persisted.
+    pub pairing_store: Option<PairingStore>,
+    /// Private credential destination used when a live pairing is approved or
+    /// revoked through the local admin API.
+    pub credential_store: Option<PrivateCredentialStore>,
+    /// Cryptographically random per-broker bearer secret.
+    pub token: String,
+    /// Broker start identity used to reject stale endpoint/process metadata.
+    pub broker_start_id: String,
+    /// Features served by this broker generation.
+    pub broker_features: Vec<String>,
+    /// Bound for body parsing, message buffering and per-socket write buffering.
+    pub max_websocket_message_bytes: usize,
+    /// Upper bound on concurrent upgraded WebSocket connections.
+    pub max_websocket_connections: usize,
+    /// Upper bound on active Chrome Profile extension streams.
+    pub max_extension_streams: usize,
+    /// Bounded handoff queue to the state machine.
+    pub event_queue_capacity: usize,
+    /// Bytes retained by parsed events until the state owner drops them.
+    pub queued_event_bytes: usize,
+    /// Deadline for state-machine replies and extension acknowledgements.
+    pub event_response_timeout: Duration,
+}
+
+impl BrokerServerConfig {
+    /// Construct the standard per-user loopback listener configuration.
+    pub fn new(trusted_extension_origin: impl Into<String>) -> Self {
+        Self::with_trusted_extension_origins(vec![trusted_extension_origin.into()])
+    }
+
+    /// Construct a configuration for a bounded set of explicitly paired IDs.
+    pub fn with_trusted_extension_origins(mut trusted_extension_origins: Vec<String>) -> Self {
+        trusted_extension_origins.sort();
+        Self {
+            discovery_addr: SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                crate::protocol::CHROME_DISCOVERY_PORT,
+            ),
+            trusted_extension_origins,
+            pairing_store: None,
+            credential_store: None,
+            token: generate_broker_token(),
+            broker_start_id: Uuid::new_v4().simple().to_string(),
+            // Features are enabled only by the runtime after their state machine
+            // has registered. The transport alone must not promise control.
+            broker_features: Vec::new(),
+            max_websocket_message_bytes: MAX_WEBSOCKET_MESSAGE_BYTES,
+            max_websocket_connections: MAX_WEBSOCKET_CONNECTIONS,
+            max_extension_streams: MAX_EXTENSION_STREAMS,
+            event_queue_capacity: 256,
+            queued_event_bytes: crate::protocol::MAX_QUEUED_EVENT_BYTES,
+            event_response_timeout: MAX_EVENT_RESPONSE_WAIT,
+        }
+    }
+
+    /// Attach the existing per-user state directory without creating a second
+    /// storage convention. The pairing and generation credential files remain
+    /// siblings beneath this private directory.
+    pub fn with_persistent_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
+        let state_dir = state_dir.into();
+        self.pairing_store = Some(PairingStore::new(&state_dir));
+        self.credential_store = Some(PrivateCredentialStore::new(state_dir));
+        self
+    }
+
+    fn validate(&self) -> Result<(), BrokerError> {
+        if !self.discovery_addr.ip().is_loopback() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "Chrome broker listeners must bind to loopback",
+            ));
+        }
+        if self.trusted_extension_origins.len() > crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
+            || self
+                .trusted_extension_origins
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self
+                .trusted_extension_origins
+                .iter()
+                .any(|origin| !valid_extension_origin(origin))
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerOriginDenied,
+                "trusted extension origins must be unique exact Chrome extension IDs within the configured limit",
+            ));
+        }
+        if self.token.len() < 32 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "broker token is shorter than the minimum credential length",
+            ));
+        }
+        if self.broker_start_id.is_empty()
+            || self.broker_start_id.len() > 128
+            || self.event_queue_capacity == 0
+            || self.event_queue_capacity > MAX_EVENT_QUEUE_CAPACITY
+            || self.max_websocket_connections == 0
+            || self.max_websocket_connections > MAX_WEBSOCKET_CONNECTIONS
+            || self.max_extension_streams == 0
+            || self.max_extension_streams > MAX_EXTENSION_STREAMS
+            || self.broker_features.len() > MAX_BROKER_FEATURES
+            || self
+                .broker_features
+                .iter()
+                .any(|feature| feature.len() > 128)
+            || self.token.len() > 512
+            || self.max_websocket_message_bytes < 1024
+            || self.max_websocket_message_bytes > MAX_WEBSOCKET_MESSAGE_BYTES
+            || self.queued_event_bytes < self.max_websocket_message_bytes
+            || self.queued_event_bytes > 512 * 1024 * 1024
+            || self.event_response_timeout.is_zero()
+            || self.event_response_timeout > Duration::from_secs(300)
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "broker limits or start identity are invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Transport events consumed by the broker state machine. Network and filesystem
+/// work belongs to the consumer; the transport never holds a registry lock over I/O.
+pub enum BrokerEvent {
+    Heartbeat {
+        payload: ExtensionHeartbeat,
+        reply: oneshot::Sender<Value>,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    Operation {
+        request: OperationRequest,
+        reply: oneshot::Sender<Result<Value, BrokerError>>,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    ExtensionResponse {
+        extension_instance_id: String,
+        generation: Option<u64>,
+        response: ExtensionResponse,
+        reply: Option<oneshot::Sender<Value>>,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    ExtensionHttpMessage {
+        path: String,
+        extension_instance_id: Option<String>,
+        /// WebSocket messages carry the stream generation that was current
+        /// when the transport accepted them. HTTP diagnostic messages may
+        /// repeat the extension's payload generation; teardown messages can
+        /// omit it after the WebSocket has already closed.
+        generation: Option<u64>,
+        payload: Value,
+        reply: oneshot::Sender<Value>,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    ExtensionConnected {
+        hello: ExtensionStreamMessage,
+        generation: u64,
+        reply: oneshot::Sender<Value>,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    ExtensionDisconnected {
+        extension_instance_id: String,
+        generation: u64,
+    },
+    /// Explicit trust removal is stronger than a transient stream disconnect:
+    /// clear all request and capture state for the affected live sessions.
+    ExtensionTrustRevoked {
+        extension_instance_ids: Vec<String>,
+    },
+    NetworkBatch {
+        batch: NetworkBatch,
+        /// The authenticated WebSocket generation that accepted this batch.
+        /// This is transport authority and is intentionally not supplied by
+        /// the extension payload.
+        generation: u64,
+        reply: oneshot::Sender<Value>,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    PreviewFrame {
+        target: BrowserTarget,
+        seq: u64,
+        url: String,
+        jpeg: Bytes,
+        /// The validated TSH1 envelope, retained for zero-reencoding
+        /// publication to browser UI clients.
+        frame: Bytes,
+        _budget: tokio::sync::OwnedSemaphorePermit,
+    },
+    FrameError {
+        extension_instance_id: String,
+        error: String,
+    },
+    Subscribe {
+        owner_id: String,
+        extension_instance_id: String,
+        target: Option<BrowserTarget>,
+        request_id: String,
+        reply: oneshot::Sender<Result<Value, BrokerError>>,
+    },
+    Unsubscribe {
+        owner_id: String,
+    },
+    SubscriptionActive {
+        owner_id: String,
+        target: BrowserTarget,
+        reply: oneshot::Sender<bool>,
+    },
+}
+
+/// A target-scoped update to a CLI/desktop/daemon browser subscriber.
+#[derive(Debug, Clone)]
+pub struct BrokerPublication {
+    pub target: BrowserTarget,
+    pub frame: Bytes,
+    /// Owners that still hold this target subscription when the state owner
+    /// accepted the frame. The transport uses this set in addition to its
+    /// local target filter so navigation and disconnect cleanup cannot leave
+    /// a stale socket subscribed by accident.
+    pub owner_ids: Arc<[String]>,
+}
+
+#[derive(Clone)]
+struct ServerState {
+    trusted_extension_origins: Arc<StdRwLock<Vec<Arc<str>>>>,
+    configured_extension_origins: Arc<Vec<Arc<str>>>,
+    pairing_store: Option<PairingStore>,
+    credential_store: Option<PrivateCredentialStore>,
+    pending_pairings: Arc<tokio::sync::RwLock<Vec<PendingExtensionPairing>>>,
+    token: Arc<str>,
+    start_id: Arc<str>,
+    broker_features: Arc<Vec<String>>,
+    discovery_addr: SocketAddr,
+    websocket_addr: SocketAddr,
+    websocket_base_url: Arc<str>,
+    discovery_base_url: Arc<str>,
+    events: mpsc::Sender<BrokerEvent>,
+    event_byte_budget: Arc<Semaphore>,
+    websocket_slots: Arc<Semaphore>,
+    extension_stream_slots: Arc<Semaphore>,
+    streams: StreamRegistry,
+    stream_origins: StreamOriginRegistry,
+    revocations: broadcast::Sender<Arc<str>>,
+    publications: broadcast::Sender<BrokerPublication>,
+    next_stream_generation: Arc<std::sync::atomic::AtomicU64>,
+    max_websocket_message_bytes: usize,
+    response_timeout: Duration,
+}
+
+/// Untrusted extension metadata retained only until the user explicitly
+/// approves the authoritative HTTP Origin. Claims never become trust keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingExtensionPairing {
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_extension_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_label: Option<String>,
+    pub first_seen_at_ms: u64,
+    pub last_seen_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingApprovalRequest {
+    origin: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// Running loopback broker listeners and the event queue used by the state owner.
+pub struct BrokerRuntime {
+    state: ServerState,
+    events: mpsc::Receiver<BrokerEvent>,
+    shutdown: watch::Sender<bool>,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl BrokerRuntime {
+    /// Bind both loopback listeners, refusing an occupied discovery port without
+    /// signalling, killing, or sending any data to the process that owns it.
+    pub async fn start(config: BrokerServerConfig) -> Result<Self, BrokerError> {
+        config.validate()?;
+
+        let durable_pairings = config
+            .pairing_store
+            .as_ref()
+            .map(PairingStore::load)
+            .transpose()?
+            .unwrap_or_default();
+        let effective_origins = merge_extension_origins(
+            &config.trusted_extension_origins,
+            durable_pairings.iter().map(|record| record.origin.as_str()),
+        )?;
+
+        // Bind fixed discovery first so an unrelated existing listener is reported
+        // before any dynamic socket is allocated.
+        let discovery_listener =
+            TcpListener::bind(config.discovery_addr)
+                .await
+                .map_err(|error| {
+                    BrokerError::new(
+                        BrokerErrorCode::BrowserUnavailable,
+                        format!("cannot bind loopback broker discovery listener: {error}"),
+                    )
+                })?;
+        let discovery_addr = discovery_listener.local_addr().map_err(|error| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserUnavailable,
+                format!("cannot inspect discovery listener: {error}"),
+            )
+        })?;
+        let websocket_listener =
+            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .await
+                .map_err(|error| {
+                    BrokerError::new(
+                        BrokerErrorCode::BrowserUnavailable,
+                        format!("cannot bind dynamic loopback WebSocket listener: {error}"),
+                    )
+                })?;
+        let websocket_addr = websocket_listener.local_addr().map_err(|error| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserUnavailable,
+                format!("cannot inspect WebSocket listener: {error}"),
+            )
+        })?;
+
+        let (event_tx, event_rx) = mpsc::channel(config.event_queue_capacity);
+        let (publication_tx, _) = broadcast::channel(MAX_PUBLICATION_QUEUE_CAPACITY);
+        let (revocation_tx, _) = broadcast::channel(MAX_EXTENSION_STREAMS);
+        let configured_extension_origins = Arc::new(
+            config
+                .trusted_extension_origins
+                .into_iter()
+                .map(Arc::<str>::from)
+                .collect::<Vec<_>>(),
+        );
+        let state = ServerState {
+            trusted_extension_origins: Arc::new(StdRwLock::new(
+                effective_origins
+                    .into_iter()
+                    .map(Arc::<str>::from)
+                    .collect(),
+            )),
+            configured_extension_origins,
+            pairing_store: config.pairing_store,
+            credential_store: config.credential_store,
+            pending_pairings: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            token: Arc::from(config.token),
+            start_id: Arc::from(config.broker_start_id),
+            broker_features: Arc::new(config.broker_features),
+            discovery_addr,
+            websocket_addr,
+            websocket_base_url: Arc::from(format!("ws://127.0.0.1:{}", websocket_addr.port())),
+            discovery_base_url: Arc::from(format!(
+                "http://127.0.0.1:{}/v1/bridge",
+                discovery_addr.port()
+            )),
+            events: event_tx,
+            event_byte_budget: Arc::new(Semaphore::new(config.queued_event_bytes)),
+            websocket_slots: Arc::new(Semaphore::new(config.max_websocket_connections)),
+            extension_stream_slots: Arc::new(Semaphore::new(config.max_extension_streams)),
+            streams: Arc::new(RwLock::new(HashMap::new())),
+            stream_origins: Arc::new(RwLock::new(HashMap::new())),
+            revocations: revocation_tx,
+            publications: publication_tx,
+            next_stream_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            max_websocket_message_bytes: config.max_websocket_message_bytes,
+            response_timeout: config.event_response_timeout,
+        };
+
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let discovery_app = discovery_router(state.clone());
+        let websocket_app = websocket_router(state.clone());
+        let tasks = vec![
+            spawn_server(discovery_listener, discovery_app, shutdown_rx.clone()),
+            spawn_server(websocket_listener, websocket_app, shutdown_rx),
+        ];
+
+        Ok(Self {
+            state,
+            events: event_rx,
+            shutdown,
+            tasks,
+        })
+    }
+
+    /// Receive the next bounded transport event for state-machine processing.
+    pub async fn next_event(&mut self) -> Option<BrokerEvent> {
+        self.events.recv().await
+    }
+
+    /// Subscribe to target-scoped browser updates published by the state owner.
+    pub fn subscribe_publications(&self) -> broadcast::Receiver<BrokerPublication> {
+        self.state.publications.subscribe()
+    }
+
+    /// Publish one already-authorized target event to browser UI clients.
+    pub fn publish(&self, publication: BrokerPublication) -> Result<(), BrokerError> {
+        if publication.frame.is_empty() || publication.frame.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview publication exceeds the binary frame limit",
+            ));
+        }
+        let (metadata, _, _) = parse_tsh1_frame(publication.frame.clone())?;
+        let frame_target = BrowserTarget {
+            extension_instance_id: metadata.extension_instance_id,
+            window_id: metadata.window_id,
+            tab_id: metadata.tab_id,
+        };
+        if frame_target != publication.target {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "preview publication target does not match its TSH1 metadata",
+            ));
+        }
+        self.state
+            .publications
+            .send(publication)
+            .map(|_| ())
+            .map_err(|_| {
+                BrokerError::new(
+                    BrokerErrorCode::BrowserUnavailable,
+                    "no browser UI subscriber is currently connected",
+                )
+            })
+    }
+
+    /// Send a correlated command directly to the currently connected Profile stream.
+    pub async fn send_extension_command(
+        &self,
+        extension_instance_id: &str,
+        command: Value,
+    ) -> Result<(), BrokerError> {
+        self.send_extension_command_for_generation(extension_instance_id, None, command)
+            .await
+    }
+
+    /// Send a command only to the stream generation captured by the pending
+    /// request. A reconnect can replace the stream registry entry before the
+    /// state owner consumes its `ExtensionConnected` event; accepting the new
+    /// sender here would dispatch a command after the old request was failed.
+    pub async fn send_extension_command_for_generation(
+        &self,
+        extension_instance_id: &str,
+        expected_generation: Option<u64>,
+        command: Value,
+    ) -> Result<(), BrokerError> {
+        // Keep the registry read lock through the non-blocking try_send. This
+        // makes the generation check and enqueue one critical section with
+        // respect to a reconnect replacing the registry entry; otherwise a
+        // cloned old sender could still receive a command after the check.
+        let streams = self.state.streams.read().await;
+        let Some((actual_generation, sender)) = streams.get(extension_instance_id) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserSessionDisconnected,
+                "extension preview/control stream is disconnected",
+            ));
+        };
+        if expected_generation.is_some_and(|expected| expected != *actual_generation) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::IncompatibleBrowserSession,
+                "extension preview/control stream generation changed before dispatch",
+            ));
+        }
+        let payload = json!({"type":"direct_command", "command":command});
+        let text = json_to_bounded_text(&payload, MAX_CONTROL_MESSAGE_BYTES)?;
+        let budget = reserve_event_bytes(&self.state, text.len())?;
+        match sender.try_send(BrokerOutgoingMessage {
+            message: Message::Text(text.into()),
+            _budget: budget,
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "extension preview/control stream queue is full; command remains on heartbeat fallback",
+            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(BrokerError::new(
+                BrokerErrorCode::BrowserSessionDisconnected,
+                "extension preview/control stream closed before dispatch",
+            )),
+        }
+    }
+
+    /// Install an in-process command sink for the feature-gated contract oracle.
+    ///
+    /// This is intentionally unavailable to production builds. It exercises the
+    /// same bounded direct-stream sender used by the real WebSocket path while
+    /// keeping the differential test deterministic and process-local.
+    #[cfg(feature = "contract-oracle")]
+    pub async fn contract_attach_extension_stream(
+        &self,
+        extension_instance_id: &str,
+        generation: u64,
+    ) -> mpsc::Receiver<Value> {
+        let (sender, mut outgoing) =
+            mpsc::channel::<BrokerOutgoingMessage>(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        let (public_sender, public_receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        self.state
+            .streams
+            .write()
+            .await
+            .insert(extension_instance_id.to_owned(), (generation, sender));
+        tokio::spawn(async move {
+            while let Some(message) = outgoing.recv().await {
+                let value = match message.message {
+                    Message::Text(text) => serde_json::from_str::<Value>(&text).ok(),
+                    _ => None,
+                };
+                let Some(value) = value else {
+                    continue;
+                };
+                if public_sender.send(value).await.is_err() {
+                    break;
+                }
+            }
+        });
+        public_receiver
+    }
+
+    /// Remove the feature-gated contract oracle's in-process command sink.
+    #[cfg(feature = "contract-oracle")]
+    pub async fn contract_detach_extension_stream(&self, extension_instance_id: &str) {
+        self.state
+            .streams
+            .write()
+            .await
+            .remove(extension_instance_id);
+    }
+
+    /// Endpoint written to the per-project compatibility pointer. It contains no
+    /// authentication token and no other project's filesystem path.
+    pub fn endpoint_record(&self) -> EndpointRecord {
+        let discovery = self.discovery_response(false);
+        EndpointRecord {
+            schema_version: discovery.schema_version,
+            protocol_version: discovery.protocol_version,
+            mode: discovery.mode,
+            ws_url: discovery.ws_url,
+            discovery_url: discovery.discovery_url,
+            extension_frame_ws_url: discovery.extension_frame_ws_url,
+            broker_pid: discovery.broker_pid,
+            broker_start_id: discovery.broker_start_id,
+            broker_features: discovery.broker_features,
+            bridge: "rust".into(),
+        }
+    }
+
+    /// Access the bearer secret for private per-user credential persistence.
+    /// Callers must never put this value in logs or project files.
+    pub fn credential(&self) -> &str {
+        &self.state.token
+    }
+
+    /// Persist the secret only in the per-user private store, bound to this
+    /// listener's public PID/start generation.
+    pub fn persist_private_credential(
+        &self,
+        store: &PrivateCredentialStore,
+    ) -> Result<(), BrokerError> {
+        let trusted_extension_origins = self
+            .state
+            .trusted_extension_origins
+            .read()
+            .map_err(|_| {
+                BrokerError::new(
+                    BrokerErrorCode::BrowserArtifactFailure,
+                    "broker trust state lock is poisoned",
+                )
+            })?
+            .iter()
+            .map(|origin| origin.to_string())
+            .collect();
+        let credential = PrivateBrokerCredential::for_endpoint(
+            &self.endpoint_record(),
+            self.credential(),
+            trusted_extension_origins,
+        )?;
+        store.write(&credential)
+    }
+
+    /// Stop both listeners and wait for their graceful shutdown.
+    pub async fn shutdown(mut self) {
+        let _ = self.shutdown.send(true);
+        for task in self.tasks.drain(..) {
+            let _ = task.await;
+        }
+    }
+
+    /// Run the single broker state owner until Ctrl+C or listener shutdown.
+    pub async fn run_state_machine(mut self) {
+        let mut state = crate::state::BrokerState::new();
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        let mut expiry_tick = interval(Duration::from_millis(250));
+        expiry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = &mut ctrl_c => break,
+                _ = expiry_tick.tick() => state.tick(),
+                event = self.events.recv() => {
+                    let Some(event) = event else { break };
+                    state.handle(event, &self).await;
+                }
+            }
+        }
+        self.shutdown().await;
+    }
+
+    fn discovery_response(&self, include_token: bool) -> DiscoveryResponse {
+        build_discovery_response(&self.state, include_token)
+    }
+}
+
+impl Drop for BrokerRuntime {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+fn discovery_router(state: ServerState) -> Router {
+    Router::new()
+        .route(
+            "/v1/bridge",
+            get(discovery).post(discovery).options(preflight),
+        )
+        .route(
+            "/v1/bridge/pairing",
+            get(pairing_list).post(pairing_add).delete(pairing_remove),
+        )
+        .route(
+            BROWSER_BROKER_IDENTITY_CHALLENGE_PATH,
+            post(identity_challenge).options(preflight),
+        )
+        .route("/v1/bridge/heartbeat", post(heartbeat).options(preflight))
+        .route(
+            "/v1/bridge/response",
+            post(extension_response).options(preflight),
+        )
+        .route(
+            "/v1/bridge/activate_tab",
+            post(extension_http_message).options(preflight),
+        )
+        .route(
+            "/v1/bridge/capture_now",
+            post(extension_http_message).options(preflight),
+        )
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
+        .layer(ServiceBuilder::new().layer(ConcurrencyLimitLayer::new(HTTP_CONCURRENCY)))
+        .layer(middleware::from_fn(enforce_request_header_bounds))
+        .with_state(state)
+}
+
+fn websocket_router(state: ServerState) -> Router {
+    Router::new()
+        .route("/", get(client_websocket))
+        .route(EXTENSION_FRAME_WS_PATH, get(extension_websocket))
+        .layer(middleware::from_fn(enforce_request_header_bounds))
+        .with_state(state)
+}
+
+async fn enforce_request_header_bounds(request: Request<Body>, next: Next) -> Response {
+    let headers = request.headers();
+    let bytes = headers.iter().fold(0usize, |total, (name, value)| {
+        total
+            .saturating_add(name.as_str().len())
+            .saturating_add(value.as_bytes().len())
+            .saturating_add(4)
+    });
+    if headers.len() > MAX_REQUEST_HEADER_COUNT || bytes > MAX_REQUEST_HEADER_BYTES {
+        return (
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            Json(error_value(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "request headers exceed the broker limits",
+            ))),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+fn spawn_server(
+    listener: TcpListener,
+    app: Router,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let graceful = async move {
+            if !*shutdown_rx.borrow() {
+                let _ = shutdown_rx.changed().await;
+            }
+        };
+        if let Err(error) = axum::serve(listener, app)
+            .with_graceful_shutdown(graceful)
+            .await
+        {
+            tracing::error!(%error, "Chrome broker listener exited");
+        }
+    })
+}
+
+async fn discovery(
+    State(state): State<ServerState>,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !host_is_loopback(&headers, state.discovery_addr.port()) {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "broker Host must identify its loopback listener",
+        ));
+    }
+    let origin = header_text(&headers, ORIGIN);
+    // GET is always a public, project-neutral, credential-free discovery probe.
+    // Only the extension's JSON POST, with the browser-supplied exact Origin,
+    // can receive the credential-bearing compatibility URLs. This avoids
+    // treating a self-reported extension ID in a normal request header as proof.
+    if method == Method::POST && origin.is_none() {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "credential-bearing discovery requires a browser Origin",
+        ));
+    }
+    let include_token = match origin.as_deref() {
+        Some(value) if is_trusted_extension_origin(&state, value) => method == Method::POST,
+        Some(value) if valid_extension_origin(value) => {
+            let pending = remember_pending_pairing(&state, value, &body).await;
+            return pairing_required_response(&headers, value, pending);
+        }
+        Some(_) => {
+            return cors_error(
+                &headers,
+                &state,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerOriginDenied,
+                    "discovery is unavailable to this browser origin",
+                ),
+            );
+        }
+        None => false,
+    };
+    let payload = build_discovery_response(&state, include_token);
+    let mut response = Json(payload).into_response();
+    add_cors_if_trusted(response.headers_mut(), &headers, &state);
+    response
+}
+
+async fn remember_pending_pairing(
+    state: &ServerState,
+    origin: &str,
+    body: &Bytes,
+) -> PendingExtensionPairing {
+    let now = unix_ms();
+    let claims = serde_json::from_slice::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let claimed_extension_id = bounded_claim(&claims, "extension_id", 64).filter(|value| {
+        value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+    });
+    let extension_instance_id = bounded_claim(&claims, "extension_instance_id", 128);
+    let profile_label = bounded_claim(&claims, "profile_label", 120);
+    let mut pending = state.pending_pairings.write().await;
+    if let Some(existing) = pending.iter_mut().find(|entry| entry.origin == origin) {
+        existing.last_seen_at_ms = now;
+        if claimed_extension_id.is_some() {
+            existing.claimed_extension_id = claimed_extension_id.clone();
+        }
+        if extension_instance_id.is_some() {
+            existing.extension_instance_id = extension_instance_id.clone();
+        }
+        if profile_label.is_some() {
+            existing.profile_label = profile_label.clone();
+        }
+        return existing.clone();
+    }
+    if pending.len() >= crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
+        && let Some(oldest) = pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.last_seen_at_ms)
+            .map(|(index, _)| index)
+    {
+        pending.remove(oldest);
+    }
+    let entry = PendingExtensionPairing {
+        origin: origin.to_owned(),
+        claimed_extension_id,
+        extension_instance_id,
+        profile_label,
+        first_seen_at_ms: now,
+        last_seen_at_ms: now,
+    };
+    pending.push(entry.clone());
+    entry
+}
+
+fn bounded_claim(value: &Value, key: &str, max_bytes: usize) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= max_bytes)
+        .filter(|value| !value.chars().any(char::is_control))
+        .map(str::to_owned)
+}
+
+fn pairing_required_response(
+    request_headers: &HeaderMap,
+    origin: &str,
+    pending: PendingExtensionPairing,
+) -> Response {
+    let mut error = BrokerError::new(
+        BrokerErrorCode::BrokerPairingRequired,
+        "this Chrome extension is not paired with the local Teshi broker",
+    );
+    error
+        .recovery
+        .insert("pairing_required".into(), Value::Bool(true));
+    error
+        .recovery
+        .insert("origin".into(), Value::String(origin.to_owned()));
+    error.recovery.insert(
+        "pending".into(),
+        serde_json::to_value(pending).unwrap_or_else(|_| json!({})),
+    );
+    let mut response = error_response(error);
+    add_cors_for_extension_origin(response.headers_mut(), request_headers, origin);
+    response
+}
+
+async fn pairing_list(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize_admin(&state, &headers) {
+        return error_response(error);
+    }
+    let trusted = match pairing_records(&state) {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    let pending = state.pending_pairings.read().await.clone();
+    Json(json!({
+        "ok": true,
+        "trusted_origins": trusted,
+        "effective_origins": effective_origin_strings(&state),
+        "pending_pairings": pending,
+    }))
+    .into_response()
+}
+
+async fn pairing_add(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_admin(&state, &headers) {
+        return error_response(error);
+    }
+    let request = match parse_pairing_approval(&headers, &body) {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
+    let Some(store) = state.pairing_store.as_ref() else {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrowserArtifactFailure,
+            "durable pairing is unavailable because no per-user state store was configured",
+        ));
+    };
+    let before_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = store.add_exact(&request.origin, request.display_name.as_deref()) {
+        return error_response(error);
+    }
+    let after_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = apply_trust_update(&state, &after_records) {
+        let _ = store.replace(&before_records);
+        return error_response(error);
+    }
+    state
+        .pending_pairings
+        .write()
+        .await
+        .retain(|entry| entry.origin != request.origin);
+    Json(json!({
+        "ok": true,
+        "changed": before_records.iter().all(|entry| entry.origin != request.origin),
+        "origin": request.origin,
+        "trusted_origins": after_records,
+        "effective_origins": effective_origin_strings(&state),
+    }))
+    .into_response()
+}
+
+async fn pairing_remove(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_admin(&state, &headers) {
+        return error_response(error);
+    }
+    let request = match parse_pairing_approval(&headers, &body) {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
+    let Some(store) = state.pairing_store.as_ref() else {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrowserArtifactFailure,
+            "durable pairing is unavailable because no per-user state store was configured",
+        ));
+    };
+    let before_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = store.remove_exact(&request.origin) {
+        return error_response(error);
+    }
+    let after_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = apply_trust_update(&state, &after_records) {
+        let _ = store.replace(&before_records);
+        return error_response(error);
+    }
+    let affected_instances = stream_instances_for_origin(&state, &request.origin).await;
+    if !affected_instances.is_empty()
+        && state
+            .events
+            .try_send(BrokerEvent::ExtensionTrustRevoked {
+                extension_instance_ids: affected_instances.clone(),
+            })
+            .is_err()
+    {
+        let _ = store.replace(&before_records);
+        let _ = apply_trust_update(&state, &before_records);
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "broker event queue is full; live trust revoke was not completed",
+        ));
+    }
+    close_streams_for_instances(&state, &affected_instances).await;
+    state
+        .pending_pairings
+        .write()
+        .await
+        .retain(|entry| entry.origin != request.origin);
+    let _ = state.revocations.send(Arc::from(request.origin.clone()));
+    Json(json!({
+        "ok": true,
+        "changed": before_records.iter().any(|entry| entry.origin == request.origin),
+        "origin": request.origin,
+        "revoked_sessions": affected_instances,
+        "trusted_origins": after_records,
+        "effective_origins": effective_origin_strings(&state),
+    }))
+    .into_response()
+}
+
+fn parse_pairing_approval(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<PairingApprovalRequest, BrokerError> {
+    if !content_type_is_json(headers) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "pairing mutation requires application/json",
+        ));
+    }
+    let request: PairingApprovalRequest = serde_json::from_slice(body).map_err(|_| {
+        BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "pairing mutation body is malformed",
+        )
+    })?;
+    validate_origin(request.origin.trim())?;
+    Ok(PairingApprovalRequest {
+        origin: request.origin.trim().to_owned(),
+        display_name: request.display_name,
+    })
+}
+
+fn pairing_records(state: &ServerState) -> Result<Vec<TrustedExtensionOrigin>, BrokerError> {
+    if let Some(store) = state.pairing_store.as_ref() {
+        return store.list();
+    }
+    Ok(effective_origin_strings(state)
+        .into_iter()
+        .map(|origin| TrustedExtensionOrigin {
+            origin,
+            display_name: None,
+            created_at_ms: 0,
+            last_seen_at_ms: 0,
+        })
+        .collect())
+}
+
+fn apply_trust_update(
+    state: &ServerState,
+    durable_records: &[TrustedExtensionOrigin],
+) -> Result<(), BrokerError> {
+    let effective = merge_extension_origins(
+        &state
+            .configured_extension_origins
+            .iter()
+            .map(|origin| origin.to_string())
+            .collect::<Vec<_>>(),
+        durable_records.iter().map(|record| record.origin.as_str()),
+    )?;
+    {
+        let mut trusted = state.trusted_extension_origins.write().map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserArtifactFailure,
+                "broker trust state lock is poisoned",
+            )
+        })?;
+        let previous = trusted.clone();
+        *trusted = effective
+            .iter()
+            .map(|origin| Arc::<str>::from(origin.as_str()))
+            .collect();
+        if let Some(store) = state.credential_store.as_ref() {
+            let credential = PrivateBrokerCredential::for_endpoint(
+                &state_endpoint_record(state),
+                state.token.to_string(),
+                effective,
+            )?;
+            if let Err(error) = store.write(&credential) {
+                *trusted = previous;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn state_endpoint_record(state: &ServerState) -> EndpointRecord {
+    let discovery = build_discovery_response(state, false);
+    EndpointRecord {
+        schema_version: discovery.schema_version,
+        protocol_version: discovery.protocol_version,
+        mode: discovery.mode,
+        ws_url: discovery.ws_url,
+        discovery_url: discovery.discovery_url,
+        extension_frame_ws_url: discovery.extension_frame_ws_url,
+        broker_pid: discovery.broker_pid,
+        broker_start_id: discovery.broker_start_id,
+        broker_features: discovery.broker_features,
+        bridge: "rust".into(),
+    }
+}
+
+fn effective_origin_strings(state: &ServerState) -> Vec<String> {
+    state
+        .trusted_extension_origins
+        .read()
+        .map(|origins| origins.iter().map(|origin| origin.to_string()).collect())
+        .unwrap_or_default()
+}
+
+async fn stream_instances_for_origin(state: &ServerState, origin: &str) -> Vec<String> {
+    state
+        .stream_origins
+        .read()
+        .await
+        .iter()
+        .filter(|(_, (_, stream_origin))| stream_origin.as_ref() == origin)
+        .map(|(instance_id, _)| instance_id.clone())
+        .collect()
+}
+
+async fn close_streams_for_instances(state: &ServerState, extension_instance_ids: &[String]) {
+    let senders = {
+        let streams = state.streams.read().await;
+        extension_instance_ids
+            .iter()
+            .filter_map(|instance_id| streams.get(instance_id).map(|(_, sender)| sender.clone()))
+            .collect::<Vec<_>>()
+    };
+    for sender in senders {
+        close_replaced_stream(state, sender).await;
+    }
+}
+
+async fn identity_challenge(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(challenge): Json<BrokerIdentityChallenge>,
+) -> Response {
+    if !host_is_loopback(&headers, state.discovery_addr.port()) {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "identity proof Host must identify its loopback listener",
+        ));
+    }
+    if let Some(origin) = header_text(&headers, ORIGIN)
+        && !is_trusted_extension_origin(&state, &origin)
+    {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::BrokerOriginDenied,
+                "identity proof is unavailable to this browser origin",
+            ),
+        );
+    }
+    match create_identity_proof(
+        &state.token,
+        BROWSER_BROKER_SCHEMA_VERSION,
+        BROWSER_BROKER_PROTOCOL_VERSION,
+        std::process::id(),
+        &state.start_id,
+        &challenge.nonce,
+    ) {
+        Ok(proof) => {
+            let mut response = Json(proof).into_response();
+            add_cors_if_trusted(response.headers_mut(), &headers, &state);
+            response
+        }
+        Err(error) => error_response(error),
+    }
+}
+
+async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if !host_is_loopback(&headers, state.discovery_addr.port()) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(origin) = header_text(&headers, ORIGIN) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if !is_trusted_extension_origin(&state, &origin) && !valid_extension_origin(&origin) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(origin) = HeaderValue::from_str(&origin) {
+        response
+            .headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    response.headers_mut().insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Content-Type, X-Teshi-Broker-Token"),
+    );
+    response
+        .headers_mut()
+        .insert(VARY, HeaderValue::from_static("Origin"));
+    response
+}
+
+async fn heartbeat(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_http(&state, &headers, &uri) {
+        return cors_error(&headers, &state, error);
+    }
+    if !content_type_is_json(&headers) {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "heartbeat requires application/json",
+            ),
+        );
+    }
+    let _budget = match reserve_event_bytes(&state, body.len()) {
+        Ok(budget) => budget,
+        Err(error) => return cors_error(&headers, &state, error),
+    };
+    let payload = match serde_json::from_slice::<ExtensionHeartbeat>(&body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return cors_error(
+                &headers,
+                &state,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "heartbeat body is not a valid protocol message",
+                ),
+            );
+        }
+    };
+    if payload
+        .schema_version
+        .is_some_and(|version| version != BROWSER_BROKER_SCHEMA_VERSION)
+        || payload
+            .protocol_version
+            .is_some_and(|version| version > BROWSER_BROKER_PROTOCOL_VERSION)
+    {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::IncompatibleBrowserSession,
+                "extension protocol version is newer than the broker",
+            ),
+        );
+    }
+    let (reply, receiver) = oneshot::channel();
+    if state
+        .events
+        .try_send(BrokerEvent::Heartbeat {
+            payload,
+            reply,
+            _budget,
+        })
+        .is_err()
+    {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker event queue is full; heartbeat was not accepted",
+            ),
+        );
+    }
+    let body = await_value(receiver, state.response_timeout).await;
+    add_cors_if_trusted_to_value(body, &headers, &state)
+}
+
+async fn extension_response(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_http(&state, &headers, &uri) {
+        return cors_error(&headers, &state, error);
+    }
+    if !content_type_is_json(&headers) {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "extension response requires application/json",
+            ),
+        );
+    }
+    let _budget = match reserve_event_bytes(&state, body.len()) {
+        Ok(budget) => budget,
+        Err(error) => return cors_error(&headers, &state, error),
+    };
+    let value: Value = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => {
+            return cors_error(
+                &headers,
+                &state,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "extension response body must be a JSON object",
+                ),
+            );
+        }
+    };
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind == "response" {
+        let response = match serde_json::from_value::<ExtensionResponse>(value) {
+            Ok(response) if response.validate().is_ok() => response,
+            _ => {
+                return cors_error(
+                    &headers,
+                    &state,
+                    BrokerError::new(
+                        BrokerErrorCode::BrokerProtocolError,
+                        "extension response is missing required correlation fields",
+                    ),
+                );
+            }
+        };
+        let instance_id = response
+            .extension_instance_id
+            .clone()
+            .or_else(|| {
+                response
+                    .target
+                    .as_ref()
+                    .map(|target| target.extension_instance_id.clone())
+            })
+            .unwrap_or_default();
+        if instance_id.is_empty() {
+            return cors_error(
+                &headers,
+                &state,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "extension response is missing its Profile identity",
+                ),
+            );
+        }
+        let (reply, receiver) = oneshot::channel();
+        return queue_response_reply(
+            &state,
+            &headers,
+            BrokerEvent::ExtensionResponse {
+                extension_instance_id: instance_id,
+                generation: None,
+                response,
+                reply: Some(reply),
+                _budget,
+            },
+            receiver,
+        )
+        .await;
+    }
+    if matches!(
+        kind,
+        "frame_error" | "console_event" | "console_capture_terminated"
+    ) {
+        let extension_instance_id = value
+            .get("extension_instance_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let (reply, receiver) = oneshot::channel();
+        let event = BrokerEvent::ExtensionHttpMessage {
+            path: uri.path().to_owned(),
+            extension_instance_id,
+            generation: None,
+            payload: value,
+            reply,
+            _budget,
+        };
+        return queue_http_reply(&state, &headers, event, receiver).await;
+    }
+    cors_error(
+        &headers,
+        &state,
+        BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "unsupported extension HTTP message type",
+        ),
+    )
+}
+
+async fn extension_http_message(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_http(&state, &headers, &uri) {
+        return cors_error(&headers, &state, error);
+    }
+    if !content_type_is_json(&headers) {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "extension message requires application/json",
+            ),
+        );
+    }
+    let _budget = match reserve_event_bytes(&state, body.len()) {
+        Ok(budget) => budget,
+        Err(error) => return cors_error(&headers, &state, error),
+    };
+    let value: Value = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        _ => {
+            return cors_error(
+                &headers,
+                &state,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "extension HTTP message must be a JSON object",
+                ),
+            );
+        }
+    };
+    let (reply, receiver) = oneshot::channel();
+    let event = BrokerEvent::ExtensionHttpMessage {
+        path: uri.path().to_owned(),
+        extension_instance_id: value
+            .get("extension_instance_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        generation: None,
+        payload: value,
+        reply,
+        _budget,
+    };
+    queue_http_reply(&state, &headers, event, receiver).await
+}
+
+async fn queue_response_reply(
+    state: &ServerState,
+    headers: &HeaderMap,
+    event: BrokerEvent,
+    receiver: oneshot::Receiver<Value>,
+) -> Response {
+    if state.events.try_send(event).is_err() {
+        return cors_error(
+            headers,
+            state,
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker event queue is full; extension response was not accepted",
+            ),
+        );
+    }
+    let body = await_value(receiver, state.response_timeout).await;
+    add_cors_if_trusted_to_value(body, headers, state)
+}
+
+async fn queue_http_reply(
+    state: &ServerState,
+    headers: &HeaderMap,
+    event: BrokerEvent,
+    receiver: oneshot::Receiver<Value>,
+) -> Response {
+    if state.events.try_send(event).is_err() {
+        return cors_error(
+            headers,
+            state,
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker event queue is full; extension message was not accepted",
+            ),
+        );
+    }
+    let body = await_value(receiver, state.response_timeout).await;
+    add_cors_if_trusted_to_value(body, headers, state)
+}
+
+async fn await_value(receiver: oneshot::Receiver<Value>, wait: Duration) -> Value {
+    match timeout(wait, receiver).await {
+        Ok(Ok(value)) => value,
+        _ => error_value(BrokerError::new(
+            BrokerErrorCode::BrowserOperationTimeout,
+            "broker state handler did not respond before the transport deadline",
+        )),
+    }
+}
+
+fn reserve_event_bytes(
+    state: &ServerState,
+    bytes: usize,
+) -> Result<tokio::sync::OwnedSemaphorePermit, BrokerError> {
+    let permits = u32::try_from(bytes.max(1)).map_err(|_| {
+        BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "broker event exceeds the byte-budget counter",
+        )
+    })?;
+    Arc::clone(&state.event_byte_budget)
+        .try_acquire_many_owned(permits)
+        .map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker retained-message byte budget is full",
+            )
+        })
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "serialized JSON exceeded the transport limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_to_bounded_text(value: &Value, limit: usize) -> Result<String, BrokerError> {
+    let mut writer = BoundedJsonWriter {
+        bytes: Vec::with_capacity(limit.min(64 * 1024)),
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|error| {
+        if error.io_error_kind() == Some(io::ErrorKind::FileTooLarge) {
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "serialized JSON exceeds the transport message limit",
+            )
+        } else {
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "broker could not serialize its JSON response",
+            )
+        }
+    })?;
+    String::from_utf8(writer.bytes).map_err(|_| {
+        BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "serialized broker response was not UTF-8",
+        )
+    })
+}
+
+async fn client_websocket(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    if !host_is_loopback(&headers, state.websocket_addr.port()) {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "WebSocket Host must identify its loopback listener",
+        ));
+    }
+    if let Err(error) = authorize_websocket(&state, &headers, &uri, false) {
+        return error_response(error);
+    }
+    let permit = match Arc::clone(&state.websocket_slots).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error_response(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker WebSocket connection limit reached",
+            ));
+        }
+    };
+    websocket
+        .max_message_size(crate::protocol::MAX_CONTROL_MESSAGE_BYTES)
+        .max_frame_size(crate::protocol::MAX_CONTROL_MESSAGE_BYTES)
+        .write_buffer_size(WS_WRITE_BUFFER_BYTES)
+        .max_write_buffer_size(WS_MAX_WRITE_BUFFER_BYTES)
+        .on_upgrade(move |socket| client_socket(socket, state, permit))
+}
+
+async fn extension_websocket(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    if !host_is_loopback(&headers, state.websocket_addr.port()) {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "extension WebSocket Host must identify its loopback listener",
+        ));
+    }
+    if let Err(error) = authorize_websocket(&state, &headers, &uri, true) {
+        return error_response(error);
+    }
+    let extension_origin = header_text(&headers, ORIGIN).unwrap_or_default();
+    let permit = match Arc::clone(&state.websocket_slots).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error_response(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker WebSocket connection limit reached",
+            ));
+        }
+    };
+    let extension_stream_permit =
+        match Arc::clone(&state.extension_stream_slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return error_response(BrokerError::new(
+                    BrokerErrorCode::BrowserResourceLimit,
+                    "broker extension stream limit reached",
+                ));
+            }
+        };
+    let max_size = state.max_websocket_message_bytes;
+    websocket
+        .max_message_size(max_size)
+        .max_frame_size(max_size)
+        .write_buffer_size(WS_WRITE_BUFFER_BYTES)
+        .max_write_buffer_size(WS_MAX_WRITE_BUFFER_BYTES)
+        .on_upgrade(move |socket| {
+            extension_socket(
+                socket,
+                state,
+                permit,
+                extension_stream_permit,
+                extension_origin,
+            )
+        })
+}
+
+async fn client_socket(
+    mut socket: WebSocket,
+    state: ServerState,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let owner_id = Uuid::new_v4().simple().to_string();
+    let mut subscription: Option<BrowserTarget> = None;
+    let mut publications = state.publications.subscribe();
+    let (outgoing_tx, mut outgoing_rx) =
+        mpsc::channel::<ClientOutgoingMessage>(MAX_CLIENT_IN_FLIGHT_OPERATIONS);
+    let in_flight = Arc::new(Semaphore::new(MAX_CLIENT_IN_FLIGHT_OPERATIONS));
+    let mut operation_tasks = JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = socket.next() => {
+                let Some(Ok(message)) = incoming else { break };
+                let text = match message {
+                    Message::Text(text) => text,
+                    // Answer RFC 6455 keepalive pings so standard clients with
+                    // periodic pings are not disconnected mid-session.
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Message::Pong(_) => continue,
+                    Message::Close(_) => break,
+                    Message::Binary(_) => {
+                        if socket.send(Message::Close(None)).await.is_err() {
+                            break;
+                        }
+                        break;
+                    }
+                };
+                let value: Value = match serde_json::from_str::<Value>(text.as_str()) {
+                    Ok(value) if value.is_object() => value,
+                    _ => {
+                        let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                            BrokerErrorCode::BrokerProtocolError,
+                            "client WebSocket message must be a JSON object",
+                        )).to_string().into())).await;
+                        continue;
+                    }
+                };
+                if value.get("cmd").and_then(Value::as_str) == Some("subscribe_browser_session") {
+                    let extension_instance_id = value.get("extension_instance_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    let request_id = value.get("request_id").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    if extension_instance_id.is_empty() || request_id.is_empty() {
+                        let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                            BrokerErrorCode::InvalidBrowserOperation,
+                            "subscription requires extension_instance_id and request_id",
+                        )).to_string().into())).await;
+                        continue;
+                    }
+                    let target = match value.get("target") {
+                        Some(raw_target) => match serde_json::from_value::<BrowserTarget>(raw_target.clone()) {
+                            Ok(target) => Some(target),
+                            Err(_) => {
+                                let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                    BrokerErrorCode::InvalidBrowserOperation,
+                                    "subscription target does not match the complete browser target shape",
+                                )).to_string().into())).await;
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+                    let (reply, receiver) = oneshot::channel();
+                    if state.events.try_send(BrokerEvent::Subscribe {
+                        owner_id: owner_id.clone(),
+                        extension_instance_id: extension_instance_id.clone(),
+                        target,
+                        request_id,
+                        reply,
+                    }).is_err() {
+                        let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                            BrokerErrorCode::BrowserResourceLimit,
+                            "broker event queue is full; subscription was not accepted",
+                        )).to_string().into())).await;
+                        continue;
+                    }
+                    match timeout(state.response_timeout, receiver).await {
+                        Ok(Ok(Ok(response))) => {
+                            let Some(target) = response
+                                .get("target")
+                                .cloned()
+                                .and_then(|value| serde_json::from_value::<BrowserTarget>(value).ok())
+                            else {
+                                let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                    BrokerErrorCode::BrokerProtocolError,
+                                    "broker returned an invalid subscription target",
+                                )).to_string().into())).await;
+                                continue;
+                            };
+                            if socket.send(Message::Text(response.to_string().into())).await.is_err() {
+                                break;
+                            }
+                            subscription = Some(target);
+                        }
+                        Ok(Ok(Err(error))) => {
+                            let _ = socket.send(Message::Text(error_value(error).to_string().into())).await;
+                            continue;
+                        }
+                        _ => {
+                            let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                BrokerErrorCode::BrowserOperationTimeout,
+                                "browser subscription did not complete before its deadline",
+                            )).to_string().into())).await;
+                            continue;
+                        }
+                    }
+                } else {
+                    let request: OperationRequest = match serde_json::from_value(value) {
+                        Ok(request) => request,
+                        Err(_) => {
+                            let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                BrokerErrorCode::BrokerProtocolError,
+                                "client operation does not match the protocol envelope",
+                            )).to_string().into())).await;
+                            continue;
+                        }
+                    };
+                    if let Err(error) = request.validate() {
+                        let _ = socket.send(Message::Text(operation_error_value(&request, error).to_string().into())).await;
+                        continue;
+                    }
+                    let operation_permit = match Arc::clone(&in_flight).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let _ = socket.send(Message::Text(operation_error_value(&request, BrokerError::new(
+                                BrokerErrorCode::BrowserResourceLimit,
+                                "client WebSocket has too many in-flight operations",
+                            )).to_string().into())).await;
+                            continue;
+                        }
+                    };
+                    let _budget = match reserve_event_bytes(&state, text.len()) {
+                        Ok(budget) => budget,
+                        Err(error) => {
+                            drop(operation_permit);
+                            let _ = socket.send(Message::Text(operation_error_value(&request, error).to_string().into())).await;
+                            continue;
+                        }
+                    };
+                    let request_timeout = request.timeout_ms.map(Duration::from_millis).unwrap_or(state.response_timeout).min(state.response_timeout);
+                    let (reply, receiver) = oneshot::channel();
+                    if state.events.try_send(BrokerEvent::Operation { request: request.clone(), reply, _budget }).is_err() {
+                        drop(operation_permit);
+                        let _ = socket.send(Message::Text(operation_error_value(&request, BrokerError::new(
+                            BrokerErrorCode::BrowserResourceLimit,
+                            "broker event queue is full; operation was not dispatched",
+                        )).to_string().into())).await;
+                        continue;
+                    }
+                    let operation_state = state.clone();
+                    let operation_outgoing = outgoing_tx.clone();
+                    operation_tasks.spawn(async move {
+                        let _in_flight = operation_permit;
+                        let result = match timeout(request_timeout, receiver).await {
+                            Ok(Ok(Ok(value))) => value,
+                            Ok(Ok(Err(error))) => operation_error_value(&request, error),
+                            _ => operation_error_value(&request, BrokerError::new(
+                                BrokerErrorCode::BrowserOperationTimeout,
+                                "broker operation did not complete before its deadline",
+                            )),
+                        };
+                        let (text, response_budget) =
+                            operation_response_text(&operation_state, &request, &result);
+                        let _ = operation_outgoing
+                            .send(ClientOutgoingMessage {
+                                message: Message::Text(text.into()),
+                                _budget: response_budget,
+                            })
+                            .await;
+                    });
+                }
+            }
+            outgoing = outgoing_rx.recv() => {
+                let Some(outgoing) = outgoing else { break };
+                if socket.send(outgoing.message).await.is_err() { break; }
+            }
+            completed = operation_tasks.join_next(), if !operation_tasks.is_empty() => {
+                if completed.is_none() {
+                    break;
+                }
+            }
+            publication = publications.recv(), if subscription.is_some() => {
+                match publication {
+                    Ok(publication)
+                        if publication.owner_ids.iter().any(|subscriber| subscriber == &owner_id)
+                            && subscription.as_ref() == Some(&publication.target) =>
+                    {
+                        let (reply, receiver) = oneshot::channel();
+                        if state
+                            .events
+                            .try_send(BrokerEvent::SubscriptionActive {
+                                owner_id: owner_id.clone(),
+                                target: publication.target.clone(),
+                                reply,
+                            })
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        let active = matches!(
+                            timeout(state.response_timeout, receiver).await,
+                            Ok(Ok(true))
+                        );
+                        if active && socket.send(Message::Binary(publication.frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+    let _ = timeout(
+        state.response_timeout,
+        state.events.send(BrokerEvent::Unsubscribe { owner_id }),
+    )
+    .await;
+    operation_tasks.abort_all();
+    while operation_tasks.join_next().await.is_some() {}
+}
+
+async fn extension_socket(
+    mut socket: WebSocket,
+    state: ServerState,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _extension_stream_permit: tokio::sync::OwnedSemaphorePermit,
+    extension_origin: String,
+) {
+    let Some(Ok(Message::Text(first))) = socket.next().await else {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+    if first.len() > 64 * 1024 {
+        let _ = socket
+            .send(Message::Text(
+                error_value(BrokerError::new(
+                    BrokerErrorCode::BrowserResourceLimit,
+                    "extension stream hello exceeds the metadata limit",
+                ))
+                .to_string()
+                .into(),
+            ))
+            .await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+    let _hello_budget = match reserve_event_bytes(&state, first.len()) {
+        Ok(budget) => budget,
+        Err(error) => {
+            let _ = socket
+                .send(Message::Text(error_value(error).to_string().into()))
+                .await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let hello = match serde_json::from_str::<ExtensionStreamMessage>(first.as_str()) {
+        Ok(
+            hello @ ExtensionStreamMessage::StreamHello {
+                protocol_version, ..
+            },
+        ) if protocol_version == BROWSER_BROKER_PROTOCOL_VERSION => hello,
+        _ => {
+            let _ = socket
+                .send(Message::Text(
+                    error_value(BrokerError::new(
+                        BrokerErrorCode::IncompatibleBrowserSession,
+                        "extension stream must begin with a supported stream_hello",
+                    ))
+                    .to_string()
+                    .into(),
+                ))
+                .await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let extension_instance_id = match &hello {
+        ExtensionStreamMessage::StreamHello {
+            extension_instance_id,
+            ..
+        } => extension_instance_id.clone(),
+    };
+    if extension_instance_id.is_empty() || extension_instance_id.len() > 128 {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    let generation = state
+        .next_stream_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (outgoing, mut outgoing_rx) =
+        mpsc::channel::<BrokerOutgoingMessage>(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+    let mut revocations = state.revocations.subscribe();
+    let event_permit = match timeout(state.response_timeout, state.events.reserve()).await {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            let _ = socket
+                .send(Message::Text(
+                    error_value(BrokerError::new(
+                        BrokerErrorCode::BrowserResourceLimit,
+                        "broker event queue stayed full while registering the extension stream",
+                    ))
+                    .to_string()
+                    .into(),
+                ))
+                .await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let previous = state.streams.write().await.insert(
+        extension_instance_id.clone(),
+        (generation, outgoing.clone()),
+    );
+    state.stream_origins.write().await.insert(
+        extension_instance_id.clone(),
+        (generation, Arc::from(extension_origin.clone())),
+    );
+    if let Some((_, old_sender)) = previous {
+        close_replaced_stream(&state, old_sender).await;
+    }
+    let (reply, reply_rx) = oneshot::channel();
+    event_permit.send(BrokerEvent::ExtensionConnected {
+        hello,
+        generation,
+        reply,
+        _budget: _hello_budget,
+    });
+    let ack = match timeout(state.response_timeout, reply_rx).await {
+        Ok(Ok(value)) => value,
+        _ => {
+            let _ = socket.send(Message::Close(None)).await;
+            unregister_stream(&state, &extension_instance_id, generation, true).await;
+            return;
+        }
+    };
+    let connected = ack.get("ok").and_then(Value::as_bool) == Some(true);
+    if !connected {
+        let _ = socket.send(Message::Text(ack.to_string().into())).await;
+        let _ = socket.send(Message::Close(None)).await;
+        unregister_stream(&state, &extension_instance_id, generation, true).await;
+        return;
+    }
+    if socket
+        .send(Message::Text(ack.to_string().into()))
+        .await
+        .is_err()
+    {
+        unregister_stream(&state, &extension_instance_id, generation, true).await;
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            incoming = socket.next() => {
+                let Some(Ok(message)) = incoming else { break };
+                if !stream_generation_is_current(&state, &extension_instance_id, generation).await {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                match message {
+                    Message::Text(text) => {
+                        if !handle_extension_text(
+                            &state,
+                            &extension_instance_id,
+                            generation,
+                            text.as_str(),
+                        )
+                        .await
+                        {
+                            let _ = socket.send(Message::Close(None)).await;
+                            break;
+                        }
+                    }
+                    Message::Binary(packet) => {
+                        let raw_frame = packet.clone();
+                        let frame_budget = match reserve_event_bytes(&state, packet.len()) {
+                            Ok(budget) => budget,
+                            Err(error) => {
+                                let _ = socket.send(Message::Text(error_value(error).to_string().into())).await;
+                                let _ = socket.send(Message::Close(None)).await;
+                                break;
+                            }
+                        };
+                        match parse_tsh1_frame(packet) {
+                            Ok((metadata, jpeg, frame)) => {
+                                if metadata.extension_instance_id != extension_instance_id {
+                                    let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                        BrokerErrorCode::MismatchedBrowserResponse,
+                                        "preview frame extension instance does not match the authenticated stream",
+                                    )).to_string().into())).await;
+                                    let _ = socket.send(Message::Close(None)).await;
+                                    break;
+                                }
+                                let target = BrowserTarget {
+                                    extension_instance_id: metadata.extension_instance_id,
+                                    window_id: metadata.window_id,
+                                    tab_id: metadata.tab_id,
+                                };
+                                debug_assert_eq!(&frame[..], &raw_frame[..]);
+                                let event = BrokerEvent::PreviewFrame { target, seq: metadata.seq, url: metadata.url, jpeg, frame, _budget: frame_budget };
+                                if state.events.try_send(event).is_err() {
+                                    let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                        BrokerErrorCode::BrowserResourceLimit,
+                                        "broker event queue is full; preview frame was not accepted",
+                                    )).to_string().into())).await;
+                                    let _ = socket.send(Message::Close(None)).await;
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = socket.send(Message::Text(error_value(error).to_string().into())).await;
+                                let _ = socket.send(Message::Close(None)).await;
+                                break;
+                            }
+                        }
+                    }
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(_) => break,
+                }
+            }
+            outgoing = outgoing_rx.recv() => {
+                let Some(outgoing) = outgoing else { break };
+                if !stream_generation_is_current(&state, &extension_instance_id, generation).await {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                if socket.send(outgoing.message).await.is_err() { break; }
+            }
+            revoked = revocations.recv() => {
+                match revoked {
+                    Ok(origin) if origin.as_ref() == extension_origin => {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    unregister_stream(&state, &extension_instance_id, generation, true).await;
+}
+
+async fn close_replaced_stream(state: &ServerState, sender: ExtensionStreamSender) {
+    let Ok(budget) = reserve_event_bytes(state, 1) else {
+        return;
+    };
+    let close = sender.send(BrokerOutgoingMessage {
+        message: Message::Close(None),
+        _budget: budget,
+    });
+    let _ = timeout(Duration::from_secs(1), close).await;
+}
+
+async fn unregister_stream(
+    state: &ServerState,
+    extension_instance_id: &str,
+    generation: u64,
+    notify: bool,
+) {
+    let removed = {
+        let mut streams = state.streams.write().await;
+        if streams
+            .get(extension_instance_id)
+            .is_some_and(|(current, _)| *current == generation)
+        {
+            streams.remove(extension_instance_id);
+            true
+        } else {
+            false
+        }
+    };
+    if removed {
+        let mut stream_origins = state.stream_origins.write().await;
+        if stream_origins
+            .get(extension_instance_id)
+            .is_some_and(|(current, _)| *current == generation)
+        {
+            stream_origins.remove(extension_instance_id);
+        }
+    }
+    if removed && notify {
+        let event = BrokerEvent::ExtensionDisconnected {
+            extension_instance_id: extension_instance_id.to_owned(),
+            generation,
+        };
+        let _ = timeout(state.response_timeout, state.events.send(event)).await;
+    }
+}
+
+async fn stream_generation_is_current(
+    state: &ServerState,
+    instance_id: &str,
+    generation: u64,
+) -> bool {
+    state
+        .streams
+        .read()
+        .await
+        .get(instance_id)
+        .is_some_and(|(current, _)| *current == generation)
+}
+
+async fn handle_extension_text(
+    state: &ServerState,
+    instance_id: &str,
+    generation: u64,
+    text: &str,
+) -> bool {
+    let _budget = match reserve_event_bytes(state, text.len()) {
+        Ok(budget) => budget,
+        Err(_) => return false,
+    };
+    let value: Value = match serde_json::from_str::<Value>(text) {
+        Ok(value) if value.is_object() => value,
+        _ => return false,
+    };
+    match value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "response" => {
+            let mut response: ExtensionResponse = match serde_json::from_value(value) {
+                Ok(response) => response,
+                Err(_) => return false,
+            };
+            if response.validate().is_err() {
+                return false;
+            }
+            if response
+                .extension_instance_id
+                .as_deref()
+                .is_some_and(|id| id != instance_id)
+                || response
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.extension_instance_id != instance_id)
+            {
+                return false;
+            }
+            response.extension_instance_id = Some(instance_id.to_owned());
+            state
+                .events
+                .try_send(BrokerEvent::ExtensionResponse {
+                    extension_instance_id: instance_id.to_owned(),
+                    generation: Some(generation),
+                    response,
+                    reply: None,
+                    _budget,
+                })
+                .is_ok()
+        }
+        "network_batch" => {
+            if text.len() > crate::protocol::MAX_NETWORK_BATCH_BYTES {
+                return false;
+            }
+            let batch: NetworkBatch = match serde_json::from_value(value) {
+                Ok(batch) => batch,
+                Err(_) => return false,
+            };
+            if batch.extension_instance_id != instance_id {
+                return false;
+            }
+            let (reply, receiver) = oneshot::channel();
+            if state
+                .events
+                .try_send(BrokerEvent::NetworkBatch {
+                    batch,
+                    generation,
+                    reply,
+                    _budget,
+                })
+                .is_err()
+            {
+                return false;
+            }
+            let ack = match timeout(state.response_timeout, receiver).await {
+                Ok(Ok(value)) => value,
+                _ => return false,
+            };
+            let sender = {
+                state.streams.read().await.get(instance_id).and_then(
+                    |(current_generation, sender)| {
+                        (*current_generation == generation).then(|| sender.clone())
+                    },
+                )
+            };
+            if let Some(sender) = sender {
+                match json_to_bounded_text(&ack, 64 * 1024) {
+                    Ok(text) => match reserve_event_bytes(state, text.len()) {
+                        Ok(budget) => sender
+                            .send(BrokerOutgoingMessage {
+                                message: Message::Text(text.into()),
+                                _budget: budget,
+                            })
+                            .await
+                            .is_ok(),
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        }
+        "frame_error" | "console_event" | "console_capture_terminated" => {
+            let error = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("extension diagnostic event")
+                .chars()
+                .take(2048)
+                .collect::<String>();
+            let event = if value.get("type").and_then(Value::as_str) == Some("frame_error") {
+                BrokerEvent::FrameError {
+                    extension_instance_id: instance_id.to_owned(),
+                    error,
+                }
+            } else {
+                let (reply, receiver) = oneshot::channel();
+                if state
+                    .events
+                    .try_send(BrokerEvent::ExtensionHttpMessage {
+                        path: "/v1/bridge/response".into(),
+                        extension_instance_id: Some(instance_id.to_owned()),
+                        generation: Some(generation),
+                        payload: value,
+                        reply,
+                        _budget,
+                    })
+                    .is_err()
+                {
+                    return false;
+                }
+                let _ = timeout(state.response_timeout, receiver).await;
+                return true;
+            };
+            state.events.try_send(event).is_ok()
+        }
+        _ => false,
+    }
+}
+
+fn build_discovery_response(state: &ServerState, include_token: bool) -> DiscoveryResponse {
+    let token = if include_token {
+        format!("?token={}", state.token)
+    } else {
+        String::new()
+    };
+    let ws_base = state.websocket_base_url.as_ref();
+    DiscoveryResponse {
+        schema_version: BROWSER_BROKER_SCHEMA_VERSION,
+        protocol_version: BROWSER_BROKER_PROTOCOL_VERSION,
+        mode: "chrome".into(),
+        transport: "http-heartbeat+ws-screencast".into(),
+        command_transport: "direct-ws+heartbeat-fallback".into(),
+        ws_url: format!("{ws_base}/{token}"),
+        extension_frame_ws_url: format!("{ws_base}{EXTENSION_FRAME_WS_PATH}{token}"),
+        discovery_url: state.discovery_base_url.to_string(),
+        broker_pid: std::process::id(),
+        broker_scope: "user_session".into(),
+        broker_start_id: state.start_id.to_string(),
+        broker_features: state.broker_features.as_ref().clone(),
+        extension_connected: false,
+    }
+}
+
+fn authorize_http(
+    state: &ServerState,
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+) -> Result<(), BrokerError> {
+    if !host_is_loopback(headers, state.discovery_addr.port()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "HTTP Host must identify the loopback discovery listener",
+        ));
+    }
+    if let Some(origin) = header_text(headers, ORIGIN)
+        && !is_trusted_extension_origin(state, &origin)
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "HTTP mutation is not accepted from this browser origin",
+        ));
+    }
+    if !token_matches(state, headers, uri.query()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerAuthenticationFailed,
+            "broker authentication failed",
+        ));
+    }
+    Ok(())
+}
+
+fn authorize_admin(state: &ServerState, headers: &HeaderMap) -> Result<(), BrokerError> {
+    if !host_is_loopback(headers, state.discovery_addr.port()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "pairing administration requires the loopback discovery listener",
+        ));
+    }
+    if headers.contains_key(ORIGIN) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "pairing administration is restricted to the trusted Teshi process",
+        ));
+    }
+    if !token_matches_header(state, headers) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerAuthenticationFailed,
+            "broker authentication failed",
+        ));
+    }
+    Ok(())
+}
+
+fn authorize_websocket(
+    state: &ServerState,
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+    extension_stream: bool,
+) -> Result<(), BrokerError> {
+    let origin = header_text(headers, ORIGIN);
+    if extension_stream
+        && !origin
+            .as_deref()
+            .is_some_and(|value| is_trusted_extension_origin(state, value))
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "extension stream Origin is not trusted",
+        ));
+    }
+    if let Some(origin) = origin
+        && !is_trusted_extension_origin(state, &origin)
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "WebSocket Origin is not trusted",
+        ));
+    }
+    if !token_matches(state, headers, uri.query()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerAuthenticationFailed,
+            "broker authentication failed",
+        ));
+    }
+    Ok(())
+}
+
+fn token_matches(state: &ServerState, headers: &HeaderMap, query: Option<&str>) -> bool {
+    let header_token = headers
+        .get("x-teshi-broker-token")
+        .and_then(|value| value.to_str().ok());
+    let bearer_token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let supplied_header = header_token.or(bearer_token);
+    let supplied_query = query.and_then(|query| {
+        let mut tokens = query
+            .split('&')
+            .filter_map(|entry| entry.split_once('='))
+            .filter(|(key, _)| *key == "token")
+            .map(|(_, value)| value);
+        let first = tokens.next()?;
+        if tokens.next().is_some() {
+            return None;
+        }
+        Some(first)
+    });
+    match (supplied_header, supplied_query) {
+        (Some(header), Some(query)) => {
+            constant_time_equal(header, &state.token) && constant_time_equal(query, &state.token)
+        }
+        (Some(header), None) => constant_time_equal(header, &state.token),
+        (None, Some(query)) => constant_time_equal(query, &state.token),
+        (None, None) => false,
+    }
+}
+
+fn token_matches_header(state: &ServerState, headers: &HeaderMap) -> bool {
+    let header_token = headers
+        .get("x-teshi-broker-token")
+        .and_then(|value| value.to_str().ok());
+    let bearer_token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    header_token
+        .or(bearer_token)
+        .is_some_and(|candidate| constant_time_equal(candidate, &state.token))
+}
+
+fn constant_time_equal(candidate: &str, expected: &str) -> bool {
+    if candidate.len() != expected.len() {
+        return false;
+    }
+    bool::from(candidate.as_bytes().ct_eq(expected.as_bytes()))
+}
+
+fn valid_extension_origin(origin: &str) -> bool {
+    let Some(id) = origin.strip_prefix("chrome-extension://") else {
+        return false;
+    };
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+fn merge_extension_origins<'a>(
+    configured: &[String],
+    durable: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<String>, BrokerError> {
+    let mut origins = configured.to_vec();
+    origins.extend(durable.into_iter().map(str::to_owned));
+    origins.sort();
+    origins.dedup();
+    if origins.len() > crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
+        || origins.iter().any(|origin| !valid_extension_origin(origin))
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "effective trusted extension origins exceed the exact bounded allowlist",
+        ));
+    }
+    Ok(origins)
+}
+
+fn is_trusted_extension_origin(state: &ServerState, origin: &str) -> bool {
+    state
+        .trusted_extension_origins
+        .read()
+        .map(|trusted| trusted.iter().any(|value| value.as_ref() == origin))
+        .unwrap_or(false)
+}
+
+fn host_is_loopback(headers: &HeaderMap, port: u16) -> bool {
+    let Some(host) = headers.get(HOST).and_then(|host| host.to_str().ok()) else {
+        return false;
+    };
+    host == format!("127.0.0.1:{port}")
+}
+
+fn content_type_is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+}
+
+fn header_text(headers: &HeaderMap, key: axum::http::header::HeaderName) -> Option<String> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn add_cors_if_trusted(headers: &mut HeaderMap, request_headers: &HeaderMap, state: &ServerState) {
+    let Some(origin) = header_text(request_headers, ORIGIN) else {
+        return;
+    };
+    if !is_trusted_extension_origin(state, &origin) {
+        return;
+    }
+    if let Ok(origin) = HeaderValue::from_str(&origin) {
+        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(VARY, HeaderValue::from_static("Origin"));
+    }
+}
+
+fn add_cors_for_extension_origin(
+    headers: &mut HeaderMap,
+    request_headers: &HeaderMap,
+    origin: &str,
+) {
+    if header_text(request_headers, ORIGIN).as_deref() != Some(origin)
+        || !valid_extension_origin(origin)
+    {
+        return;
+    }
+    if let Ok(origin) = HeaderValue::from_str(origin) {
+        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(VARY, HeaderValue::from_static("Origin"));
+    }
+}
+
+fn add_cors_if_trusted_to_value(
+    value: Value,
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Response {
+    let mut response = Json(value).into_response();
+    add_cors_if_trusted(response.headers_mut(), headers, state);
+    response
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn cors_error(headers: &HeaderMap, state: &ServerState, error: BrokerError) -> Response {
+    let mut response = error_response(error);
+    add_cors_if_trusted(response.headers_mut(), headers, state);
+    response
+}
+
+fn error_status(code: BrokerErrorCode) -> StatusCode {
+    match code {
+        BrokerErrorCode::BrokerAuthenticationFailed
+        | BrokerErrorCode::BrokerOriginDenied
+        | BrokerErrorCode::BrokerPairingRequired => StatusCode::FORBIDDEN,
+        BrokerErrorCode::BrowserResourceLimit => StatusCode::SERVICE_UNAVAILABLE,
+        BrokerErrorCode::BrowserOperationTimeout | BrokerErrorCode::BrowserWaitTimeout => {
+            StatusCode::GATEWAY_TIMEOUT
+        }
+        BrokerErrorCode::BrowserExecutionUnknown => StatusCode::CONFLICT,
+        BrokerErrorCode::BrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        BrokerErrorCode::IncompatibleBrowserSession => StatusCode::UPGRADE_REQUIRED,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+fn error_value(error: BrokerError) -> Value {
+    json!({
+        "ok": false,
+        "code": error.code.as_str(),
+        "error": error.message,
+        "recovery": error.recovery,
+    })
+}
+
+fn operation_error_value(request: &OperationRequest, error: BrokerError) -> Value {
+    let mut response = json!({
+        "ok": false,
+        "request_id": request.request_id,
+        "operation": request.operation,
+        "code": error.code.as_str(),
+        "error": error.message,
+        "recovery": error.recovery,
+    });
+    if let Some(object) = response.as_object_mut() {
+        for key in [
+            "target",
+            "action",
+            "page_context_revision",
+            "extension_code",
+            "action_outcome",
+            "wait_outcome",
+        ] {
+            if let Some(value) = object
+                .get("recovery")
+                .and_then(Value::as_object)
+                .and_then(|recovery| recovery.get(key))
+            {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    response
+}
+
+/// Return only the credential-free fields that identify the broker generation.
+///
+/// This is attached to every typed operation response so CLI, Agent, MCP, and
+/// native/daemon adapters can prove that their request was handled by the same
+/// user-scoped broker. The public `ws_url` is intentionally generated from the
+/// token-free endpoint record; the command credential is never included here.
+fn broker_identity_value(state: &ServerState) -> Value {
+    let endpoint = state_endpoint_record(state);
+    json!({
+        "schema_version": endpoint.schema_version,
+        "protocol_version": endpoint.protocol_version,
+        "mode": endpoint.mode,
+        "ws_url": endpoint.ws_url,
+        "discovery_url": endpoint.discovery_url,
+        "broker_pid": endpoint.broker_pid,
+        "broker_start_id": endpoint.broker_start_id,
+        "broker_features": endpoint.broker_features,
+        "broker_scope": "user_session",
+        "bridge": endpoint.bridge,
+    })
+}
+
+fn attach_broker_identity(state: &ServerState, response: &Value) -> Value {
+    let mut response = response.clone();
+    if let Some(object) = response.as_object_mut() {
+        object.insert("broker_identity".into(), broker_identity_value(state));
+    }
+    response
+}
+
+fn operation_response_text(
+    state: &ServerState,
+    request: &OperationRequest,
+    response: &Value,
+) -> (String, Option<tokio::sync::OwnedSemaphorePermit>) {
+    let response = attach_broker_identity(state, response);
+    let mut text = json_to_bounded_text(&response, MAX_WEBSOCKET_MESSAGE_BYTES)
+        .unwrap_or_else(|error| operation_error_value(request, error).to_string());
+    match reserve_event_bytes(state, text.len()) {
+        Ok(budget) => (text, Some(budget)),
+        Err(error) => {
+            text =
+                attach_broker_identity(state, &operation_error_value(request, error)).to_string();
+            let budget = reserve_event_bytes(state, text.len()).ok();
+            (text, budget)
+        }
+    }
+}
+
+fn error_response(error: BrokerError) -> Response {
+    let status = error_status(error.code);
+    (status, Json(error_value(error))).into_response()
+}
+
+fn jpeg_dimensions(jpeg: &[u8]) -> Result<(u16, u16), BrokerError> {
+    let mut cursor = 2;
+    while cursor < jpeg.len() {
+        if jpeg[cursor] != 0xff {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG marker is malformed",
+            ));
+        }
+        while cursor < jpeg.len() && jpeg[cursor] == 0xff {
+            cursor += 1;
+        }
+        let marker = *jpeg.get(cursor).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG marker is truncated",
+            )
+        })?;
+        cursor += 1;
+        if marker == 0xda || marker == 0xd9 {
+            break;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let length_end = cursor.checked_add(2).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview JPEG segment length overflowed",
+            )
+        })?;
+        let length_bytes = jpeg.get(cursor..length_end).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG segment length is truncated",
+            )
+        })?;
+        let segment_len = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
+        if segment_len < 2 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG segment length is invalid",
+            ));
+        }
+        let segment_end = cursor.checked_add(segment_len).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview JPEG segment length overflowed",
+            )
+        })?;
+        if segment_end > jpeg.len() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG segment is truncated",
+            ));
+        }
+        if matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        ) {
+            if segment_len < 7 {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "preview JPEG dimensions are truncated",
+                ));
+            }
+            let height = u16::from_be_bytes([jpeg[cursor + 3], jpeg[cursor + 4]]);
+            let width = u16::from_be_bytes([jpeg[cursor + 5], jpeg[cursor + 6]]);
+            if width == 0
+                || height == 0
+                || width > MAX_PREVIEW_WIDTH
+                || height > MAX_PREVIEW_HEIGHT
+                || u32::from(width) * u32::from(height) > MAX_PREVIEW_PIXELS
+            {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::BrowserResourceLimit,
+                    "preview JPEG dimensions exceed the configured bound",
+                ));
+            }
+            return Ok((width, height));
+        }
+        cursor = segment_end;
+    }
+    Err(BrokerError::new(
+        BrokerErrorCode::BrokerProtocolError,
+        "preview JPEG does not contain a supported dimension marker",
+    ))
+}
+
+fn parse_tsh1_frame(packet: Bytes) -> Result<(PreviewFrameMetadata, Bytes, Bytes), BrokerError> {
+    if packet.len() < 8 || &packet[..4] != TSH1_MAGIC {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "preview frame is not a TSH1 packet",
+        ));
+    }
+    let metadata_len = u32::from_le_bytes(packet[4..8].try_into().unwrap()) as usize;
+    if metadata_len == 0 || metadata_len > MAX_PREVIEW_META_BYTES {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "preview frame metadata is empty or oversized",
+        ));
+    }
+    let metadata_end = 8usize.checked_add(metadata_len).ok_or_else(|| {
+        BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "preview frame metadata length overflowed",
+        )
+    })?;
+    if metadata_end >= packet.len() {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "preview frame metadata or image payload is truncated",
+        ));
+    }
+    let metadata: PreviewFrameMetadata =
+        serde_json::from_slice(&packet[8..metadata_end]).map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview frame metadata is malformed",
+            )
+        })?;
+    if metadata.extension_instance_id.trim().is_empty()
+        || metadata.extension_instance_id.len() > 128
+        || metadata.window_id <= 0
+        || metadata.tab_id <= 0
+        || metadata.seq == 0
+        || metadata.url.len() > 16 * 1024
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "preview frame metadata is outside protocol bounds",
+        ));
+    }
+    let jpeg = packet.slice(metadata_end..);
+    if jpeg.len() > MAX_PREVIEW_JPEG_BYTES
+        || jpeg.len() < 4
+        || jpeg[..2] != [0xff, 0xd8]
+        || jpeg[jpeg.len() - 2..] != [0xff, 0xd9]
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "preview JPEG is empty, malformed, or exceeds the frame limit",
+        ));
+    }
+    jpeg_dimensions(&jpeg)?;
+    Ok((metadata, jpeg, packet))
+}
+
+/// Generate a URL-safe bearer value with 244 CSPRNG bits without logging or
+/// writing it to a project endpoint. The two UUID v4 values are OS-random.
+pub fn generate_broker_token() -> String {
+    let first = Uuid::new_v4().into_bytes();
+    let second = Uuid::new_v4().into_bytes();
+    let mut material = [0u8; 32];
+    material[..16].copy_from_slice(&first);
+    material[16..].copy_from_slice(&second);
+    URL_SAFE_NO_PAD.encode(material)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::protocol::{
+        BrokerIdentityProof, ExtensionHeartbeat, ExtensionTab, ExtensionWindow, FeatureAvailability,
+    };
+    use crate::state::BrokerState;
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
+    use tokio_tungstenite::tungstenite::http::header::ORIGIN as WS_ORIGIN;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+
+    const EXTENSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn test_config() -> BrokerServerConfig {
+        let mut config = BrokerServerConfig::new(format!("chrome-extension://{EXTENSION_ID}"));
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        config
+    }
+
+    fn request_ws_url(runtime: &BrokerRuntime) -> String {
+        format!(
+            "{}?token={}",
+            runtime.endpoint_record().ws_url,
+            runtime.credential()
+        )
+    }
+
+    fn request_extension_ws_url(runtime: &BrokerRuntime) -> String {
+        format!(
+            "{}?token={}",
+            runtime.endpoint_record().extension_frame_ws_url,
+            runtime.credential()
+        )
+    }
+
+    fn test_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08];
+        jpeg.extend_from_slice(&height.to_be_bytes());
+        jpeg.extend_from_slice(&width.to_be_bytes());
+        jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xff, 0xd9]);
+        jpeg
+    }
+
+    fn test_tsh1(instance_id: &str, window_id: i64, tab_id: i64, seq: u64, jpeg: &[u8]) -> Vec<u8> {
+        let metadata = serde_json::to_vec(&PreviewFrameMetadata {
+            extension_instance_id: instance_id.into(),
+            window_id,
+            tab_id,
+            url: "https://example.test/".into(),
+            seq,
+        })
+        .unwrap();
+        let mut packet = Vec::with_capacity(8 + metadata.len() + jpeg.len());
+        packet.extend_from_slice(TSH1_MAGIC);
+        packet.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        packet.extend_from_slice(&metadata);
+        packet.extend_from_slice(jpeg);
+        packet
+    }
+
+    fn test_heartbeat(instance_id: &str, tab_ids: &[i64]) -> ExtensionHeartbeat {
+        let tabs = tab_ids
+            .iter()
+            .map(|tab_id| ExtensionTab {
+                id: *tab_id,
+                window_id: 7,
+                title: format!("Tab {tab_id}"),
+                url: format!("https://{instance_id}-{tab_id}.test"),
+                active: Some(tab_id) == tab_ids.first(),
+                favicon_url: String::new(),
+                debuggable: true,
+            })
+            .collect::<Vec<_>>();
+        ExtensionHeartbeat {
+            schema_version: Some(BROWSER_BROKER_SCHEMA_VERSION),
+            protocol_version: Some(BROWSER_BROKER_PROTOCOL_VERSION),
+            extension_instance_id: Some(instance_id.into()),
+            profile_label: instance_id.into(),
+            extension_version: "test".into(),
+            features: Vec::new(),
+            supported_actions: Vec::new(),
+            supported_operations: Vec::new(),
+            optional_permissions: BTreeMap::new(),
+            browser: BTreeMap::new(),
+            project_root: None,
+            url: tabs.first().map(|tab| tab.url.clone()).unwrap_or_default(),
+            title: tabs
+                .first()
+                .map(|tab| tab.title.clone())
+                .unwrap_or_default(),
+            active_window_id: Some(7),
+            active_tab_id: tab_ids.first().copied(),
+            tabs: Vec::new(),
+            windows: vec![ExtensionWindow {
+                id: 7,
+                focused: true,
+                tabs,
+            }],
+            frame_error: String::new(),
+        }
+    }
+
+    async fn read_json(socket: &mut TestSocket) -> Value {
+        let message = socket.next().await.unwrap().unwrap();
+        serde_json::from_str(message.into_text().unwrap().as_str()).unwrap()
+    }
+
+    async fn subscribe_client(
+        socket: &mut TestSocket,
+        runtime: &mut BrokerRuntime,
+        state: &mut BrokerState,
+        target: &BrowserTarget,
+        request_id: &str,
+    ) -> Value {
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "cmd": "subscribe_browser_session",
+                    "request_id": request_id,
+                    "extension_instance_id": target.extension_instance_id,
+                    "target": target,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let event = runtime.next_event().await.unwrap();
+        state.handle(event, runtime).await;
+        read_json(socket).await
+    }
+
+    async fn handle_next_state_event(runtime: &mut BrokerRuntime, state: &mut BrokerState) {
+        let event = timeout(Duration::from_secs(1), runtime.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        state.handle(event, runtime).await;
+    }
+
+    #[test]
+    fn extension_origin_is_exact_and_uses_chrome_id_alphabet() {
+        assert!(valid_extension_origin(&format!(
+            "chrome-extension://{}",
+            "a".repeat(32)
+        )));
+        assert!(!valid_extension_origin("https://example.test"));
+        assert!(!valid_extension_origin(&format!(
+            "chrome-extension://{}",
+            "q".repeat(32)
+        )));
+        assert!(!valid_extension_origin(&format!(
+            "chrome-extension://{}",
+            "a".repeat(31)
+        )));
+    }
+
+    #[test]
+    fn tsh1_parser_preserves_frame_bytes_without_reencoding() {
+        let jpeg = test_jpeg(3, 2);
+        let packet = test_tsh1("profile-a", 7, 42, 1, &jpeg);
+        let original = packet.clone();
+        let (parsed, bytes, frame) = parse_tsh1_frame(Bytes::from(packet)).unwrap();
+        assert_eq!(parsed.extension_instance_id, "profile-a");
+        assert_eq!(parsed.seq, 1);
+        assert_eq!(&bytes[..], &jpeg[..]);
+        assert_eq!(&frame[..], &original[..]);
+    }
+
+    #[test]
+    fn tsh1_parser_rejects_malformed_oversized_and_dimension_limited_frames() {
+        let malformed = parse_tsh1_frame(Bytes::from_static(b"not-tsh1")).unwrap_err();
+        assert_eq!(malformed.code, BrokerErrorCode::BrokerProtocolError);
+
+        let mut oversized_jpeg = vec![0xff, 0xd8];
+        oversized_jpeg.resize(MAX_PREVIEW_JPEG_BYTES + 1, 0);
+        let oversized = parse_tsh1_frame(Bytes::from(test_tsh1(
+            "profile-a",
+            7,
+            42,
+            1,
+            &oversized_jpeg,
+        )))
+        .unwrap_err();
+        assert_eq!(oversized.code, BrokerErrorCode::BrowserResourceLimit);
+
+        let too_wide = parse_tsh1_frame(Bytes::from(test_tsh1(
+            "profile-a",
+            7,
+            42,
+            1,
+            &test_jpeg(MAX_PREVIEW_WIDTH + 1, 1),
+        )))
+        .unwrap_err();
+        assert_eq!(too_wide.code, BrokerErrorCode::BrowserResourceLimit);
+
+        let pixel_bound_edge = parse_tsh1_frame(Bytes::from(test_tsh1(
+            "profile-a",
+            7,
+            42,
+            1,
+            &test_jpeg(MAX_PREVIEW_WIDTH, MAX_PREVIEW_HEIGHT),
+        )))
+        .unwrap();
+        assert_eq!(pixel_bound_edge.0.tab_id, 42);
+    }
+
+    #[tokio::test]
+    async fn binary_publication_preserves_tsh1_and_validates_complete_target() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let mut publications = runtime.subscribe_publications();
+        let target = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let packet = test_tsh1("profile-a", 7, 42, 1, &test_jpeg(3, 2));
+        runtime
+            .publish(BrokerPublication {
+                target: target.clone(),
+                frame: Bytes::from(packet.clone()),
+                owner_ids: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            })
+            .unwrap();
+        let publication = publications.recv().await.unwrap();
+        assert_eq!(publication.target, target);
+        assert_eq!(&publication.frame[..], &packet[..]);
+
+        let mismatch = runtime
+            .publish(BrokerPublication {
+                target: BrowserTarget {
+                    extension_instance_id: "profile-b".into(),
+                    window_id: 7,
+                    tab_id: 42,
+                },
+                frame: Bytes::from(packet),
+                owner_ids: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            })
+            .unwrap_err();
+        assert_eq!(mismatch.code, BrokerErrorCode::MismatchedBrowserResponse);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_preview_subscriptions_require_the_complete_matching_target() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let mut state = BrokerState::new();
+        let now = std::time::Instant::now();
+        state
+            .sessions
+            .register_heartbeat(test_heartbeat("profile-a", &[42, 43]), now)
+            .unwrap();
+        state
+            .sessions
+            .register_heartbeat(test_heartbeat("profile-b", &[42]), now)
+            .unwrap();
+
+        let target_a_42 = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let target_a_43 = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 43,
+        };
+        let target_b_42 = BrowserTarget {
+            extension_instance_id: "profile-b".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let (mut client_a_42, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let (mut client_a_43, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let (mut client_b_42, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+
+        for (client, target, request_id) in [
+            (&mut client_a_42, &target_a_42, "subscribe-a-42"),
+            (&mut client_a_43, &target_a_43, "subscribe-a-43"),
+            (&mut client_b_42, &target_b_42, "subscribe-b-42"),
+        ] {
+            let ack = subscribe_client(client, &mut runtime, &mut state, target, request_id).await;
+            assert_eq!(ack["ok"], true);
+            assert_eq!(ack["target"], serde_json::to_value(target).unwrap());
+        }
+
+        let packet = test_tsh1("profile-a", 7, 42, 1, &test_jpeg(3, 2));
+        let (metadata, jpeg, frame) = parse_tsh1_frame(Bytes::from(packet.clone())).unwrap();
+        let frame_budget = Arc::new(Semaphore::new(frame.len().max(1)))
+            .try_acquire_owned()
+            .unwrap();
+        state
+            .handle(
+                BrokerEvent::PreviewFrame {
+                    target: target_a_42.clone(),
+                    seq: metadata.seq,
+                    url: metadata.url,
+                    jpeg,
+                    frame,
+                    _budget: frame_budget,
+                },
+                &runtime,
+            )
+            .await;
+
+        let mut navigated = test_heartbeat("profile-a", &[42, 43]);
+        navigated.windows[0].tabs[0].url = "https://profile-a-navigated.test".into();
+        navigated.url = navigated.windows[0].tabs[0].url.clone();
+        state
+            .sessions
+            .register_heartbeat(navigated, now + Duration::from_secs(1))
+            .unwrap();
+        handle_next_state_event(&mut runtime, &mut state).await;
+
+        assert!(
+            timeout(Duration::from_millis(100), client_a_42.next())
+                .await
+                .is_err()
+        );
+        assert!(!state.sessions.has_subscriber(&target_a_42));
+
+        assert!(
+            timeout(Duration::from_millis(100), client_a_43.next())
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(100), client_b_42.next())
+                .await
+                .is_err()
+        );
+
+        let ack = subscribe_client(
+            &mut client_a_43,
+            &mut runtime,
+            &mut state,
+            &target_a_42,
+            "subscribe-a-42-after-navigation",
+        )
+        .await;
+        assert_eq!(ack["ok"], true);
+        assert_eq!(ack["target"], serde_json::to_value(&target_a_42).unwrap());
+
+        let navigated_packet = test_tsh1("profile-a", 7, 42, 1, &test_jpeg(3, 2));
+        let (metadata, jpeg, frame) =
+            parse_tsh1_frame(Bytes::from(navigated_packet.clone())).unwrap();
+        let frame_budget = Arc::new(Semaphore::new(frame.len().max(1)))
+            .try_acquire_owned()
+            .unwrap();
+        state
+            .handle(
+                BrokerEvent::PreviewFrame {
+                    target: target_a_42.clone(),
+                    seq: metadata.seq,
+                    url: metadata.url,
+                    jpeg,
+                    frame,
+                    _budget: frame_budget,
+                },
+                &runtime,
+            )
+            .await;
+        handle_next_state_event(&mut runtime, &mut state).await;
+        assert!(
+            timeout(Duration::from_millis(100), client_a_42.next())
+                .await
+                .is_err()
+        );
+        let received_after_navigation = timeout(Duration::from_secs(1), client_a_43.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received_after_navigation,
+            WsMessage::Binary(Bytes::from(navigated_packet))
+        );
+
+        client_a_42.close(None).await.unwrap();
+        let disconnect = timeout(Duration::from_secs(1), runtime.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(disconnect, BrokerEvent::Unsubscribe { .. }));
+        state.handle(disconnect, &runtime).await;
+        assert!(state.sessions.has_subscriber(&target_a_42));
+        assert!(!state.sessions.has_subscriber(&target_a_43));
+        assert!(state.sessions.has_subscriber(&target_b_42));
+
+        client_a_43.close(None).await.unwrap();
+        client_b_42.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn action_error_projection_keeps_non_secret_locator_context_at_top_level() {
+        let request: OperationRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "request_id": "action-1",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_browser_action",
+            "target": {
+                "extension_instance_id": "profile-a",
+                "window_id": 7,
+                "tab_id": 42
+            },
+            "lease_token": "lease-private",
+            "action": "click",
+            "element": {
+                "css": "#missing",
+                "page_context_revision": "revision-1"
+            }
+        }))
+        .unwrap();
+        let mut error = BrokerError::new(BrokerErrorCode::ElementNotFound, "element not found");
+        error.recovery.insert(
+            "target".into(),
+            serde_json::json!({
+                "extension_instance_id": "profile-a",
+                "window_id": 7,
+                "tab_id": 42
+            }),
+        );
+        error
+            .recovery
+            .insert("action".into(), Value::String("click".into()));
+        error.recovery.insert(
+            "action_outcome".into(),
+            serde_json::json!({"ok": false, "match_count": 0}),
+        );
+        let response = operation_error_value(&request, error);
+        assert_eq!(response["code"], "element_not_found");
+        assert_eq!(response["target"]["extension_instance_id"], "profile-a");
+        assert_eq!(response["action"], "click");
+        assert_eq!(response["action_outcome"]["match_count"], 0);
+        assert_eq!(response["recovery"]["target"]["tab_id"], 42);
+        assert!(!response.to_string().contains("lease-private"));
+    }
+
+    #[test]
+    fn broker_rejects_non_loopback_and_unpinned_extension_origin() {
+        let mut config = BrokerServerConfig::new(format!("chrome-extension://{}", "a".repeat(32)));
+        config.discovery_addr = "0.0.0.0:17373".parse().unwrap();
+        assert_eq!(
+            config.validate().unwrap_err().code,
+            BrokerErrorCode::BrokerProtocolError
+        );
+        config.discovery_addr = "127.0.0.1:17373".parse().unwrap();
+        config.trusted_extension_origins = vec!["chrome-extension://other".into()];
+        assert_eq!(
+            config.validate().unwrap_err().code,
+            BrokerErrorCode::BrokerOriginDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn occupied_discovery_listener_is_never_terminated_or_reused() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = occupied.local_addr().unwrap();
+        let mut config = test_config();
+        config.discovery_addr = address;
+
+        let error = BrokerRuntime::start(config).await.err().unwrap();
+        assert_eq!(error.code, BrokerErrorCode::BrowserUnavailable);
+        let connection = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (accepted, _) = occupied.accept().await.unwrap();
+        drop(connection);
+        drop(accepted);
+    }
+
+    #[tokio::test]
+    async fn discovery_never_gives_credentials_or_project_paths_to_local_clients() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let discovery_url = runtime.endpoint_record().discovery_url;
+
+        let local = client.get(&discovery_url).send().await.unwrap();
+        assert_eq!(local.status(), StatusCode::OK);
+        let local: Value = local.json().await.unwrap();
+        assert_eq!(local["mode"], "chrome");
+        assert_eq!(local["broker_scope"], "user_session");
+        assert!(!local["ws_url"].as_str().unwrap().contains("token="));
+        assert!(
+            !local["extension_frame_ws_url"]
+                .as_str()
+                .unwrap()
+                .contains("token=")
+        );
+        assert!(local.get("project_root").is_none());
+        assert!(local.get("endpoint").is_none());
+        let public_ws_port = local["ws_url"]
+            .as_str()
+            .unwrap()
+            .split(':')
+            .nth(2)
+            .unwrap()
+            .split('/')
+            .next()
+            .unwrap()
+            .split('?')
+            .next()
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        assert_ne!(public_ws_port, crate::protocol::CHROME_DISCOVERY_PORT);
+
+        let mut bad_host = tokio::net::TcpStream::connect(runtime.state.discovery_addr)
+            .await
+            .unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        bad_host
+            .write_all(
+                b"GET /v1/bridge HTTP/1.1\r\nHost: attacker.example\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut bad_host_response = Vec::new();
+        bad_host.read_to_end(&mut bad_host_response).await.unwrap();
+        assert!(bad_host_response.starts_with(b"HTTP/1.1 403"));
+
+        let hostile = client
+            .get(&discovery_url)
+            .header("Origin", "https://attacker.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hostile.status(), StatusCode::FORBIDDEN);
+        assert!(
+            hostile
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        let _ = hostile.bytes().await.unwrap();
+
+        let trusted_origin = format!("chrome-extension://{EXTENSION_ID}");
+        let forged_extension_header = client
+            .get(&discovery_url)
+            .header("X-Teshi-Extension-Origin", &trusted_origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forged_extension_header.status(), StatusCode::OK);
+        let forged_extension_header: Value = forged_extension_header.json().await.unwrap();
+        assert!(
+            !forged_extension_header["ws_url"]
+                .as_str()
+                .unwrap()
+                .contains("token=")
+        );
+
+        let missing_origin_post = client.post(&discovery_url).send().await.unwrap();
+        assert_eq!(missing_origin_post.status(), StatusCode::FORBIDDEN);
+        let _ = missing_origin_post.bytes().await.unwrap();
+
+        let untrusted_origin_post = client
+            .post(&discovery_url)
+            .header(
+                "Origin",
+                "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(untrusted_origin_post.status(), StatusCode::FORBIDDEN);
+        let _ = untrusted_origin_post.bytes().await.unwrap();
+
+        let trusted_post = client
+            .post(&discovery_url)
+            .header("Origin", &trusted_origin)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(trusted_post.status(), StatusCode::OK);
+        assert_eq!(
+            trusted_post
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            trusted_origin.as_str()
+        );
+        let trusted_post: Value = trusted_post.json().await.unwrap();
+        assert!(trusted_post["ws_url"].as_str().unwrap().contains("token="));
+
+        let hostile_http_origin_wins = client
+            .post(&discovery_url)
+            .header("Origin", "https://attacker.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hostile_http_origin_wins.status(), StatusCode::FORBIDDEN);
+        let _ = hostile_http_origin_wins.bytes().await.unwrap();
+
+        let extension = client
+            .get(&discovery_url)
+            .header("Origin", &trusted_origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(extension.status(), StatusCode::OK);
+        assert_eq!(
+            extension
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            trusted_origin.as_str()
+        );
+        let extension: Value = extension.json().await.unwrap();
+        assert!(!extension["ws_url"].as_str().unwrap().contains("token="));
+        assert!(
+            extension["extension_frame_ws_url"]
+                .as_str()
+                .unwrap()
+                .contains("/extension/frames")
+        );
+        assert!(
+            !extension["extension_frame_ws_url"]
+                .as_str()
+                .unwrap()
+                .contains("token=")
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pairing_requires_explicit_native_approval_and_persists_without_project_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = BrokerServerConfig::with_trusted_extension_origins(Vec::new())
+            .with_persistent_state_dir(temp.path());
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let private = PrivateCredentialStore::new(temp.path());
+        runtime.persist_private_credential(&private).unwrap();
+        let endpoint = runtime.endpoint_record();
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let origin = format!("chrome-extension://{EXTENSION_ID}");
+
+        let pending = client
+            .post(&endpoint.discovery_url)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&serde_json::json!({
+                "extension_id": EXTENSION_ID,
+                "profile_label": "QA account",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pending.status(), StatusCode::FORBIDDEN);
+        let pending_body: Value = pending.json().await.unwrap();
+        assert_eq!(pending_body["code"], "broker_pairing_required");
+        assert_eq!(pending_body["recovery"]["origin"], origin);
+        assert!(pending_body.to_string().find("token").is_none());
+
+        let admin_path = format!("{}/pairing", endpoint.discovery_url);
+        let listed = client
+            .get(&admin_path)
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_body: Value = listed.json().await.unwrap();
+        assert_eq!(listed_body["trusted_origins"].as_array().unwrap().len(), 0);
+        assert_eq!(listed_body["pending_pairings"][0]["origin"], origin);
+
+        let self_approval = client
+            .post(&admin_path)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({"origin": origin}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(self_approval.status(), StatusCode::FORBIDDEN);
+
+        let approved = client
+            .post(&admin_path)
+            .header("Content-Type", "application/json")
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({
+                "origin": origin,
+                "display_name": "QA account",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let approved_body: Value = approved.json().await.unwrap();
+        assert_eq!(approved_body["changed"], true);
+        assert_eq!(
+            PairingStore::new(temp.path()).load().unwrap()[0].origin,
+            origin
+        );
+        let generation_credential = private.read_for_endpoint(&endpoint).unwrap();
+        assert_eq!(
+            generation_credential.trusted_extension_origins(),
+            std::slice::from_ref(&origin)
+        );
+
+        let discovered = client
+            .post(&endpoint.discovery_url)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(discovered.status(), StatusCode::OK);
+        let discovered_body: Value = discovered.json().await.unwrap();
+        assert!(
+            discovered_body["extension_frame_ws_url"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("token={}", runtime.credential()))
+        );
+
+        let removed = client
+            .delete(&admin_path)
+            .header("Content-Type", "application/json")
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({"origin": origin}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        assert!(PairingStore::new(temp.path()).load().unwrap().is_empty());
+        let denied = client
+            .post(&endpoint.discovery_url)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            denied.json::<Value>().await.unwrap()["code"],
+            "broker_pairing_required"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn removing_pairing_closes_the_live_extension_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = format!("chrome-extension://{EXTENSION_ID}");
+        let mut config = BrokerServerConfig::with_trusted_extension_origins(vec![origin.clone()])
+            .with_persistent_state_dir(temp.path());
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let private = PrivateCredentialStore::new(temp.path());
+        runtime.persist_private_credential(&private).unwrap();
+        let endpoint = runtime.endpoint_record();
+        let mut request = request_extension_ws_url(&runtime)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(WS_ORIGIN, WsHeaderValue::from_str(&origin).unwrap());
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&ExtensionStreamMessage::StreamHello {
+                    project_root: None,
+                    extension_instance_id: "pairing-revoke-profile".into(),
+                    protocol_version: BROWSER_BROKER_PROTOCOL_VERSION,
+                    extension_version: "test".into(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut state = BrokerState::new();
+        handle_next_state_event(&mut runtime, &mut state).await;
+        assert_eq!(read_json(&mut socket).await["ok"], true);
+
+        let client = reqwest::Client::new();
+        let removed = client
+            .delete(format!("{}/pairing", endpoint.discovery_url))
+            .header("Content-Type", "application/json")
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({"origin": origin}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        handle_next_state_event(&mut runtime, &mut state).await;
+        let closed = timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            closed,
+            None | Some(Err(_)) | Some(Ok(WsMessage::Close(_)))
+        ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn generation_bound_direct_send_never_enqueues_on_a_replacement_stream() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        runtime
+            .state
+            .streams
+            .write()
+            .await
+            .insert("profile-a".into(), (2, sender));
+
+        let error = runtime
+            .send_extension_command_for_generation(
+                "profile-a",
+                Some(1),
+                serde_json::json!({"request_id": "old-generation"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::IncompatibleBrowserSession);
+        assert!(receiver.try_recv().is_err());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn identity_challenge_proves_generation_without_sending_token() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let endpoint = runtime.endpoint_record();
+        let token = runtime.credential().to_owned();
+        let credential = PrivateBrokerCredential::for_endpoint(
+            &endpoint,
+            token.clone(),
+            vec![format!("chrome-extension://{EXTENSION_ID}")],
+        )
+        .unwrap();
+        let challenge = BrokerIdentityChallenge {
+            nonce: URL_SAFE_NO_PAD.encode([7u8; 32]),
+        };
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}{}",
+                runtime.state.discovery_addr.port(),
+                BROWSER_BROKER_IDENTITY_CHALLENGE_PATH
+            ))
+            .json(&challenge)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let proof: BrokerIdentityProof = response.json().await.unwrap();
+        credential
+            .verify_identity_proof(&challenge, &proof, &endpoint)
+            .unwrap();
+        assert!(!serde_json::to_string(&proof).unwrap().contains(&token));
+
+        let denied = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}{}",
+                runtime.state.discovery_addr.port(),
+                BROWSER_BROKER_IDENTITY_CHALLENGE_PATH
+            ))
+            .header("Origin", "https://attacker.example")
+            .json(&challenge)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_persists_a_credential_bound_to_its_process_generation() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store = PrivateCredentialStore::new(temp.path().join("private-state"));
+        runtime.persist_private_credential(&store).unwrap();
+        let endpoint = runtime.endpoint_record();
+        let credential = store.read_for_endpoint(&endpoint).unwrap();
+        assert_eq!(credential.token(), runtime.credential());
+
+        let mut stale_endpoint = endpoint;
+        stale_endpoint.broker_start_id.push_str("-stale");
+        assert_eq!(
+            store.read_for_endpoint(&stale_endpoint).unwrap_err().code,
+            BrokerErrorCode::IncompatibleBrowserSession
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn http_mutations_require_exact_origin_and_token_before_state_events() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let endpoint = runtime.endpoint_record();
+        let origin = format!("chrome-extension://{EXTENSION_ID}");
+        let heartbeat = serde_json::json!({
+            "schema_version": 1,
+            "protocol_version": 1,
+            "extension_instance_id": "profile-a",
+            "project_root": "C:/private/project",
+            "tabs": []
+        });
+
+        let missing = client
+            .post(format!("{}/heartbeat", endpoint.discovery_url))
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&heartbeat)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+        let _ = missing.bytes().await.unwrap();
+
+        let hostile = client
+            .post(format!(
+                "{}/heartbeat?token={}",
+                endpoint.discovery_url,
+                runtime.credential()
+            ))
+            .header("Content-Type", "application/json")
+            .header("Origin", "https://attacker.example")
+            .json(&heartbeat)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hostile.status(), StatusCode::FORBIDDEN);
+        let _ = hostile.bytes().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), runtime.events.recv())
+                .await
+                .is_err()
+        );
+
+        let credential = runtime.credential().to_owned();
+        let request = tokio::spawn(async move {
+            client
+                .post(format!(
+                    "{}/heartbeat?token={credential}",
+                    endpoint.discovery_url
+                ))
+                .header("Content-Type", "application/json")
+                .header("X-Teshi-Broker-Token", &credential)
+                .header("Origin", origin)
+                .json(&heartbeat)
+                .send()
+                .await
+                .unwrap()
+        });
+        let BrokerEvent::Heartbeat { payload, reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected authenticated heartbeat event")
+        };
+        assert_eq!(payload.extension_instance_id.as_deref(), Some("profile-a"));
+        assert_eq!(payload.project_root.as_deref(), Some("C:/private/project"));
+        reply
+            .send(serde_json::json!({"ok": true, "compatible": true}))
+            .unwrap();
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap()["ok"], true);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn extension_stream_requires_pinned_origin_and_acknowledges_network_batches() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let url = request_extension_ws_url(&runtime);
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            WS_ORIGIN,
+            WsHeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}")).unwrap(),
+        );
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "stream_hello",
+                    "protocol_version": 1,
+                    "extension_instance_id": "profile-a",
+                    "project_root": "C:/stale/first-project",
+                    "extension_version": "0.7.10"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::ExtensionConnected {
+            hello,
+            generation,
+            reply,
+            ..
+        } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected extension connection event")
+        };
+        assert!(matches!(hello, ExtensionStreamMessage::StreamHello { .. }));
+        assert_eq!(generation, 1);
+        reply
+            .send(serde_json::json!({
+                "type": "stream_hello_ack",
+                "schema_version": 1,
+                "protocol_version": 1,
+                "ok": true
+            }))
+            .unwrap();
+        assert_eq!(read_json(&mut socket).await["type"], "stream_hello_ack");
+
+        runtime
+            .send_extension_command(
+                "profile-a",
+                serde_json::json!({"request_id": "action-1", "cmd": "get_page_snapshot"}),
+            )
+            .await
+            .unwrap();
+        let command = read_json(&mut socket).await;
+        assert_eq!(command["type"], "direct_command");
+        assert_eq!(command["command"]["request_id"], "action-1");
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "network_batch",
+                    "extension_instance_id": "profile-a",
+                    "capture_id": "capture-a",
+                    "target": {"extension_instance_id": "profile-a", "window_id": 9, "tab_id": 4},
+                    "events": [{"seq": 1, "request_id": "network-1"}],
+                    "first_seq": 1,
+                    "last_seq": 1,
+                    "dropped_events": 0,
+                    "dropped_bytes": 0,
+                    "dropped_events_total": 0,
+                    "dropped_bytes_total": 0,
+                    "diagnostics": {"retries": 0}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::NetworkBatch { batch, reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected network capture batch event")
+        };
+        assert_eq!(batch.target.extension_instance_id, "profile-a");
+        assert_eq!(batch.events[0].seq, 1);
+        reply
+            .send(serde_json::json!({
+                "type": "network_ack",
+                "capture_id": "capture-a",
+                "target": {"extension_instance_id": "profile-a", "window_id": 9, "tab_id": 4},
+                "ack_seq": 1,
+                "accepted": true
+            }))
+            .unwrap();
+        let ack = read_json(&mut socket).await;
+        assert_eq!(ack["type"], "network_ack");
+        assert_eq!(ack["ack_seq"], 1);
+
+        let mut reconnect_request = request_extension_ws_url(&runtime)
+            .into_client_request()
+            .unwrap();
+        reconnect_request.headers_mut().insert(
+            WS_ORIGIN,
+            WsHeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}")).unwrap(),
+        );
+        let (mut reconnected, _) = connect_async(reconnect_request).await.unwrap();
+        reconnected
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "stream_hello",
+                    "protocol_version": 1,
+                    "extension_instance_id": "profile-a",
+                    "project_root": "C:/different/project",
+                    "extension_version": "0.7.10"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::ExtensionConnected {
+            generation: next_generation,
+            reply,
+            ..
+        } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected replacement extension connection event")
+        };
+        assert_eq!(next_generation, generation + 1);
+        reply
+            .send(serde_json::json!({
+                "type": "stream_hello_ack",
+                "schema_version": 1,
+                "protocol_version": 1,
+                "ok": true
+            }))
+            .unwrap();
+        assert_eq!(
+            read_json(&mut reconnected).await["type"],
+            "stream_hello_ack"
+        );
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            WsMessage::Close(_)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), runtime.events.recv())
+                .await
+                .is_err()
+        );
+        runtime
+            .send_extension_command(
+                "profile-a",
+                serde_json::json!({"request_id": "reconnected-action", "cmd": "get_page_snapshot"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read_json(&mut reconnected).await["command"]["request_id"],
+            "reconnected-action"
+        );
+
+        reconnected.close(None).await.unwrap();
+        let BrokerEvent::ExtensionDisconnected {
+            extension_instance_id,
+            generation: disconnected_generation,
+        } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected extension disconnect event")
+        };
+        assert_eq!(extension_instance_id, "profile-a");
+        assert_eq!(disconnected_generation, next_generation);
+        drop(socket);
+        drop(reconnected);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn extension_stream_network_batch_is_acknowledged_by_state_machine() {
+        let mut config = test_config();
+        config.broker_features = vec![
+            "p0.control".into(),
+            "p1.observability_artifacts".into(),
+            "p1.filtered_network_capture".into(),
+            "p1.network_batch_transport".into(),
+        ];
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let target = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let mut heartbeat = test_heartbeat("profile-a", &[42]);
+        heartbeat.project_root = Some("C:/project-a".into());
+        heartbeat.features = [
+            "p0.control",
+            "p1.observability_artifacts",
+            "p1.filtered_network_capture",
+            "p1.network_batch_transport",
+        ]
+        .into_iter()
+        .map(|feature| FeatureAvailability {
+            feature: feature.into(),
+            available: true,
+            reason: None,
+        })
+        .collect();
+        heartbeat.supported_operations = vec![
+            "start_network_capture".into(),
+            "list_network_requests".into(),
+        ];
+        let mut state = BrokerState::new();
+        state
+            .sessions
+            .register_heartbeat(heartbeat, std::time::Instant::now())
+            .unwrap();
+
+        let mut extension_request = request_extension_ws_url(&runtime)
+            .into_client_request()
+            .unwrap();
+        extension_request.headers_mut().insert(
+            WS_ORIGIN,
+            WsHeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}")).unwrap(),
+        );
+        let (mut extension, _) = connect_async(extension_request).await.unwrap();
+        extension
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "stream_hello",
+                    "protocol_version": 1,
+                    "extension_instance_id": "profile-a",
+                    "project_root": "C:/project-a",
+                    "extension_version": "0.7.10"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let connected = runtime.next_event().await.unwrap();
+        state.handle(connected, &runtime).await;
+        assert_eq!(read_json(&mut extension).await["type"], "stream_hello_ack");
+
+        let (mut client, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        client
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "lease-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "acquire_browser_lease",
+                    "extension_instance_id": "profile-a",
+                    "owner_label": "network-state-test",
+                    "ttl_secs": 60
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let lease_event = runtime.next_event().await.unwrap();
+        state.handle(lease_event, &runtime).await;
+        let lease_response = read_json(&mut client).await;
+        let lease_token = lease_response["lease_token"].as_str().unwrap().to_owned();
+
+        client
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "network-start-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "start_network_capture",
+                    "target": target,
+                    "lease_token": lease_token.clone(),
+                    "allowed_hostnames": ["example.test"]
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let start_event = runtime.next_event().await.unwrap();
+        state.handle(start_event, &runtime).await;
+        let start_command = read_json(&mut extension).await;
+        let capture_id = start_command["command"]["capture_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            start_command["command"]["target"],
+            serde_json::json!(target)
+        );
+
+        extension
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "response",
+                    "schema_version": 1,
+                    "protocol_version": 1,
+                    "request_id": "network-start-1",
+                    "cmd": "start_network_capture",
+                    "extension_instance_id": "profile-a",
+                    "target": target,
+                    "ok": true,
+                    "active": true,
+                    "capture_id": capture_id
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response_event = runtime.next_event().await.unwrap();
+        state.handle(response_event, &runtime).await;
+        let start_response = read_json(&mut client).await;
+        assert_eq!(start_response["ok"], true);
+        assert_eq!(start_response["capture"]["capture_id"], capture_id);
+
+        extension
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "network_batch",
+                    "extension_instance_id": "profile-a",
+                    "capture_id": capture_id,
+                    "target": target,
+                    "events": [{
+                        "seq": 1,
+                        "event": {
+                            "event_type": "request",
+                            "request_id": "network-1",
+                            "url": "https://example.test/path",
+                            "method": "GET",
+                            "headers": {"Authorization": "Bearer secret"}
+                        }
+                    }],
+                    "first_seq": 1,
+                    "last_seq": 1
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let batch_event = runtime.next_event().await.unwrap();
+        state.handle(batch_event, &runtime).await;
+        let ack = read_json(&mut extension).await;
+        assert_eq!(ack["type"], "network_ack");
+        assert_eq!(ack["capture_id"], capture_id);
+        assert_eq!(ack["target"], serde_json::json!(target));
+        assert_eq!(ack["ack_seq"], 1);
+        assert_eq!(ack["acknowledged_sequence"], 1);
+        assert_eq!(ack["accepted"], true);
+
+        client
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "network-list-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "list_network_requests",
+                    "target": target,
+                    "lease_token": lease_token
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let list_event = runtime.next_event().await.unwrap();
+        state.handle(list_event, &runtime).await;
+        let list_response = read_json(&mut client).await;
+        assert_eq!(list_response["requests"].as_array().unwrap().len(), 1);
+        assert!(
+            !list_response["requests"]
+                .to_string()
+                .contains("Bearer secret")
+        );
+
+        client.close(None).await.unwrap();
+        extension.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn direct_websocket_rejects_unknown_operations_and_correlates_supported_requests() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({"request_id": "bad-1", "cmd": "delete_all_files"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let rejected = read_json(&mut socket).await;
+        assert_eq!(rejected["code"], "invalid_browser_operation");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), runtime.events.recv())
+                .await
+                .is_err()
+        );
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "snapshot-1",
+                    "cmd": "get_page_snapshot",
+                    "target": {"extension_instance_id": "profile-a", "window_id": 2, "tab_id": 3}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation { request, reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected supported browser operation")
+        };
+        assert_eq!(request.request_id, "snapshot-1");
+        reply
+            .send(Ok(serde_json::json!({"ok": true, "revision": "r1"})))
+            .unwrap();
+        assert_eq!(read_json(&mut socket).await["revision"], "r1");
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn same_client_websocket_can_receive_cancel_while_operation_is_pending() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "pending-1",
+                    "cmd": "get_page_snapshot",
+                    "target": {"extension_instance_id": "profile-a", "window_id": 2, "tab_id": 3}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation {
+            request: pending_request,
+            reply: pending_reply,
+            ..
+        } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected the pending browser operation")
+        };
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "cancel-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "cancel_browser_request",
+                    "cancel_request_id": pending_request.request_id.clone()
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation {
+            request: cancel_request,
+            reply: cancel_reply,
+            ..
+        } = tokio::time::timeout(Duration::from_millis(250), runtime.next_event())
+            .await
+            .expect("same WebSocket stopped reading the cancellation")
+            .unwrap()
+        else {
+            panic!("expected the cancellation operation")
+        };
+        assert_eq!(cancel_request.operation, "cancel_browser_request");
+
+        cancel_reply
+            .send(Ok(serde_json::json!({
+                "type": "response",
+                "request_id": "cancel-1",
+                "operation": "cancel_browser_request",
+                "ok": true,
+                "cancelled": true,
+                "cancel_request_id": "pending-1"
+            })))
+            .unwrap();
+        pending_reply
+            .send(Err(BrokerError::new(
+                BrokerErrorCode::BrowserOperationCancelled,
+                "browser operation was explicitly cancelled",
+            )))
+            .unwrap();
+
+        let first = read_json(&mut socket).await;
+        let second = read_json(&mut socket).await;
+        let responses = [first, second];
+        let cancelled = responses
+            .iter()
+            .find(|response| response["request_id"] == "cancel-1")
+            .unwrap();
+        let pending = responses
+            .iter()
+            .find(|response| response["request_id"] == "pending-1")
+            .unwrap();
+        assert_eq!(cancelled["cancelled"], true);
+        assert_eq!(pending["code"], "browser_operation_cancelled");
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn direct_response_budget_exhaustion_returns_resource_error() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "response-budget-1",
+                    "cmd": "get_page_snapshot",
+                    "target": {"extension_instance_id": "profile-a", "window_id": 2, "tab_id": 3}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation { request, reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected browser operation")
+        };
+        let available = runtime.state.event_byte_budget.available_permits();
+        let _all_remaining = Arc::clone(&runtime.state.event_byte_budget)
+            .try_acquire_many_owned(available as u32)
+            .unwrap();
+        reply.send(Ok(serde_json::json!({"ok": true}))).unwrap();
+
+        let rejected = read_json(&mut socket).await;
+        assert_eq!(rejected["request_id"], request.request_id);
+        assert_eq!(rejected["code"], "browser_resource_limit");
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn full_event_queue_rejects_without_dispatching_a_second_operation() {
+        let mut config = test_config();
+        config.event_queue_capacity = 1;
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let (mut first, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let (mut second, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let snapshot = |request_id: &str| {
+            serde_json::json!({
+                "schema_version": 1,
+                "request_id": request_id,
+                "cmd": "get_page_snapshot",
+                "target": {"extension_instance_id": "profile-a", "window_id": 2, "tab_id": 3}
+            })
+            .to_string()
+        };
+        first
+            .send(WsMessage::Text(snapshot("queued-1").into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime.events.capacity() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        second
+            .send(WsMessage::Text(snapshot("rejected-2").into()))
+            .await
+            .unwrap();
+        let rejected = read_json(&mut second).await;
+        assert_eq!(rejected["code"], "browser_resource_limit");
+
+        let BrokerEvent::Operation { request, reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected the first queued operation only")
+        };
+        assert_eq!(request.request_id, "queued-1");
+        reply.send(Ok(serde_json::json!({"ok": true}))).unwrap();
+        assert_eq!(read_json(&mut first).await["ok"], true);
+        first.close(None).await.unwrap();
+        second.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn response_deadline_is_explicit_and_late_reply_is_not_delivered() {
+        let mut config = test_config();
+        config.event_response_timeout = Duration::from_millis(100);
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "deadline-1",
+                    "cmd": "get_page_snapshot",
+                    "target": {"extension_instance_id": "profile-a", "window_id": 2, "tab_id": 3}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation { request, reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected the timed operation")
+        };
+        let response = read_json(&mut socket).await;
+        assert_eq!(response["request_id"], "deadline-1");
+        assert_eq!(response["code"], "browser_operation_timeout");
+        assert!(reply.send(Ok(serde_json::json!({"ok": true}))).is_err());
+        assert_eq!(request.request_id, "deadline-1");
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_keepalive_pings_are_answered_without_closing_the_control_socket() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let mut state = BrokerState::new();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+
+        socket
+            .send(WsMessage::Ping(vec![7, 8, 9].into()))
+            .await
+            .unwrap();
+        let pong = timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(pong, WsMessage::Pong(vec![7, 8, 9].into()));
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "request-after-ping",
+                    "cmd": "list_browser_sessions",
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let event = runtime.next_event().await.unwrap();
+        state.handle(event, &runtime).await;
+        let response = read_json(&mut socket).await;
+        assert_eq!(response["request_id"], "request-after-ping");
+        assert_eq!(response["ok"], true);
+
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn full_profile_outbound_queue_returns_without_blocking_state_transport() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (sender, _receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        let (other_sender, mut other_receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        runtime.state.streams.write().await.extend([
+            ("profile-a".into(), (1, sender)),
+            ("profile-b".into(), (1, other_sender)),
+        ]);
+
+        for index in 0..EXTENSION_OUTBOUND_QUEUE_CAPACITY {
+            runtime
+                .send_extension_command(
+                    "profile-a",
+                    serde_json::json!({"request_id": format!("queued-{index}"), "cmd": "get_page_snapshot"}),
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            runtime.send_extension_command(
+                "profile-a",
+                serde_json::json!({"request_id": "overflow", "cmd": "get_page_snapshot"}),
+            ),
+        )
+        .await
+        .expect("a full Profile queue blocked the broker event loop")
+        .unwrap_err();
+        assert_eq!(result.code, BrokerErrorCode::BrowserResourceLimit);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            runtime.send_extension_command(
+                "profile-b",
+                serde_json::json!({"request_id": "profile-b-command", "cmd": "heartbeat"}),
+            ),
+        )
+        .await
+        .expect("Profile B command was blocked by Profile A")
+        .unwrap();
+        assert!(other_receiver.try_recv().is_ok());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn extension_websocket_rejects_untrusted_origins_and_stale_tokens() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let endpoint = runtime.endpoint_record();
+        let valid_token = runtime.credential().to_owned();
+
+        for (origin, token) in [
+            ("https://attacker.example", valid_token.clone()),
+            (
+                "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "stale-token-that-is-long-enough-to-look-valid".to_owned(),
+            ),
+        ] {
+            let mut request = format!("{}?token={token}", endpoint.extension_frame_ws_url)
+                .into_client_request()
+                .unwrap();
+            request
+                .headers_mut()
+                .insert(WS_ORIGIN, WsHeaderValue::from_str(origin).unwrap());
+            let error = connect_async(request).await.unwrap_err();
+            let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+                panic!("expected handshake rejection, got {error}")
+            };
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), runtime.events.recv())
+                .await
+                .is_err()
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn control_http_body_and_websocket_connection_limits_are_enforced() {
+        let mut config = test_config();
+        config.max_websocket_connections = 1;
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let endpoint = runtime.endpoint_record();
+        // These probes exercise independent limits. An early oversized-body
+        // rejection can close its transport while the client is still writing;
+        // do not reuse that connection for the following header-limit probe.
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let origin = format!("chrome-extension://{EXTENSION_ID}");
+        let response = client
+            .post(format!(
+                "{}/heartbeat?token={}",
+                endpoint.discovery_url,
+                runtime.credential()
+            ))
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .header("Origin", &origin)
+            .header("Content-Type", "application/json")
+            .body(vec![b' '; MAX_HTTP_BODY_BYTES + 1])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let oversized_headers = client
+            .get(&endpoint.discovery_url)
+            .header("X-Teshi-Test", "h".repeat(MAX_REQUEST_HEADER_BYTES + 512))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            oversized_headers.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+
+        let (mut first, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let error = connect_async(request_ws_url(&runtime)).await.unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("expected socket limit rejection, got {error}")
+        };
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        first.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn extension_stream_limit_rejects_excess_profiles_without_replacing_first() {
+        let mut config = test_config();
+        config.max_extension_streams = 1;
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let endpoint = runtime.endpoint_record();
+        let mut first_request = request_extension_ws_url(&runtime)
+            .into_client_request()
+            .unwrap();
+        first_request.headers_mut().insert(
+            WS_ORIGIN,
+            WsHeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}")).unwrap(),
+        );
+        let (mut first, _) = connect_async(first_request).await.unwrap();
+
+        let mut second_request = endpoint.extension_frame_ws_url + "?token=";
+        second_request.push_str(runtime.credential());
+        let mut second_request = second_request.into_client_request().unwrap();
+        second_request.headers_mut().insert(
+            WS_ORIGIN,
+            WsHeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}")).unwrap(),
+        );
+        let error = connect_async(second_request).await.unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("expected extension stream limit rejection, got {error}")
+        };
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        first
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "stream_hello",
+                    "protocol_version": 1,
+                    "extension_instance_id": "profile-a",
+                    "extension_version": "0.7.10"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::ExtensionConnected { reply, .. } = runtime.next_event().await.unwrap()
+        else {
+            panic!("first extension stream was displaced")
+        };
+        reply.send(serde_json::json!({"ok": true})).unwrap();
+        assert_eq!(read_json(&mut first).await["ok"], true);
+
+        first.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn queued_event_byte_budget_fails_closed_when_exhausted() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut config = test_config();
+            config.queued_event_bytes = MAX_WEBSOCKET_MESSAGE_BYTES;
+            let runtime = BrokerRuntime::start(config).await.unwrap();
+            let all = Arc::clone(&runtime.state.event_byte_budget)
+                .try_acquire_many_owned(MAX_WEBSOCKET_MESSAGE_BYTES as u32)
+                .unwrap();
+            assert_eq!(
+                reserve_event_bytes(&runtime.state, 1).unwrap_err().code,
+                BrokerErrorCode::BrowserResourceLimit
+            );
+            drop(all);
+            assert!(reserve_event_bytes(&runtime.state, 1).is_ok());
+            runtime.shutdown().await;
+        });
+    }
+}

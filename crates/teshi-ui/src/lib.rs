@@ -8,18 +8,20 @@ pub mod backend;
 mod browser_sessions_view;
 mod gherkin_diagnostics_view;
 mod llm_config_view;
+#[cfg(any(test, target_arch = "wasm32"))]
+pub mod replay_fixture;
 mod run_view;
 mod winapp_preview;
 
 pub use app_shell::{AppShell, ShellSurface};
 pub use backend::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, BackendFuture,
-    BrowserLeaseSnapshot, BrowserMetadataSnapshot, BrowserSessionIdentitySnapshot,
-    BrowserSessionListSnapshot, BrowserSessionSnapshot, BrowserSessionsBackend, BrowserTabSnapshot,
-    BrowserTabTarget, BrowserWindowSnapshot, GherkinEditorBackend, LlmConfigBackend,
-    LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot, ModelProfileSnapshot,
-    ModelProfileUpdate, SharedApiRunBackend, SharedBrowserSessionsBackend,
-    SharedGherkinEditorBackend, SharedLlmBackend,
+    BrowserBrokerIdentitySnapshot, BrowserLeaseSnapshot, BrowserMetadataSnapshot,
+    BrowserSessionIdentitySnapshot, BrowserSessionListSnapshot, BrowserSessionSnapshot,
+    BrowserSessionsBackend, BrowserTabSnapshot, BrowserTabTarget, BrowserWindowSnapshot,
+    GherkinEditorBackend, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate,
+    ModelProfileListSnapshot, ModelProfileSnapshot, ModelProfileUpdate, SharedApiRunBackend,
+    SharedBrowserSessionsBackend, SharedGherkinEditorBackend, SharedLlmBackend,
 };
 pub use browser_sessions_view::BrowserSessionsView;
 pub use gherkin_diagnostics_view::GherkinDiagnosticsView;

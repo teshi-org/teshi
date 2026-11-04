@@ -1,0 +1,10 @@
+---
+description: Shared chrys-derived ratatui styling
+globs: crates/teshi-tui/**/*.rs
+alwaysApply: false
+---
+
+Follow `doc/tui-style-guide.md`. Use `theme::` tokens and component helpers instead
+of `Color::` values. Pick glyphs only from the guide. Lower color-budget caps for
+every migrated file; never raise a cap. Preserve visible text, keys, geometry,
+and tab click regions.

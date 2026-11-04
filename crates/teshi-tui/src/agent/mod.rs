@@ -8,26 +8,31 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 
 use crate::app::{AgentMutation, AgentPendingChange};
+use crate::cli::browser_endpoint::{read_cdp_endpoint, resolve_browser_project_root};
 use teshi_core::gherkin_lang::StructuralType;
 
 // Browser tool helpers
-fn resolve_sidecar_ws_url() -> Option<String> {
-    let project_root = std::env::current_dir().ok()?;
-    let endpoint_path = project_root.join(".teshi").join("cdp-endpoint.json");
-    let text = std::fs::read_to_string(endpoint_path).ok()?;
-    let payload: serde_json::Value = serde_json::from_str(&text).ok()?;
-    payload.get("ws_url")?.as_str().map(|s| s.to_string())
+fn browser_client(project_root: &std::path::Path) -> Result<teshi_engine::BrowserOperations> {
+    use std::time::Duration;
+
+    let project_root = resolve_browser_project_root(project_root)?;
+    let endpoint = read_cdp_endpoint(&project_root)?;
+    Ok(
+        teshi_engine::BrowserOperations::new(endpoint.ws_url, Duration::from_secs(30))
+            .with_caller_label("teshi-tui-agent")
+            .with_project_root(project_root.to_string_lossy()),
+    )
 }
 
 fn execute_typed_browser_operation(
+    project_root: &std::path::Path,
     build: impl FnOnce(teshi_engine::BrowserTarget, String) -> teshi_engine::BrowserOperation,
 ) -> Result<serde_json::Value> {
-    use std::time::Duration;
-    let ws_url = resolve_sidecar_ws_url().ok_or_else(|| {
-        anyhow::anyhow!("no browser sidecar connected; start Embedded or connect Chrome first")
+    let client = browser_client(project_root).map_err(|error| {
+        anyhow::anyhow!(
+            "no browser sidecar connected; start Embedded or connect Chrome first: {error}"
+        )
     })?;
-    let client = teshi_engine::BrowserOperations::new(ws_url, Duration::from_secs(30))
-        .with_caller_label("teshi-tui-agent");
     let sessions = client
         .execute(&teshi_engine::BrowserOperation::ListBrowserSessions)?
         .payload;
@@ -79,8 +84,13 @@ fn execute_typed_browser_operation(
         })?
         .payload;
     let lease_token = lease
-        .pointer("/lease/lease_token")
+        .get("lease_token")
         .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            lease
+                .pointer("/lease/lease_token")
+                .and_then(serde_json::Value::as_str)
+        })
         .context("browser lease response missing token")?
         .to_string();
     let result = client.execute(&build(target, lease_token.clone()));
@@ -104,6 +114,21 @@ fn execute_tool_impl(
     tool_call_id: &str,
     agent_idx: usize,
 ) -> Result<String> {
+    if matches!(
+        name,
+        "get_feature_content"
+            | "insert_scenario"
+            | "update_step"
+            | "delete_scenario"
+            | "rename_scenario"
+            | "reorder_steps"
+    ) {
+        let args: serde_json::Value =
+            serde_json::from_str(args_json).context("invalid JSON arguments")?;
+        if let Some(path) = args.get("file_path").and_then(|value| value.as_str()) {
+            app.ensure_tool_feature(path)?;
+        }
+    }
     match name {
         "get_project_info" => execute_get_project_info(app),
         "highlight_mindmap_nodes" => execute_highlight_mindmap_nodes(app, args_json),
@@ -217,6 +242,25 @@ fn execute_apply_mindmap_filter(app: &mut crate::app::App, args_json: &str) -> R
 
 fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
     let project = &app.project;
+    if let Some(catalog) = &app.lazy_features {
+        return Ok(format!(
+            "Project directory: {}\nFeature files discovered: {}\nCatalog loading: {}\nAST/MindMap scope: current Feature only\nActive file: {}\nFiles (first 100):\n{}",
+            project.root_dir.display(),
+            catalog.paths.len(),
+            catalog.is_loading(),
+            app.file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none selected".into()),
+            catalog
+                .paths
+                .iter()
+                .take(100)
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
 
     if project.features.is_empty() {
         let current_dir = std::env::current_dir()
@@ -1113,9 +1157,10 @@ fn execute_search_features(app: &crate::app::App, args_json: &str) -> Result<Str
 
     let mut results: Vec<String> = Vec::new();
 
-    for feature in &app.project.features {
+    for feature in app.feature_scope(None) {
+        let feature = feature?;
         let file_path = feature.file_path.to_string_lossy();
-        for scenario in &feature.scenarios {
+        for scenario in feature.all_scenarios() {
             // Check tag filter
             if let Some(tag) = tag_filter
                 && !scenario.tags.iter().any(|t| t == tag)
@@ -1178,15 +1223,10 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
 
     // Build run cases from project features
     let mut cases: Vec<crate::runner::RunCase> = Vec::new();
-    for feature in &app.project.features {
+    for feature in app.feature_scope(feature_path_filter) {
+        let feature = feature?;
         let fp = feature.file_path.to_string_lossy().to_string();
-        if let Some(filter_path) = feature_path_filter
-            && fp != filter_path
-            && !fp.ends_with(filter_path)
-        {
-            continue;
-        }
-        for scenario in &feature.scenarios {
+        for scenario in feature.all_scenarios() {
             if let Some(filter_name) = scenario_name_filter
                 && scenario.name != filter_name
             {
@@ -1295,6 +1335,7 @@ fn active_or_default_scope(
         .map(|store_id| teshi_agent::pipeline::RequirementSourceScope {
             store_id,
             iteration: teshi_core::authoring::RequirementIterationFilter::All,
+            project_filter: app.authoring_ui.project_filter.clone(),
         })
 }
 
@@ -1899,52 +1940,32 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 
     let file_path_opt = args.get("file_path").and_then(|v| v.as_str());
 
-    let project = &app.project;
-    let selected = if let Some(fp) = file_path_opt {
-        let selected: Vec<_> = project
-            .features
-            .iter()
-            .filter(|f| {
-                let path_str = f.file_path.to_string_lossy().replace('\\', "/");
-                path_str == fp || path_str.ends_with(fp)
+    let mut issues = Vec::new();
+    let mut selected_count = 0usize;
+    for feature in app.feature_scope(file_path_opt) {
+        let feature = feature?;
+        selected_count += 1;
+        let content = app
+            .find_feature_idx_for_file(&feature.file_path.to_string_lossy())
+            .and_then(|index| app.buffers.get(index))
+            .map(|buffer| buffer.as_string())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::lazy_features::read_content(&feature.file_path).map(|(_, source)| source)
             })
-            .collect();
-
-        if selected.is_empty() {
-            let available: Vec<_> = project
-                .features
-                .iter()
-                .map(|f| f.file_path.to_string_lossy().to_string())
-                .collect();
+            .map_err(anyhow::Error::msg)?;
+        issues.extend(teshi_agent::validator::validate_feature(
+            &content,
+            &feature.file_path,
+        ));
+        if issues.len() > 1000 {
             anyhow::bail!(
-                "Feature file '{}' not found. Available files: {}",
-                fp,
-                if available.is_empty() {
-                    "(none)".into()
-                } else {
-                    available.join(", ")
-                }
+                "More than 1000 validation issues; narrow the file scope. Validation is incomplete."
             );
         }
-        selected
-    } else {
-        project.features.iter().collect()
-    };
-
-    let mut issues = Vec::new();
-    for feature in selected {
-        match std::fs::read_to_string(&feature.file_path) {
-            Ok(content) => issues.extend(teshi_agent::validator::validate_feature(
-                &content,
-                &feature.file_path,
-            )),
-            Err(_) => issues.extend(teshi_agent::validator::validate_project(
-                &teshi_core::gherkin::BddProject {
-                    root_dir: project.root_dir.clone(),
-                    features: vec![feature.clone()],
-                },
-            )),
-        }
+    }
+    if selected_count == 0 {
+        anyhow::bail!("No matching Feature files in the discovered scope");
     }
 
     if issues.is_empty() {
@@ -1957,20 +1978,21 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 
 // ── Browser agent exploration tool handlers ──
 
-fn execute_browser_snapshot(_app: &mut crate::app::App) -> Result<String> {
-    let response = execute_typed_browser_operation(|target, lease_token| {
-        teshi_engine::BrowserOperation::GetPageSnapshot {
-            target,
-            lease_token,
-        }
-    })?;
+fn execute_browser_snapshot(app: &mut crate::app::App) -> Result<String> {
+    let response =
+        execute_typed_browser_operation(app.find_project_dir(), |target, lease_token| {
+            teshi_engine::BrowserOperation::GetPageSnapshot {
+                target,
+                lease_token,
+            }
+        })?;
     Ok(serde_json::to_string_pretty(&response)?)
 }
 
 fn execute_observe_page(app: &mut crate::app::App, agent_idx: usize) -> Result<String> {
     // A failed capture must not reuse a previous image as if it were current.
     app.agents[agent_idx].latest_visual_observation = None;
-    let screenshot = execute_typed_browser_screenshot()?;
+    let screenshot = execute_typed_browser_screenshot(app.find_project_dir())?;
     tracing::debug!(
         event = "visual_observation_created",
         observation_id = %screenshot.observation_id,
@@ -1983,13 +2005,12 @@ fn execute_observe_page(app: &mut crate::app::App, agent_idx: usize) -> Result<S
     Ok("Visual observation captured successfully.".into())
 }
 
-fn execute_typed_browser_screenshot() -> Result<teshi_engine::BrowserScreenshot> {
-    use std::time::Duration;
-    let ws_url = resolve_sidecar_ws_url().ok_or_else(|| {
-        anyhow::anyhow!("browser visual observation failed: no browser sidecar connected")
+fn execute_typed_browser_screenshot(
+    project_root: &std::path::Path,
+) -> Result<teshi_engine::BrowserScreenshot> {
+    let client = browser_client(project_root).map_err(|error| {
+        anyhow::anyhow!("browser visual observation failed: no browser sidecar connected: {error}")
     })?;
-    let client = teshi_engine::BrowserOperations::new(ws_url, Duration::from_secs(30))
-        .with_caller_label("teshi-tui-agent");
     let sessions = client
         .execute(&teshi_engine::BrowserOperation::ListBrowserSessions)?
         .payload;
@@ -2041,8 +2062,13 @@ fn execute_typed_browser_screenshot() -> Result<teshi_engine::BrowserScreenshot>
         })?
         .payload;
     let lease_token = lease
-        .pointer("/lease/lease_token")
+        .get("lease_token")
         .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            lease
+                .pointer("/lease/lease_token")
+                .and_then(serde_json::Value::as_str)
+        })
         .context("browser lease response missing token")?
         .to_string();
     let result = client.capture_viewport_png(target, lease_token.clone());
@@ -2053,7 +2079,7 @@ fn execute_typed_browser_screenshot() -> Result<teshi_engine::BrowserScreenshot>
     result
 }
 
-fn execute_browser_click(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
+fn execute_browser_click(app: &mut crate::app::App, args_json: &str) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
     let ref_id = args
@@ -2065,27 +2091,28 @@ fn execute_browser_click(_app: &mut crate::app::App, args_json: &str) -> Result<
     } else {
         format!("@{ref_id}")
     };
-    let response = execute_typed_browser_operation(|target, lease_token| {
-        teshi_engine::BrowserOperation::ExecuteBrowserAction {
-            target,
-            lease_token,
-            action: teshi_engine::BrowserAction::Click,
-            element: teshi_engine::BrowserElementInput {
-                reference: Some(reference),
-                ..Default::default()
-            },
-            value: None,
-            files: vec![],
-            wait: None,
-            timeout_ms: 15_000,
-            focus: false,
-            monitor: false,
-        }
-    })?;
+    let response =
+        execute_typed_browser_operation(app.find_project_dir(), |target, lease_token| {
+            teshi_engine::BrowserOperation::ExecuteBrowserAction {
+                target,
+                lease_token,
+                action: teshi_engine::BrowserAction::Click,
+                element: teshi_engine::BrowserElementInput {
+                    reference: Some(reference),
+                    ..Default::default()
+                },
+                value: None,
+                files: vec![],
+                wait: None,
+                timeout_ms: 15_000,
+                focus: false,
+                monitor: false,
+            }
+        })?;
     Ok(serde_json::to_string_pretty(&response)?)
 }
 
-fn execute_browser_type(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
+fn execute_browser_type(app: &mut crate::app::App, args_json: &str) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
     let ref_id = args
@@ -2101,27 +2128,28 @@ fn execute_browser_type(_app: &mut crate::app::App, args_json: &str) -> Result<S
     } else {
         format!("@{ref_id}")
     };
-    let response = execute_typed_browser_operation(|target, lease_token| {
-        teshi_engine::BrowserOperation::ExecuteBrowserAction {
-            target,
-            lease_token,
-            action: teshi_engine::BrowserAction::Type,
-            element: teshi_engine::BrowserElementInput {
-                reference: Some(reference),
-                ..Default::default()
-            },
-            value: Some(text.to_string()),
-            files: vec![],
-            wait: None,
-            timeout_ms: 15_000,
-            focus: false,
-            monitor: false,
-        }
-    })?;
+    let response =
+        execute_typed_browser_operation(app.find_project_dir(), |target, lease_token| {
+            teshi_engine::BrowserOperation::ExecuteBrowserAction {
+                target,
+                lease_token,
+                action: teshi_engine::BrowserAction::Type,
+                element: teshi_engine::BrowserElementInput {
+                    reference: Some(reference),
+                    ..Default::default()
+                },
+                value: Some(text.to_string()),
+                files: vec![],
+                wait: None,
+                timeout_ms: 15_000,
+                focus: false,
+                monitor: false,
+            }
+        })?;
     Ok(serde_json::to_string_pretty(&response)?)
 }
 
-fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
+fn execute_browser_assert(app: &mut crate::app::App, args_json: &str) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
     let condition_type = args
@@ -2136,12 +2164,13 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
     match condition_type {
         "text_visible" => {
             // Get snapshot and check for text in the page
-            let snap_val = execute_typed_browser_operation(|target, lease_token| {
-                teshi_engine::BrowserOperation::GetPageSnapshot {
-                    target,
-                    lease_token,
-                }
-            })?;
+            let snap_val =
+                execute_typed_browser_operation(app.find_project_dir(), |target, lease_token| {
+                    teshi_engine::BrowserOperation::GetPageSnapshot {
+                        target,
+                        lease_token,
+                    }
+                })?;
             if let Some(elements) = snap_val
                 .get("interactive_elements")
                 .and_then(|v| v.as_array())
@@ -2168,12 +2197,13 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
             ))
         }
         "url_match" => {
-            let snap_val = execute_typed_browser_operation(|target, lease_token| {
-                teshi_engine::BrowserOperation::GetPageSnapshot {
-                    target,
-                    lease_token,
-                }
-            })?;
+            let snap_val =
+                execute_typed_browser_operation(app.find_project_dir(), |target, lease_token| {
+                    teshi_engine::BrowserOperation::GetPageSnapshot {
+                        target,
+                        lease_token,
+                    }
+                })?;
             if let Some(url) = snap_val.get("url").and_then(|v| v.as_str()) {
                 let matches = url.contains(value) || url.starts_with(value);
                 if matches {
@@ -2193,14 +2223,15 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
     }
 }
 
-fn execute_browser_go_back(_app: &mut crate::app::App) -> Result<String> {
-    let response = execute_typed_browser_operation(|target, lease_token| {
-        teshi_engine::BrowserOperation::GoBackBrowser {
-            target,
-            lease_token,
-            timeout_ms: 15_000,
-        }
-    })?;
+fn execute_browser_go_back(app: &mut crate::app::App) -> Result<String> {
+    let response =
+        execute_typed_browser_operation(app.find_project_dir(), |target, lease_token| {
+            teshi_engine::BrowserOperation::GoBackBrowser {
+                target,
+                lease_token,
+                timeout_ms: 15_000,
+            }
+        })?;
     Ok(serde_json::to_string_pretty(&response)?)
 }
 
@@ -2287,6 +2318,27 @@ mod pipeline_gate_tests {
         );
     }
 
+    #[test]
+    fn validate_feature_uses_accepted_buffer_edits_before_save() {
+        let (mut app, dir) = app_in_temp_project();
+        let original = fs::read_to_string(dir.path().join("sample.feature")).unwrap();
+        let edited = "Feature: Sample\n  Scenario: Unsaved empty scenario\n";
+        app.buffers[0] = crate::editor_buffer::EditorBuffer::from_string(edited.into());
+        let result = app
+            .execute_tool(
+                "validate_feature",
+                r#"{"file_path":"sample.feature"}"#,
+                "validate",
+                0,
+            )
+            .unwrap();
+        assert!(result.contains("Unsaved empty scenario"), "{result}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sample.feature")).unwrap(),
+            original
+        );
+    }
+
     fn app_with_scoped_document(
         iteration: Option<&str>,
     ) -> (crate::app::App, tempfile::TempDir, RequirementStoreId) {
@@ -2314,6 +2366,7 @@ mod pipeline_gate_tests {
         );
         app.generation_scope = Some(RequirementSourceScope {
             store_id: store_id.clone(),
+            project_filter: Default::default(),
             iteration: match iteration {
                 Some(name) => RequirementIterationFilter::Named(name.to_string()),
                 None => RequirementIterationFilter::All,
@@ -2528,6 +2581,8 @@ mod pipeline_gate_tests {
         let document = RequirementDocumentContent {
             meta: RequirementDocumentMeta {
                 iteration: None,
+                priority: None,
+                projects: Default::default(),
                 id: "doc-1".into(),
                 path: "auth.md".into(),
                 title: "Auth".into(),
@@ -2972,9 +3027,15 @@ mod pipeline_gate_tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(

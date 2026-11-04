@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod api;
 pub mod auth;
 pub mod browser;
@@ -9,25 +10,28 @@ pub mod export;
 pub mod install_skill;
 pub mod locator_verify;
 pub mod mcp;
+pub(crate) mod replay_plan;
 pub mod replay_screenshots;
 pub mod requirements;
 pub mod steps;
 pub mod terminal;
+pub mod testpoints;
 pub mod trace;
 pub mod update;
 pub mod winapp;
 
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "teshi",
     version,
     about = "Terminal-first BDD editor with AI assistance",
-    long_about = "Terminal UI: `teshi` opens an empty buffer; `teshi .` recursively scans the current directory.\n\
-                  `teshi path/` scans one level; add `--recursive` to scan subdirectories.\n\
+    long_about = "Terminal UI: `teshi`, `teshi .`, and `teshi path/` load the project features/ using the system language.\n\
+                  Without features/, load only .feature files directly in the target directory.\n\
+                  Add `-R` or `--recursive` to scan the entire target directory recursively.\n\
                   Browser GUI: `teshi web [--project PATH]`.\n\
                   Native locator workflow: `teshi desktop [--project PATH]`.\n\
                   Headless CI runs: `teshi run [PATH] [--scenario NAME]`."
@@ -41,7 +45,7 @@ pub struct Cli {
     #[arg(long, short = 'R')]
     pub recursive: bool,
 
-    /// File or directory paths for TUI mode (`teshi .` = recursive project root)
+    /// Feature file or project directory paths for TUI mode
     #[arg(value_name = "PATH")]
     pub paths: Vec<String>,
 
@@ -55,24 +59,46 @@ pub fn parse_cli() -> Cli {
     let command = Cli::command().version(crate::version_display());
     match command.try_get_matches() {
         Ok(matches) => Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit()),
+        Err(err) if err.kind() == ErrorKind::DisplayVersion => {
+            println!("{}", crate::version_display());
+            std::process::exit(err.exit_code());
+        }
         Err(err) => err.exit(),
     }
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run recorded terminal application scenarios through the Rust TUI runner
+    Tui {
+        /// Feature file or directory
+        #[arg(value_name = "PATH")]
+        path: String,
+        /// Run only the named scenario
+        #[arg(long)]
+        scenario: Option<String>,
+        /// TUI runner executable (default: TESHI_TUI_RUNNER or teshi-tui-runner)
+        #[arg(long)]
+        runner_cmd: Option<String>,
+    },
     /// Check for and install a verified Teshi release bundle
     Update {
-        /// Read the last local helper result without contacting GitHub
-        #[arg(long, conflicts_with_all = ["check", "channel", "yes"])]
+        /// Read local failures and the last helper result without contacting GitHub
+        #[arg(long, conflicts_with_all = ["check", "channel", "yes", "retry_install", "force_close"])]
         status: bool,
+        /// Retry the cached installation offline after revalidating its payload
+        #[arg(long, conflicts_with_all = ["check", "channel"])]
+        retry_install: bool,
+        /// Force-close remaining processes from this installation after graceful shutdown (unsaved work may be lost)
+        #[arg(long, conflicts_with = "check")]
+        force_close: bool,
         /// Only check metadata; do not download or install a bundle
         #[arg(long)]
         check: bool,
         /// Explicitly switch to a release stream
         #[arg(long, value_parser = ["stable", "nightly"])]
         channel: Option<String>,
-        /// Skip Teshi confirmation (does not bypass operating-system elevation)
+        /// Kept for compatibility; installation is automatic (does not bypass operating-system elevation)
         #[arg(long)]
         yes: bool,
         /// Print one JSON result, with progress on stderr
@@ -85,6 +111,11 @@ pub enum Command {
     Auth {
         #[command(subcommand)]
         action: AuthCommand,
+    },
+    /// Manage user-level ACP agent definitions
+    Acp {
+        #[command(subcommand)]
+        action: AcpCommand,
     },
     /// Native desktop shell (Chrome extension locator, embedded terminal)
     Desktop {
@@ -103,6 +134,11 @@ pub enum Command {
         #[command(subcommand)]
         action: RequirementsCommand,
     },
+    /// Inspect a project's test points and maintain their requirement links
+    Testpoints {
+        #[command(subcommand)]
+        action: TestpointsCommand,
+    },
     /// Run BDD features headlessly (CI / scripts; streams NDJSON runner events)
     Run {
         /// Feature file or project directory (default: current directory)
@@ -120,6 +156,9 @@ pub enum Command {
         /// Runner working directory
         #[arg(long)]
         runner_cwd: Option<String>,
+        /// Write a persistent Feature/Scenario result report as JSON
+        #[arg(long, value_name = "PATH")]
+        report: Option<String>,
         /// Deprecated alias for positional `PATH`
         #[arg(long, hide = true)]
         feature: Option<String>,
@@ -198,6 +237,54 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum AcpCommand {
+    /// List configured ACP agents
+    List {
+        /// Print the definitions as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one configured ACP agent
+    Show {
+        /// ACP Agent ID
+        id: String,
+        /// Print the definition as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or replace a custom ACP agent
+    Add {
+        /// Stable ACP Agent ID (letters, numbers, '-' and '_')
+        id: String,
+        /// Executable path or name on PATH
+        #[arg(long)]
+        program: PathBuf,
+        /// Display name (defaults to ID)
+        #[arg(long)]
+        name: Option<String>,
+        /// Structured executable argument (repeatable)
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Child environment reference NAME or NAME=SOURCE_ENV (repeatable)
+        #[arg(long = "env", value_name = "NAME[=SOURCE_ENV]")]
+        env_from: Vec<String>,
+        /// Print the persisted definition as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a configured ACP agent
+    Remove {
+        /// ACP Agent ID
+        id: String,
+        /// Print the removed definition as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the resolved user-level ACP configuration path
+    ConfigPath,
+}
+
 #[derive(Debug, Args)]
 pub struct CheckArgs {
     /// Validate one Feature path relative to the project root
@@ -235,6 +322,54 @@ pub enum ExportTargetArg {
 /// Subcommands for `teshi requirements`.
 #[derive(Debug, Subcommand)]
 pub enum RequirementsCommand {
+    /// Read or replace project folders and saved query collections
+    Organize {
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// JSON configuration; omit to read the current configuration
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Create a manual folder path, including missing ancestors
+        #[arg(long, conflicts_with_all = ["file", "query", "assign"])]
+        folder: Option<String>,
+        /// Create or update a root query collection by name
+        #[arg(long, requires = "condition", conflicts_with_all = ["file", "assign"])]
+        query: Option<String>,
+        /// Query expression: status=planned & priority=P1 (also supports |, !, and folder=AI/Chat)
+        #[arg(long, requires = "query")]
+        condition: Option<String>,
+        /// Link requirement IDs to the folder supplied with --to
+        #[arg(long, num_args = 1.., requires = "to", conflicts_with = "file")]
+        assign: Vec<String>,
+        /// Existing manual folder path for --assign
+        #[arg(long, requires = "assign")]
+        to: Option<String>,
+    },
+    /// Create a timestamp-named requirement (no implicit project association)
+    Create {
+        /// Title; must match the first Markdown heading when a body is supplied
+        #[arg(long)]
+        title: String,
+        /// Complete Markdown document
+        #[arg(long, conflicts_with = "stdin")]
+        file: Option<PathBuf>,
+        /// Read complete Markdown from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Priority (P0 through P2)
+        #[arg(long, value_parser = ["P0", "P1", "P2"])]
+        priority: Option<String>,
+        /// Explicit project to associate with planned status
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Iteration name
+        #[arg(long)]
+        iteration: Option<String>,
+        /// Machine-readable result or diagnostic
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the resolved user-level requirement store path
     Path,
     /// Import a project's legacy `requirements/` directory into the current store
@@ -251,6 +386,15 @@ pub enum RequirementsCommand {
     },
     /// List requirement documents in the current store
     List {
+        /// Project directory (default: current directory)
+        #[arg(long, conflicts_with_all = ["all_projects", "unassigned_project"])]
+        project: Option<PathBuf>,
+        /// Include every project and unassigned documents
+        #[arg(long, conflicts_with = "unassigned_project")]
+        all_projects: bool,
+        /// Include only documents not linked to any project
+        #[arg(long)]
+        unassigned_project: bool,
         /// Include only documents in this iteration
         #[arg(long, conflicts_with = "unassigned")]
         iteration: Option<String>,
@@ -260,6 +404,54 @@ pub enum RequirementsCommand {
         /// Machine-readable JSON envelope
         #[arg(long)]
         json: bool,
+    },
+    /// Link requirements to a project without resetting existing delivery states
+    LinkProject {
+        /// Requirement IDs, paths, or unique titles
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove only this project's associations, retaining the shared documents
+    UnlinkProject {
+        /// Requirement IDs, paths, or unique titles
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record delivery state for an already linked requirement in one project
+    SetProjectStatus {
+        /// Requirement IDs, paths, or unique titles
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Explicitly recorded state; acceptance is never inferred
+        #[arg(long, value_parser = ["planned", "implemented", "verified"])]
+        status: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export linked Markdown and source identities as a portable JSON snapshot
+    ExportProject {
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// New snapshot file; existing files are never overwritten
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Print one requirement document
     Show {
@@ -305,6 +497,84 @@ pub enum RequirementsCommand {
         /// Machine-readable JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Subcommands for `teshi testpoints`.
+#[derive(Debug, Subcommand)]
+pub enum TestpointsCommand {
+    /// List test points with their review state and requirement links
+    List {
+        /// Project directory containing `testpoints/testpoints.json`
+        /// (default: current directory)
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<PathBuf>,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add, remove, or retarget one requirement link
+    Link {
+        #[command(subcommand)]
+        action: TestpointLinkCommand,
+    },
+}
+
+/// Arguments shared by every `teshi testpoints link` subcommand.
+#[derive(Debug, Args)]
+pub struct TestpointArgs {
+    /// Project directory containing `testpoints/testpoints.json`
+    /// (default: current directory)
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<PathBuf>,
+    /// Test point ID such as `tp-1`
+    #[arg(value_name = "TP_ID")]
+    pub test_point_id: String,
+    /// Machine-readable JSON envelope
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TestpointLinkCommand {
+    /// Append a resolved requirement link to an existing test point
+    Add {
+        #[command(flatten)]
+        base: TestpointArgs,
+        /// Requirement document ID in the current requirement store
+        #[arg(long)]
+        document: String,
+        /// `START:END` Unicode scalar range inside the target document
+        #[arg(long)]
+        range: String,
+    },
+    /// Remove one requirement link; with no selector the test point must have exactly one
+    Remove {
+        #[command(flatten)]
+        base: TestpointArgs,
+        /// Match only links to this requirement document ID
+        #[arg(long)]
+        document: Option<String>,
+        /// Match only the link at this `START:END` Unicode scalar range
+        #[arg(long)]
+        range: Option<String>,
+    },
+    /// Replace one requirement link's document or range instead of appending
+    Update {
+        #[command(flatten)]
+        base: TestpointArgs,
+        /// Match only links to this requirement document ID
+        #[arg(long)]
+        document: Option<String>,
+        /// Match only the link at this `START:END` Unicode scalar range
+        #[arg(long)]
+        range: Option<String>,
+        /// New target requirement document ID
+        #[arg(long)]
+        to_document: String,
+        /// New `START:END` Unicode scalar range inside the target document
+        #[arg(long)]
+        to_range: String,
     },
 }
 
@@ -460,6 +730,11 @@ pub enum WaitUntilArg {
 
 #[derive(Debug, Subcommand)]
 pub enum BrowserCommand {
+    /// List, approve, or revoke user-scoped Chrome extension pairing.
+    Pairing {
+        #[command(subcommand)]
+        action: BrowserPairingCommand,
+    },
     /// List registered browser-profile sessions and health
     Sessions,
     /// List windows and tabs for one browser-profile session
@@ -500,6 +775,8 @@ pub enum BrowserCommand {
     Extensions(BrowserExtensionsArgs),
     /// Read page accessibility and interactive element snapshot
     Snapshot(BrowserSnapshotArgs),
+    /// Read rendered page text, including static content and form descriptions
+    Scan(BrowserScanArgs),
     /// Navigate the active browser tab to an explicit URL
     Navigate(BrowserNavigateArgs),
     /// Highlight a selector in the active browser
@@ -544,6 +821,31 @@ pub enum BrowserCommand {
     },
     /// Explicitly remove managed browser artifact files
     ArtifactCleanup(BrowserArtifactCleanupArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserPairingCommand {
+    /// Show durable trusted origins and live pending pairing requests.
+    List,
+    /// Explicitly approve one exact Origin or its 32-character extension ID.
+    Approve(BrowserPairingApproveArgs),
+    /// Revoke one exact Origin or its 32-character extension ID.
+    Remove(BrowserPairingOriginArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserPairingApproveArgs {
+    /// Exact chrome-extension:// origin, or the extension ID shown by pairing list.
+    pub origin: String,
+    /// Optional display-only label retained with the durable identity.
+    #[arg(long)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserPairingOriginArgs {
+    /// Exact chrome-extension:// origin, or the extension ID shown by pairing list.
+    pub origin: String,
 }
 
 #[derive(Debug, Args, Default)]
@@ -812,6 +1114,27 @@ pub struct BrowserLeaseReleaseArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct BrowserScanArgs {
+    /// Optional CSS selector limiting the content scope
+    #[arg(long)]
+    pub selector: Option<String>,
+    /// Unicode character offset into normalized page text
+    #[arg(long, default_value_t = 0)]
+    pub offset: u64,
+    /// Maximum Unicode characters to return
+    #[arg(long, default_value_t = 35000, value_parser = clap::value_parser!(u64).range(1..=100000))]
+    pub limit: u64,
+    /// Explicitly select text output (scan always returns structured text)
+    #[arg(long)]
+    pub text_only: bool,
+    /// Timeout in milliseconds
+    #[arg(long, default_value_t = 60000)]
+    pub timeout_ms: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
 pub struct BrowserSnapshotArgs {
     /// Timeout in milliseconds waiting for the sidecar response
     #[arg(long, default_value_t = 60_000)]
@@ -901,6 +1224,9 @@ pub struct BrowserReplayArgs {
     /// Feature path relative to project root; defaults to active step feature
     #[arg(long)]
     pub feature: Option<String>,
+    /// Replay one named scenario, including its background and all source steps
+    #[arg(long)]
+    pub scenario: Option<String>,
     /// Only replay bindings up to this source line
     #[arg(long)]
     pub until_line: Option<usize>,
@@ -1241,6 +1567,13 @@ pub struct BrowserNetworkDetailArgs {
 pub enum McpCommand {
     /// Serve the browser-agent tools over newline-delimited JSON-RPC on STDIO
     Serve(McpServeArgs),
+    /// Internal proxy for a live ACP conversation's host tools
+    #[command(hide = true)]
+    AuthoringProxy {
+        /// Private loopback listener of the owning conversation
+        #[arg(long)]
+        address: std::net::SocketAddr,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -1261,12 +1594,46 @@ pub struct McpServeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WinAppCommand {
+    /// Run an explicitly supplied external checker with structured results and evidence
+    ExternalCheck {
+        /// JSON argv, input and check_timeout_ms; checker must be read-only
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Execute an explicit bounded visual exploration plan; never creates bindings
+    VisualPlan {
+        /// JSON with steps and optional observation from a prior capture
+        #[arg(long)]
+        file: PathBuf,
+        /// Physical input requires foreground mode
+        #[arg(long, default_value = "auto", value_parser = ["auto", "foreground", "background"])]
+        mode: String,
+        /// Explicitly permit physical input for this plan
+        #[arg(long)]
+        allow_interactive_input: bool,
+    },
+    /// Launch, inspect, wait for, or stop only an executor-owned process instance
+    Instance {
+        /// JSON action with argv for launch or instance token for status/wait/stop
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Query the supervisor without waiting for UI Automation
+    Health,
+    /// Cancel only the active request with this identity; never repeat its action
+    Cancel {
+        /// Active request identity reported by health
+        #[arg(long)]
+        request_id: String,
+    },
     /// Save a visible UIA element as lossless PNG
     Screenshot(WinAppScreenshotArgs),
     /// Compare a visible UIA element with a PNG baseline
     AssertScreenshot(WinAppAssertScreenshotArgs),
     /// List visible top-level windows for attach
     ListWindows,
+    /// Show WinApp executor and target integrity diagnostics
+    Status,
     /// Attach to an existing WinUI3/native window
     Attach(WinAppAttachArgs),
     /// Launch an app and attach to its first visible window
@@ -1281,6 +1648,10 @@ pub enum WinAppCommand {
     Execute(WinAppExecuteArgs),
     /// Replay confirmed UIA step bindings
     Replay(WinAppReplayArgs),
+    /// Windows shell automation (taskbar notification area)
+    Shell(WinAppShellArgs),
+    /// Wait for a process window to become visible or hidden
+    WaitWindow(WinAppWaitWindowArgs),
 }
 
 /// HTTP API BDD sidecar (`teshi api`).
@@ -1334,6 +1705,9 @@ pub struct WinAppAttachArgs {
 pub struct WinAppLaunchArgs {
     /// App executable path
     pub path: String,
+    /// Start the WinApp executor and target through the Windows UAC boundary
+    #[arg(long)]
+    pub elevated: bool,
     /// Optional title fragment to prefer after launch
     #[arg(long)]
     pub title: Option<String>,
@@ -1392,7 +1766,7 @@ pub struct WinAppExecuteArgs {
     #[arg(long)]
     pub selector: String,
     /// Action to execute; `click` uses UIA activation, while `pointer_click`
-    /// moves the real foreground pointer before sending a left-click
+    /// moves the real pointer and requires --mode foreground --allow-interactive-input
     #[arg(long, default_value = "click")]
     pub action: String,
     /// Optional input value for fill/assert_text/select/press_key
@@ -1401,10 +1775,94 @@ pub struct WinAppExecuteArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
-    /// Input mode: foreground (default) or background (non-intrusive PostMessage);
-    /// `pointer_click` requires foreground
-    #[arg(long, default_value = "foreground")]
+    /// Input policy: auto (default), background (strictly non-intrusive), or foreground
+    /// (requires --allow-interactive-input); auto/background never inject physical input
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "background", "foreground"]
+    )]
     pub mode: String,
+    /// Explicitly permit physical input and focus changes in foreground mode
+    #[arg(long)]
+    pub allow_interactive_input: bool,
+}
+
+/// `teshi winapp shell ...` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppShellArgs {
+    #[command(subcommand)]
+    pub command: ShellCommand,
+}
+
+/// Shell automation surfaces outside the attached application.
+#[derive(Debug, Subcommand)]
+pub enum ShellCommand {
+    /// Notification area (system tray) operations
+    Tray(WinAppTrayArgs),
+}
+
+/// `teshi winapp shell tray ...` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppTrayArgs {
+    #[command(subcommand)]
+    pub command: TrayCommand,
+}
+
+/// Notification area operations.
+#[derive(Debug, Subcommand)]
+pub enum TrayCommand {
+    /// List notification area icons with tooltip name, area, and bounds
+    List,
+    /// Click a notification area icon by tooltip name
+    Click(WinAppTrayClickArgs),
+}
+
+/// `teshi winapp shell tray click` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppTrayClickArgs {
+    /// Icon tooltip name (exact, case-insensitive)
+    #[arg(long)]
+    pub name: String,
+    /// Disambiguate same-named icons by owning process id
+    #[arg(long)]
+    pub pid: Option<u32>,
+    /// Mouse button to inject
+    #[arg(long, default_value = "left", value_parser = ["left", "right"])]
+    pub button: String,
+    /// Number of clicks to inject (2 = double click)
+    #[arg(long, default_value_t = 1)]
+    pub count: u32,
+    /// Input policy: auto (default), background (rejects physical input), or foreground (requires permission)
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "background", "foreground"]
+    )]
+    pub mode: String,
+    /// Explicitly permit physical input and focus changes in foreground mode
+    #[arg(long)]
+    pub allow_interactive_input: bool,
+    /// Timeout in milliseconds for icon resolution and overflow opening
+    #[arg(long, default_value_t = 10000)]
+    pub timeout_ms: u64,
+}
+
+/// `teshi winapp wait-window` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppWaitWindowArgs {
+    /// Process identifier that owns the window
+    #[arg(long)]
+    pub pid: u32,
+    /// Wait until a visible window exists (default)
+    #[arg(long, conflicts_with = "hidden")]
+    pub visible: bool,
+    /// Wait until no visible window exists
+    #[arg(long, conflicts_with = "visible")]
+    pub hidden: bool,
+    /// Timeout in milliseconds
+    #[arg(long, default_value_t = 10000)]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1427,10 +1885,16 @@ pub struct WinAppReplayArgs {
     /// Launch this executable and attach before replay (when not already attached)
     #[arg(long)]
     pub launch: Option<String>,
-    /// Input mode for replay steps: foreground (default) or background
-    /// (non-intrusive PostMessage); `pointer_click` requires foreground
-    #[arg(long, default_value = "foreground")]
+    /// Input policy for each replay step: auto (default), background, or foreground
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "background", "foreground"]
+    )]
     pub mode: String,
+    /// Explicitly permit physical input and focus changes in foreground mode
+    #[arg(long)]
+    pub allow_interactive_input: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1503,7 +1967,11 @@ pub enum DaemonCommand {
     /// Start the project daemon if not already running
     Start,
     /// Stop the running project daemon
-    Stop,
+    Stop {
+        /// Force-close the verified daemon if graceful shutdown does not finish
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1551,6 +2019,7 @@ impl Command {
         runner_cmd: Option<String>,
         runner_arg: Option<Vec<String>>,
         runner_cwd: Option<String>,
+        report: Option<String>,
         feature: Option<String>,
     ) -> crate::runner::RunCliOptions {
         let path = path.or(feature).map(PathBuf::from);
@@ -1560,6 +2029,7 @@ impl Command {
             runner_cmd,
             runner_args: runner_arg.unwrap_or_default(),
             runner_cwd: runner_cwd.map(PathBuf::from),
+            report_path: report.map(PathBuf::from),
         }
     }
 }
@@ -1590,6 +2060,97 @@ mod tests {
     #[test]
     fn cli_command_factory_has_valid_args() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn testpoints_link_add_parses_the_target_range_and_json() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "testpoints",
+            "link",
+            "add",
+            "tp-1",
+            "--document",
+            "doc-9",
+            "--range",
+            "0:14",
+            "--json",
+            "--project",
+            "/tmp/project",
+        ])
+        .expect("parse testpoints link add");
+        let Some(Command::Testpoints {
+            action:
+                TestpointsCommand::Link {
+                    action:
+                        TestpointLinkCommand::Add {
+                            base,
+                            document,
+                            range,
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("expected testpoints link add");
+        };
+        assert_eq!(base.test_point_id, "tp-1");
+        assert_eq!(
+            base.project.as_deref(),
+            Some(std::path::Path::new("/tmp/project"))
+        );
+        assert!(base.json);
+        assert_eq!(document, "doc-9");
+        assert_eq!(range, "0:14");
+    }
+
+    #[test]
+    fn testpoints_link_update_leaves_the_selector_optional() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "testpoints",
+            "link",
+            "update",
+            "tp-1",
+            "--to-document",
+            "doc-9",
+            "--to-range",
+            "0:14",
+        ])
+        .expect("parse testpoints link update");
+        let Some(Command::Testpoints {
+            action:
+                TestpointsCommand::Link {
+                    action:
+                        TestpointLinkCommand::Update {
+                            document,
+                            range,
+                            to_document,
+                            to_range,
+                            ..
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("expected testpoints link update");
+        };
+        assert!(document.is_none(), "selector document should be optional");
+        assert!(range.is_none(), "selector range should be optional");
+        assert_eq!(to_document, "doc-9");
+        assert_eq!(to_range, "0:14");
+    }
+
+    #[test]
+    fn testpoints_list_defaults_to_the_current_directory() {
+        let cli = Cli::try_parse_from(["teshi", "testpoints", "list", "--json"])
+            .expect("parse testpoints list");
+        let Some(Command::Testpoints {
+            action: TestpointsCommand::List { project, json },
+        }) = cli.command
+        else {
+            panic!("expected testpoints list");
+        };
+        assert!(project.is_none());
+        assert!(json);
     }
 
     #[test]
@@ -2065,6 +2626,85 @@ mod tests {
         assert_eq!(args.selector, "uia:automation_id=SearchBox");
         assert_eq!(args.action, "fill");
         assert_eq!(args.value_arg.as_deref(), Some("hello"));
+        assert_eq!(args.mode, "auto");
+    }
+
+    #[test]
+    fn winapp_input_policy_accepts_three_modes_and_rejects_unknown_values() {
+        for mode in ["auto", "background", "foreground"] {
+            let cli = Cli::try_parse_from([
+                "teshi",
+                "winapp",
+                "execute",
+                "--selector",
+                "uia:name=Save",
+                "--action",
+                "click",
+                "--mode",
+                mode,
+            ])
+            .expect("parse supported WinApp input policy");
+            let Some(Command::WinApp {
+                action: WinAppCommand::Execute(args),
+            }) = cli.command
+            else {
+                panic!("expected winapp execute subcommand");
+            };
+            assert_eq!(args.mode, mode);
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "teshi",
+                "winapp",
+                "execute",
+                "--selector",
+                "uia:name=Save",
+                "--action",
+                "click",
+                "--mode",
+                "physical",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn winapp_launch_accepts_elevated_mode_without_changing_path_arguments() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "launch",
+            "--elevated",
+            "C:\\Apps\\Enhook.exe",
+            "--",
+            "--profile",
+            "test",
+        ])
+        .expect("parse elevated winapp launch");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Launch(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp launch subcommand");
+        };
+        assert!(args.elevated);
+        assert_eq!(args.path, "C:\\Apps\\Enhook.exe");
+        assert_eq!(args.args, ["--profile", "test"]);
+    }
+
+    #[test]
+    fn winapp_launch_without_elevated_keeps_the_existing_default() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "launch", "C:\\Apps\\Enhook.exe"])
+            .expect("parse ordinary winapp launch");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Launch(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp launch subcommand");
+        };
+        assert!(!args.elevated);
+        assert_eq!(args.path, "C:\\Apps\\Enhook.exe");
     }
 
     #[test]
@@ -2078,6 +2718,133 @@ mod tests {
             panic!("expected winapp attach subcommand");
         };
         assert_eq!(args.title.as_deref(), Some("My App"));
+    }
+
+    #[test]
+    fn winapp_shell_tray_list_parses() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "shell", "tray", "list"])
+            .expect("parse winapp shell tray list");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Shell(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp shell subcommand");
+        };
+        assert!(matches!(
+            args.command,
+            ShellCommand::Tray(ref tray) if matches!(tray.command, TrayCommand::List)
+        ));
+    }
+
+    #[test]
+    fn winapp_shell_tray_click_parses_name_pid_and_policy() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "shell",
+            "tray",
+            "click",
+            "--name",
+            "Enhook",
+            "--pid",
+            "36788",
+            "--button",
+            "left",
+            "--count",
+            "2",
+            "--mode",
+            "auto",
+            "--timeout-ms",
+            "8000",
+        ])
+        .expect("parse winapp shell tray click");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Shell(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp shell subcommand");
+        };
+        let ShellCommand::Tray(tray) = args.command;
+        let TrayCommand::Click(click) = tray.command else {
+            panic!("expected tray click subcommand");
+        };
+        assert_eq!(click.name, "Enhook");
+        assert_eq!(click.pid, Some(36788));
+        assert_eq!(click.button, "left");
+        assert_eq!(click.count, 2);
+        assert_eq!(click.mode, "auto");
+        assert_eq!(click.timeout_ms, 8000);
+    }
+
+    #[test]
+    fn winapp_shell_tray_click_rejects_unknown_button_and_mode() {
+        assert!(
+            Cli::try_parse_from([
+                "teshi", "winapp", "shell", "tray", "click", "--name", "Enhook", "--button",
+                "middle",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "teshi", "winapp", "shell", "tray", "click", "--name", "Enhook", "--mode",
+                "physical",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn winapp_wait_window_parses_pid_and_state() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "wait-window",
+            "--pid",
+            "36788",
+            "--visible",
+            "--timeout-ms",
+            "10000",
+        ])
+        .expect("parse winapp wait-window");
+        let Some(Command::WinApp {
+            action: WinAppCommand::WaitWindow(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp wait-window subcommand");
+        };
+        assert_eq!(args.pid, 36788);
+        assert!(args.visible);
+        assert!(!args.hidden);
+        assert_eq!(args.timeout_ms, 10000);
+    }
+
+    #[test]
+    fn winapp_wait_window_defaults_to_visible_and_rejects_conflicting_state() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "wait-window", "--pid", "1"])
+            .expect("parse winapp wait-window defaults");
+        let Some(Command::WinApp {
+            action: WinAppCommand::WaitWindow(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp wait-window subcommand");
+        };
+        assert!(!args.visible);
+        assert!(!args.hidden);
+        assert_eq!(args.timeout_ms, 10000);
+
+        assert!(
+            Cli::try_parse_from([
+                "teshi",
+                "winapp",
+                "wait-window",
+                "--pid",
+                "1",
+                "--visible",
+                "--hidden",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

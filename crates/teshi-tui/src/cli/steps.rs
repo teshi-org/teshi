@@ -28,8 +28,7 @@ const VALIDATION_REPORT_HEADER: &str = "x-teshi-validation-report";
 
 /// Handles `teshi steps ...` subcommands.
 pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
-    let project_root =
-        teshi_engine::find_project_root(None).unwrap_or_else(|| std::env::current_dir().unwrap());
+    let project_root = steps_project_root(action);
 
     // Try daemon for state-modifying operations
     if let Some(manifest) = teshi_engine::DaemonManifest::load_manifest(&project_root)
@@ -51,6 +50,35 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
         StepsCommand::Resolve(args) => resolve(&project_root, args),
         StepsCommand::List(args) => list(&project_root, args),
         StepsCommand::Unbind(args) => unbind(&project_root, args),
+    }
+}
+
+fn steps_project_root(action: &StepsCommand) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let StepsCommand::Catalog(args) = action
+        && let Some(root) = args.project_root.as_deref()
+    {
+        let path = Path::new(root);
+        return if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+    }
+
+    let feature = match action {
+        StepsCommand::Select(args) => Some(args.feature.as_str()),
+        StepsCommand::Unbound(args) | StepsCommand::NextUnbound(args) => args.feature.as_deref(),
+        StepsCommand::Resolve(args) => args.feature.as_deref(),
+        StepsCommand::List(args) => args.feature.as_deref(),
+        StepsCommand::Unbind(args) => Some(args.feature.as_str()),
+        _ => None,
+    };
+    match feature.map(Path::new) {
+        Some(path) if path.is_absolute() => teshi_engine::find_project_root(Some(path))
+            .or_else(|| path.parent().map(Path::to_path_buf))
+            .unwrap_or(cwd),
+        _ => cwd,
     }
 }
 

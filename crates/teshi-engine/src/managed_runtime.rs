@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::app_data::app_data_dir;
 
 pub const WINAPP_RUNTIME_ID: &str = "winapp";
-/// Runtime v3 adds real foreground pointer clicks through the WinApp sidecar.
-pub const WINAPP_RUNTIME_VERSION: u32 = 3;
+/// Runtime v5 adds isolated execution and responsive health/cancellation.
+pub const WINAPP_RUNTIME_VERSION: u32 = 5;
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub const WINAPP_RUNTIME_PLATFORM: &str = "windows-x86_64";
@@ -369,9 +369,7 @@ fn valid_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
-    use std::sync::Mutex;
     use tempfile::tempdir;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     use zip::write::FileOptions;
 
     fn req() -> RuntimeRequirement {
@@ -409,7 +407,7 @@ mod tests {
     fn runtime_requirement_is_versioned_independent_of_teshi_version() {
         let requirement = winapp_runtime_requirement();
         assert_eq!(requirement.runtime, "winapp");
-        assert_eq!(requirement.runtime_version, 3);
+        assert_eq!(requirement.runtime_version, 5);
     }
 
     #[cfg(not(all(windows, target_arch = "x86_64")))]
@@ -423,7 +421,7 @@ mod tests {
     fn runtime_installation_path_uses_app_data_not_project() {
         let app = PathBuf::from(r"C:\Users\u\AppData\Roaming\teshi");
         let path = winapp_runtime_dir_in(&app);
-        assert!(path.ends_with(Path::new("runtimes").join("winapp").join("3")));
+        assert!(path.ends_with(Path::new("runtimes").join("winapp").join("5")));
         assert!(!path.to_string_lossy().contains(".venv"));
         assert!(!path.to_string_lossy().contains(".teshi\\runtime"));
     }
@@ -443,11 +441,11 @@ mod tests {
     }
 
     #[test]
-    fn pointer_runtime_rejects_installed_v2_runtime() {
+    fn isolated_runtime_rejects_installed_v4_runtime() {
         let mut requirement = req();
         requirement.runtime_version = WINAPP_RUNTIME_VERSION;
         let mut old_manifest = good_manifest();
-        old_manifest.runtime_version = 2;
+        old_manifest.runtime_version = 4;
         assert!(validate_manifest(&old_manifest, &requirement).is_err());
         let installed = tempdir().unwrap();
         write_runtime(installed.path(), old_manifest);
@@ -456,10 +454,14 @@ mod tests {
         upgraded.runtime_version = WINAPP_RUNTIME_VERSION;
         validate_manifest(&upgraded, &requirement).unwrap();
         assert!(include_str!("../../../scripts/build-winapp-runtime.ps1")
-            .contains("$RuntimeVersion = 3"));
+            .contains("$RuntimeVersion = 5"));
         assert!(
-            include_str!("../../../.github/workflows/release.yml").contains("-RuntimeVersion 3")
+            include_str!("../../../.github/workflows/release.yml").contains("-RuntimeVersion 5")
         );
+        assert!(include_str!("../../../.github/workflows/release.yml")
+            .contains("winapp-runtime-windows-x86_64-v5.zip"));
+        assert!(!include_str!("../../../.github/workflows/release.yml")
+            .contains("winapp-runtime-windows-x86_64-v3"));
         assert!(!include_str!("../../../.github/workflows/release.yml")
             .contains("winapp-runtime-windows-x86_64-v2"));
         assert!(!include_str!("../../../.github/workflows/release.yml")
@@ -522,7 +524,7 @@ mod tests {
 
     #[test]
     fn missing_runtime_installs_transactionally_from_verified_archive() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = crate::app_data::test_env_lock();
         let dir = tempdir().unwrap();
         let archive = dir.path().join("runtime.zip");
         let bytes = runtime_zip();
@@ -543,7 +545,7 @@ mod tests {
 
     #[test]
     fn existing_compatible_runtime_is_reused_without_download() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = crate::app_data::test_env_lock();
         let dir = tempdir().unwrap();
         let final_dir = winapp_runtime_dir_in(dir.path());
         write_runtime(&final_dir, good_manifest());

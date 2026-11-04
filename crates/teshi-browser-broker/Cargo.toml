@@ -1,0 +1,34 @@
+[package]
+name = "teshi-browser-broker"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Local Rust broker for Chrome extension browser automation"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64.workspace = true
+futures-util = "0.3"
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle = "2.6"
+tokio.workspace = true
+tracing.workspace = true
+tower = { version = "0.5", features = ["limit", "util"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[features]
+contract-oracle = []
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile = "3"
+tokio-tungstenite = "0.29"
+
+[[example]]
+name = "browser_contract_oracle"
+path = "examples/browser_contract_oracle.rs"
+required-features = ["contract-oracle"]

@@ -37,6 +37,94 @@ pub enum AgentBackendRuntime {
 }
 
 impl AgentBackendRuntime {
+    /// Reconnect ACP with a new profile's MCP catalog and retain local history.
+    ///
+    /// # Errors
+    /// Returns configuration, bridge, or worker startup errors for ACP backends.
+    pub fn reconnect_acp_host_tools(
+        &mut self,
+        tools: crate::tool_bridge::ToolBridgeConfig,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.reconnect_host_tools(tools),
+            Self::Native(_) => Ok(()),
+        }
+    }
+    /// Poll a live MCP call from the external agent without blocking the UI.
+    pub fn host_tool_request(&self) -> Option<crate::tool_bridge::HostToolRequest> {
+        match self {
+            Self::Acp(backend) => backend.host_tool_request(),
+            Self::Native(_) => None,
+        }
+    }
+
+    /// Keep an MCP call pending while the existing file approval UI is open.
+    pub fn defer_host_tool(&mut self, request: crate::tool_bridge::HostToolRequest) {
+        if let Self::Acp(backend) = self {
+            backend.defer_host_tool(request);
+        }
+    }
+
+    /// Deliver an accepted or rejected file change to its waiting MCP caller.
+    pub fn resolve_host_tool(&mut self, id: &str, result: Result<String, String>) -> bool {
+        match self {
+            Self::Acp(backend) => backend.resolve_host_tool(id, result),
+            Self::Native(_) => false,
+        }
+    }
+
+    /// Check that a queued file mutation still belongs to a connected MCP call.
+    pub fn host_tool_is_pending(&self, id: &str) -> bool {
+        match self {
+            Self::Acp(backend) => backend.host_tool_is_pending(id),
+            Self::Native(_) => false,
+        }
+    }
+    /// Discover ACP controls without sending a prompt.
+    ///
+    /// # Errors
+    /// Returns connection or configuration errors for ACP backends.
+    pub fn connect_acp(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.connect(),
+            Self::Native(_) => Ok(()),
+        }
+    }
+
+    /// Snapshot of external-agent settings, absent for native conversations.
+    pub fn acp_controls(&self) -> Option<crate::AcpControls> {
+        match self {
+            Self::Acp(backend) => Some(backend.controls()),
+            Self::Native(_) => None,
+        }
+    }
+
+    /// Change one advertised setting on the current remote session.
+    ///
+    /// # Errors
+    /// Rejects unsupported backends, stale selections, and busy sessions.
+    pub fn set_acp_option(
+        &mut self,
+        id: &str,
+        value: serde_json::Value,
+        revision: u64,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.set_option(id, value, revision),
+            Self::Native(_) => anyhow::bail!("No ACP agent selected"),
+        }
+    }
+
+    /// Synchronize the effective client approval policy.
+    ///
+    /// # Errors
+    /// Returns an error if the external worker exited.
+    pub fn set_acp_policy(&mut self, policy: teshi_acp::PermissionPolicy) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.set_policy(policy),
+            Self::Native(_) => Ok(()),
+        }
+    }
     /// Temporarily releases the backend while AgentHost calls mutate the
     /// application. The replacement has the same selected kind.
     pub fn take_for_host_call(&mut self) -> Self {
@@ -71,6 +159,11 @@ impl AgentBackendRuntime {
     pub fn configure_acp(&mut self, config: AcpBackendConfig) -> anyhow::Result<()> {
         match self {
             Self::Acp(backend) => {
+                backend.poll_shutdown();
+                anyhow::ensure!(
+                    !backend.shutdown_pending(),
+                    "ACP backend is still stopping; retry after exit"
+                );
                 backend.configure(config);
                 Ok(())
             }
@@ -130,7 +223,10 @@ impl AgentBackendRuntime {
     ) -> anyhow::Result<()> {
         match self {
             Self::Native(backend) => backend.runtime.send_chat(system, messages, tools),
-            Self::Acp(backend) => backend.submit_turn(system, &messages),
+            Self::Acp(backend) => {
+                backend.set_host_tools(tools.unwrap_or_default());
+                backend.submit_turn(system, &messages)
+            }
         }
     }
 
@@ -138,6 +234,40 @@ impl AgentBackendRuntime {
         match self {
             Self::Native(backend) => backend.runtime.cancel(),
             Self::Acp(backend) => backend.cancel(),
+        }
+    }
+
+    /// Request complete teardown of the current project's model/ACP resources.
+    /// The frontend must poll shutdown before replacing project-owned state.
+    pub fn request_shutdown(&mut self) {
+        match self {
+            Self::Native(backend) => backend.runtime.cancel(),
+            Self::Acp(backend) => backend.request_shutdown(),
+        }
+    }
+
+    /// Whether stopped or replaced backend resources still need exit acknowledgement.
+    pub fn shutdown_pending(&self) -> bool {
+        match self {
+            Self::Native(backend) => backend.runtime.shutdown_pending(),
+            Self::Acp(backend) => backend.shutdown_pending(),
+        }
+    }
+
+    /// Reap exited workers without waiting synchronously for live work.
+    pub fn poll_shutdown(&mut self) {
+        match self {
+            Self::Native(backend) => backend.runtime.poll_shutdown(),
+            Self::Acp(backend) => backend.poll_shutdown(),
+        }
+    }
+
+    /// Answer a pending ACP `session/request_permission`. `None` rejects.
+    /// Native backends never prompt through this path and return false.
+    pub fn respond_permission(&mut self, request_id: u64, option_id: Option<String>) -> bool {
+        match self {
+            Self::Native(_) => false,
+            Self::Acp(backend) => backend.respond_permission(request_id, option_id),
         }
     }
 
@@ -226,6 +356,22 @@ impl AgentBackendRuntime {
         }
     }
 
+    /// Reasoning streamed by a native provider before response completion.
+    pub fn partial_reasoning(&self) -> &str {
+        match self {
+            Self::Native(backend) => &backend.runtime.partial_reasoning,
+            Self::Acp(_) => "",
+        }
+    }
+
+    /// Move streamed reasoning into a retained interrupted response.
+    pub fn take_partial_reasoning(&mut self) -> String {
+        match self {
+            Self::Native(backend) => std::mem::take(&mut backend.runtime.partial_reasoning),
+            Self::Acp(_) => String::new(),
+        }
+    }
+
     pub fn partial_response_mut(&mut self) -> &mut String {
         match self {
             Self::Native(backend) => &mut backend.runtime.partial_response,
@@ -237,6 +383,7 @@ impl AgentBackendRuntime {
 impl From<NativeRuntimeEvent> for AgentBackendEvent {
     fn from(value: NativeRuntimeEvent) -> Self {
         match value {
+            NativeRuntimeEvent::ReasoningChunk { content } => Self::ReasoningChunk { content },
             NativeRuntimeEvent::MessageChunk { content } => Self::MessageChunk { content },
             NativeRuntimeEvent::Completed {
                 model,

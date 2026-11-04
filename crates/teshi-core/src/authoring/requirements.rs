@@ -4,7 +4,7 @@
 //! is the pair `(store_id, document_id)` so moving the store directory does not
 //! break project test-point links.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +16,49 @@ pub const REQUIREMENT_INDEX_VERSION: u32 = 2;
 
 /// Filename of the requirement store index written at the store root.
 pub const REQUIREMENT_INDEX_FILE: &str = "_teshi.json";
+
+/// Why the first line of a requirement document cannot supply its display title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidRequirementTitle {
+    /// The first line is not an ATX level-one heading.
+    MissingH1,
+    /// The heading contains no title after trimming whitespace.
+    Empty,
+}
+
+impl fmt::Display for InvalidRequirementTitle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingH1 => f.write_str("Requirement must start with an H1 title: # Title"),
+            Self::Empty => f.write_str("Requirement title cannot be empty"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidRequirementTitle {}
+
+/// Extracts the display title from the first line's `# Title` heading.
+///
+/// Surrounding title whitespace is ignored without rewriting the Markdown.
+/// Later headings never supply the document title.
+///
+/// # Errors
+///
+/// Returns [`InvalidRequirementTitle`] when the first line lacks an H1 or its
+/// title is empty.
+pub fn requirement_title(body: &str) -> Result<&str, InvalidRequirementTitle> {
+    let first_line = body.lines().next().unwrap_or_default();
+    let heading = first_line
+        .strip_prefix('#')
+        .ok_or(InvalidRequirementTitle::MissingH1)?;
+    if heading.trim().is_empty() {
+        return Err(InvalidRequirementTitle::Empty);
+    }
+    if !heading.starts_with([' ', '\t']) {
+        return Err(InvalidRequirementTitle::MissingH1);
+    }
+    Ok(heading.trim())
+}
 
 /// Stable identity for a user-level requirement store.
 ///
@@ -175,6 +218,83 @@ pub fn normalize_iteration_name(raw: &str) -> Result<String, InvalidIterationNam
     Ok(trimmed.to_string())
 }
 
+/// Scheduling priority for a requirement document.
+///
+/// Priority is optional document metadata. It expresses planning urgency and
+/// is intentionally separate from incident severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RequirementPriority {
+    /// Immediate attention.
+    #[serde(rename = "P0")]
+    P0,
+    /// Next planned work.
+    #[serde(rename = "P1")]
+    P1,
+    /// Normal backlog work.
+    #[serde(rename = "P2")]
+    P2,
+    /// Deferred improvement.
+    #[serde(rename = "P3")]
+    P3,
+}
+
+impl RequirementPriority {
+    /// Parses a priority label after trimming surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequirementPriority`] for values other than `P0` through
+    /// `P3`.
+    pub fn parse(raw: &str) -> Result<Self, InvalidRequirementPriority> {
+        match raw.trim() {
+            "P0" => Ok(Self::P0),
+            "P1" => Ok(Self::P1),
+            "P2" => Ok(Self::P2),
+            "P3" => Ok(Self::P3),
+            _ => Err(InvalidRequirementPriority(raw.trim().to_string())),
+        }
+    }
+
+    /// Returns the canonical serialized priority label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        }
+    }
+}
+
+impl fmt::Display for RequirementPriority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why a requirement priority label was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidRequirementPriority(String);
+
+impl InvalidRequirementPriority {
+    /// Returns the rejected input after trimming surrounding whitespace.
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for InvalidRequirementPriority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid requirement priority '{}'; expected P0, P1, P2, or P3",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidRequirementPriority {}
+
 /// Error raised when a requirement Markdown path is not a safe store-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidRequirementPath {
@@ -320,6 +440,39 @@ pub struct RequirementDocumentMeta {
     /// Optional user-defined iteration name. `None` means Unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration: Option<String>,
+    /// Optional scheduling priority. `None` means no priority is assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<RequirementPriority>,
+    /// Project membership and explicitly recorded delivery state, keyed by durable project ID.
+    /// Missing on older documents, which remain unassigned until explicitly linked.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub projects: BTreeMap<String, RequirementProjectStatus>,
+}
+
+/// Delivery state of a requirement in one project; never inferred from another project.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementProjectStatus {
+    /// Linked to the project but not yet implemented.
+    #[default]
+    Planned,
+    /// Implementation has been recorded, without claiming acceptance.
+    Implemented,
+    /// Acceptance has been explicitly recorded for this project.
+    Verified,
+}
+
+/// Project window over the shared requirement library.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "project_id", rename_all = "snake_case")]
+pub enum RequirementProjectFilter {
+    /// Every document in the library.
+    #[default]
+    All,
+    /// Documents with no project associations.
+    Unassigned,
+    /// Documents linked to this durable project ID.
+    Project(String),
 }
 
 impl RequirementDocumentMeta {
@@ -336,12 +489,23 @@ impl RequirementDocumentMeta {
             title: title.into(),
             revision,
             iteration: None,
+            priority: None,
+            projects: BTreeMap::new(),
         }
     }
 
     /// Returns `true` when this document has no iteration assignment.
     pub fn is_unassigned(&self) -> bool {
         self.iteration.is_none()
+    }
+
+    /// Tests project membership independently of the iteration filter.
+    pub fn matches_project_filter(&self, filter: &RequirementProjectFilter) -> bool {
+        match filter {
+            RequirementProjectFilter::All => true,
+            RequirementProjectFilter::Unassigned => self.projects.is_empty(),
+            RequirementProjectFilter::Project(id) => self.projects.contains_key(id),
+        }
     }
 
     /// Returns `true` when this document belongs to `filter`.
@@ -419,6 +583,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_line_h1_supplies_trimmed_title_without_changing_markdown() {
+        for (body, expected) in [
+            ("# Login\n\nBody\n# Another title", "Login"),
+            ("#    用户登录需求    \r\n\r\nBody", "用户登录需求"),
+            ("#\tTabbed title\t\n", "Tabbed title"),
+        ] {
+            assert_eq!(requirement_title(body), Ok(expected), "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn missing_first_line_h1_and_empty_titles_are_rejected() {
+        for body in [
+            "",
+            "Login\n# Later",
+            "\n# Login",
+            "## Login",
+            "#Login",
+            " # Login",
+        ] {
+            assert_eq!(
+                requirement_title(body),
+                Err(InvalidRequirementTitle::MissingH1)
+            );
+        }
+        for body in ["#", "#    \nBody", "#\t\r\nBody"] {
+            assert_eq!(requirement_title(body), Err(InvalidRequirementTitle::Empty));
+        }
+    }
+
+    #[test]
     fn index_serde_roundtrip() {
         let index = RequirementDocumentIndex {
             version: 2,
@@ -463,6 +658,40 @@ mod tests {
         }"#;
         let meta: RequirementDocumentMeta = serde_json::from_str(json).expect("deserialize");
         assert!(meta.is_unassigned());
+    }
+
+    #[test]
+    fn priority_is_optional_and_backward_compatible() {
+        let legacy = r#"{
+            "id": "doc-1",
+            "path": "a.md",
+            "title": "A",
+            "revision": "r"
+        }"#;
+        let meta: RequirementDocumentMeta = serde_json::from_str(legacy).expect("deserialize");
+        assert_eq!(meta.priority, None);
+
+        let mut prioritized = meta;
+        prioritized.priority = Some(RequirementPriority::P1);
+        let json = serde_json::to_value(&prioritized).expect("serialize");
+        assert_eq!(json["priority"], "P1");
+        assert_eq!(
+            serde_json::from_value::<RequirementDocumentMeta>(json)
+                .expect("deserialize")
+                .priority,
+            Some(RequirementPriority::P1)
+        );
+    }
+
+    #[test]
+    fn priority_validation_accepts_only_p0_through_p3() {
+        assert_eq!(
+            RequirementPriority::parse(" P0 ").unwrap(),
+            RequirementPriority::P0
+        );
+        assert_eq!(RequirementPriority::parse("P3").unwrap().as_str(), "P3");
+        assert_eq!(RequirementPriority::parse("P4").unwrap_err().value(), "P4");
+        assert!(serde_json::from_str::<RequirementPriority>(r#""P4""#).is_err());
     }
 
     #[test]
@@ -557,5 +786,6 @@ mod tests {
         let meta = RequirementDocumentMeta::new("d", "d.md", "D", DocumentRevision::new("r"));
         let json = serde_json::to_string(&meta).expect("serialize");
         assert!(!json.contains("iteration"));
+        assert!(!json.contains("priority"));
     }
 }

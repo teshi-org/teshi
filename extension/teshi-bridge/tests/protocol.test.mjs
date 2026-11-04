@@ -15,6 +15,14 @@ const fixtures = JSON.parse(
 
 test("manifest permits persisted profile-local identity and debugger access", () => {
   assert.equal(manifest.manifest_version, 3);
+  assert.deepEqual([...manifest.permissions].sort(), [
+    "activeTab",
+    "alarms",
+    "debugger",
+    "storage",
+    "tabGroups",
+    "tabs",
+  ]);
   assert.ok(manifest.permissions.includes("storage"));
   assert.ok(manifest.permissions.includes("debugger"));
 });
@@ -107,9 +115,18 @@ test("console capture uses target-scoped CDP events and bounded broker transport
   assert.match(background, /Runtime\.consoleAPICalled/);
   assert.match(background, /Log\.entryAdded/);
   assert.match(background, /type: "console_event"/);
+  assert.match(background, /capture_id: capture\.capture_id/);
+  assert.match(background, /stream_generation: lastStreamGeneration/);
+  assert.match(background, /type: "console_capture_terminated"/);
+  assert.match(background, /"target_closed"/);
+  assert.match(background, /"broker_restart"/);
+  assert.match(background, /console_capture_id_mismatch/);
   assert.match(background, /consoleCaptureTabIds\.has\(source\.tabId\)/);
   assert.match(background, /cmd === "start_console_capture"/);
   assert.match(background, /cmd === "stop_console_capture"/);
+  assert.match(background, /cmd === "__teshi_stop_console_capture"/);
+  assert.match(background, /terminateConsoleCaptures\("stream_disconnected"/);
+  assert.match(background, /suppress_response/);
 });
 
 test("network capture uses filtered acknowledged WebSocket batches", () => {
@@ -145,7 +162,7 @@ test("capture activity and unacknowledged events keep socket reconnect enabled",
   assert.match(background, /function streamSocketNeeded/);
   assert.match(background, /networkCapturesByTab\.size > 0/);
   assert.match(background, /state\.queue\.length > 0/);
-  assert.match(background, /if \(streamSocketNeeded\(\) && cachedProjectRoot\)/);
+  assert.match(background, /if \(streamSocketNeeded\(\) && brokerConnectionReady\(\)\)/);
   assert.match(background, /state\.sent_through_seq = state\.acked_seq/);
 });
 
@@ -161,10 +178,21 @@ test("artifact transport is bounded and element clips use page coordinates", () 
 test("loopback HTTP mutations use the discovered broker token", () => {
   assert.match(background, /function cacheBrokerToken/);
   assert.match(background, /searchParams\.get\("token"\)/);
-  assert.match(background, /authenticatedUrl\.searchParams\.set\("token", cachedBrokerToken\)/);
-  assert.match(background, /"X-Teshi-Broker-Token": cachedBrokerToken/);
+  assert.match(background, /authenticatedUrl\.searchParams\.set\("token", token\)/);
+  assert.match(background, /"X-Teshi-Broker-Token": token/);
   assert.match(background, /res = await bridgePost\(HEARTBEAT_URL/);
   assert.doesNotMatch(background, /fetch\(HEARTBEAT_URL/);
+});
+
+test("extension Discovery uses a browser-originated credential request", () => {
+  assert.match(background, /function discoveryRequestOptions/);
+  assert.match(background, /method: "POST"/);
+  assert.match(background, /"Content-Type": "application\/json"/);
+  assert.match(background, /extension_id: chrome\.runtime\.id/);
+  assert.match(background, /extension_instance_id: identity\.extension_instance_id/);
+  assert.match(background, /profile_label: identity\.profile_label/);
+  assert.match(background, /browser-supplied HTTP Origin header/);
+  assert.doesNotMatch(background, /X-Teshi-Extension-Origin/);
 });
 
 test("mutation monitoring captures bounded summaries around one action dispatch", () => {
@@ -178,6 +206,48 @@ test("mutation monitoring captures bounded summaries around one action dispatch"
   assert.equal((executeBranch.match(/await executeLocator\(/g) || []).length, 1);
   assert.match(executeBranch, /beforeSummary/);
   assert.match(executeBranch, /afterSummary/);
+});
+
+test("execute_locator keeps DOM click and pointer click semantics distinct", () => {
+  const executeLocator = background.match(
+    /async function executeLocator\([\s\S]*?\n}\n\nasync function waitForBrowserCondition/,
+  )?.[0];
+  assert.ok(executeLocator, "executeLocator implementation missing");
+  assert.match(executeLocator, /code: "element_disabled"/);
+  assert.match(executeLocator, /else if \(action === "click"\) \{\s*el\.click\(\);/);
+  assert.match(executeLocator, /else if \(action === "pointer_click"\) \{/);
+  assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mousePressed"/);
+  assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mouseReleased"/);
+});
+
+test("assert_text observes asynchronous UI updates without replaying an action", () => {
+  const executeLocator = background.match(
+    /async function executeLocator\([\s\S]*?\n}\n\nasync function waitForBrowserCondition/,
+  )?.[0];
+  assert.ok(executeLocator, "executeLocator implementation missing");
+  assert.match(executeLocator, /let text = "";/);
+  assert.match(executeLocator, /while \(Date\.now\(\) < deadline\)/);
+  assert.match(executeLocator, /await sleep\(100\);/);
+  assert.match(executeLocator, /code: "assert_text_failed"/);
+});
+
+test("locator verification preserves frame and shadow scope and fails closed", () => {
+  const verifyLocator = background.match(
+    /async function verifyPlaywrightLocators\([\s\S]*?\n}\n\nasync function captureBrowserScreenshot/,
+  )?.[0];
+  assert.ok(verifyLocator, "locator verification implementation missing");
+  assert.match(verifyLocator, /candidate\?\.context/);
+  assert.match(verifyLocator, /const resolveRoot = \(context = \{\}\)/);
+  assert.match(verifyLocator, /cross-origin iframe locator context is unsupported/);
+  assert.match(verifyLocator, /iframe locator context is ambiguous/);
+  assert.match(verifyLocator, /shadow root locator context is ambiguous/);
+  assert.match(verifyLocator, /const querySelectorAll = \(root, rawSelector\)/);
+  assert.match(verifyLocator, /querySelectorAll\(root, args\.selector\)/);
+  assert.match(verifyLocator, /:has-text\(/);
+  assert.match(background, /function accessibleName\(el\)/);
+  assert.match(background, /let shadowHosts = \[\];/);
+  assert.match(background, /if \(host\.shadowRoot\) collect\(host\.shadowRoot/);
+  assert.match(background, /candidate and locator context do not match/);
 });
 
 test("file upload resolves one actionable input and uses CDP file assignment", () => {

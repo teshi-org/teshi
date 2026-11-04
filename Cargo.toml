@@ -2,6 +2,32 @@
 lto = true
 strip = "symbols"
 
+# Local installs use the dev profile. Unoptimized, these crates make the TUI
+# screenshot viewer 10-30x slower to decode, resample, and encode a capture.
+# Each override applies to that package only, not to its dependencies.
+[profile.dev.package]
+image.opt-level = 3
+png.opt-level = 3
+fdeflate.opt-level = 3
+simd-adler32.opt-level = 3
+crc32fast.opt-level = 3
+miniz_oxide.opt-level = 3
+zune-jpeg.opt-level = 3
+zune-core.opt-level = 3
+icy_sixel.opt-level = 3
+quantette.opt-level = 3
+palette.opt-level = 3
+palette_math.opt-level = 3
+wide.opt-level = 3
+safe_arch.opt-level = 3
+bitvec.opt-level = 3
+bytemuck.opt-level = 3
+libm.opt-level = 3
+num-traits.opt-level = 3
+ordered-float.opt-level = 3
+ratatui-image.opt-level = 3
+base64-simd.opt-level = 3
+
 [workspace]
 resolver = "3"
 members = [
@@ -12,6 +38,8 @@ members = [
     "crates/teshi-agent-runtime",
     "crates/teshi-acp",
     "crates/teshi-engine",
+    "crates/teshi-replay-evidence",
+    "crates/teshi-browser-broker",
     "crates/teshi-ui",
     "crates/teshi-web-protocol",
     "apps/teshi-daemon",
@@ -24,7 +52,7 @@ members = [
     "tests/steps/requirement-cli",
     "tests/steps/validation-cli",
 ]
-exclude = ["runner"]
+exclude = ["runner", "crates/teshi-tui-runner"]
 
 [workspace.package]
 version = "0.7.11"
@@ -37,9 +65,11 @@ clap = { version = "4", features = ["derive"] }
 # Pinned Zed revision with GPUI web (`single_threaded_web`) and FetchHttpClient.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba" }
+hmac = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "json", "blocking", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 teshi-agent = { path = "crates/teshi-agent" }

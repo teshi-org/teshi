@@ -23,6 +23,28 @@ fn valid_feature() -> &'static str {
 }
 
 #[test]
+fn default_scope_does_not_escape_to_an_ancestor_teshi_directory() {
+    let ancestor = tempfile::tempdir().expect("owned ancestor");
+    std::fs::create_dir(ancestor.path().join(".teshi")).unwrap();
+    let project = ancestor.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    write_feature(&project, "local.feature", valid_feature());
+    write_feature(
+        ancestor.path(),
+        "unrelated.feature",
+        "Feature: Broken\n  Scenario: Empty\n",
+    );
+    let output = run_check(&project, &["--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"], serde_json::json!(["local.feature"]));
+}
+
+#[test]
 fn default_scope_checks_all_project_features() {
     let project = tempfile::tempdir().expect("temp project");
     write_feature(

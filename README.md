@@ -3,16 +3,24 @@
 Terminal-first BDD editor with AI assistance, mind-map navigation, and external test runner integration.
 
 ```
-teshi .              # open current project
+teshi                # load features/ for the system UI language
+teshi .              # same loading rules as teshi
+teshi project/       # load project/features for the system UI language
+teshi -R             # recursively load all .feature files in the current directory
 teshi web            # browser GUI
 teshi desktop        # native desktop (WinUI3 recording)
 ```
+
+`teshi` and `teshi .` scan `./features` recursively; `teshi project/` scans that project's `features` folder. If language subdirectories such as
+`zh-CN` and `en-US` exist, it loads only the matching system UI language directory.
+Without language subdirectories, it loads all Feature files under `features`.
+See [CLI startup rules](doc/cli-usage.md#open-files-tui) for examples and missing-directory behavior.
 
 Explore · MindMap · AI — three tabs for browsing, editing, and AI-assisted authoring.
 
 ---
 
-**Install** — Windows user setup `teshi-*-x64-setup.exe` (in-app updates) · `winget install teshi-org.teshi` (MSI, check-only) · [releases](https://github.com/teshi-org/teshi/releases)
+**Install** — Windows user setup `teshi-*-x64-setup.exe` (in-app updates) · machine-wide MSI `teshi-*-x64.msi` (check-only) · [releases](https://github.com/teshi-org/teshi/releases)
 
 Please read https://github.com/teshi-org/teshi/blob/main/AI_INSTALL.md and follow it to install the teshi CLI, load the teshi-bridge Chrome extension, and add the teshi agent skills.
 

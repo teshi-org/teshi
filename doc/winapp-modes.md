@@ -54,6 +54,22 @@ Or launch an executable and wait for its first visible window:
 teshi winapp launch "C:\path\to\MyApp.exe"
 ```
 
+For a target that requires administrator UI access, use the opt-in elevated
+session:
+
+```bash
+teshi winapp launch --elevated "C:\path\to\Enhook.exe"
+teshi winapp status
+```
+
+Windows displays the normal UAC consent prompt. Only the WinApp execution
+sidecar is started at High Integrity; the Teshi CLI, daemon, Agent, and Web UI
+remain at their normal integrity level. If a Medium executor attaches to a
+High target, action commands fail before UIA or input dispatch with an
+integrity-mismatch error. The session owner stops the elevated executor when
+the WinApp session or daemon ends; Teshi does not automate the Secure Desktop
+UAC surface or store credentials.
+
 ## GPUI preview
 
 The native and WASM GPUI shells show the same latest-frame preview on their main surface. WinApp mode prefers Windows Graphics Capture (WGC) for the exact attached HWND and automatically falls back to screen-rectangle ImageGrab when WGC cannot start or stops unexpectedly.
@@ -114,17 +130,33 @@ When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards sce
 
 ## Supported actions
 
-| Action | UIA behavior |
-|--------|--------------|
-| `click` | Prefer `InvokePattern`, then UIA click, then center-point click; does not guarantee real pointer hover or pressed state |
-| `pointer_click` | Foreground-only real pointer move to the element center followed by a Win32 `SendInput` left-click |
-| `fill` | Prefer `ValuePattern.SetValue`, then focus + keyboard input |
+WinApp input is non-intrusive by default. `execute` and every step in `replay`
+use `--mode auto` unless a mode is supplied:
+
+| Mode | Policy |
+|------|--------|
+| `auto` | Prefer UIA and background messages. Do not grant foreground fallbacks implicitly. `pointer_click` and tray clicks return `requires_interactive_input`; the action name grants no permission. |
+| `background` | Strictly forbid `SetForegroundWindow`, focus-dependent `SendKeys`, `SendInput`, and real pointer movement. Fail when UIA/background messages cannot complete the action. |
+| `foreground` | Mutations require `--allow-interactive-input`. Only this combination permits target activation, focus, and keyboard fallback. Pure reads never activate the window. |
+
+The mode is evaluated per action. A replay containing one `pointer_click` does
+not activate the window for its earlier or later assertion/UIA steps.
+
+| Action | Execution policy |
+|--------|------------------|
+| `click` | Prefer `InvokePattern`, then SelectionItem/Toggle, then LegacyIAccessible, then background window messages. It never moves the real pointer. A foreground-only focused keyboard fallback is available when explicitly allowed. |
+| `pointer_click` | Explicit physical capability: activate the window, move the real pointer to the element center, and issue a Win32 `SendInput` left-click. Requires `--mode foreground --allow-interactive-input`; rejected in auto/background even with the permission flag. |
+| `fill` | Prefer `ValuePattern.SetValue`, then background messages. Only `foreground` plus `--allow-interactive-input` permits focus + keyboard fallback. |
 | `assert_visible` | Check that the resolved element has visible bounds |
 | `assert_not_exists` | Pass only when the UIA selector matches no element, including hidden elements |
 | `assert_text` | Compare expected text against `ValuePattern` or `Name` |
 | `assert_screenshot` | Compare lossless RGB pixels of one visible interactive UIA element with a PNG baseline |
-| `select` | Prefer `SelectionItemPattern.Select`, then click |
-| `press_key` | Focus the element and send keys |
+| `select` | Prefer `SelectionItemPattern.Select`, then the same least-intrusive activation chain as `click` |
+| `press_key` | Prefer background window messages. Only `foreground` plus `--allow-interactive-input` permits focus + `SendKeys` fallback. |
+
+`snapshot`, `screenshot`, `highlight`, and all assertion actions are always
+non-intrusive, including when `--mode foreground` is supplied. They never call
+`SetForegroundWindow`, move the system pointer, or inject keyboard input.
 
 Use `pointer_click` when the control depends on real pointer input, such as
 hover/pressed state, a WinUI3 custom title bar or caption island, non-client
@@ -132,9 +164,48 @@ area interaction, or pointer messages. It moves the system pointer and brings
 the attached window to the foreground. `click` remains the UIA-activation-first
 choice for ordinary stable automation.
 
+Do not replace `click` with `pointer_click` merely because one click attempt
+failed. First determine whether the target is a hover/pressed-state control,
+custom title bar, caption island, non-client surface, or another control whose
+contract truly depends on physical pointer messages.
+
 ```powershell
-teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
+teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click --mode foreground --allow-interactive-input
 ```
+
+Compatibility change: scripts using default pointer/tray clicks or foreground
+mutations must explicitly add `--mode foreground --allow-interactive-input`.
+`--yes`, `--non-interactive`, a recorded binding, and per-step Enter prompts do
+not authorize desktop interference. Permission is request-scoped, never saved
+in bindings or inherited by another sidecar request. Sidecar JSON uses the
+literal boolean `"allow_interactive_input": true` together with `"mode": "foreground"`.
+Failures preserve JSON with `code: "requires_interactive_input"` and a nonzero CLI exit.
+
+Before resolving a click/fill/select target, Teshi configures the actual shared
+UIAutomation client with `IUIAutomation2.AutoSetFocus = false` and reads the
+property back. Legacy clients are replaced with CUIAutomation8. If this policy
+cannot be established, mutation fails before dispatch; there is no message or
+foreground fallback. This closes UIA's implicit focus path, which is separate
+from explicit SetFocus/SetForegroundWindow calls.
+
+UIA provider completion is reported as `action_outcome: "provider_completed"`
+with `business_result: "unverified"`; input injection likewise does not prove a
+business action. Follow it with an application-specific assertion. Provider
+errors after invocation and queued/partially queued click/key messages return
+`ok: false`, `code: "action_result_uncertain"`. Replay stops; inspect state before
+retrying. No foreground fallback follows uncertain dispatch. Selection/Toggle verify their exposed state; their supported patterns precede
+Legacy default action. Responses expose `input_method` for click/select. Fill succeeds only
+after value readback matches; WM_SETTEXT transport success alone is insufficient.
+UIA providers and target applications execute their own code: a target can open
+or focus its own window in response to a semantic action; Teshi does not call
+focus or physical-input APIs in auto/background mode.
+
+Custom title bars, WinUI3 caption islands and HWND-less controls do not necessarily
+consume PostMessage mouse/key input. An enqueued message is not proof of a click.
+Inspect supported patterns and use authorized physical input only when the action
+requires it. Tray enumeration is read-only. Revealing an auto-hidden taskbar,
+opening overflow, and tray clicking require permission; follow restore actions
+with `winapp wait-window --pid <pid> --visible` and a business assertion.
 
 ## Element screenshots and visual assertions
 
@@ -168,11 +239,12 @@ For step bindings, keep the existing schema:
 
 WinApp replay uses tolerance 8 and writes failures under `.teshi/artifacts/visual/<sanitized-feature>-L<line>-diff.png`. The assertion response is printed before replay reports the failing step. Existing replay JPEG evidence remains separate from visual comparison.
 
-Managed runtime v3 packages real pointer clicking and the existing visual
-capability. The install path and release archive are versioned separately from
-the Teshi application; v2 manifests cannot satisfy the v3 requirement. Release
-builds embed the v3 archive URL, hash, and size. Restart an already-running
-older daemon/sidecar after upgrading so it loads the new runtime.
+Managed runtime v4 packages authenticated sidecar connections, real pointer
+clicking, and the existing visual capability. The install path and release
+archive are versioned separately from the Teshi application; v3 manifests
+cannot satisfy the v4 requirement. Release builds embed the v4 archive URL,
+hash, and size. Restart an already-running older daemon/sidecar after upgrading
+so it loads the new runtime.
 
 Run the window-independent capture, comparison, selector, CLI, and replay tests after building the CLI:
 
@@ -194,8 +266,24 @@ WinApp mode requires `websockets` to start. UI inspection/actions require `uiaut
 
 ## Limitations
 
-- Target apps running as administrator may require teshi to run at the same integrity level.
+- Target apps already running as administrator must be attached from an elevated
+  WinApp session; a Medium executor reports an integrity mismatch instead of
+  attempting UIA or input dispatch.
 - Custom-drawn controls may expose little or no UIA metadata; prefer adding stable `AutomationId` values in the app under test.
 - WGC cannot capture protected content. ImageGrab fallback is additionally affected by occlusion and minimized windows.
 - Independent top-level popup windows are not merged into the attached main HWND's WGC stream.
 - Attach only to the app under test. Agents should not guess between multiple plausible native app windows.
+
+Authorized keyboard input checks the observed foreground HWND before injection,
+rather than trusting the SetForegroundWindow return value. An already-active
+target needs no activation. A target that remains in the background is rejected.
+`exec close` sends WM_CLOSE once and waits up to one second for the HWND to
+vanish; disappearance verifies closure, otherwise the result is uncertain.
+
+
+## Instance, visual and external-check extensions
+
+See [WinApp exploration contracts](winapp-exploration.md) for the source-checkout
+extensions and the distinction between provider completion, screenshot capture and
+business verification. Installed capabilities must be checked with version/help.
+No runtime acceptance was performed for these extensions in the current delivery.

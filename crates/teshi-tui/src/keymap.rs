@@ -43,19 +43,44 @@ pub struct KeyContext {
     pub requirements_editor_mode: RequirementsEditorMode,
     /// Active pane when the Test Points tab is selected.
     pub test_points_focus: TestPointsFocus,
+    /// Whether the active test-point field owns printable input.
+    pub test_points_editing: bool,
+    /// Model/session deletion confirmation captures all input.
+    pub delete_confirmation_active: bool,
     /// Whether a Requirements filter/iteration overlay is open.
     pub requirements_overlay_active: bool,
+    /// The Requirements overlay accepts text rather than list-navigation keys.
+    pub requirements_text_overlay: bool,
+    /// Iteration/priority choice overlays support list navigation.
+    pub requirements_list_overlay: bool,
     /// Whether the AI generation source-scope confirmation overlay is open.
     pub generation_scope_prompt_active: bool,
 
     /// Whether the quit confirmation panel is open.
     pub quit_pending_confirm: bool,
+
+    /// Whether an external ACP agent has a pending permission prompt.
+    pub acp_permission_pending: bool,
+    /// Whether the project switcher owns keyboard input.
+    pub project_switch_active: bool,
 }
 
 /// High-level editor command derived from keyboard input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Action {
+    /// Open the session Agent selector from the chat configuration row.
+    AiOpenAgentSelector,
+    /// Toggle the completed process of a user turn without moving input focus.
+    AiToggleTurn(usize),
+    /// Toggle one reasoning body; `usize::MAX` identifies live native reasoning.
+    AiToggleThought(usize),
+    /// Toggle one external tool group inside a turn's execution process.
+    AiToggleTools(usize),
+    /// Rescan Feature files while preserving unsaved buffers.
+    RefreshFeatures,
+    /// Pan the focused Explore pane without moving keyboard focus.
+    ExplorePan(isize),
     // Editor movement (stage 3)
     MoveUp,
     MoveDown,
@@ -65,6 +90,9 @@ pub enum Action {
     MoveEnd,
     PageUp,
     PageDown,
+    /// Jump to the first/last item of the active list, tree, or document.
+    NavigateFirst,
+    NavigateLast,
     // Text editing
     Insert(char),
     Enter,
@@ -98,12 +126,51 @@ pub enum Action {
     /// Return to Requirements navigation.
     ReqExitInsert,
     ReqNewDocument,
+    /// Open confirmation to remove the selected document from the global library.
+    ReqDeleteDocument,
     /// Open the iteration filter picker (`i` on the Requirements tree).
     ReqFilterOverlay,
+    /// Cycle current project, all projects, and unassigned requirements.
+    ReqProjectScope,
+    /// Toggle membership of the selected document in the current project.
+    ReqProjectLink,
     /// Toggle path vs iteration grouping (`g` on the Requirements tree).
     ReqGroupToggle,
+    /// Toggle implemented and verified requirement visibility (`H`, Current project only).
+    ReqCompletedToggle,
+    /// Open the action menu for the selected tree row (Space).
+    ReqActionMenu,
+    /// Toggle a folder or query row; open a document in the editor (Enter).
+    ReqTreeActivate,
+    /// Collapse the selected folder, query, or iteration row (`h`).
+    ReqTreeCollapse,
+    /// Expand the selected folder, query, or iteration row (`l`).
+    ReqTreeExpand,
     /// Edit the selected document's iteration (`I` on the Requirements tree).
     ReqEditIteration,
+    /// Edit the selected document's optional priority (`p` on the Requirements tree).
+    ReqEditPriority,
+    /// Bounded Vim append/open/delete/yank operations for Requirements.
+    ReqVimAppend,
+    ReqVimOpenBelow,
+    ReqVimOpenAbove,
+    ReqVimDeleteChar,
+    ReqVimDeleteLine,
+    ReqVimYankLine,
+    ReqVimPasteAfter,
+    ReqVimPasteBefore,
+    ReqVimWordForward,
+    ReqVimWordBackward,
+    ReqVimWordEnd,
+    ReqVimLineStart,
+    ReqVimFirstNonBlank,
+    ReqVimLineEnd,
+    ReqVimGoTop,
+    ReqVimGoBottom,
+    ReqVimVisualChar,
+    ReqVimVisualLine,
+    ReqVimVisualYank,
+    ReqVimVisualDelete,
     /// Confirm the active Requirements overlay.
     OverlayConfirm,
     /// Cancel the active Requirements overlay.
@@ -116,6 +183,10 @@ pub enum Action {
     OverlayInsert(char),
     /// Backspace in the overlay text field.
     OverlayBackspace,
+    /// Delete the character under the overlay text cursor.
+    OverlayDelete,
+    /// Move the overlay text cursor.
+    OverlayCursor(crate::authoring_tab::CursorMotion),
     /// Confirm the pending generation source-scope overlay.
     GenerationScopeConfirm,
     /// Cancel the pending generation source-scope overlay.
@@ -132,15 +203,29 @@ pub enum Action {
     TpContinueGeneration,
     /// Open a realized Gherkin scenario linked from the selected test point.
     TpFollowScenario,
+    /// Start editing the selected test-point field.
+    TpEnterInsert,
+    /// Commit the field and return to Normal mode.
+    TpExitInsert,
+    /// Confirm a pending model/session deletion.
+    DeleteConfirm,
+    /// Cancel a pending model/session deletion.
+    DeleteCancel,
     // Global
     Save,
     Quit,
     SelectTab(MainTab),
     ActivateStepInput,
+    /// Cancel only the pending pane-navigation chord, preserving pane state.
+    CancelPaneNavigation,
     ClearInputState,
     // Explore navigation
     FocusNextColumn,
     FocusPrevColumn,
+    /// Move to the nearest visible pane below the current pane.
+    FocusPaneDown,
+    /// Move to the nearest visible pane above the current pane.
+    FocusPaneUp,
     ExploreRight,
     RunScenario,
     AiSuggest,
@@ -172,6 +257,8 @@ pub enum Action {
     // AI tab input
     AiSendChar(char),
     AiSendMessage,
+    /// Continue an interrupted ACP task in the current session.
+    AiContinueTask,
     AiBackspace,
     /// Scroll chat history up (Alt+Up).
     AiScrollUp,
@@ -188,6 +275,10 @@ pub enum Action {
     AiDelete,
     AiCursorLeft,
     AiCursorRight,
+    /// Move to the previous logical input line.
+    AiCursorUp,
+    /// Move to the next logical input line.
+    AiCursorDown,
     AiCursorHome,
     AiCursorEnd,
     /// Jump to top of chat history (Ctrl+Home).
@@ -207,11 +298,26 @@ pub enum Action {
     AgentClose,
     AgentNext,
     AgentPrev,
+    /// Select the visible conversation at this index without creating a turn.
+    AgentSelect(usize),
     // ── Slash command suggestion popup ───────────────
     AiSlashPrev,
     AiSlashNext,
     AiSlashSelect,
     AiSlashDismiss,
+    /// Highlight a visible slash suggestion without executing it.
+    AiSlashChoose(usize),
+    // ── ACP agent permission prompt ───────────────────
+    /// Move the ACP permission prompt selection up.
+    AcpPermissionUp,
+    /// Move the ACP permission prompt selection down.
+    AcpPermissionDown,
+    /// Allow the highlighted ACP permission option.
+    AcpPermissionConfirm,
+    /// Reject the ACP permission request.
+    AcpPermissionReject,
+    /// Highlight a permission choice without approving the pending request.
+    AcpPermissionChoose(usize),
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -246,6 +352,8 @@ pub enum Action {
     ModelPanelFormInsert(char),
     /// Delete the character before the cursor in the focused form field.
     ModelPanelFormBackspace,
+    /// Move the model form cursor or edit at it without consuming text keys.
+    ModelPanelFormCursor(KeyCode),
     /// Submit the form and create the profile.
     ModelPanelFormSubmit,
     /// Cancel the form and return to the list.
@@ -269,7 +377,7 @@ pub enum Action {
     TreeSiblingPrev,
     /// Navigate to the next sibling node in the MindMap tree (Shift+Down).
     TreeSiblingNext,
-    // Mouse-driven selection actions (no key bindings — triggered by mouse events)
+    // Chat/editor selection actions
     /// Copy the current mouse-drag selection to the system clipboard and clear it.
     CopySelection,
     /// Clear the mouse-drag selection without copying.
@@ -337,8 +445,78 @@ pub enum Action {
 
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
-        if let Some(pending_char) = context.pending_char {
-            if context.active_tab == MainTab::Requirements && pending_char == 'w' {
+        // Ctrl+Q is the only exit chord, and it wins over every mode so the
+        // user can always leave. Ctrl+C belongs to copying, and a bare `q` is
+        // ordinary input in insert modes.
+        if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::CONTROL {
+            return Some(Self::Quit);
+        }
+        if context.delete_confirmation_active {
+            return match event.code {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y') => Some(Self::DeleteConfirm),
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => Some(Self::DeleteCancel),
+                _ => None,
+            };
+        }
+        let modal_list = context.agent_profile_panel_active
+            || context.approval_panel_active
+            || context.acp_permission_pending
+            || context.session_panel_active
+            || (context.model_panel_active && !context.model_panel_adding)
+            || context.change_summary_visible
+            || context.scenario_dropdown_open
+            || context.requirements_list_overlay
+            || context.step_keyword_picker_active;
+        if modal_list
+            && !context.external_change_prompt_active
+            && !context.agent_change_prompt_active
+            && !context.quit_pending_confirm
+            && !context.project_switch_active
+        {
+            let action = match (event.code, event.modifiers) {
+                (KeyCode::Home, _) => Some(Self::NavigateFirst),
+                (KeyCode::End, _)
+                | (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    Some(Self::NavigateLast)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) if context.pending_char == Some('g') => {
+                    Some(Self::NavigateFirst)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::PendingChar('g')),
+                (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                    Some(Self::PageUp)
+                }
+                (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                    Some(Self::PageDown)
+                }
+                _ => None,
+            };
+            if action.is_some() {
+                return action;
+            }
+        }
+        if context.project_switch_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                (KeyCode::Enter, _) => Some(Self::OverlayConfirm),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::OverlayMoveUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::OverlayMoveDown)
+                }
+                (KeyCode::Backspace, _) => Some(Self::OverlayBackspace),
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::OverlayInsert(ch))
+                }
+                _ => None,
+            };
+        }
+        if let Some(pending_char) = context.pending_char.filter(|_| !modal_context(context)) {
+            if pending_char == 'w' && pane_navigation_allowed(context) {
                 // Some terminal/input paths retain CONTROL (or add SHIFT for
                 // an uppercase character) on the second key of the chord.
                 // Treat h/H and l/L equivalently so Ctrl-W h/l works across
@@ -349,23 +527,90 @@ impl Action {
                     || event.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
                 if has_only_supported_modifiers {
                     return match event.code {
-                        KeyCode::Char('h') | KeyCode::Char('H') => Some(Self::FocusPrevColumn),
-                        KeyCode::Char('l') | KeyCode::Char('L') => Some(Self::FocusNextColumn),
-                        _ => None,
+                        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
+                            Some(Self::FocusPrevColumn)
+                        }
+                        KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
+                            Some(Self::FocusNextColumn)
+                        }
+                        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => {
+                            Some(Self::FocusPaneDown)
+                        }
+                        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => {
+                            Some(Self::FocusPaneUp)
+                        }
+                        KeyCode::Esc => Some(Self::CancelPaneNavigation),
+                        _ => Some(Self::CancelPaneNavigation),
                     };
                 }
-                return None;
+                return Some(Self::CancelPaneNavigation);
             }
-            match (pending_char, event.code, event.modifiers) {
-                ('d', KeyCode::Char('d'), KeyModifiers::NONE) => return Some(Self::DeleteNode),
-                ('y', KeyCode::Char('y'), KeyModifiers::NONE) => return Some(Self::CopyStep),
-                _ => {}
+            if context.active_tab == MainTab::Requirements
+                && context.requirements_focus == RequirementsFocus::Editor
+                && matches!(
+                    context.requirements_editor_mode,
+                    RequirementsEditorMode::Browse
+                        | RequirementsEditorMode::VisualChar
+                        | RequirementsEditorMode::VisualLine
+                )
+            {
+                match (pending_char, event.code, event.modifiers) {
+                    ('d', KeyCode::Char('d'), KeyModifiers::NONE) => {
+                        return Some(
+                            if context.requirements_editor_mode == RequirementsEditorMode::Browse {
+                                Self::ReqVimDeleteLine
+                            } else {
+                                Self::ReqVimVisualDelete
+                            },
+                        );
+                    }
+                    ('y', KeyCode::Char('y'), KeyModifiers::NONE) => {
+                        return Some(
+                            if context.requirements_editor_mode == RequirementsEditorMode::Browse {
+                                Self::ReqVimYankLine
+                            } else {
+                                Self::ReqVimVisualYank
+                            },
+                        );
+                    }
+                    ('g', KeyCode::Char('g'), KeyModifiers::NONE) => {
+                        return Some(Self::ReqVimGoTop);
+                    }
+                    _ => {}
+                }
+            }
+            if (context.active_tab == MainTab::Explore && context.explore_edit_mode)
+                || (context.active_tab == MainTab::MindMap
+                    && context.view_stage == ViewStage::EditorAndPanel
+                    && context.mindmap_focus == MindMapFocus::Main)
+            {
+                match (pending_char, event.code, event.modifiers) {
+                    ('d', KeyCode::Char('d'), KeyModifiers::NONE) if !context.step_input_active => {
+                        return Some(Self::DeleteNode);
+                    }
+                    ('y', KeyCode::Char('y'), KeyModifiers::NONE) if !context.step_input_active => {
+                        return Some(Self::CopyStep);
+                    }
+                    _ => {}
+                }
             }
         }
 
-        // Ctrl+C always maps to Quit, regardless of mode.
+        if event.code == KeyCode::F(6) && !context.external_change_prompt_active {
+            return Some(Self::RefreshFeatures);
+        }
+        if context.active_tab == MainTab::Explore && event.modifiers == KeyModifiers::SHIFT {
+            match event.code {
+                KeyCode::Left => return Some(Self::ExplorePan(-4)),
+                KeyCode::Right => return Some(Self::ExplorePan(4)),
+                _ => {}
+            }
+        }
+        // Ctrl+C copies the current selection instead of exiting. With nothing
+        // selected it reports that to the status line rather than closing the
+        // session, so the habitual interrupt cannot lose work.
         if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
-            return Some(Self::Quit);
+            return Some(Self::CopySelection);
         }
 
         if context.external_change_prompt_active {
@@ -398,12 +643,28 @@ impl Action {
             };
         }
 
+        // ACP permission prompt intercepts list navigation and the decision.
+        // Mirrors Zed's agent permission panel: move, Enter to allow the
+        // highlighted option, Esc to reject.
+        if context.acp_permission_pending {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AcpPermissionUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AcpPermissionDown)
+                }
+                (KeyCode::Enter, _) => Some(Self::AcpPermissionConfirm),
+                (KeyCode::Esc, _) => Some(Self::AcpPermissionReject),
+                _ => None,
+            };
+        }
+
         // Quit confirmation panel intercept
         if context.quit_pending_confirm {
             return match (event.code, event.modifiers) {
-                (KeyCode::Char('q'), KeyModifiers::NONE)
-                | (KeyCode::Char('y'), KeyModifiers::NONE)
-                | (KeyCode::Enter, _) => Some(Self::Quit),
+                (KeyCode::Char('y' | 'Y'), _) => Some(Self::DeleteConfirm),
+                (KeyCode::Enter, _) => Some(Self::Quit),
                 (KeyCode::Char('n'), KeyModifiers::NONE)
                 | (KeyCode::Char('N'), KeyModifiers::SHIFT)
                 | (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -478,15 +739,23 @@ impl Action {
                     (KeyCode::Esc, _) => Some(Self::ModelPanelFormCancel),
                     (KeyCode::Tab, _) => Some(Self::ModelPanelFormNext),
                     (KeyCode::BackTab, _) => Some(Self::ModelPanelFormPrev),
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        Some(Self::ModelPanelFormPrev)
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        Some(Self::ModelPanelFormNext)
-                    }
+                    (KeyCode::Up, _) => Some(Self::ModelPanelFormPrev),
+                    (KeyCode::Down, _) => Some(Self::ModelPanelFormNext),
                     (KeyCode::Enter, _) => Some(Self::ModelPanelFormSubmit),
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::ModelPanelFormSubmit),
                     (KeyCode::Backspace, _) => Some(Self::ModelPanelFormBackspace),
-                    (KeyCode::Char(ch), _) if !ch.is_control() => {
+                    (
+                        code @ (KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::Delete),
+                        _,
+                    ) => Some(Self::ModelPanelFormCursor(code)),
+                    (KeyCode::Char(ch), modifiers)
+                        if !ch.is_control()
+                            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                    {
                         Some(Self::ModelPanelFormInsert(ch))
                     }
                     _ => None,
@@ -504,7 +773,13 @@ impl Action {
                     (KeyCode::Enter, _) => Some(Self::ModelPanelActivate),
                     (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::ModelPanelAdd),
                     (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ModelPanelEdit),
-                    (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::ModelPanelDelete),
+                    (KeyCode::Char('d'), KeyModifiers::NONE)
+                        if context.pending_char == Some('d') =>
+                    {
+                        Some(Self::ModelPanelDelete)
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::PendingChar('d')),
+                    (KeyCode::Delete, _) => Some(Self::ModelPanelDelete),
                     _ => None,
                 };
             }
@@ -520,7 +795,11 @@ impl Action {
                     Some(Self::SessionPanelDown)
                 }
                 (KeyCode::Enter, _) => Some(Self::SessionPanelActivate),
-                (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::SessionPanelDelete),
+                (KeyCode::Char('d'), KeyModifiers::NONE) if context.pending_char == Some('d') => {
+                    Some(Self::SessionPanelDelete)
+                }
+                (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::PendingChar('d')),
+                (KeyCode::Delete, _) => Some(Self::SessionPanelDelete),
                 (KeyCode::Esc, _) => Some(Self::SessionPanelClose),
                 _ => None,
             };
@@ -543,13 +822,26 @@ impl Action {
 
         // Requirements overlay intercepts keys while open (including from generation scope).
         if context.requirements_overlay_active {
+            use crate::authoring_tab::CursorMotion;
+            let text = context.requirements_text_overlay;
             return match (event.code, event.modifiers) {
+                (KeyCode::Char(ch), modifiers)
+                    if text && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::OverlayInsert(ch))
+                }
                 (KeyCode::Esc, _) => Some(Self::OverlayCancel),
                 (KeyCode::Enter, _) => Some(Self::OverlayConfirm),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                (KeyCode::Left, _) if text => Some(Self::OverlayCursor(CursorMotion::Left)),
+                (KeyCode::Right, _) if text => Some(Self::OverlayCursor(CursorMotion::Right)),
+                (KeyCode::Home, _) if text => Some(Self::OverlayCursor(CursorMotion::Home)),
+                (KeyCode::End, _) if text => Some(Self::OverlayCursor(CursorMotion::End)),
+                (KeyCode::Delete, _) if text => Some(Self::OverlayDelete),
+                // Tab and arrows move between query form fields or list rows.
+                (KeyCode::Up | KeyCode::BackTab, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                     Some(Self::OverlayMoveUp)
                 }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                (KeyCode::Down | KeyCode::Tab, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::OverlayMoveDown)
                 }
                 (KeyCode::Backspace, _) => Some(Self::OverlayBackspace),
@@ -578,8 +870,12 @@ impl Action {
         if context.step_keyword_picker_active {
             return match (event.code, event.modifiers) {
                 (KeyCode::Esc, _) => Some(Self::StepKeywordPickerCancel),
-                (KeyCode::Up, _) => Some(Self::StepKeywordPickerUp),
-                (KeyCode::Down, _) => Some(Self::StepKeywordPickerDown),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::StepKeywordPickerUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::StepKeywordPickerDown)
+                }
                 (KeyCode::Enter, _) => Some(Self::StepKeywordPickerConfirm),
                 _ => None,
             };
@@ -591,7 +887,14 @@ impl Action {
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::Char('/'), KeyModifiers::CONTROL)
+                | (KeyCode::Char('7'), KeyModifiers::CONTROL)
                 | (KeyCode::Char('_'), KeyModifiers::CONTROL) => Some(Self::Undo),
+                // ConPTY decodes the same legacy 0x1f byte as Ctrl+Shift+-.
+                (KeyCode::Char('-' | '_'), modifiers)
+                    if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::Undo)
+                }
                 (KeyCode::Char('y'), KeyModifiers::CONTROL)
                 | (KeyCode::Char('Y'), KeyModifiers::CONTROL) => Some(Self::Redo),
                 (KeyCode::Up, _) => Some(Self::MoveUp),
@@ -615,17 +918,138 @@ impl Action {
             };
         }
 
+        // Ctrl-W starts the pane-navigation chord after all modal and text
+        // input handlers have had precedence.  In particular, it must not
+        // steal an editor insertion or AI prompt keystroke, and it must not
+        // fall through to the legacy Ctrl-W keyword switch.
+        let ctrl_w = matches!(event.code, KeyCode::Char('w') | KeyCode::Char('W'))
+            && event.modifiers.contains(KeyModifiers::CONTROL)
+            || event.code == KeyCode::Char('\u{17}');
+        if pane_navigation_allowed(context) && ctrl_w {
+            return Some(Self::PendingChar('w'));
+        }
+
+        let text_input = (context.active_tab == MainTab::Ai && context.ai_input_focused)
+            || (context.active_tab == MainTab::MindMap
+                && context.mindmap_focus == MindMapFocus::AiPanel
+                && context.ai_input_focused)
+            || (context.active_tab == MainTab::Requirements
+                && context.requirements_focus == RequirementsFocus::Editor
+                && context.requirements_editor_mode != RequirementsEditorMode::Browse)
+            || (context.active_tab == MainTab::TestPoints && context.test_points_editing);
+        if !text_input {
+            let navigation = match (event.code, event.modifiers) {
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                    Some(Self::PageUp)
+                }
+                (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                    Some(Self::PageDown)
+                }
+                (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    Some(Self::NavigateLast)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) if context.pending_char == Some('g') => {
+                    Some(Self::NavigateFirst)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE)
+                    if context.active_tab != MainTab::Requirements
+                        || context.requirements_focus == RequirementsFocus::Editor =>
+                {
+                    Some(Self::PendingChar('g'))
+                }
+                (KeyCode::Home, _)
+                    if (context.active_tab != MainTab::Requirements
+                        || context.requirements_focus != RequirementsFocus::Editor)
+                        && (context.active_tab != MainTab::TestPoints
+                            || context.test_points_focus != TestPointsFocus::Details) =>
+                {
+                    Some(Self::NavigateFirst)
+                }
+                (KeyCode::End, _)
+                    if (context.active_tab != MainTab::Requirements
+                        || context.requirements_focus != RequirementsFocus::Editor)
+                        && (context.active_tab != MainTab::TestPoints
+                            || context.test_points_focus != TestPointsFocus::Details) =>
+                {
+                    Some(Self::NavigateLast)
+                }
+                _ => None,
+            };
+            if navigation.is_some() {
+                return navigation;
+            }
+        }
+
+        // A blurred chat is a browsing surface, independent of its host tab.
+        let chat_browse = !context.ai_input_focused
+            && (context.active_tab == MainTab::Ai
+                || (context.active_tab == MainTab::MindMap
+                    && context.mindmap_focus == MindMapFocus::AiPanel));
+        if chat_browse {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AiScrollUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AiScrollDown)
+                }
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::AiScrollLeft)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::AiScrollRight)
+                }
+                (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                    Some(Self::AiFocusInput)
+                }
+                (KeyCode::Char('['), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AgentPrev)
+                }
+                (KeyCode::Char(']'), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AgentNext)
+                }
+                (KeyCode::Char('a'), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AgentNew)
+                }
+                (KeyCode::Char('x'), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AgentClose)
+                }
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
+                (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
+                (KeyCode::Char('c' | 'C'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::CopySelection)
+                }
+                (KeyCode::Char('o'), _) if context.active_tab == MainTab::MindMap => {
+                    Some(Self::ToggleScenarioDropdown)
+                }
+                (KeyCode::Esc, _)
+                    if context.active_tab == MainTab::Ai && context.ai_status_waiting =>
+                {
+                    Some(Self::AiCancel)
+                }
+                (KeyCode::Esc, _) if context.active_tab == MainTab::MindMap => {
+                    Some(Self::ClearInputState)
+                }
+                _ => None,
+            };
+        }
+
         // Requirements tab: three-pane navigation and plain-text editing
         if context.active_tab == MainTab::Requirements {
             // Windows console input can normalize Ctrl+W to an uppercase
             // character while retaining CONTROL. Normalize both spellings
             // before entering the two-key pane-navigation chord.
-            let requirements_ctrl_w = matches!(event.code, KeyCode::Char('w') | KeyCode::Char('W'))
-                && event.modifiers.contains(KeyModifiers::CONTROL);
-            if requirements_ctrl_w {
-                return Some(Self::PendingChar('w'));
-            }
-
             if context.requirements_focus == RequirementsFocus::Editor {
                 if context.requirements_editor_mode == RequirementsEditorMode::Insert {
                     return match (event.code, event.modifiers) {
@@ -650,6 +1074,40 @@ impl Action {
                         _ => None,
                     };
                 }
+                if matches!(
+                    context.requirements_editor_mode,
+                    RequirementsEditorMode::VisualChar | RequirementsEditorMode::VisualLine
+                ) {
+                    return match (event.code, event.modifiers) {
+                        (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
+                        (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                            Some(Self::MoveLeft)
+                        }
+                        (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                            Some(Self::MoveRight)
+                        }
+                        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                            Some(Self::MoveUp)
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                            Some(Self::MoveDown)
+                        }
+                        (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Self::ReqVimWordForward),
+                        (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqVimWordBackward),
+                        (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ReqVimWordEnd),
+                        (KeyCode::Char('0'), KeyModifiers::NONE) => Some(Self::ReqVimLineStart),
+                        (KeyCode::Char('^'), KeyModifiers::SHIFT)
+                        | (KeyCode::Char('^'), KeyModifiers::NONE) => {
+                            Some(Self::ReqVimFirstNonBlank)
+                        }
+                        (KeyCode::Char('$'), KeyModifiers::SHIFT)
+                        | (KeyCode::Char('$'), KeyModifiers::NONE)
+                        | (KeyCode::End, _) => Some(Self::ReqVimLineEnd),
+                        (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Self::ReqVimVisualYank),
+                        (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::ReqVimVisualDelete),
+                        _ => None,
+                    };
+                }
                 return match (event.code, event.modifiers) {
                     (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                         Some(Self::MoveLeft)
@@ -664,6 +1122,32 @@ impl Action {
                         Some(Self::MoveDown)
                     }
                     (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqEnterInsert),
+                    (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::ReqVimAppend),
+                    (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ReqVimOpenBelow),
+                    (KeyCode::Char('O'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('O'), KeyModifiers::NONE) => Some(Self::ReqVimOpenAbove),
+                    (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Self::ReqVimDeleteChar),
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::PendingChar('d')),
+                    (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Self::PendingChar('y')),
+                    (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqVimPasteAfter),
+                    (KeyCode::Char('P'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('P'), KeyModifiers::NONE) => Some(Self::ReqVimPasteBefore),
+                    (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Self::ReqVimVisualChar),
+                    (KeyCode::Char('V'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('V'), KeyModifiers::NONE) => Some(Self::ReqVimVisualLine),
+                    (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Self::ReqVimWordForward),
+                    (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqVimWordBackward),
+                    (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ReqVimWordEnd),
+                    (KeyCode::Char('0'), KeyModifiers::NONE) => Some(Self::ReqVimLineStart),
+                    (KeyCode::Char('^'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('^'), KeyModifiers::NONE) => Some(Self::ReqVimFirstNonBlank),
+                    (KeyCode::Char('$'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('$'), KeyModifiers::NONE) => Some(Self::ReqVimLineEnd),
+                    (KeyCode::Char('G'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('G'), KeyModifiers::NONE) => Some(Self::ReqVimGoBottom),
+                    (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::PendingChar('g')),
+                    (KeyCode::Char('u'), KeyModifiers::NONE) => Some(Self::Undo),
+                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::Redo),
                     (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         Some(Self::ReqEditIteration)
                     }
@@ -685,7 +1169,6 @@ impl Action {
                     (KeyCode::Char('5'), KeyModifiers::NONE) => {
                         Some(Self::SelectTab(MainTab::TestPoints))
                     }
-                    (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                     (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                     (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                     (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
@@ -693,16 +1176,31 @@ impl Action {
                 };
             }
             return match (event.code, event.modifiers) {
-                (KeyCode::Left, _) => Some(Self::FocusPrevColumn),
-                (KeyCode::Right, _) => Some(Self::FocusNextColumn),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::ReqTreeCollapse)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::ReqTreeExpand)
+                }
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::MoveUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
                 }
                 (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Delete, _) | (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                    Some(Self::ReqDeleteDocument)
+                }
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
+                (KeyCode::Enter, KeyModifiers::NONE) => Some(Self::ReqTreeActivate),
+                (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ReqProjectScope),
+                (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqProjectLink),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
+                (KeyCode::Char('H'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::ReqCompletedToggle)
+                }
+                (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ReqActionMenu),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
+                (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqEditPriority),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
@@ -712,7 +1210,7 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -722,48 +1220,27 @@ impl Action {
 
         // Test Points tab: three-pane navigation, editing, and review
         if context.active_tab == MainTab::TestPoints {
-            if context.test_points_focus == TestPointsFocus::Details {
+            if context.test_points_focus == TestPointsFocus::Details && context.test_points_editing
+            {
                 return match (event.code, event.modifiers) {
-                    (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
-                    (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
-                    (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                        Some(Self::MoveLeft)
+                    (KeyCode::Esc, _) | (KeyCode::Enter, KeyModifiers::NONE) => {
+                        Some(Self::TpExitInsert)
                     }
-                    (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                        Some(Self::MoveRight)
-                    }
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        Some(Self::MoveUp)
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        Some(Self::MoveDown)
-                    }
+                    (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::Insert('\n')),
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                    (KeyCode::Left, _) => Some(Self::MoveLeft),
+                    (KeyCode::Right, _) => Some(Self::MoveRight),
+                    (KeyCode::Up, _) => Some(Self::MoveUp),
+                    (KeyCode::Down, _) => Some(Self::MoveDown),
+                    (KeyCode::Home, _) => Some(Self::MoveHome),
+                    (KeyCode::End, _) => Some(Self::MoveEnd),
                     (KeyCode::Backspace, _) => Some(Self::Backspace),
                     (KeyCode::Delete, _) => Some(Self::Delete),
-                    (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::TpApprove),
-                    (KeyCode::Char('a'), KeyModifiers::SHIFT) => Some(Self::TpBatchApprove),
-                    (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::TpReject),
-                    (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::TpReviewFilter),
-                    (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::TpFollowScenario),
-                    (KeyCode::Char('1'), KeyModifiers::NONE) => {
-                        Some(Self::SelectTab(MainTab::Explore))
-                    }
-                    (KeyCode::Char('2'), KeyModifiers::NONE) => {
-                        Some(Self::SelectTab(MainTab::MindMap))
-                    }
-                    (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
-                    (KeyCode::Char('4'), KeyModifiers::NONE) => {
-                        Some(Self::SelectTab(MainTab::Requirements))
-                    }
-                    (KeyCode::Char('5'), KeyModifiers::NONE) => {
-                        Some(Self::SelectTab(MainTab::TestPoints))
-                    }
-                    (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
-                    (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
-                    (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
-                    (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                    (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
+                    (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
                     (KeyCode::Char(ch), modifiers)
-                        if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+                        if !ch.is_control()
+                            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
                     {
                         Some(Self::Insert(ch))
                     }
@@ -771,10 +1248,26 @@ impl Action {
                 };
             }
             return match (event.code, event.modifiers) {
+                (KeyCode::Home, _) if context.test_points_focus == TestPointsFocus::Details => {
+                    Some(Self::MoveHome)
+                }
+                (KeyCode::End, _) if context.test_points_focus == TestPointsFocus::Details => {
+                    Some(Self::MoveEnd)
+                }
                 (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
                 (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE)
+                    if context.test_points_focus == TestPointsFocus::Details =>
+                {
+                    Some(Self::MoveLeft)
+                }
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::FocusPrevColumn)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE)
+                    if context.test_points_focus == TestPointsFocus::Details =>
+                {
+                    Some(Self::MoveRight)
                 }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
                     Some(Self::FocusNextColumn)
@@ -785,6 +1278,11 @@ impl Action {
                 }
                 (KeyCode::Enter, _) if context.test_points_focus == TestPointsFocus::Excerpts => {
                     Some(Self::TpFollowExcerpt)
+                }
+                (KeyCode::Char('i'), KeyModifiers::NONE) | (KeyCode::Enter, _)
+                    if context.test_points_focus == TestPointsFocus::Details =>
+                {
+                    Some(Self::TpEnterInsert)
                 }
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::TpApprove),
                 (KeyCode::Char('A'), KeyModifiers::SHIFT) => Some(Self::TpBatchApprove),
@@ -801,7 +1299,6 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -838,39 +1335,9 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
-                _ => None,
-            };
-        }
-
-        // AI tab: blurred mode — Enter to focus, 1-4 switch tabs,
-        // Esc cancels thinking agent.
-        if context.active_tab == MainTab::Ai && !context.ai_input_focused {
-            return match (event.code, event.modifiers) {
-                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
-                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
-                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
-                (KeyCode::Char('4'), KeyModifiers::NONE) => {
-                    Some(Self::SelectTab(MainTab::Requirements))
-                }
-                (KeyCode::Char('5'), KeyModifiers::NONE) => {
-                    Some(Self::SelectTab(MainTab::TestPoints))
-                }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
-                (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
-                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentNew),
-                (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Self::AgentClose),
-                (KeyCode::Char('j'), KeyModifiers::NONE) => Some(Self::AgentNext),
-                (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::AgentPrev),
-                (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
-                (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
-                (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
-                (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
-                (KeyCode::Esc, _) if context.ai_status_waiting => Some(Self::AiCancel),
-                (KeyCode::Enter, _) => Some(Self::AiFocusInput),
                 _ => None,
             };
         }
@@ -891,10 +1358,15 @@ impl Action {
             // Fall through to normal AI tab focused handling
         }
 
-        // AI tab: focused mode — text input, Esc blurs instead of clearing
-        if context.active_tab == MainTab::Ai {
+        // Both chat surfaces share focused text input; Esc blurs without clearing.
+        if context.active_tab == MainTab::Ai
+            || (context.active_tab == MainTab::MindMap
+                && context.mindmap_focus == MindMapFocus::AiPanel
+                && context.ai_input_focused)
+        {
             return match (event.code, event.modifiers) {
-                (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::AiNewline),
+                (KeyCode::Enter, KeyModifiers::SHIFT)
+                | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Self::AiNewline),
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                 (KeyCode::Delete, _) => Some(Self::AiDelete),
@@ -902,6 +1374,8 @@ impl Action {
                 (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
                 (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
                 (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
+                (KeyCode::Up, _) => Some(Self::AiCursorUp),
+                (KeyCode::Down, _) => Some(Self::AiCursorDown),
                 (KeyCode::Left, _) => Some(Self::AiCursorLeft),
                 (KeyCode::Right, _) => Some(Self::AiCursorRight),
                 (KeyCode::Esc, _) if context.ai_status_waiting => Some(Self::AiBlurInput),
@@ -909,67 +1383,25 @@ impl Action {
                 (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                     Some(Self::AiScrollUp)
                 }
-                (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                    Some(Self::AiScrollDown)
-                }
+                (KeyCode::PageDown, _) => Some(Self::AiScrollDown),
                 (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                 (KeyCode::Home, _) => Some(Self::AiCursorHome),
                 (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
-                (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
+                (KeyCode::Char('c'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::CopySelection)
+                }
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiSendChar(ch))
+                }
                 _ => None,
             };
-        }
-
-        // MindMap tab: AI panel has focus
-        if context.active_tab == MainTab::MindMap && context.mindmap_focus == MindMapFocus::AiPanel
-        {
-            if context.ai_input_focused {
-                // AI input focused — same bindings as AI tab text input
-                return match (event.code, event.modifiers) {
-                    (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::AiNewline),
-                    (KeyCode::Enter, _) => Some(Self::AiSendMessage),
-                    (KeyCode::Backspace, _) => Some(Self::AiBackspace),
-                    (KeyCode::Delete, _) => Some(Self::AiDelete),
-                    (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
-                    (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
-                    (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
-                    (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
-                    (KeyCode::Left, _) => Some(Self::AiCursorLeft),
-                    (KeyCode::Right, _) => Some(Self::AiCursorRight),
-                    (KeyCode::Esc, _) if context.ai_status_waiting => Some(Self::AiBlurInput),
-                    (KeyCode::Esc, _) => Some(Self::AiBlurInput),
-                    (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                        Some(Self::AiScrollUp)
-                    }
-                    (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                        Some(Self::AiScrollDown)
-                    }
-                    (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
-                    (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
-                    (KeyCode::Home, _) => Some(Self::AiCursorHome),
-                    (KeyCode::End, _) => Some(Self::AiCursorEnd),
-                    (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
-                    (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
-                    _ => None,
-                };
-            } else {
-                // AI panel focused but input not focused — scroll, focus input, return to tree
-                return match (event.code, event.modifiers) {
-                    (KeyCode::Esc, _) => Some(Self::ClearInputState),
-                    (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
-                    (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
-                    (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
-                    (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
-                    (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                        Some(Self::ClearInputState)
-                    }
-                    (KeyCode::Enter, _) => Some(Self::AiFocusInput),
-                    (KeyCode::Char('o'), _) => Some(Self::ToggleScenarioDropdown),
-                    _ => None,
-                };
-            }
         }
 
         // MindMap tab: tree navigation (stages 1 & 2)
@@ -1014,7 +1446,6 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::MindMapSendToAi),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ToggleMindMapAiPanel),
@@ -1026,6 +1457,7 @@ impl Action {
 
         // Default: editor (stage 3) and global keys
         match (event.code, event.modifiers) {
+            (KeyCode::Char('u'), KeyModifiers::NONE) => Some(Self::Undo),
             (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
             (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
             (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
@@ -1033,19 +1465,24 @@ impl Action {
                 Some(Self::SelectTab(MainTab::Requirements))
             }
             (KeyCode::Char('5'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::TestPoints)),
-            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
             (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
             (KeyCode::Char('\x1c'), _) => Some(Self::ToggleMindMapAiPanel),
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::RunBackground),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::Redo),
+            (KeyCode::F(5), _) => Some(Self::RunBackground),
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::NewScenario),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("Given")),
-            (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("When")),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("Then")),
             (KeyCode::Char('a'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("And")),
             (KeyCode::Char('/'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('7'), KeyModifiers::CONTROL)
             | (KeyCode::Char('_'), KeyModifiers::CONTROL) => Some(Self::Undo),
+            (KeyCode::Char('-' | '_'), modifiers)
+                if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+            {
+                Some(Self::Undo)
+            }
             (KeyCode::Char('y'), KeyModifiers::CONTROL)
             | (KeyCode::Char('Y'), KeyModifiers::CONTROL) => Some(Self::Redo),
             (KeyCode::Char(' '), KeyModifiers::NONE)
@@ -1063,7 +1500,7 @@ impl Action {
             {
                 Some(Self::FoldAllScenarios)
             }
-            (KeyCode::Enter, _)
+            (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE)
                 if (context.active_tab == MainTab::MindMap
                     && context.view_stage == ViewStage::EditorAndPanel)
                     || (context.active_tab == MainTab::Explore && context.explore_edit_mode) =>
@@ -1105,6 +1542,50 @@ impl Action {
     }
 }
 
+/// Whether the global two-key pane-navigation prefix may consume this key.
+/// Modal branches return earlier in [`Action::from_key_event`]; these checks
+/// cover the remaining text editors whose input must win over pane movement.
+fn modal_context(context: KeyContext) -> bool {
+    context.external_change_prompt_active
+        || context.agent_change_prompt_active
+        || context.acp_permission_pending
+        || context.quit_pending_confirm
+        || context.auth_panel_active
+        || context.model_panel_active
+        || context.session_panel_active
+        || context.agent_profile_panel_active
+        || context.approval_panel_active
+        || context.scenario_dropdown_open
+        || context.change_summary_visible
+        || context.requirements_overlay_active
+        || context.generation_scope_prompt_active
+        || context.step_keyword_picker_active
+        || context.project_switch_active
+}
+
+fn pane_navigation_allowed(context: KeyContext) -> bool {
+    let ai_prompt_active = context.ai_input_focused
+        && (context.active_tab == MainTab::Ai
+            || (context.active_tab == MainTab::MindMap
+                && context.mindmap_focus == MindMapFocus::AiPanel));
+    if context.step_input_active || ai_prompt_active {
+        return false;
+    }
+    if context.active_tab == MainTab::Requirements
+        && matches!(
+            context.requirements_editor_mode,
+            RequirementsEditorMode::Insert
+                | RequirementsEditorMode::VisualChar
+                | RequirementsEditorMode::VisualLine
+        )
+    {
+        return false;
+    }
+    !(context.active_tab == MainTab::TestPoints
+        && context.test_points_focus == TestPointsFocus::Details
+        && context.test_points_editing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Action, KeyContext};
@@ -1112,6 +1593,280 @@ mod tests {
     use crate::authoring_tab::RequirementsFocus;
     use crate::test_points_tab::TestPointsFocus;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn test_point_insert_preserves_every_printable_command_character() {
+        let context = KeyContext {
+            active_tab: MainTab::TestPoints,
+            test_points_focus: TestPointsFocus::Details,
+            test_points_editing: true,
+            ..requirements_tree_context()
+        };
+        for ch in (32u8..=126).map(char::from).chain("中文🙂é".chars()) {
+            for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+                assert_eq!(
+                    Action::from_key_event(KeyEvent::new(KeyCode::Char(ch), modifiers), context),
+                    Some(Action::Insert(ch)),
+                    "{ch:?}"
+                );
+            }
+        }
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::TpExitInsert)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::Save)
+        );
+        let normal = KeyContext {
+            test_points_editing: false,
+            ..context
+        };
+        for key in [KeyCode::Enter, KeyCode::Char('i')] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), normal),
+                Some(Action::TpEnterInsert)
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                normal
+            ),
+            Some(Action::TpBatchApprove)
+        );
+    }
+
+    #[test]
+    fn model_form_keeps_jk_and_arrows_edit_without_modifier_text_leaks() {
+        let context = KeyContext {
+            model_panel_active: true,
+            model_panel_adding: true,
+            ..requirements_tree_context()
+        };
+        for ch in ['j', 'k', '中', '🙂'] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    context
+                ),
+                Some(Action::ModelPanelFormInsert(ch))
+            );
+        }
+        for code in [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Delete,
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, KeyModifiers::NONE), context),
+                Some(Action::ModelPanelFormCursor(code))
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                context
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn chat_normal_scrolls_with_vim_and_arrows_instead_of_switching_agents() {
+        for tab in [MainTab::Ai, MainTab::MindMap] {
+            let context = chat_context(tab, MindMapFocus::AiPanel, false);
+            for (keys, expected) in [
+                ([KeyCode::Char('j'), KeyCode::Down], Action::AiScrollDown),
+                ([KeyCode::Char('k'), KeyCode::Up], Action::AiScrollUp),
+                ([KeyCode::Char('h'), KeyCode::Left], Action::AiScrollLeft),
+                ([KeyCode::Char('l'), KeyCode::Right], Action::AiScrollRight),
+                ([KeyCode::Char('i'), KeyCode::Enter], Action::AiFocusInput),
+            ] {
+                for key in keys {
+                    assert_eq!(
+                        Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), context),
+                        Some(expected.clone())
+                    );
+                }
+            }
+        }
+        let context = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::AgentNext)
+        );
+    }
+
+    #[test]
+    fn pane_chord_has_arrow_equivalents_and_delete_confirmation_blocks_commands() {
+        let context = KeyContext {
+            pending_char: Some('w'),
+            ..requirements_tree_context()
+        };
+        for (key, expected) in [
+            (KeyCode::Left, Action::FocusPrevColumn),
+            (KeyCode::Right, Action::FocusNextColumn),
+            (KeyCode::Up, Action::FocusPaneUp),
+            (KeyCode::Down, Action::FocusPaneDown),
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), context),
+                Some(expected)
+            );
+        }
+        let modal = KeyContext {
+            delete_confirmation_active: true,
+            ..context
+        };
+        for key in [KeyCode::Char('q'), KeyCode::Char('1'), KeyCode::Down] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), modal),
+                None
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), modal),
+            Some(Action::DeleteConfirm)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), modal),
+            Some(Action::DeleteCancel)
+        );
+    }
+
+    fn chat_context(
+        active_tab: MainTab,
+        mindmap_focus: MindMapFocus,
+        ai_input_focused: bool,
+    ) -> KeyContext {
+        KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active: false,
+            active_tab,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus,
+            mindmap_ai_panel_visible: true,
+            ai_input_focused,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: false,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
+            test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
+            requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
+            generation_scope_prompt_active: false,
+            quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
+        }
+    }
+
+    #[test]
+    fn ctrl_q_exits_while_ctrl_c_and_bare_q_do_not() {
+        for context in [
+            chat_context(MainTab::Ai, MindMapFocus::Main, true),
+            chat_context(MainTab::Explore, MindMapFocus::Main, false),
+            requirements_tree_context(),
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                    context
+                ),
+                Some(Action::Quit),
+                "Ctrl+Q must exit from every mode"
+            );
+            assert_ne!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                    context
+                ),
+                Some(Action::Quit),
+                "a bare q must never exit"
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    context
+                ),
+                Some(Action::CopySelection),
+                "Ctrl+C must copy the selection instead of exiting"
+            );
+        }
+    }
+
+    #[test]
+    fn undo_accepts_legacy_pty_control_seven_in_editor_contexts() {
+        let mut context = chat_context(MainTab::Explore, MindMapFocus::Main, false);
+        context.view_stage = ViewStage::EditorAndPanel;
+        context.explore_edit_mode = true;
+        for step_input in [false, true] {
+            context.step_input_active = step_input;
+            for ch in ['/', '_', '7'] {
+                assert_eq!(
+                    Action::from_key_event(
+                        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL),
+                        context,
+                    ),
+                    Some(Action::Undo),
+                );
+            }
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(
+                        KeyCode::Char('-'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    ),
+                    context,
+                ),
+                Some(Action::Undo),
+            );
+        }
+    }
+
+    #[test]
+    fn chat_copy_shortcut_is_available_in_all_chat_focus_states() {
+        let key = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        for context in [
+            chat_context(MainTab::Ai, MindMapFocus::Main, false),
+            chat_context(MainTab::Ai, MindMapFocus::Main, true),
+            chat_context(MainTab::MindMap, MindMapFocus::AiPanel, false),
+            chat_context(MainTab::MindMap, MindMapFocus::AiPanel, true),
+        ] {
+            assert_eq!(
+                Action::from_key_event(key, context),
+                Some(Action::CopySelection)
+            );
+        }
+    }
 
     #[test]
     fn test_tab_switch_shortcuts_in_tree_mode() {
@@ -1140,9 +1895,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1178,15 +1939,104 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
             context,
         );
         assert_eq!(action, Some(Action::Insert('1')));
+    }
+
+    #[test]
+    fn acp_permission_prompt_intercepts_navigation_and_decision() {
+        let mut context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active: false,
+            active_tab: MainTab::Ai,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
+            ai_input_focused: true,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: true,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
+            test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
+            requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
+            generation_scope_prompt_active: false,
+            quit_pending_confirm: false,
+            acp_permission_pending: true,
+            project_switch_active: false,
+        };
+        let keys = [
+            (KeyCode::Up, KeyModifiers::NONE, Action::AcpPermissionUp),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+                Action::AcpPermissionUp,
+            ),
+            (KeyCode::Down, KeyModifiers::NONE, Action::AcpPermissionDown),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                Action::AcpPermissionDown,
+            ),
+            (
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                Action::AcpPermissionConfirm,
+            ),
+            (
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                Action::AcpPermissionReject,
+            ),
+        ];
+        for (code, modifiers, expected) in keys {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, modifiers), context),
+                Some(expected.clone()),
+                "{code:?} must be captured by the ACP permission prompt"
+            );
+        }
+        // Ordinary typing must not leak into the input while prompting.
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                context
+            ),
+            None
+        );
+        context.acp_permission_pending = false;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::AiSendMessage)
+        );
     }
 
     #[test]
@@ -1216,9 +2066,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1264,9 +2120,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1312,9 +2174,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -1368,9 +2236,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -1406,9 +2280,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -1444,9 +2324,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -1506,9 +2392,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -1561,9 +2453,15 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
@@ -1579,6 +2477,13 @@ mod tests {
     fn requirements_modes_keep_printable_text_and_commands_separate() {
         use crate::authoring_tab::RequirementsEditorMode;
         let mut context = requirements_tree_context();
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::Save)
+        );
         context.requirements_focus = RequirementsFocus::Editor;
         for ch in (32u8..=126).map(char::from).chain("中文🙂é".chars()) {
             let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
@@ -1627,16 +2532,8 @@ mod tests {
             ),
             (KeyCode::Tab, KeyModifiers::NONE, Some(Action::Insert('\t'))),
             (KeyCode::BackTab, KeyModifiers::SHIFT, None),
-            (
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                Some(Action::PendingChar('w')),
-            ),
-            (
-                KeyCode::Char('W'),
-                KeyModifiers::CONTROL,
-                Some(Action::PendingChar('w')),
-            ),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL, None),
+            (KeyCode::Char('W'), KeyModifiers::CONTROL, None),
             (KeyCode::Home, KeyModifiers::NONE, Some(Action::MoveHome)),
             (KeyCode::End, KeyModifiers::NONE, Some(Action::MoveEnd)),
         ] {
@@ -1649,6 +2546,7 @@ mod tests {
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
                 KeyContext {
+                    requirements_editor_mode: RequirementsEditorMode::Browse,
                     pending_char: Some('w'),
                     ..context
                 }
@@ -1659,6 +2557,7 @@ mod tests {
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
                 KeyContext {
+                    requirements_editor_mode: RequirementsEditorMode::Browse,
                     pending_char: Some('w'),
                     ..context
                 }
@@ -1686,6 +2585,7 @@ mod tests {
                 Action::from_key_event(
                     KeyEvent::new(key, modifiers),
                     KeyContext {
+                        requirements_editor_mode: RequirementsEditorMode::Browse,
                         pending_char: Some('w'),
                         ..context
                     }
@@ -1721,9 +2621,95 @@ mod tests {
             requirements_focus: RequirementsFocus::Tree,
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
+            test_points_editing: false,
+            delete_confirmation_active: false,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
+            requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+            project_switch_active: false,
+        }
+    }
+
+    #[test]
+    fn test_requirements_tree_space_opens_menu_and_text_forms_edit_at_cursor() {
+        let context = requirements_tree_context();
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert_eq!(
+            Action::from_key_event(key(KeyCode::Char(' '), KeyModifiers::NONE), context),
+            Some(Action::ReqActionMenu)
+        );
+        for removed in ['F', 'A', 'C'] {
+            assert_eq!(
+                Action::from_key_event(key(KeyCode::Char(removed), KeyModifiers::SHIFT), context),
+                None,
+                "{removed} moved into the Space menu"
+            );
+        }
+        let form = KeyContext {
+            requirements_overlay_active: true,
+            requirements_text_overlay: true,
+            ..context
+        };
+        use crate::authoring_tab::CursorMotion;
+        for (code, expected) in [
+            (KeyCode::Left, Action::OverlayCursor(CursorMotion::Left)),
+            (KeyCode::End, Action::OverlayCursor(CursorMotion::End)),
+            (KeyCode::Delete, Action::OverlayDelete),
+            (KeyCode::Tab, Action::OverlayMoveDown),
+            (KeyCode::Char('j'), Action::OverlayInsert('j')),
+        ] {
+            assert_eq!(
+                Action::from_key_event(key(code, KeyModifiers::NONE), form),
+                Some(expected)
+            );
+        }
+        let menu = KeyContext {
+            requirements_overlay_active: true,
+            requirements_list_overlay: true,
+            ..context
+        };
+        assert_eq!(
+            Action::from_key_event(key(KeyCode::Char('j'), KeyModifiers::NONE), menu),
+            Some(Action::OverlayMoveDown)
+        );
+        assert_eq!(
+            Action::from_key_event(key(KeyCode::Char(' '), KeyModifiers::NONE), menu),
+            Some(Action::OverlayInsert(' '))
+        );
+    }
+
+    #[test]
+    fn requirements_line_operators_use_prefixes_but_visual_operators_are_immediate() {
+        use crate::authoring_tab::RequirementsEditorMode;
+        let mut context = requirements_tree_context();
+        context.requirements_focus = RequirementsFocus::Editor;
+        for (ch, line, visual) in [
+            ('d', Action::ReqVimDeleteLine, Action::ReqVimVisualDelete),
+            ('y', Action::ReqVimYankLine, Action::ReqVimVisualYank),
+        ] {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            assert_eq!(
+                Action::from_key_event(key, context),
+                Some(Action::PendingChar(ch))
+            );
+            let repeated = KeyContext {
+                pending_char: Some(ch),
+                ..context
+            };
+            assert_eq!(Action::from_key_event(key, repeated), Some(line));
+            for mode in [
+                RequirementsEditorMode::VisualChar,
+                RequirementsEditorMode::VisualLine,
+            ] {
+                let selecting = KeyContext {
+                    requirements_editor_mode: mode,
+                    ..context
+                };
+                assert_eq!(Action::from_key_event(key, selecting), Some(visual.clone()));
+            }
         }
     }
 
@@ -1735,22 +2721,22 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
                 context
             ),
-            None
+            Some(Action::ReqTreeCollapse)
         );
         assert_eq!(
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
                 context
             ),
-            None
+            Some(Action::ReqTreeExpand)
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
-            Some(Action::FocusPrevColumn)
+            Some(Action::ReqTreeCollapse)
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
-            Some(Action::FocusNextColumn)
+            Some(Action::ReqTreeExpand)
         );
         assert_eq!(
             Action::from_key_event(
@@ -1797,6 +2783,99 @@ mod tests {
     }
 
     #[test]
+    fn pane_prefix_is_global_but_text_modes_keep_precedence() {
+        let base = requirements_tree_context();
+        for active_tab in [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ] {
+            let context = KeyContext {
+                active_tab,
+                mindmap_ai_panel_visible: active_tab == MainTab::MindMap,
+                ..base
+            };
+            for key in ['w', 'W'] {
+                assert_eq!(
+                    Action::from_key_event(
+                        KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
+                        context,
+                    ),
+                    Some(Action::PendingChar('w')),
+                    "tab {active_tab:?}"
+                );
+            }
+        }
+
+        let browse = KeyContext {
+            active_tab: MainTab::Explore,
+            mindmap_ai_panel_visible: false,
+            pending_char: Some('w'),
+            ..base
+        };
+        for (key, expected) in [
+            ('h', Action::FocusPrevColumn),
+            ('l', Action::FocusNextColumn),
+            ('j', Action::FocusPaneDown),
+            ('k', Action::FocusPaneUp),
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    browse,
+                ),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), browse,),
+            Some(Action::CancelPaneNavigation)
+        );
+
+        for context in [
+            KeyContext {
+                active_tab: MainTab::Requirements,
+                requirements_focus: RequirementsFocus::Editor,
+                requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Insert,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::Ai,
+                ai_input_focused: true,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::TestPoints,
+                test_points_focus: TestPointsFocus::Details,
+                test_points_editing: true,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::MindMap,
+                mindmap_focus: MindMapFocus::AiPanel,
+                mindmap_ai_panel_visible: true,
+                ai_input_focused: true,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::Explore,
+                step_input_active: true,
+                ..base
+            },
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                    context,
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn requirements_overlay_intercepts_confirm_and_insert() {
         let mut context = requirements_tree_context();
         context.requirements_overlay_active = true;
@@ -1815,5 +2894,27 @@ mod tests {
             ),
             Some(Action::OverlayInsert('a'))
         );
+        for ch in ['j', 'k'] {
+            context.requirements_text_overlay = true;
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    context
+                ),
+                Some(Action::OverlayInsert(ch))
+            );
+            context.requirements_text_overlay = false;
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    context
+                ),
+                Some(if ch == 'j' {
+                    Action::OverlayMoveDown
+                } else {
+                    Action::OverlayMoveUp
+                })
+            );
+        }
     }
 }

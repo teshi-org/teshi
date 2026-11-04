@@ -1,25 +1,35 @@
 mod acp_agents;
+mod acp_controls;
 mod agent;
+mod agent_selection;
 mod app;
 mod auth;
 mod authoring_tab;
 mod bdd_nav;
+mod chat_state;
 mod cli;
 mod config;
 mod diff;
 mod editor_buffer;
 mod engine;
+mod feature_browser;
+mod feature_discovery;
 mod generation_state;
 mod highlight;
+mod image_view;
 mod input;
 mod keymap;
+mod lazy_features;
 mod llm;
 pub mod markdown;
 mod mindmap;
 mod profiles;
+mod project_context;
 mod runner;
 mod session;
+mod test_frame;
 mod test_points_tab;
+mod theme;
 mod ui;
 mod version;
 
@@ -34,7 +44,9 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -182,18 +194,31 @@ pub fn run() -> Result<()> {
     match cli_args.command {
         Some(cli::Command::Update {
             status,
+            retry_install,
+            force_close,
             check,
             channel,
             yes,
             json,
         }) => {
-            return cli::update::handle_update(status, check, channel.as_deref(), yes, json);
+            return cli::update::handle_update(
+                status,
+                check,
+                retry_install,
+                force_close,
+                channel.as_deref(),
+                yes,
+                json,
+            );
         }
         Some(cli::Command::Check(args)) => {
             return cli::check::handle_check_command(&args);
         }
         Some(cli::Command::Auth { action }) => {
             return cli::auth::handle_auth_command(&action);
+        }
+        Some(cli::Command::Acp { action }) => {
+            return cli::acp::handle_acp_command(&action);
         }
         Some(cli::Command::Desktop {
             project,
@@ -213,16 +238,30 @@ pub fn run() -> Result<()> {
                 requirements_root.as_deref(),
             );
         }
+        Some(cli::Command::Testpoints { action }) => {
+            return cli::testpoints::handle_testpoints_command(
+                &action,
+                requirements_root.as_deref(),
+            );
+        }
+        Some(cli::Command::Tui {
+            path,
+            scenario,
+            runner_cmd,
+        }) => {
+            return runner::run_tui(std::path::Path::new(&path), scenario.as_deref(), runner_cmd);
+        }
         Some(cli::Command::Run {
             path,
             scenario,
             runner_cmd,
             runner_arg,
             runner_cwd,
+            report,
             feature,
         }) => {
             let opts = cli::Command::run_options(
-                path, scenario, runner_cmd, runner_arg, runner_cwd, feature,
+                path, scenario, runner_cmd, runner_arg, runner_cwd, report, feature,
             );
             return runner::run_with_options(opts);
         }
@@ -270,21 +309,68 @@ pub fn run() -> Result<()> {
     }
 
     let _guard = TerminalGuard::setup()?;
+    // Query the terminal before anything reads stdin: the graphics probe
+    // consumes the terminal's reply, and `EventSource` starts a reader on
+    // Windows that would take those bytes instead.
+    let image_detection = image_view::init();
+    if let Some(file) = diag_file.as_mut() {
+        let _ = writeln!(
+            file,
+            "image protocol: {} ({})",
+            image_detection.support.label(),
+            image_detection.detail
+        );
+        let _ = file.flush();
+    }
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::from_cli(&cli_args)?;
+    app.set_image_support(image_detection);
     app.version = version_display().to_string();
     let mut event_source = input::EventSource::new()?;
+    let test_frame_path = std::env::var_os("TESHI_TEST_FRAME_PATH").map(std::path::PathBuf::from);
 
     while !app.should_quit {
         app.poll_runner_events();
         app.poll_acp_registry();
         app.poll_llm_events();
+        if let Err(error) = app.save_sessions(false) {
+            app.status = format!("Failed to save conversations: {error}");
+            app.set_status_message(app.status.clone());
+        }
+        app.poll_lazy_features();
+        app.poll_git_status();
+        app.poll_feature_browser_search();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();
-        terminal.draw(|frame| ui::render(frame, &mut app))?;
+        app.screenshot.poll();
+        app.screenshot.prepare_frame(&mut terminal)?;
+        let completed = terminal.draw(|frame| ui::render(frame, &mut app))?;
+        if let Some(path) = &test_frame_path {
+            // A text fragment can precede the final layout in a PTY reader.
+            // Publish only after draw/flush completed and hit regions exist.
+            test_frame::publish(path, &completed)?;
+        }
+        app.screenshot.finish_frame(&mut terminal)?;
 
-        if let Some(terminal_event) = event_source.next(Duration::from_millis(50))? {
+        // Drain bounded input bursts before redrawing the complete chat. A
+        // redraw per character makes pasted prompts stall as history grows.
+        // Worker results and bounded pixel batches are only handled between
+        // iterations, so a busy image viewer must not idle for a full tick.
+        let first_wait = if app.screenshot.is_busy() {
+            Duration::from_millis(4)
+        } else {
+            Duration::from_millis(50)
+        };
+        for event_index in 0..128 {
+            let timeout = if event_index == 0 {
+                first_wait
+            } else {
+                Duration::ZERO
+            };
+            let Some(terminal_event) = event_source.next(timeout)? else {
+                break;
+            };
             if let Some(file) = diag_file.as_mut() {
                 let _ = write_diagnostic_event(file, &terminal_event);
                 let _ = file.flush();
@@ -292,6 +378,33 @@ pub fn run() -> Result<()> {
             match terminal_event {
                 Event::Key(key_event) => {
                     if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        continue;
+                    }
+                    if app.handle_acp_controls_key(key_event) {
+                        continue;
+                    }
+                    if app.handle_screenshot_key(key_event) {
+                        continue;
+                    }
+                    // The project picker reserves j/k for recent-entry
+                    // navigation. In the Open path field they are ordinary
+                    // path characters, so route them directly before the
+                    // shared picker keymap consumes them as movement.
+                    if app.project_switch.path_input().is_some()
+                        && matches!(
+                            (key_event.code, key_event.modifiers),
+                            (
+                                KeyCode::Char('j' | 'k' | 'J' | 'K'),
+                                KeyModifiers::NONE | KeyModifiers::SHIFT
+                            )
+                        )
+                    {
+                        if let KeyCode::Char(ch) = key_event.code {
+                            app.project_switch.append_path_input(ch);
+                        }
+                        continue;
+                    }
+                    if app.handle_feature_browser_key(key_event) {
                         continue;
                     }
                     if let Some(action) = Action::from_key_event(
@@ -322,9 +435,18 @@ pub fn run() -> Result<()> {
                             requirements_focus: app.authoring_ui.focus,
                             requirements_editor_mode: app.authoring_ui.editor_mode,
                             test_points_focus: app.test_points_ui.focus,
+                            test_points_editing: app.test_points_ui.editing,
+                            delete_confirmation_active: app.pending_delete.is_some(),
                             requirements_overlay_active: app.authoring_ui.overlay_active(),
+                            requirements_text_overlay: app.authoring_ui.overlay_accepts_text(),
+                            requirements_list_overlay: app.authoring_ui.overlay_is_list(),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
+                            acp_permission_pending: app.has_acp_permission_prompt(),
+                            project_switch_active: !matches!(
+                                app.project_switch.overlay,
+                                crate::project_context::SwitchOverlay::None
+                            ),
                         },
                     ) {
                         app.handle_action(action)?;
@@ -338,6 +460,41 @@ pub fn run() -> Result<()> {
                         mouse_event.modifiers,
                     )?;
                 }
+                Event::Paste(text)
+                    if app.active_tab == crate::app::MainTab::Explore
+                        && app.feature_browser.searching =>
+                {
+                    app.paste_feature_browser_search(&text);
+                }
+                Event::Paste(_)
+                    if app.pending_delete.is_some()
+                        || app.quit_pending_confirm
+                        || app.auth_panel_active
+                        || app.session_panel_active
+                        || app.agent_profile_panel_active
+                        || app.approval_panel_active
+                        || (app.model_panel_active
+                            && app.model_panel_mode == app::ModelPanelMode::List)
+                        || app.agent().acp_controls_ui.picker_active()
+                        || app.change_summary_visible
+                        || app.generation_scope_prompt.is_some()
+                        || app.step_keyword_picker.is_some()
+                        || app.authoring_ui.overlay_active()
+                        || app.has_acp_permission_prompt()
+                        || app.has_agent_change_prompt()
+                        || app.has_external_change_prompt()
+                        || !matches!(
+                            app.project_switch.overlay,
+                            crate::project_context::SwitchOverlay::None
+                        ) => {}
+                Event::Paste(text)
+                    if app.model_panel_active
+                        && app.model_panel_mode != app::ModelPanelMode::List =>
+                {
+                    for ch in text.chars().filter(|ch| !ch.is_control()) {
+                        app.handle_action(Action::ModelPanelFormInsert(ch))?;
+                    }
+                }
                 Event::Paste(text) if app.active_tab == crate::app::MainTab::Requirements => {
                     if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
                         && app.authoring_ui.editor_mode
@@ -346,23 +503,77 @@ pub fn run() -> Result<()> {
                     {
                         for ch in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
                             match ch {
-                                '\n' => app.handle_action(Action::Enter)?,
-                                '\t' => app.handle_action(Action::Insert('\t'))?,
-                                ch if !ch.is_control() => app.handle_action(Action::Insert(ch))?,
+                                '\n' => app.authoring_ui.insert_newline(),
+                                '\t' => app.authoring_ui.insert_char('\t'),
+                                ch if !ch.is_control() => app.authoring_ui.insert_char(ch),
                                 _ => {}
                             }
                         }
                     }
                 }
-                Event::Paste(text) if app.ai_input_focused => {
+                Event::Paste(text)
+                    if app.active_tab == crate::app::MainTab::TestPoints
+                        && app.test_points_ui.editing =>
+                {
+                    for ch in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
+                        if !ch.is_control() || ch == '\n' || ch == '\t' {
+                            app.handle_action(Action::Insert(ch))?;
+                        }
+                    }
+                }
+                Event::Paste(text)
+                    if app.ai_input_focused
+                        && (app.active_tab == app::MainTab::Ai
+                            || (app.active_tab == app::MainTab::MindMap
+                                && app.mindmap_focus == app::MindMapFocus::AiPanel)) =>
+                {
                     app.handle_action(Action::AiPaste(text))?;
                 }
                 _ => {}
             }
+            if app.should_quit {
+                break;
+            }
         }
     }
 
+    // Leave the alternate screen before any teardown work. Saving sessions and
+    // reaping agent processes can block for seconds; the shell must come back
+    // at once, with that work visible in the normal terminal instead of behind
+    // a frozen full-screen UI.
+    drop(terminal);
+    drop(_guard);
+    // Only the Windows reader thread outlives the loop; elsewhere there is
+    // nothing to release and `drop` would just trip clippy::drop_non_drop.
+    #[cfg(windows)]
+    drop(event_source);
+
+    let saved = app.save_sessions(true);
+    stop_agents(&mut app);
+    drop(app);
+    saved?;
     Ok(())
+}
+
+/// Waits briefly for agent backends to release their processes.
+///
+/// The TUI is already gone when this runs, so a slow agent container costs a
+/// status line in the terminal rather than a frozen screen. Whatever has not
+/// finished by the deadline is still reaped by the ordinary drop path.
+fn stop_agents(app: &mut App) {
+    const GRACE: Duration = Duration::from_secs(2);
+    app.request_agent_shutdown();
+    let deadline = std::time::Instant::now() + GRACE;
+    let mut announced = false;
+    while app.agent_shutdown_pending() && std::time::Instant::now() < deadline {
+        if !announced {
+            println!("teshi: stopping agent sessions...");
+            let _ = io::stdout().flush();
+            announced = true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        app.poll_agent_shutdown();
+    }
 }
 
 #[cfg(test)]
