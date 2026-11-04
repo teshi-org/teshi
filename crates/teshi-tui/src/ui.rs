@@ -676,10 +676,19 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
     }
     for (area, count, offset) in rows {
         if area.contains((x, y).into()) && offset + usize::from(y - area.y) < count {
-            frame.buffer_mut().set_style(
-                Rect::new(area.x, y, area.width, 1),
-                Style::default().bg(theme::HOVER_BG),
-            );
+            paint_hover(frame, Rect::new(area.x, y, area.width, 1));
+        }
+    }
+}
+
+/// Tints a hovered target. Fills are lifted by `theme::hover_fill`, so an
+/// already selected row still answers the pointer without losing its label.
+fn paint_hover(frame: &mut Frame<'_>, area: Rect) {
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.bg = theme::hover_fill(cell.bg);
         }
     }
 }
@@ -748,9 +757,7 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
         };
         if rect.contains((x, y).into()) {
             let visible = rect.intersection(frame.area());
-            frame
-                .buffer_mut()
-                .set_style(visible, Style::default().bg(theme::HOVER_BG));
+            paint_hover(frame, visible);
             break;
         }
     }
@@ -6770,6 +6777,81 @@ Feature: Rule only
             .collect::<String>();
         assert!(screen.contains("M  backup"), "screen was: {screen}");
         assert!(!screen.contains("backup.feature"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn pointer_hover_keeps_the_selected_feature_row_readable() {
+        let mut app = App::from_args().expect("app init");
+        app.active_tab = crate::app::MainTab::Explore;
+        app.explore_focus = crate::app::ColumnFocus::Feature;
+        app.project.features = vec![
+            gherkin::parse_feature(
+                "Feature: Alpha\n  Scenario: A\n    Given a step\n",
+                PathBuf::from("alpha.feature"),
+            ),
+            gherkin::parse_feature(
+                "Feature: Beta\n  Scenario: B\n    Given a step\n",
+                PathBuf::from("beta.feature"),
+            ),
+        ];
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let rows = app
+            .clickable_regions
+            .iter()
+            .filter_map(|region| match region {
+                ClickableRegion::ExploreFeature {
+                    feature_idx,
+                    row_y,
+                    col_x,
+                    col_right,
+                } => Some((*feature_idx, *row_y, *col_x, *col_right)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (_, selected_y, selected_x, _) = rows[0];
+        let (_, other_y, other_x, _) = rows[1];
+
+        app.mouse_position = Some((selected_x + 1, selected_y));
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let (x, y) = cell_at_text(&terminal, "alpha").expect("selected row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::hover_fill(crate::theme::CURSOR_BG)
+        );
+        assert_ne!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::CURSOR_BG
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].fg,
+            crate::theme::CURSOR_FG
+        );
+
+        app.mouse_position = Some((other_x + 1, other_y));
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let (x, y) = cell_at_text(&terminal, "beta").expect("hovered row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::HOVER_BG
+        );
+
+        app.mouse_position = None;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let (x, y) = cell_at_text(&terminal, "alpha").expect("selected row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].bg,
+            crate::theme::CURSOR_BG
+        );
     }
 
     #[test]

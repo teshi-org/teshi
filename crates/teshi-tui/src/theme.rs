@@ -138,6 +138,24 @@ pub(crate) fn action_line(text: &'static str) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Background for a cell under the pointer. A cell that already carries a fill
+/// keeps its hue and is lifted instead of replaced, because that fill pairs with
+/// a dedicated foreground (a selected row, a chip) that a flat tint would hide.
+pub(crate) fn hover_fill(bg: Color) -> Color {
+    /// Headroom that reads as a distinct hover on a dark terminal without
+    /// washing the label out against its own foreground.
+    const LIFT: u8 = 0x20;
+    match bg {
+        Color::Reset => HOVER_BG,
+        Color::Rgb(r, g, b) => Color::Rgb(
+            r.saturating_add(LIFT),
+            g.saturating_add(LIFT),
+            b.saturating_add(LIFT),
+        ),
+        filled => filled,
+    }
+}
+
 /// Selection fill to apply across the entire row.
 pub(crate) fn selected_row(focused: bool) -> Style {
     if focused {
