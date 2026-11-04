@@ -176,6 +176,14 @@ fn capture(terminal: &Terminal, name: &str) {
         .unwrap();
 }
 
+/// Loading a session blurs the composer so restored history stays passive.
+/// Focus it again before typing, or the keys run chat shortcuts ("a" opens a
+/// new agent).
+fn focus_composer(terminal: &Terminal) {
+    terminal.key("Enter").unwrap();
+    terminal.expect_text("[INPUT]", true, 5000).unwrap();
+}
+
 fn command(terminal: &Terminal, command: &str) {
     terminal.write(command).unwrap();
     terminal.expect_text(command, true, 5000).unwrap();
@@ -318,6 +326,7 @@ fn session_modal_blocks_background_pointer_and_selects_target_history() {
     terminal.key("Enter").unwrap();
     command(&terminal, "/resume");
     terminal.expect_text("HISTORY_LINE_64", true, 5000).unwrap();
+    focus_composer(&terminal);
     command(&terminal, "/sessions");
     terminal.expect_text("Load [Enter]", true, 5000).unwrap();
     terminal.click_text("Requirements [4]", 5000).unwrap();
@@ -437,7 +446,7 @@ fn approval_modal_owns_background_pointer_and_its_option_rows() {
     terminal.key("Escape").unwrap();
     terminal.expect_text("Approval Mode", false, 5000).unwrap();
     capture(&terminal, "approval-modal-after-close");
-    terminal.expect_text("╭ Agents", true, 1000).unwrap();
+    terminal.expect_text("╭ Chats", true, 1000).unwrap();
     command(&terminal, "/approval");
     terminal.expect_text("Approval Mode", true, 5000).unwrap();
     terminal.click_text("Auto", 5000).unwrap();

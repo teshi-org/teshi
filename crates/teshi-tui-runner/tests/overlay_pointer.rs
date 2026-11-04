@@ -125,6 +125,14 @@ fn capture(terminal: &Terminal, stage: &str) {
         .unwrap();
 }
 
+/// Loading a session blurs the composer so restored history stays passive.
+/// Focus it again before typing, or the keys run chat shortcuts ("a" opens a
+/// new agent).
+fn focus_composer(terminal: &Terminal) {
+    terminal.key("Enter").unwrap();
+    terminal.expect_text("[INPUT]", true, 5000).unwrap();
+}
+
 fn command(terminal: &Terminal, input: &str) {
     terminal.write(input).unwrap();
     terminal.expect_text(input, true, 5000).unwrap();
@@ -180,6 +188,7 @@ fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
         .expect_text("SESSION_Beta_BODY", true, 5000)
         .unwrap();
     capture(&terminal, &format!("{stage}-session-loaded-beta"));
+    focus_composer(&terminal);
     command(&terminal, "/sessions");
     terminal
         .expect_text("Model: Session Alpha", true, 5000)
@@ -244,6 +253,7 @@ fn approval_close_footer_returns_to_unchanged_chat() {
         terminal
             .expect_text("SESSION_Alpha_BODY", true, 5000)
             .unwrap();
+        focus_composer(&terminal);
         command(&terminal, "/approval");
         terminal.expect_text("Approval Mode", true, 5000).unwrap();
         capture(&terminal, &format!("{stage}-approval-open"));

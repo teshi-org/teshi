@@ -65,6 +65,8 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
             rows: 24,
         })
         .unwrap();
+        // Toolbars narrower than 32 cells collapse the connected Settings chip to an ellipsis.
+        let settings = if cols == 40 { "⋯" } else { "Settings" };
         terminal.expect_text("sample", true, 10000).unwrap();
         terminal.key("3").unwrap();
         terminal.expect_text("Not connected", true, 5000).unwrap();
@@ -81,7 +83,8 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         std::thread::sleep(Duration::from_millis(400));
         assert!(!trace.exists(), "browsing must not spawn an ACP process");
         if cols == 64 {
-            terminal.click_text("ctx unknown", 2000).unwrap();
+            // The composer's prompt glyph; the usage text now sits on the toolbar above it.
+            terminal.click_text("›", 2000).unwrap();
         } else {
             terminal
                 .key(if cols == 40 { "i" } else { "Enter" })
@@ -94,7 +97,7 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         let second = terminal.screen().unwrap();
         fs::write(output.join("loading-second.txt"), &second).unwrap();
         assert_ne!(first, second, "loading feedback must animate");
-        terminal.expect_text("Settings", true, 10000).unwrap();
+        terminal.expect_text(settings, true, 10000).unwrap();
         assert_eq!(count_method(&trace, "spawn"), 1);
         assert_eq!(count_method(&trace, "session/new"), 1);
         assert_eq!(
@@ -112,7 +115,7 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         terminal.key("Enter").unwrap();
         terminal.expect_text("LAZY_REPLY_1", true, 10000).unwrap();
         terminal.key("Escape").unwrap();
-        terminal.click_text("Settings", 1500).unwrap();
+        terminal.click_text(settings, 1500).unwrap();
         terminal.expect_text("Model: Alpha", true, 3000).unwrap();
         fs::write(output.join("settings.txt"), terminal.screen().unwrap()).unwrap();
         terminal.key("Enter").unwrap();
@@ -129,7 +132,7 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         terminal.write("/new").unwrap();
         terminal.key("Tab").unwrap();
         terminal.expect_text("LAZY_REPLY_1", false, 10000).unwrap();
-        terminal.expect_text("Settings", true, 10000).unwrap();
+        terminal.expect_text(settings, true, 10000).unwrap();
         terminal.write("/resume").unwrap();
         terminal.key("Enter").unwrap();
         terminal.expect_text("LAZY_REPLY_1", true, 10000).unwrap();
@@ -142,7 +145,7 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         );
         fs::write(output.join("restored.txt"), terminal.screen().unwrap()).unwrap();
         terminal.key("Enter").unwrap();
-        terminal.expect_text("Settings", true, 10000).unwrap();
+        terminal.expect_text(settings, true, 10000).unwrap();
         assert_eq!(count_method(&trace, "spawn"), 3);
         assert_eq!(count_method(&trace, "session/new"), 3);
         assert_eq!(count_method(&trace, "session/prompt"), 1);
@@ -233,8 +236,9 @@ fn failed_explicit_selection_does_not_retry_while_browsing_and_can_be_reselected
     terminal.expect_text("Error", true, 10000).unwrap();
     terminal.key("Escape").unwrap();
     terminal.click_text("Error", 1500).unwrap();
+    // The transcript guide narrows the body, so match a phrase that stays on one row.
     terminal
-        .expect_text("rejected initialization", true, 5000)
+        .expect_text("fixture rejected", true, 5000)
         .unwrap();
     let output =
         PathBuf::from(std::env::var("TESHI_ACP_DISCOVERY_ARTIFACTS").unwrap()).join("failure");

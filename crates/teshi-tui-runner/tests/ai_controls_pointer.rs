@@ -172,6 +172,32 @@ impl Fixture {
         self.capture(terminal, &format!("{name}-after"));
     }
 
+    /// Clicks a command on the bottom footer row.
+    ///
+    /// The transcript hint ("Focus the input to start") and the composer's
+    /// "Model" picker reuse footer words, so a first-match click would land on
+    /// them instead of the command.
+    fn click_footer(&self, terminal: &Terminal, label: &str, name: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (row, col) = loop {
+            let screen = terminal.screen().unwrap();
+            let (row, footer) = screen.lines().enumerate().last().unwrap();
+            if let Some(byte) = footer.find(label) {
+                break (row + 1, footer[..byte].chars().count() + 1);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "footer {label:?} was not visible\n{screen}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        self.capture(terminal, &format!("{name}-before"));
+        terminal
+            .write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))
+            .unwrap();
+        self.capture(terminal, &format!("{name}-after"));
+    }
+
     fn background(&self, terminal: &Terminal) {
         terminal
             .write("\x1b[<0;2;1M\x1b[<0;2;1m\x1b[<65;2;1M")
@@ -406,7 +432,7 @@ fn footer_and_threads(narrow: bool) {
     let fixture = Fixture::new("threads-footer", narrow);
     let provider = OwnedProvider::new(None, fixture.artifacts.join("provider-trace.jsonl"));
     let terminal = fixture.launch(Some(&provider), false);
-    fixture.click(&terminal, "Focus", "focus");
+    fixture.click_footer(&terminal, "Focus", "focus");
     terminal.write("THREAD_ORIGINAL").unwrap();
     if narrow {
         // doc-31/doc-36: below 70 columns the sidebar is hidden, so agent
@@ -474,16 +500,16 @@ fn footer_and_threads(narrow: bool) {
         fixture.click(&terminal, "Close [x]", "close-third");
         terminal.expect_text("Agent 2", false, 5000).unwrap();
     }
-    fixture.click(&terminal, "Blur", "blur");
-    fixture.click(&terminal, "Model", "model");
+    fixture.click_footer(&terminal, "Blur", "blur");
+    fixture.click_footer(&terminal, "Model", "model");
     terminal.expect_text("Model", true, 5000).unwrap();
     fixture.capture(&terminal, "model-visible");
     terminal.key("Escape").unwrap();
-    fixture.click(&terminal, "Focus", "focus-before-send");
+    fixture.click_footer(&terminal, "Focus", "focus-before-send");
     fixture.click(&terminal, "Send", "send");
     expect_wrapped_marker(&terminal, "POINTER_REPLY_COMPLETE");
     fixture.capture(&terminal, "reply-visible");
-    fixture.click(&terminal, "Blur", "blur-before-quit");
+    fixture.click_footer(&terminal, "Blur", "blur-before-quit");
     if fixture.narrow {
         // The pinned exit control starts at 60 columns; narrow terminals keep
         // the chord as their exit affordance.
@@ -507,15 +533,15 @@ fn slash_rows(narrow: bool) {
     let fixture = Fixture::new("slash", narrow);
     let provider = OwnedProvider::new(None, fixture.artifacts.join("provider-trace.jsonl"));
     let terminal = fixture.launch(Some(&provider), false);
-    fixture.click(&terminal, "Focus", "focus");
+    fixture.click_footer(&terminal, "Focus", "focus");
     terminal.write("/model").unwrap();
     terminal.expect_text("/models", true, 5000).unwrap();
     fixture.click(&terminal, "/models", "choose-models");
     fixture.click(&terminal, "Select", "select-command");
     terminal.expect_text("Model Profiles", true, 5000).unwrap();
     terminal.key("Escape").unwrap();
-    fixture.click(&terminal, "Blur", "blur-after-model");
-    fixture.click(&terminal, "Focus", "focus-dismiss");
+    fixture.click_footer(&terminal, "Blur", "blur-after-model");
+    fixture.click_footer(&terminal, "Focus", "focus-dismiss");
     terminal.write("/copy").unwrap();
     fixture.click(&terminal, "Dismiss", "dismiss");
     assert!(!terminal.screen().unwrap().contains(" Select"));
@@ -533,7 +559,7 @@ fn permission(narrow: bool, allow: bool) {
         narrow,
     );
     let terminal = fixture.launch(None, true);
-    fixture.click(&terminal, "Focus", "focus");
+    fixture.click_footer(&terminal, "Focus", "focus");
     terminal.write("Inspect owned project").unwrap();
     fixture.click(&terminal, "Send", "send");
     terminal.expect_text("Allow once", true, 5000).unwrap();
@@ -595,7 +621,7 @@ fn pending_change(narrow: bool, accept: bool, inspect_diff: bool) {
         fixture.artifacts.join("provider-trace.jsonl"),
     );
     let terminal = fixture.launch(Some(&provider), false);
-    fixture.click(&terminal, "Focus", "focus");
+    fixture.click_footer(&terminal, "Focus", "focus");
     terminal
         .write("Change the step in the owned project")
         .unwrap();

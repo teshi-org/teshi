@@ -100,12 +100,14 @@ fn acp_reply_color_and_event_order_in_real_terminal() {
     assert_svg_headers(&terminal, &output.join("before-completion.svg"), 2, 0);
     let screen = terminal.screen().unwrap();
     let progress = screen.find("I will inspect the project").unwrap();
-    let tool = screen.find("Done  Read project").unwrap();
+    // Activity headers collapse runs of whitespace into single spaces.
+    let tool = screen.find("Done Read project").unwrap();
     let final_reply = screen.find("Inspection finished").unwrap();
     assert!(progress < tool && tool < final_reply, "{screen}");
     assert_eq!(screen.matches("Read project").count(), 1);
     std::fs::write(gate.with_extension("finish"), "continue").unwrap();
-    assert_svg_headers(&terminal, &output.join("completed.svg"), 1, 1);
+    // Completion folds the progress block, leaving only the green final header.
+    assert_svg_headers(&terminal, &output.join("completed.svg"), 0, 1);
     terminal.key("Escape").unwrap();
     terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
@@ -191,8 +193,10 @@ fn assert_svg_headers(terminal: &Terminal, path: &std::path::Path, muted: usize,
             .split("<text ")
             .filter_map(|part| {
                 let (attributes, rest) = part.split_once('>')?;
-                let text = rest.split_once("</text>")?.0;
-                (text.trim().ends_with("Teshi") && !text.contains("Welcome")).then_some(attributes)
+                let text = rest.split_once("</text>")?.0.trim();
+                // The newest finished answer carries a completion check after its name.
+                let header = text.ends_with("Teshi") || text.ends_with("Teshi ✓");
+                (header && !text.contains("Welcome")).then_some(attributes)
             })
             .collect();
         if headers
@@ -297,23 +301,32 @@ fn fake_acp_activity_compact_expanded_and_narrow() {
     terminal.key("Enter").unwrap();
     terminal.write("Inspect the project").unwrap();
     terminal.key("Enter").unwrap();
-    terminal.expect_text("hello", true, 15000).unwrap();
+    // A finished turn folds its progress text and tool calls behind one summary
+    // row, leaving only the final answer expanded.
     terminal
-        .expect_text("Done  Read project", true, 15000)
+        .expect_text("Inspection finished", true, 15000)
         .unwrap();
+    terminal.expect_text("▸ 2 tool calls", true, 15000).unwrap();
+    terminal.expect_text("hello", false, 1000).unwrap();
     terminal.expect_text("acp_reasoning", false, 1000).unwrap();
-    terminal.expect_text("Unconfirmed", true, 15000).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(200));
     terminal.screenshot(&output.join("compact.svg")).unwrap();
     terminal.write("/details").unwrap();
     terminal.key("Enter").unwrap();
-    terminal.expect_text("to collapse", true, 15000).unwrap();
+    // Expanded calls are titled by the location they touched.
+    terminal.expect_text("hello", true, 15000).unwrap();
+    terminal
+        .expect_text("Done Read src/sample.rs", true, 15000)
+        .unwrap();
+    terminal.expect_text("Unconfirmed", true, 15000).unwrap();
     terminal.screenshot(&output.join("expanded.svg")).unwrap();
     terminal.write("/details").unwrap();
     terminal.key("Enter").unwrap();
-    terminal.expect_text("to expand", true, 15000).unwrap();
+    terminal
+        .expect_text("Done Read src/sample.rs", false, 15000)
+        .unwrap();
     terminal.resize(48, 28).unwrap();
-    terminal.expect_text("Done", true, 15000).unwrap();
+    terminal.expect_text("tool calls", true, 15000).unwrap();
     terminal.screenshot(&output.join("narrow.svg")).unwrap();
     std::fs::write(output.join("narrow.txt"), terminal.screen().unwrap()).unwrap();
     terminal.key("Escape").unwrap();

@@ -622,6 +622,14 @@ fn command(terminal: &Terminal, text: &str) {
     terminal.expect_text(text, false, 5000).unwrap();
 }
 
+/// Loading a session blurs the composer so restored history stays passive.
+/// Focus it again before typing, or the keys run chat shortcuts instead of
+/// commands.
+fn focus_composer(terminal: &Terminal) {
+    terminal.key("Enter").unwrap();
+    terminal.expect_text("[INPUT]", true, 10000).unwrap();
+}
+
 fn close_chat(terminal: &Terminal) {
     terminal.key("Escape").unwrap();
     terminal.key("ctrl+q").unwrap();
@@ -739,6 +747,7 @@ fn copy_command_rejects_empty_invalid_and_nonanswer_history_in_real_terminal() {
     terminal
         .expect_text("SECOND_COMPLETED", true, 5000)
         .unwrap();
+    focus_composer(&terminal);
     command(&terminal, "/copy");
     assert_clipboard(&mut clipboard, "SECOND_COMPLETED");
     command(&terminal, "/copy 50");
@@ -802,7 +811,7 @@ fn chat_selection_preserves_wrapped_code_projection_across_resize_and_mindmap() 
     // Leave the embedded AI pane before using the MindMap tab shortcuts.
     terminal.key("Escape").unwrap();
     terminal.key("3").unwrap();
-    terminal.expect_text("╭ Agents", true, 5000).unwrap();
+    terminal.expect_text("╭ Chats", true, 5000).unwrap();
     terminal.expect_text("CODE_END", true, 5000).unwrap();
     terminal.key("Enter").unwrap();
     close_chat(&terminal);
@@ -993,10 +1002,31 @@ fn chat_selection_copies_unicode_across_messages_and_completed_tool_title() {
         &mut clipboard,
         "UNICODE_START\n中文 e\u{301} 😀\n\nUNICODE_END",
     );
-    terminal.drag_text("READ_PROJECT_TOOL", 5000).unwrap();
+    // A completed call folds behind a header row that only toggles it; the
+    // selectable title lives on the detail row the header reveals.
+    terminal.click_text("Done READ_PROJECT_TOOL", 5000).unwrap();
+    terminal.expect_text("✓ Done", true, 5000).unwrap();
+    let screen = terminal.screen().unwrap();
+    let (row, line) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("✓ Done"))
+        .unwrap();
+    let row = row + 1;
+    let start = line[..line.find("READ_PROJECT_TOOL").unwrap()]
+        .chars()
+        .count()
+        + 1;
+    let end = start + "READ_PROJECT_TOOL".len();
+    terminal
+        .write(&format!(
+            "\x1b[<0;{start};{row}M\x1b[<32;{end};{row}M\x1b[<0;{end};{row}m"
+        ))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(80));
     case.save(&terminal, "completed-tool-selection");
     terminal
-        .right_click_text("READ_PROJECT_TOOL", 5000)
+        .write(&format!("\x1b[<2;{start};{row}M\x1b[<2;{start};{row}m"))
         .unwrap();
     assert_clipboard(&mut clipboard, "READ_PROJECT_TOOL");
     terminal.key("Enter").unwrap();
