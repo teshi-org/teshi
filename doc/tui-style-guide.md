@@ -7,7 +7,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 
 1. Quiet chrome, prominent content: BORDER for unfocused panels, PRIMARY for focus.
 2. Use semantic roles through theme helpers rather than constructing page colors.
-3. Rounded borders; `▌` for user messages and quiet `│` guides for chat activity and answers. Keep header/status/footer rows one line high.
+3. Rounded borders; `▌` for user messages and for the finished answer (green), `│` guides for chat activity and unfinished replies. Keep header/status/footer rows one line high.
 4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Chat conversation rows use the quieter CHAT_CHIP_BG/FG fill. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
 6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
@@ -86,7 +86,7 @@ Keep existing node text, shape, IDs, navigation, and grouping unchanged.
 |---|---|
 | Status | `● ○ ◆ ✓ ✗` |
 | Spinner | `◐◓◑◒` |
-| Rail | User `▌`, quiet answer/activity `│` |
+| Rail | User `▌` accent, finished answer `▌` green, activity `│` quiet |
 | Composer | Prompt `›`, submit `↵` |
 | Scrollbar | Track `│`, thumb `┃` |
 | Bullets | `• ▪ ‣ ⭑ ◦` |
