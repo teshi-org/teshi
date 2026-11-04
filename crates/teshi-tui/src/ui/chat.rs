@@ -1107,11 +1107,18 @@ fn build_chat_projection(
                 .filter(|text| !text.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n");
-            append_selectable_chunk(&mut out, &mut blocks, chunk, message_index, source);
-            if let Some(row) = out.get_mut(line_start) {
-                std::rc::Rc::make_mut(row).action =
-                    Some(crate::keymap::Action::AiToggleTools(message_index));
+            // A press on the header toggles the group, so it cannot start a
+            // selection. Map the copyable titles onto the detail rows instead;
+            // otherwise the header claims them and no row can be selected.
+            let mut rows = chunk.into_iter();
+            if let Some(header) = rows.next() {
+                out.push(std::rc::Rc::new(ChatProjectedLine {
+                    line: header,
+                    source: None,
+                    action: Some(crate::keymap::Action::AiToggleTools(message_index)),
+                }));
             }
+            append_selectable_chunk(&mut out, &mut blocks, rows.collect(), message_index, source);
             append_blank(&mut out);
             cache.activities.insert(
                 message_index,
@@ -2247,6 +2254,31 @@ mod tests {
             tool_call_id: None,
             activity: None,
         }
+    }
+
+    #[test]
+    fn expanded_tool_titles_are_selectable_below_the_toggle_header() {
+        let (mut app, _project, _store) = activity_test_app();
+        let mut tool = message(AiRole::Assistant, "READ_PROJECT_TOOL", Some("acp_activity"));
+        tool.reasoning_content = Some("completed".into());
+        app.agents[0].activity_details_expanded = true;
+        app.agents[0].messages_mut().push(tool);
+
+        let projection = build_chat_projection(&app, 80, 40, ChatPlacement::Tab);
+        let rows: Vec<_> = projection
+            .lines
+            .iter()
+            .filter(|row| line_text(&row.line).contains("READ_PROJECT_TOOL"))
+            .collect();
+        assert_eq!(rows.len(), 2, "expected a header and a detail row");
+        assert!(
+            rows[0].action.is_some() && rows[0].source.is_none(),
+            "the header toggles the group instead of starting a selection"
+        );
+        assert!(
+            rows[1].source.is_some(),
+            "the detail row carries the copyable title"
+        );
     }
 
     #[test]
