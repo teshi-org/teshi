@@ -35,7 +35,7 @@ def main() -> int:
     if "  push:" in WORKFLOW:
         raise SystemExit("Nightly must not have a push trigger")
     require("actions: read", "CI status permission")
-    require("actions/workflows/ci.yml/runs?branch=dev&head_sha=${full_sha}", "exact-SHA CI query")
+    require("actions/workflows/ci.yml/runs?branch=main&head_sha=${full_sha}", "exact-SHA CI query")
     require("status", "CI run status inspection")
     require("conclusion", "CI run conclusion inspection")
     require("CI is not green", "pending/failure diagnostic")

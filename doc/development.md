@@ -8,6 +8,17 @@
 
 > The `.githooks/` in this repo are stale and not enabled by default. Rely on the commands below as the real quality gates.
 
+## Branching and merge policy
+
+`main` is the only long-lived branch and the repository default. Every change reaches it through a pull request:
+
+1. Branch from an up-to-date `main` as `dev/<github-handle>/<topic>`, for example `dev/lilinfangrelax/chat-dock`.
+2. Push the branch and open a pull request against `main`.
+3. CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) must pass. `main` is protected: direct pushes are rejected, and a pull request cannot merge while a required check is failing or the branch is behind `main`.
+4. Merge the pull request and delete the branch.
+
+Feature branches are short-lived, and `dev/` is only a branch-name prefix — there is no shared `dev` branch to sync with `main`.
+
 ## Building
 
 ### Terminal application tests
@@ -288,15 +299,14 @@ Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
 ### Nightly (pre-release) builds
 
-Nightly builds publish the Windows per-user **setup.exe** from the `dev` branch as GitHub **pre-releases** (no Linux/macOS archives or MSI). Stable releases still publish the full asset set.
+Nightly builds publish the Windows per-user **setup.exe** from `main` as GitHub **pre-releases** (no Linux/macOS archives or MSI). Stable releases still publish the full asset set.
 
 | Trigger | Workflow |
 |---------|----------|
-| Push to `dev` | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) |
-| Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active). Catch-up only: skipped when `dev` HEAD already has a nightly tag. |
+| Daily 06:00 UTC | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml). Catch-up only: skipped when `main` HEAD already has a nightly tag or its CI run is not green. |
 | Manual | `gh workflow run nightly.yml` |
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects its build identity without writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `main` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects its build identity without writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
 
 New Nightly builds also show a workflow run number, for example `0.7.10-nightly.101 (2026.09.07, cb4361a)`, in `teshi -V` and the TUI. The GitHub release title includes the same number. Numbers increase with Nightly workflow runs and can have gaps when a run is skipped or fails; reruns retain their number. The tag retains its existing format so already-installed updaters can validate and install the release. The update manifest retains its separate globally ordered build sequence. Stable version bumps remain independent.
 
@@ -306,7 +316,7 @@ gh release list --prerelease
 gh release download v0.7.9-nightly.20260801.dc6c942 --dir ./nightly-check
 ```
 
-Stable releases remain tag-driven on `main` (`vX.Y.Z`). Merge `dev` → `main` and run `scripts/release.py` for production releases.
+Stable releases remain tag-driven on `main` (`vX.Y.Z`). Land the release change in `main` through a pull request and run `scripts/release.py` for production releases.
 
 Windows installer source: `wix/` (WiX Toolset).
 
