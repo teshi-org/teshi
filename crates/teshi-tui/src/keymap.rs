@@ -218,6 +218,8 @@ pub enum Action {
     // Global
     Save,
     Quit,
+    /// Open the quit confirmation without acting on it (Esc on an idle chat).
+    RequestQuit,
     SelectTab(MainTab),
     ActivateStepInput,
     /// Cancel only the pending pane-navigation chord, preserving pane state.
@@ -1105,6 +1107,9 @@ impl Action {
                 {
                     Some(Self::AiInterruptRequest)
                 }
+                // An idle AI tab has nothing to dismiss: Esc asks to leave, like
+                // the host agent's own Esc ladder.
+                (KeyCode::Esc, _) if context.active_tab == MainTab::Ai => Some(Self::RequestQuit),
                 (KeyCode::Esc, _) if context.active_tab == MainTab::MindMap => {
                     Some(Self::ClearInputState)
                 }
@@ -3201,6 +3206,22 @@ mod tests {
             Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
             Some(Action::ClearInputState),
             "only the AI tab gained the confirmation rung"
+        );
+    }
+
+    #[test]
+    fn idle_ai_tab_esc_asks_to_quit() {
+        let context = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::RequestQuit),
+            "an idle chat has nothing to dismiss, so Esc offers to exit"
+        );
+        // The focused input still only blurs: the ladder is blur, then quit.
+        let focused = chat_context(MainTab::Ai, MindMapFocus::Main, true);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), focused),
+            Some(Action::AiBlurInput)
         );
     }
 }

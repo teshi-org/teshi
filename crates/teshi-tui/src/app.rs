@@ -9381,6 +9381,7 @@ impl App {
                     .min(self.explore_viewports[index].max_horizontal);
             }
             Action::Quit => self.quit(),
+            Action::RequestQuit => self.request_quit_confirmation(),
             Action::SelectTab(tab) => self.select_tab(tab),
             Action::ActivateStepInput => self.begin_step_or_title_edit()?,
             Action::StepKeywordPickerUp => self.step_keyword_picker_move(-1),
@@ -10020,6 +10021,22 @@ impl App {
             self.status = "No file path: run with `cargo run -- path/to/file.feature`".to_string();
         }
         Ok(())
+    }
+
+    /// Open the quit confirmation without quitting: Esc on an idle chat asks to
+    /// leave, matching the host agent's Esc ladder.
+    fn request_quit_confirmation(&mut self) {
+        if self
+            .authoring_ui
+            .guard_unsaved(crate::authoring_tab::RequirementsPendingAction::Action(
+                Action::RequestQuit,
+            ))
+        {
+            return;
+        }
+        self.ai_interrupt_confirm = false;
+        self.quit_pending_confirm = true;
+        self.quit_panel_selection = 0;
     }
 
     fn quit(&mut self) {
@@ -13610,6 +13627,48 @@ mod tests {
         assert!(
             !app.ai_interrupt_confirm,
             "a finished turn must not leave the prompt standing"
+        );
+    }
+
+    #[test]
+    fn esc_on_an_idle_chat_opens_the_quit_confirmation() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0].status = AiStatus::Idle;
+        app.handle_action(Action::RequestQuit).unwrap();
+        assert!(app.quit_pending_confirm);
+        assert!(!app.should_quit, "asking must not exit on its own");
+        assert_eq!(app.quit_panel_selection, 0);
+
+        // Esc again keeps the session; Enter executes the focused button.
+        app.handle_action(Action::ClearInputState).unwrap();
+        assert!(!app.quit_pending_confirm);
+        assert!(!app.should_quit);
+
+        app.handle_action(Action::RequestQuit).unwrap();
+        app.handle_action(Action::Quit).unwrap();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn quit_panel_offers_a_clean_exit_message_when_nothing_is_unsaved() {
+        let (mut app, _project, _store) = slash_test_app();
+        assert!(!app.dirty);
+        app.handle_action(Action::RequestQuit).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("Quit Teshi and return to the shell?"),
+            "{screen}"
         );
     }
 

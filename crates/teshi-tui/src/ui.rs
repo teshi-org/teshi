@@ -4131,7 +4131,11 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Centered message
-    let msg = "You have unsaved changes, quit anyway?";
+    let msg = if app.dirty {
+        "You have unsaved changes, quit anyway?"
+    } else {
+        "Quit Teshi and return to the shell?"
+    };
     let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
     lines.push(Line::styled(
         format!("{}{}", " ".repeat(msg_pad), msg),

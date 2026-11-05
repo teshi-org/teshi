@@ -187,6 +187,7 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | `i` / Enter | Focus input |
 | Ctrl+Shift+C | Copy the chat selection |
 | Esc (AI tab, request running) | Withdraw the newest queued follow-up, or ask before interrupting the turn |
+| Esc (AI tab, agent idle) | Ask to quit Teshi |
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
@@ -213,8 +214,9 @@ queued follow-up back into the composer, or opens an "Interrupt the current
 run?" confirmation when nothing is queued. Enter or `y` interrupts, `n` or Esc
 keeps the turn running, so a second Esc never stops the run by itself. A
 confirmed interrupt ends the turn and keeps the ACP process and session for the
-next message. Ctrl+Q exits from any mode, and `:` then `q` reaches the same exit
-without a control chord; Ctrl+C copies the selection instead.
+next message. With no run in progress, Esc opens the quit confirmation: Enter or
+`y` exits, `n` or Esc stays. Ctrl+Q exits from any mode, and `:` then `q` reaches
+the same exit without a control chord; Ctrl+C copies the selection instead.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
 
