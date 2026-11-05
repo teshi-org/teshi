@@ -62,6 +62,14 @@ impl AcpBackendConfig {
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` reaps the container.
 const SHUTDOWN_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long a cancelled turn waits for the agent to acknowledge `session/cancel`.
+///
+/// Cancelling ends the turn, not the conversation: the worker keeps the ACP
+/// process and session alive. An agent that ignores the notification must not
+/// park the worker forever, so the budget turns that case into a real
+/// teardown; the next turn then reconnects and re-seeds the saved transcript.
+const CANCEL_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
 enum WorkerCommand {
     Prompt(String),
     Configure {
@@ -146,6 +154,15 @@ impl ChannelPermissionHost {
             .ok()
             .and_then(|mut pending| pending.remove(&request_id))
             .is_some_and(|tx| tx.send(decision).is_ok())
+    }
+
+    /// Drop prompts queued by a turn that was cancelled. The ACP client already
+    /// answers those requests as `cancelled`, so a stopped turn must not raise a
+    /// dialog that no longer belongs to any turn.
+    pub fn discard_requests(&self) {
+        if let Ok(requests) = self.requests_rx.lock() {
+            while requests.try_recv().is_ok() {}
+        }
     }
 }
 
@@ -278,13 +295,11 @@ impl AcpAgentBackend {
         let config = self.config.clone().ok_or_else(|| {
             anyhow::anyhow!("ACP backend is not configured; supply an AcpAgentCommand")
         })?;
-        if matches!(
-            self.state,
-            AgentBackendStatus::Failed | AgentBackendStatus::Cancelled
-        ) || self
-            .controls
-            .lock()
-            .is_ok_and(|s| !s.ready && s.error.is_some())
+        if matches!(self.state, AgentBackendStatus::Failed)
+            || self
+                .controls
+                .lock()
+                .is_ok_and(|s| !s.ready && s.error.is_some())
             || self
                 .worker
                 .as_ref()
@@ -300,6 +315,10 @@ impl AcpAgentBackend {
             );
         }
         if self.worker.is_none() {
+            // A new ACP process starts without remote history, so the next turn
+            // must carry the saved transcript even when the previous one was
+            // already submitted to an older process.
+            self.submitted_prompt = false;
             self.tool_bridge = config
                 .tool_bridge
                 .as_ref()
@@ -476,12 +495,19 @@ impl AcpAgentBackend {
         Ok(())
     }
 
+    /// End the running turn while keeping the ACP process and session.
+    ///
+    /// The worker sends `session/cancel`, waits for the agent to finish the turn,
+    /// and stays connected, so the next prompt continues the same conversation.
     pub fn cancel(&mut self) {
         if let Some(bridge) = &mut self.tool_bridge {
             bridge.cancel_pending();
         }
         if let Some(commands) = &self.commands {
             let _ = commands.send(WorkerCommand::Cancel);
+        }
+        if let Some(host) = &self.permission_host {
+            host.discard_requests();
         }
         self.state = AgentBackendStatus::Cancelled;
         self.partial_response.clear();
@@ -892,12 +918,13 @@ async fn run_worker(
         state.ready = true;
         state.revision += 1;
     }
+    let mut shutdown = false;
     loop {
         let command = tokio::select! {
             command = commands.recv() => match command { Some(command) => command, None => break },
             Some(update) = updates_rx.recv() => {
                 apply_control_update(&update, &session.id, &controls);
-                if forward_update(update, &output) { break; }
+                if forward_update(update, &output, false) { break; }
                 continue;
             }
         };
@@ -967,57 +994,100 @@ async fn run_worker(
                 }
             }
             WorkerCommand::Prompt(prompt) => {
-                let mut turn = Box::pin(client.prompt(&session, &prompt));
-                let mut cancelled = false;
-                let mut protocol_failed = false;
-                let mut turn_failed = false;
+                let mut prompt = prompt;
                 loop {
-                    tokio::select! {
-                        result = &mut turn => {
-                            while let Ok(update) = updates_rx.try_recv() {
-                                apply_control_update(&update, &session.id, &controls);
-                                protocol_failed |= forward_update(update, &output);
-                            }
-                            if !cancelled && !protocol_failed {
-                                match result {
-                                    Ok(reason) => { let _ = output.send(AgentBackendEvent::Completed {
-                                        model: model.clone(), input_tokens: None, output_tokens: None, finish_reason: reason,
-                                    }); }
-                                    Err(error) => {
-                                        turn_failed = true;
-                                        let _ = output.send(AgentBackendEvent::Failed(format!("ACP prompt failed: {error}")));
+                    // Scoped so the turn future's borrow of `prompt` ends before
+                    // a deferred prompt replaces it.
+                    let (stop, deferred_prompt) = {
+                        let mut turn = Box::pin(client.prompt(&session, &prompt));
+                        let mut cancelled = false;
+                        // Re-armed on every cancel so an agent that ignores
+                        // `session/cancel` degrades to a real teardown instead of
+                        // parking the worker forever.
+                        let mut cancel_deadline = tokio::time::Instant::now() + CANCEL_ACK_BUDGET;
+                        let mut deferred_prompt: Option<String> = None;
+                        let mut protocol_failed = false;
+                        let mut turn_failed = false;
+                        loop {
+                            tokio::select! {
+                                result = &mut turn => {
+                                    while let Ok(update) = updates_rx.try_recv() {
+                                        apply_control_update(&update, &session.id, &controls);
+                                        protocol_failed |= forward_update(update, &output, cancelled);
                                     }
+                                    if !cancelled && !protocol_failed {
+                                        match result {
+                                            Ok(reason) => { let _ = output.send(AgentBackendEvent::Completed {
+                                                model: model.clone(), input_tokens: None, output_tokens: None, finish_reason: reason,
+                                            }); }
+                                            Err(error) => {
+                                                turn_failed = true;
+                                                let _ = output.send(AgentBackendEvent::Failed(format!("ACP prompt failed: {error}")));
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                                Some(update) = updates_rx.recv() => {
+                                    apply_control_update(&update, &session.id, &controls);
+                                    protocol_failed |= forward_update(update, &output, cancelled);
+                                }
+                                Some(command) = commands.recv() => match command {
+                                    WorkerCommand::Policy(policy) => {
+                                        client.set_permission_policy(policy).await;
+                                        if let Ok(mut state) = controls.lock() { state.policy = Some(policy); }
+                                    }
+                                    WorkerCommand::Configure { .. } => {
+                                        if let Ok(mut state) = controls.lock() { state.pending = false; state.error = Some("Wait for the current turn to finish".into()); }
+                                    }
+                                    // Cancelling ends this turn, not the session: keep the
+                                    // process, keep polling the turn, and drop the events the
+                                    // stopped turn still produces.
+                                    WorkerCommand::Cancel => {
+                                        if !cancelled {
+                                            cancelled = true;
+                                            cancel_deadline = tokio::time::Instant::now() + CANCEL_ACK_BUDGET;
+                                            let _ = client.cancel(&session).await;
+                                        }
+                                    }
+                                    WorkerCommand::Shutdown => {
+                                        shutdown = true;
+                                        drop(turn);
+                                        let _ = client.cancel(&session).await;
+                                        break;
+                                    }
+                                    WorkerCommand::Prompt(next) => {
+                                        if cancelled && deferred_prompt.is_none() {
+                                            deferred_prompt = Some(next);
+                                        } else {
+                                            let _ = output.send(AgentBackendEvent::Failed("ACP prompt already running".into()));
+                                        }
+                                    }
+                                },
+                                _ = tokio::time::sleep_until(cancel_deadline), if cancelled => {
+                                    turn_failed = true;
+                                    let _ = output.send(AgentBackendEvent::Failed(
+                                        "ACP agent did not acknowledge the cancellation; reconnect required".into(),
+                                    ));
+                                    drop(turn);
+                                    break;
                                 }
                             }
-                            break;
                         }
-                        Some(update) = updates_rx.recv() => {
-                            apply_control_update(&update, &session.id, &controls);
-                            protocol_failed |= forward_update(update, &output);
-                        }
-                        Some(command) = commands.recv() => match command {
-                            WorkerCommand::Policy(policy) => {
-                                client.set_permission_policy(policy).await;
-                                if let Ok(mut state) = controls.lock() { state.policy = Some(policy); }
-                            }
-                            WorkerCommand::Configure { .. } => {
-                                if let Ok(mut state) = controls.lock() { state.pending = false; state.error = Some("Wait for the current turn to finish".into()); }
-                            }
-                            WorkerCommand::Cancel | WorkerCommand::Shutdown => {
-                                cancelled = true;
-                                drop(turn);
-                                let _ = client.cancel(&session).await;
-                                break;
-                            }
-                            WorkerCommand::Prompt(_) => { let _ = output.send(AgentBackendEvent::Failed("ACP prompt already running".into())); }
-                        }
+                        (shutdown || protocol_failed || turn_failed, deferred_prompt)
+                    };
+                    if stop {
+                        break;
+                    }
+                    match deferred_prompt {
+                        Some(next) => prompt = next,
+                        None => break,
                     }
                 }
-                if cancelled || protocol_failed || turn_failed {
-                    break;
-                }
             }
-            WorkerCommand::Cancel | WorkerCommand::Shutdown => break,
+            // A cancel received between turns keeps the session for the next prompt.
+            WorkerCommand::Cancel => {}
+            WorkerCommand::Shutdown => break,
         }
     }
     if let Ok(mut state) = controls.lock() {
@@ -1048,8 +1118,14 @@ fn apply_control_update(update: &AcpEvent, session: &str, controls: &Mutex<AcpCo
     }
 }
 
-fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>) -> bool {
+fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>, muted: bool) -> bool {
     let failed = matches!(&update, AcpEvent::Error(_));
+    if muted && !failed {
+        // A cancelled turn keeps polling so the agent can acknowledge the
+        // cancel, but its remaining chunks must not land after `[cancelled]`.
+        // Protocol errors still surface: they end the worker.
+        return false;
+    }
     let event = match update {
         AcpEvent::AgentMessageChunk(content) => Some(AgentBackendEvent::MessageChunk { content }),
         AcpEvent::ToolCall(value) | AcpEvent::ToolCallUpdate(value) => {

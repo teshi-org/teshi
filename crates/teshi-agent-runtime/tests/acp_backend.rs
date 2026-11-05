@@ -15,13 +15,26 @@ fn backend(mode: &str) -> AgentBackendRuntime {
 }
 
 fn backend_with_preference(mode: &str, path: Option<PathBuf>) -> AgentBackendRuntime {
+    backend_with(mode, Vec::new(), HashMap::new(), path)
+}
+
+/// Builds a backend for one fixture mode with extra argv, environment, and an
+/// optional saved-model path.
+fn backend_with(
+    mode: &str,
+    extra_args: Vec<String>,
+    env: HashMap<String, String>,
+    path: Option<PathBuf>,
+) -> AgentBackendRuntime {
     let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_acp_agent.py");
+    let mut args = vec![script.display().to_string(), mode.into()];
+    args.extend(extra_args);
     let command = AcpAgentCommand {
         program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
-        args: vec![script.display().to_string(), mode.into()],
+        args,
         cwd: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-        env: HashMap::new(),
+        env,
     };
     let mut config = AcpBackendConfig::new(command);
     config.model_preference_path = path;
@@ -403,31 +416,213 @@ fn separate_backends_keep_configuration_isolated() {
         second.acp_controls().unwrap().config.options[0].current,
         "a"
     );
+    // Cancelling ends the turn, not the connection: the worker and its
+    // confirmed settings survive and reconnecting is a no-op.
     first.cancel();
-    // Reconnection must not join a live shutdown on the calling thread.
-    // Retry only after the owned resources acknowledge teardown.
+    assert_eq!(first.status(), AgentBackendStatus::Cancelled);
+    assert!(first.is_connected(), "cancel must not tear down the worker");
+    first.connect_acp().unwrap();
+    assert!(!first.shutdown_pending());
+    assert_eq!(first.acp_controls().unwrap().config.options[0].current, "b");
+    // Only an explicit teardown replaces the worker and rediscovers settings.
+    first.request_shutdown();
     let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
+    while first.shutdown_pending() {
         first.poll_shutdown();
-        if first.connect_acp().is_ok() {
-            break;
-        }
         assert!(
             Instant::now() < deadline,
-            "cancelled ACP backend did not exit"
+            "shutdown did not complete after an explicit teardown request"
         );
-        std::thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        !first.shutdown_pending(),
-        "a reconnected worker must not retain shutdown ownership"
-    );
+    first.connect_acp().unwrap();
     let fresh = wait_controls(&first, |s| s.ready);
     assert_eq!(fresh.config.options[0].current, "a");
     assert!(
         first
             .set_acp_option("model", "b".into(), initial.revision)
             .is_err()
+    );
+}
+
+/// Waits for the fixture's first streamed chunk so the turn is in flight.
+fn wait_for_first_chunk(backend: &mut AgentBackendRuntime) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match backend.try_next_event() {
+            Ok(Some(AgentBackendEvent::MessageChunk { .. })) => return,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(Instant::now() < deadline, "turn never started streaming");
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("event channel disconnected: {error}"),
+        }
+    }
+}
+
+#[test]
+fn cancel_ends_the_turn_without_replacing_the_acp_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("agent.pid");
+    let mut backend = backend_with(
+        "cancel_keeps_session",
+        vec![marker.display().to_string()],
+        HashMap::new(),
+        None,
+    );
+    backend.start().unwrap();
+    backend
+        .submit_turn(
+            None,
+            vec![ChatMessage::text("user", "first question")],
+            None,
+        )
+        .unwrap();
+    wait_for_first_chunk(&mut backend);
+    let session = backend.acp_controls().unwrap().session_id.unwrap();
+    let pid = std::fs::read_to_string(&marker).unwrap();
+
+    backend.cancel();
+    assert_eq!(backend.status(), AgentBackendStatus::Cancelled);
+    assert!(backend.is_connected(), "cancel must keep the ACP process");
+
+    // The follow-up arrives while the cancelled turn is still draining; the
+    // worker must defer it into the same session instead of failing.
+    backend.start().unwrap();
+    assert!(backend.is_connected());
+    backend
+        .submit_turn(
+            None,
+            vec![
+                ChatMessage::text("user", "first question"),
+                ChatMessage::text("assistant", "working"),
+                ChatMessage::text("user", "second question"),
+            ],
+            None,
+        )
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content } if content == "second-turn-ok"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentBackendEvent::Failed(_))),
+        "{events:?}"
+    );
+    assert_eq!(
+        backend.acp_controls().unwrap().session_id.unwrap(),
+        session,
+        "the follow-up turn must reuse the existing ACP session"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        pid,
+        "the ACP process was replaced by a cancel"
+    );
+}
+
+#[test]
+fn cancel_answers_a_pending_permission_and_keeps_the_session() {
+    let mut backend = backend_with_permission_host("cancel_then_permission");
+    backend.start().unwrap();
+    backend
+        .submit_turn(
+            None,
+            vec![ChatMessage::text("user", "first question")],
+            None,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match backend.try_next_event() {
+            Ok(Some(AgentBackendEvent::PermissionRequest { .. })) => break,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(Instant::now() < deadline, "no permission request");
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("event channel disconnected: {error}"),
+        }
+    }
+    backend.cancel();
+    backend.start().unwrap();
+    backend
+        .submit_turn(
+            None,
+            vec![
+                ChatMessage::text("user", "first question"),
+                ChatMessage::text("user", "second question"),
+            ],
+            None,
+        )
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content } if content == "second-turn-ok"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentBackendEvent::Failed(_))),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn reconnecting_after_a_transport_failure_restores_the_transcript() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("crashed");
+    let mut env = HashMap::new();
+    env.insert(
+        "TESHI_CRASH_STATE".to_string(),
+        marker.display().to_string(),
+    );
+    let mut backend = backend_with("crash_once", Vec::new(), env, None);
+    let messages = vec![
+        ChatMessage::text("user", "previous question"),
+        ChatMessage::text("assistant", "previous answer"),
+        ChatMessage::text("user", "current question"),
+    ];
+    backend.start().unwrap();
+    backend.submit_turn(None, messages.clone(), None).unwrap();
+    let crashed = events_until_terminal(&mut backend);
+    assert!(
+        matches!(crashed.last(), Some(AgentBackendEvent::Failed(_))),
+        "{crashed:?}"
+    );
+
+    // Reconnects after a failed transport, waiting for the old worker to exit.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        backend.poll_shutdown();
+        if backend.start().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the failed ACP worker never released the backend"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    backend.submit_turn(None, messages, None).unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content } if content == "restored-ok"
+        )),
+        "{events:?}"
     );
 }
 

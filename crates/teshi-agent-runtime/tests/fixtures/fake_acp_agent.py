@@ -1,6 +1,7 @@
 import json
 import sys
 import os
+import queue
 import threading
 import time
 import socket
@@ -39,6 +40,84 @@ if len(sys.argv) > 2:
 def send(message):
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
+
+
+def send_update(session_id, value):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": session_id, "update": value}})
+
+
+def run_cancel_mode():
+    """One long turn that only ends when Teshi sends session/cancel.
+
+    The session id embeds the pid so a reconnecting backend is visible: the
+    follow-up prompt must arrive in the same process and the same session.
+    """
+    session_id = "fake-session-{}".format(os.getpid())
+    inbound = queue.Queue()
+
+    def read_lines():
+        for line in sys.stdin:
+            try:
+                inbound.put(json.loads(line))
+            except Exception:
+                pass
+
+    threading.Thread(target=read_lines, daemon=True).start()
+    prompts = 0
+    while True:
+        message = inbound.get()
+        method = message.get("method")
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {
+                "protocolVersion": 1, "agentInfo": {"name": "fake-agent"}}})
+        elif method == "session/new":
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": session_id}})
+        elif method == "session/prompt":
+            prompts += 1
+            params = message["params"]
+            assert params["sessionId"] == session_id, "prompt created a new ACP session"
+            prompt = params["prompt"][0]["text"]
+            if prompts > 1:
+                assert "[Restored conversation history]" not in prompt, (
+                    "cancel reconnected instead of reusing the session")
+                send_update(session_id, {"sessionUpdate": "agent_message_chunk",
+                                         "content": {"type": "text", "text": "second-turn-ok"}})
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+                continue
+            send_update(session_id, {"sessionUpdate": "agent_message_chunk",
+                                     "content": {"type": "text", "text": "working"}})
+            if mode == "cancel_then_permission":
+                send({"jsonrpc": "2.0", "id": 91, "method": "session/request_permission", "params": {
+                    "sessionId": session_id,
+                    "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}]}})
+            cancelled = False
+            permission_answered = False
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    nxt = inbound.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if nxt.get("id") == 91:
+                    outcome = nxt.get("result", {}).get("outcome", {}).get("outcome")
+                    assert outcome == "cancelled", (
+                        "cancelled turn answered permission with {}".format(outcome))
+                    permission_answered = True
+                elif nxt.get("method") == "session/cancel":
+                    assert nxt["params"]["sessionId"] == session_id
+                    cancelled = True
+                if cancelled and (mode != "cancel_then_permission" or permission_answered):
+                    break
+            assert cancelled, "agent never received session/cancel"
+            assert mode != "cancel_then_permission" or permission_answered, (
+                "pending permission was not answered as cancelled")
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "cancelled"}})
+
+
+if mode in ("cancel_keeps_session", "cancel_then_permission"):
+    run_cancel_mode()
+    sys.exit(0)
 
 
 for line in sys.stdin:
@@ -210,6 +289,20 @@ for line in sys.stdin:
                 assert "[Restored conversation history]" not in prompt
         if mode == "crash":
             sys.exit(13)
+        if mode == "crash_once":
+            state = Path(os.environ["TESHI_CRASH_STATE"])
+            if not state.exists():
+                state.write_text("crashed", encoding="utf-8")
+                sys.exit(13)
+            prompt = message["params"]["prompt"][0]["text"]
+            assert "[Restored conversation history]" in prompt, (
+                "a reconnected process lost the saved transcript")
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "fake-session", "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "restored-ok"}}}})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
         if mode == "prompt_failed":
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "prompt rejected"}})
         elif mode == "permission_then_exit":
