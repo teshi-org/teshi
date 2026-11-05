@@ -529,6 +529,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         || app.model_panel_active
         || app.session_panel_active
         || app.quit_pending_confirm
+        || app.ai_interrupt_confirm
         || app.approval_panel_active
         || app.agent_profile_panel_active
         || app.change_summary_visible
@@ -571,6 +572,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.quit_pending_confirm {
         render_quit_panel(frame, app, frame.area());
+    }
+
+    if app.ai_interrupt_confirm {
+        render_interrupt_panel(frame, app, frame.area());
     }
 
     if app.approval_panel_active {
@@ -4197,6 +4202,96 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Span::raw("  "),
     ]);
     lines.push(btn_line);
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
+/// Render the "interrupt the current run" confirmation popup.
+///
+/// Mirrors the host agent's own prompt: the turn is only cut when the user
+/// confirms, and the ACP session behind it is kept either way.
+fn render_interrupt_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let panel_w = area.width.min(56);
+    let panel_h = 8;
+    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
+    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = theme::popup_block(" Interrupt the current run? ");
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let inner_w = inner.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for text in [
+        "The turn ends; the session and its answer are kept.",
+        "Enter/y interrupt · Esc/n keep running",
+    ] {
+        let pad = inner_w.saturating_sub(text.chars().count()) / 2;
+        lines.push(Line::styled(
+            format!("{}{}", " ".repeat(pad), text),
+            Style::default().fg(theme::FG),
+        ));
+    }
+    lines.push(Line::raw(""));
+
+    let btn_row = inner.y + 3;
+    let btn_sep = "    ";
+    let btn_line_total = 13 + btn_sep.len() + 12;
+    let btn_left_pad = inner_w.saturating_sub(btn_line_total) / 2;
+    let col_interrupt_start = inner.x + btn_left_pad as u16;
+    let col_continue_start = col_interrupt_start + 13 + btn_sep.len() as u16;
+
+    let interrupt_hovered = app.mouse_position.is_some_and(|(mx, my)| {
+        my == btn_row && mx >= col_interrupt_start && mx < col_interrupt_start + 13
+    });
+    let continue_hovered = app.mouse_position.is_some_and(|(mx, my)| {
+        my == btn_row && mx >= col_continue_start && mx < col_continue_start + 12
+    });
+
+    app.clickable_regions
+        .push(ClickableRegion::AiInterruptConfirm {
+            row_y: btn_row,
+            col_x: col_interrupt_start,
+            col_right: col_interrupt_start + 13,
+        });
+    app.clickable_regions
+        .push(ClickableRegion::AiInterruptContinue {
+            row_y: btn_row,
+            col_x: col_continue_start,
+            col_right: col_continue_start + 12,
+        });
+
+    let interrupt_style = if app.ai_interrupt_selection == 0 {
+        theme::selected_row(true)
+    } else {
+        theme::chip("", theme::ERROR).style
+    };
+    let interrupt_style = if interrupt_hovered {
+        interrupt_style.add_modifier(Modifier::REVERSED)
+    } else {
+        interrupt_style
+    };
+    let continue_style = if app.ai_interrupt_selection == 1 {
+        theme::selected_row(true)
+    } else {
+        theme::chip("", theme::BORDER).style
+    };
+    let continue_style = if continue_hovered {
+        continue_style.add_modifier(Modifier::REVERSED)
+    } else {
+        continue_style
+    };
+
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(btn_left_pad)),
+        Span::styled(" [Interrupt] ", interrupt_style),
+        Span::raw(btn_sep),
+        Span::styled(" [Continue] ", continue_style),
+    ]));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);

@@ -172,6 +172,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         || app.model_panel_active
         || app.session_panel_active
         || app.quit_pending_confirm
+        || app.ai_interrupt_confirm
         || app.approval_panel_active
         || app.agent_profile_panel_active
         || app.authoring_ui.overlay_active()

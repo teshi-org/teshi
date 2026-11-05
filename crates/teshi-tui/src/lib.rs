@@ -442,6 +442,7 @@ pub fn run() -> Result<()> {
                             requirements_list_overlay: app.authoring_ui.overlay_is_list(),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
+                            ai_interrupt_confirm: app.ai_interrupt_confirm,
                             acp_permission_pending: app.has_acp_permission_prompt(),
                             project_switch_active: !matches!(
                                 app.project_switch.overlay,
@@ -470,6 +471,7 @@ pub fn run() -> Result<()> {
                 Event::Paste(_)
                     if app.pending_delete.is_some()
                         || app.quit_pending_confirm
+                        || app.ai_interrupt_confirm
                         || app.command_line.is_some()
                         || app.auth_panel_active
                         || app.session_panel_active

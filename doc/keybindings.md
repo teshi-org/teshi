@@ -186,7 +186,7 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Scroll history |
 | `i` / Enter | Focus input |
 | Ctrl+Shift+C | Copy the chat selection |
-| Esc (AI tab, request running) | Cancel the current request |
+| Esc (AI tab, request running) | Withdraw the newest queued follow-up, or ask before interrupting the turn |
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
@@ -208,8 +208,12 @@ Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 | Ctrl+Shift+C | Copy chat selection |
 | Esc | Return to Normal |
 
-In the AI tab, Esc from Input followed by Esc in Normal cancels a running
-request. Ctrl+Q exits from any mode, and `:` then `q` reaches the same exit
+In the AI tab, Esc from Input returns to Normal; Esc there withdraws the newest
+queued follow-up back into the composer, or opens an "Interrupt the current
+run?" confirmation when nothing is queued. Enter or `y` interrupts, `n` or Esc
+keeps the turn running, so a second Esc never stops the run by itself. A
+confirmed interrupt ends the turn and keeps the ACP process and session for the
+next message. Ctrl+Q exits from any mode, and `:` then `q` reaches the same exit
 without a control chord; Ctrl+C copies the selection instead.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
@@ -337,6 +341,7 @@ cancels/closes. Text forms preserve printable `j/k`.
 | Change Summary | List navigation; Enter jumps to the MindMap node |
 | ACP permission | List navigation; Enter submits the highlighted option; Esc rejects |
 | Quit confirmation | h/l or Left/Right select a button; Enter/q executes it; y/Y always exits; n/N/Esc cancels |
+| Interrupt confirmation | h/l or Left/Right select a button; Enter/y interrupts; n/N/Esc keeps the turn running; the prompt closes by itself when the turn ends |
 | Model/session deletion | Requested with dd, Delete, or the button; Enter/y confirms; Esc/n cancels; background input blocked |
 | Step keyword picker | List navigation; Enter applies; Esc cancels |
 | Scenario location | List navigation; Enter selects; o or Esc closes |

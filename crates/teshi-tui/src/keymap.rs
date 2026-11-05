@@ -58,6 +58,8 @@ pub struct KeyContext {
 
     /// Whether the quit confirmation panel is open.
     pub quit_pending_confirm: bool,
+    /// Whether the "Interrupt the current run?" confirmation owns input.
+    pub ai_interrupt_confirm: bool,
 
     /// Whether an external ACP agent has a pending permission prompt.
     pub acp_permission_pending: bool,
@@ -305,6 +307,13 @@ pub enum Action {
     AiClipboardPaste,
     /// Cancel the current AI request / tool-call loop.
     AiCancel,
+    /// Esc while a turn runs: ask before interrupting (or withdraw a queued
+    /// follow-up), mirroring the host agent's own interrupt confirmation.
+    AiInterruptRequest,
+    /// Confirm the interrupt prompt.
+    AiInterruptConfirm,
+    /// Dismiss the interrupt prompt and keep the turn running.
+    AiInterruptDismiss,
     // ── Agent lifecycle ──────────────────────────────
     AgentNew,
     AgentClose,
@@ -484,6 +493,7 @@ impl Action {
             && !context.external_change_prompt_active
             && !context.agent_change_prompt_active
             && !context.quit_pending_confirm
+            && !context.ai_interrupt_confirm
             && !context.project_switch_active
         {
             let action = match (event.code, event.modifiers) {
@@ -669,6 +679,23 @@ impl Action {
                 }
                 (KeyCode::Enter, _) => Some(Self::AcpPermissionConfirm),
                 (KeyCode::Esc, _) => Some(Self::AcpPermissionReject),
+                _ => None,
+            };
+        }
+
+        // Interrupt confirmation: Enter/y interrupts, Esc/n/again keeps running.
+        if context.ai_interrupt_confirm {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Char('y' | 'Y'), _) | (KeyCode::Enter, _) => {
+                    Some(Self::AiInterruptConfirm)
+                }
+                (KeyCode::Char('n' | 'N'), _) | (KeyCode::Esc, _) => Some(Self::AiInterruptDismiss),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::MoveLeft)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::MoveRight)
+                }
                 _ => None,
             };
         }
@@ -1076,7 +1103,7 @@ impl Action {
                 (KeyCode::Esc, _)
                     if context.active_tab == MainTab::Ai && context.ai_status_waiting =>
                 {
-                    Some(Self::AiCancel)
+                    Some(Self::AiInterruptRequest)
                 }
                 (KeyCode::Esc, _) if context.active_tab == MainTab::MindMap => {
                     Some(Self::ClearInputState)
@@ -1590,6 +1617,7 @@ fn modal_context(context: KeyContext) -> bool {
         || context.agent_change_prompt_active
         || context.acp_permission_pending
         || context.quit_pending_confirm
+        || context.ai_interrupt_confirm
         || context.auth_panel_active
         || context.model_panel_active
         || context.session_panel_active
@@ -1821,6 +1849,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -1953,6 +1982,7 @@ mod tests {
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 KeyContext {
                     quit_pending_confirm: true,
+                    ai_interrupt_confirm: false,
                     ..context
                 }
             ),
@@ -2068,6 +2098,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2113,6 +2144,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2158,6 +2190,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: true,
             project_switch_active: false,
             command_line_active: false,
@@ -2242,6 +2275,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2297,6 +2331,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2352,6 +2387,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2415,6 +2451,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2460,6 +2497,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2505,6 +2543,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2574,6 +2613,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2636,6 +2676,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -2805,6 +2846,7 @@ mod tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
@@ -3094,5 +3136,71 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn ai_tab_esc_asks_before_interrupting_the_run() {
+        let mut context = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        context.ai_status_waiting = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::AiInterruptRequest),
+            "Esc must ask before cutting a running turn"
+        );
+        // The focused-input rung still only blurs, so the documented
+        // blur-then-confirm order is unchanged.
+        let mut focused = chat_context(MainTab::Ai, MindMapFocus::Main, true);
+        focused.ai_status_waiting = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), focused),
+            Some(Action::AiBlurInput)
+        );
+    }
+
+    #[test]
+    fn interrupt_panel_owns_its_decision_keys() {
+        let mut context = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        context.ai_interrupt_confirm = true;
+        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('Y')] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, KeyModifiers::NONE), context),
+                Some(Action::AiInterruptConfirm),
+                "{code:?} must interrupt"
+            );
+        }
+        for code in [KeyCode::Esc, KeyCode::Char('n'), KeyCode::Char('N')] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, KeyModifiers::NONE), context),
+                Some(Action::AiInterruptDismiss),
+                "{code:?} must keep the run going"
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
+            Some(Action::MoveLeft)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
+            Some(Action::MoveRight)
+        );
+        // The dialog is modal but never traps the user inside the app.
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn mindmap_ai_panel_esc_keeps_its_plain_clear() {
+        let mut context = chat_context(MainTab::MindMap, MindMapFocus::AiPanel, false);
+        context.ai_status_waiting = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::ClearInputState),
+            "only the AI tab gained the confirmation rung"
+        );
     }
 }

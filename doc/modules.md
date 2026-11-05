@@ -264,6 +264,7 @@ Built with **ratatui 0.29**. Uses `render_stateful_widget` for tree state.
 
 - Agent change prompt (bottom bar)
 - External file change dialog (centered)
+- Interrupt confirmation (centered, 56×8)
 - Auth panel (centered, 60×20)
 - Step keyword picker (positioned near current line)
 - Failure detail popup (75%×70%, centered)

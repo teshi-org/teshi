@@ -50,6 +50,25 @@ ACP `session/request_permission` is mapped to Teshi approval policy:
 
 Teshi never fabricates an option. If no safe allowing option exists, it rejects with a protocol error. These ACP permissions are independent from Teshi's human test-point review gate.
 
+## Turn cancellation
+
+Cancelling a turn (Esc in the AI tab, after the "Interrupt the current run?"
+confirmation) ends that turn, not the conversation:
+
+1. The backend sends `WorkerCommand::Cancel`; the worker notifies the agent with
+   `session/cancel` and answers any pending `session/request_permission` as
+   `cancelled`.
+2. The worker keeps the ACP process and session, keeps polling the turn until the
+   agent reports `stopReason: cancelled`, and drops the chunks that the stopped
+   turn still emits.
+3. A prompt sent while the cancelled turn is draining is deferred and then run in
+   the same session, so the agent keeps its context.
+
+The connection is torn down only for a real transport failure, a project switch,
+`/new`, an explicit stop, or an agent that does not acknowledge the cancel within
+the cancel budget. A new process has no remote history, so its first prompt is
+re-seeded with the saved transcript as `[Restored conversation history]`.
+
 ## Registry role
 
 Teshi parses the official ACP Registry for discovery, metadata, platform resolution, and future managed installation. V1 does not install arbitrary Registry packages automatically. Cursor V1 prefers an explicitly configured executable, then a PATH lookup for `agent`, and launches it as structured arguments: `agent` + `acp`.

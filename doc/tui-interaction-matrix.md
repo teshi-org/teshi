@@ -37,7 +37,8 @@ commits and returns to Normal. Printable commands and tab digits remain text in
 Insert, while arrows operate on a Unicode character cursor. Model forms similarly
 retain printable `j/k` and use Tab/Shift+Tab or Up/Down for fields. Choice lists
 support Home/End, `gg/G`, and page navigation. Chat Normal uses `hjkl` or arrows
-to scroll; `[`/`]` switch conversations on the AI tab. Model/session deletions
+to scroll; `[`/`]` switch conversations on the AI tab. Interrupting a running
+turn asks first (Esc withdraws a queued follow-up instead). Model/session deletions
 capture stable IDs and require confirmation for keyboard and pointer paths;
 failures retain the modal and show the error. See [the key reference](keybindings.md)
 for mode-specific exceptions and compatibility keys.

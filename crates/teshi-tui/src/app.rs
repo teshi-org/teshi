@@ -979,6 +979,10 @@ pub struct App {
     pub quit_pending_confirm: bool,
     /// Which button is focused in quit confirm panel: 0 = Yes, 1 = No.
     pub quit_panel_selection: usize,
+    /// Whether the "Interrupt the current run?" confirmation is open.
+    pub ai_interrupt_confirm: bool,
+    /// Which button is focused in the interrupt panel: 0 = Interrupt, 1 = Continue.
+    pub ai_interrupt_selection: usize,
     /// The open `:` command line, or `None` when the prompt is closed.
     pub command_line: Option<crate::authoring_tab::LineInput>,
     /// Temporary one-shot status message (e.g. "AI applied filter: @smoke").
@@ -1272,6 +1276,18 @@ pub enum ClickableRegion {
     },
     /// Quit confirmation "No" button.
     QuitConfirmNo {
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    /// Interrupt confirmation "Interrupt" button.
+    AiInterruptConfirm {
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    /// Interrupt confirmation "Continue" button.
+    AiInterruptContinue {
         row_y: u16,
         col_x: u16,
         col_right: u16,
@@ -2197,6 +2213,8 @@ impl App {
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
+            ai_interrupt_confirm: false,
+            ai_interrupt_selection: 0,
             status_message: None,
             status_message_deadline: None,
             version: String::new(),
@@ -2393,6 +2411,8 @@ impl App {
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
+            ai_interrupt_confirm: false,
+            ai_interrupt_selection: 0,
             status_message: None,
             status_message_deadline: None,
             version: String::new(),
@@ -2580,6 +2600,8 @@ impl App {
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
+            ai_interrupt_confirm: false,
+            ai_interrupt_selection: 0,
             status_message: None,
             status_message_deadline: None,
             version: String::new(),
@@ -3041,6 +3063,7 @@ impl App {
     }
 
     fn cancel_agent_turn(&mut self) {
+        self.ai_interrupt_confirm = false;
         self.agent_mut().chat.queue_ready = false;
         let agent = self.agent_mut();
         agent.retain_partial_response();
@@ -3048,6 +3071,54 @@ impl App {
         agent.status = AiStatus::Idle;
         agent.tool_status = None;
         agent.pending_acp_permission = None;
+    }
+
+    /// End the selected agent's turn in place. ACP sessions stay alive, so this
+    /// is the confirmed "interrupt" that never discards the conversation.
+    fn cancel_ai_turn(&mut self) {
+        if matches!(
+            self.agent().status,
+            AiStatus::Waiting | AiStatus::AwaitingApproval
+        ) {
+            self.cancel_agent_turn();
+            let agent = self.agent_mut();
+            agent.status = AiStatus::Idle;
+            agent.partial_response_mut().clear();
+            agent.tool_status = None;
+            agent.messages_mut().push(AiChatMessage {
+                role: AiRole::Assistant,
+                content: "[cancelled]".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: Some("agent_progress".into()),
+                activity: None,
+            });
+            self.status = "AI request cancelled".to_string();
+        }
+        self.selection_anchor = None;
+        self.selection_end = None;
+        self.clear_chat_selection();
+        self.quit_pending_confirm = false;
+        self.ai_interrupt_confirm = false;
+    }
+
+    /// Take the newest queued follow-up back into the composer without touching
+    /// the running turn. Esc uses this before offering to interrupt.
+    fn withdraw_queued_message(&mut self) {
+        let Some(message) = self.agent_mut().chat.queue.pop_back() else {
+            return;
+        };
+        let draft = std::mem::take(&mut self.agent_mut().input);
+        let joined = if draft.trim().is_empty() {
+            message
+        } else {
+            format!("{}\n{}", draft.trim_end(), message)
+        };
+        self.agent_mut().input_cursor = joined.chars().count();
+        self.agent_mut().input = joined;
+        self.ai_input_focused = true;
+        self.status = "Queued message restored for editing".to_string();
     }
 
     /// Whether the selected agent has a pending ACP permission prompt. The
@@ -3582,6 +3653,16 @@ impl App {
                     Err(error) => self.status = format!("Cannot send queued message: {error}"),
                 }
             }
+        }
+        // A finished turn must never leave the interrupt prompt standing: the
+        // run it described is gone.
+        if self.ai_interrupt_confirm
+            && !matches!(
+                self.agent().status,
+                AiStatus::Waiting | AiStatus::AwaitingApproval
+            )
+        {
+            self.ai_interrupt_confirm = false;
         }
     }
 
@@ -7788,6 +7869,33 @@ impl App {
             };
         }
 
+        // Interrupt confirmation panel intercept (below prompts, above list navigation)
+        if self.ai_interrupt_confirm {
+            return match action {
+                Action::AiInterruptConfirm => {
+                    self.cancel_ai_turn();
+                    Ok(())
+                }
+                Action::AiInterruptDismiss => {
+                    self.ai_interrupt_confirm = false;
+                    Ok(())
+                }
+                Action::MoveLeft => {
+                    self.ai_interrupt_selection = 0;
+                    Ok(())
+                }
+                Action::MoveRight => {
+                    self.ai_interrupt_selection = 1;
+                    Ok(())
+                }
+                Action::Quit => {
+                    self.quit();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         if self.navigate_modal_list(&action) {
             return Ok(());
         }
@@ -9336,14 +9444,22 @@ impl App {
                     self.status = "Input deactivated".to_string();
                     return Ok(());
                 }
-                if matches!(
+                let paused_queue =
+                    !self.agent().chat.queue.is_empty() && !self.agent().chat.queue_ready;
+                if (matches!(
                     self.agent().status,
                     AiStatus::Waiting | AiStatus::AwaitingApproval
-                ) && !self.agent().input.trim().starts_with('/')
+                ) || paused_queue)
+                    && !self.agent().input.trim().starts_with('/')
                 {
                     let message = std::mem::take(&mut self.agent_mut().input);
                     self.agent_mut().input_cursor = 0;
                     self.agent_mut().chat.queue.push_back(message);
+                    if paused_queue {
+                        // A stopped turn keeps the queue paused; a new message
+                        // must join it in order instead of overtaking it.
+                        self.agent_mut().chat.queue_ready = true;
+                    }
                     self.status = format!(
                         "Message queued ({}) — /unqueue to edit",
                         self.agent().chat.queue.len()
@@ -9600,32 +9716,27 @@ impl App {
                 self.slash_suggestion_selection = 0;
             }
             Action::AiCancel => {
-                if self.agent().status == AiStatus::Waiting
-                    || self.agent().status == AiStatus::AwaitingApproval
-                {
-                    // Cancel the LLM request
-                    self.cancel_agent_turn();
-                    // Reset agent state
-                    let agent = self.agent_mut();
-                    agent.status = AiStatus::Idle;
-                    agent.partial_response_mut().clear();
-                    agent.tool_status = None;
-                    // Clear any tool call state by sending a cancellation message
-                    agent.messages_mut().push(AiChatMessage {
-                        role: AiRole::Assistant,
-                        content: "[cancelled]".to_string(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        source: Some("agent_progress".into()),
-                        activity: None,
-                    });
-                    self.status = "AI request cancelled".to_string();
+                self.cancel_ai_turn();
+            }
+            Action::AiInterruptRequest => {
+                // Esc first withdraws a queued follow-up (the run keeps going),
+                // then asks before stopping; it never interrupts silently.
+                if self.agent().chat.queue.is_empty() {
+                    if matches!(
+                        self.agent().status,
+                        AiStatus::Waiting | AiStatus::AwaitingApproval
+                    ) {
+                        self.ai_interrupt_confirm = true;
+                        self.ai_interrupt_selection = 0;
+                        self.status = "Interrupt the current run?".to_string();
+                    }
+                } else {
+                    self.withdraw_queued_message();
                 }
-                self.selection_anchor = None;
-                self.selection_end = None;
-                self.clear_chat_selection();
-                self.quit_pending_confirm = false;
+            }
+            Action::AiInterruptConfirm => self.cancel_ai_turn(),
+            Action::AiInterruptDismiss => {
+                self.ai_interrupt_confirm = false;
             }
             Action::AiFocusInput => {
                 self.focus_ai_input();
@@ -9912,6 +10023,7 @@ impl App {
     }
 
     fn quit(&mut self) {
+        self.ai_interrupt_confirm = false;
         if self
             .authoring_ui
             .guard_unsaved(crate::authoring_tab::RequirementsPendingAction::Action(
@@ -10989,6 +11101,8 @@ impl App {
                     ClickableRegion::ApprovalOption { .. } => self.approval_panel_active,
                     ClickableRegion::QuitConfirmYes { .. }
                     | ClickableRegion::QuitConfirmNo { .. } => self.quit_pending_confirm,
+                    ClickableRegion::AiInterruptConfirm { .. }
+                    | ClickableRegion::AiInterruptContinue { .. } => self.ai_interrupt_confirm,
                     _ => false,
                 }
             {
@@ -11632,6 +11746,20 @@ impl App {
                         return Some(region);
                     }
                 }
+                ClickableRegion::AiInterruptConfirm {
+                    row_y,
+                    col_x,
+                    col_right,
+                }
+                | ClickableRegion::AiInterruptContinue {
+                    row_y,
+                    col_x,
+                    col_right,
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
             }
         }
         None
@@ -11853,6 +11981,12 @@ impl App {
             }
             ClickableRegion::QuitConfirmNo { .. } => {
                 self.quit_pending_confirm = false;
+            }
+            ClickableRegion::AiInterruptConfirm { .. } => {
+                self.cancel_ai_turn();
+            }
+            ClickableRegion::AiInterruptContinue { .. } => {
+                self.ai_interrupt_confirm = false;
             }
         }
         Ok(())
@@ -12622,13 +12756,10 @@ impl App {
             if !self.agent().input.is_empty() {
                 self.status =
                     "Keep or clear the current draft before editing a queued message".into();
-            } else if let Some(message) = self.agent_mut().chat.queue.pop_back() {
-                self.agent_mut().input_cursor = message.chars().count();
-                self.agent_mut().input = message;
-                self.ai_input_focused = true;
-                self.status = "Queued message restored for editing".into();
-            } else {
+            } else if self.agent().chat.queue.is_empty() {
                 self.status = "No queued messages".into();
+            } else {
+                self.withdraw_queued_message();
             }
             return Ok(());
         }
@@ -13382,6 +13513,177 @@ mod tests {
         );
         assert!(!app.agent().chat.queue_ready);
         assert_eq!(app.agent().input, "second queued");
+    }
+
+    #[test]
+    fn esc_opens_the_interrupt_prompt_instead_of_cancelling() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.handle_action(Action::AiInterruptRequest).unwrap();
+        assert!(app.ai_interrupt_confirm);
+        assert_eq!(
+            app.agents[0].status,
+            AiStatus::Waiting,
+            "asking must not stop the turn"
+        );
+        assert!(
+            !app.agent()
+                .messages()
+                .iter()
+                .any(|message| message.content == "[cancelled]")
+        );
+        assert_eq!(app.ai_interrupt_selection, 0);
+
+        // A second Esc dismisses the prompt and leaves the run alone.
+        app.handle_action(Action::AiInterruptDismiss).unwrap();
+        assert!(!app.ai_interrupt_confirm);
+        assert_eq!(app.agents[0].status, AiStatus::Waiting);
+    }
+
+    #[test]
+    fn confirming_the_interrupt_ends_the_turn_once() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.handle_action(Action::AiInterruptRequest).unwrap();
+        app.handle_action(Action::AiInterruptConfirm).unwrap();
+        assert!(!app.ai_interrupt_confirm);
+        assert_eq!(app.agents[0].status, AiStatus::Idle);
+        assert_eq!(
+            app.agent().messages().last().map(|m| m.content.as_str()),
+            Some("[cancelled]")
+        );
+    }
+
+    #[test]
+    fn esc_withdraws_a_queued_message_before_interrupting() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0].chat.queue.push_back("first queued".into());
+        app.agents[0].chat.queue.push_back("second queued".into());
+
+        app.handle_action(Action::AiInterruptRequest).unwrap();
+        assert_eq!(app.agent().input, "second queued");
+        assert_eq!(
+            app.agent()
+                .chat
+                .queue
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["first queued"]
+        );
+        assert!(
+            !app.ai_interrupt_confirm,
+            "withdrawing a queued message is not an interrupt"
+        );
+        assert_eq!(app.agents[0].status, AiStatus::Waiting);
+    }
+
+    #[test]
+    fn the_interrupt_prompt_closes_when_the_turn_ends() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.handle_action(Action::AiInterruptRequest).unwrap();
+        assert!(app.ai_interrupt_confirm);
+        app.agents[0].status = AiStatus::Idle;
+        app.poll_llm_events();
+        assert!(
+            !app.ai_interrupt_confirm,
+            "a finished turn must not leave the prompt standing"
+        );
+    }
+
+    #[test]
+    fn interrupt_prompt_renders_above_the_chat_with_its_buttons() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.agents[0].status = AiStatus::Waiting;
+        app.handle_action(Action::AiInterruptRequest).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Interrupt the current run?"), "{screen}");
+        assert!(
+            app.clickable_regions
+                .iter()
+                .any(|region| matches!(region, ClickableRegion::AiInterruptConfirm { .. })),
+            "the Interrupt button must be clickable"
+        );
+        assert!(
+            app.clickable_regions
+                .iter()
+                .any(|region| matches!(region, ClickableRegion::AiInterruptContinue { .. })),
+            "the Continue button must be clickable"
+        );
+    }
+
+    #[test]
+    fn a_new_message_joins_a_paused_queue_instead_of_overtaking_it() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.agent_mut().input = "first queued".into();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        // Stopping the turn pauses the queue (`/sendqueued` used to be the only
+        // way back); a later message must not jump ahead of what is queued.
+        app.handle_action(Action::AiCancel).unwrap();
+        assert!(!app.agent().chat.queue_ready);
+
+        app.agent_mut().input = "second queued".into();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(
+            app.agent()
+                .chat
+                .queue
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["first queued", "second queued"]
+        );
+        assert!(
+            app.agent().chat.queue_ready,
+            "a new message resumes the paused queue in order"
+        );
+        assert!(
+            !app.agent()
+                .messages()
+                .iter()
+                .any(|message| message.role == AiRole::User),
+            "the new message must not be dispatched ahead of the queue"
+        );
     }
 
     #[test]
@@ -14818,6 +15120,84 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Configures an ACP fixture without submitting a turn, so a test owns the
+    /// exact key and message sequence it exercises.
+    fn configure_acp_fixture(app: &mut App, mode: &str) {
+        use teshi_agent_runtime::backend::AcpBackendConfig;
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+        let command = teshi_acp::AcpAgentCommand {
+            program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+            args: vec![script.display().to_string(), mode.into()],
+            cwd: app.find_project_dir().to_path_buf(),
+            env: std::collections::HashMap::new(),
+        };
+        let mut config = AcpBackendConfig::new(command);
+        config.client.shutdown_timeout = Duration::from_millis(100);
+        config.permission_host = Some(teshi_agent_runtime::ChannelPermissionHost::new());
+        app.agents[0].backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Acp,
+            1,
+        );
+        app.agents[0].backend.configure_acp(config).unwrap();
+    }
+
+    #[test]
+    fn two_esc_stops_the_turn_and_keeps_the_acp_session() {
+        let (mut app, _project, _store) = slash_test_app();
+        configure_acp_fixture(&mut app, "cancel_keeps_session");
+        app.active_tab = MainTab::Ai;
+        app.agent_mut().input = "first question".into();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agent().partial_response().contains("working")
+        });
+        let session = app.agent().backend.acp_controls().unwrap().session_id;
+
+        // The Esc ladder: blur the input, ask, then confirm. The run must still
+        // be going after the request, and only the confirmation cuts it.
+        app.handle_action(Action::AiBlurInput).unwrap();
+        app.handle_action(Action::AiInterruptRequest).unwrap();
+        assert!(
+            app.ai_interrupt_confirm,
+            "Esc must open the interrupt confirmation"
+        );
+        assert_eq!(app.agent().status, AiStatus::Waiting);
+        app.handle_action(Action::AiInterruptConfirm).unwrap();
+        assert_eq!(app.agent().status, AiStatus::Idle);
+        assert_eq!(
+            app.agent().messages().last().map(|m| m.content.as_str()),
+            Some("[cancelled]")
+        );
+        assert!(
+            app.agent().backend.is_connected(),
+            "cancelling a turn must not tear down the ACP process"
+        );
+
+        app.agent_mut().input = "second question".into();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert!(!app.status.contains("still stopping"), "{}", app.status);
+        wait_mcp_fixture(&mut app, |app| {
+            app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("second-turn-ok"))
+        });
+        assert!(
+            !app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("Error:")),
+            "{:?}",
+            app.agent().messages()
+        );
+        assert_eq!(
+            app.agent().backend.acp_controls().unwrap().session_id,
+            session,
+            "the follow-up turn must stay in the cancelled session"
+        );
     }
 
     #[test]
@@ -18590,6 +18970,8 @@ mod tests {
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
+            ai_interrupt_confirm: false,
+            ai_interrupt_selection: 0,
             status_message: None,
             status_message_deadline: None,
             version: String::new(),
@@ -18789,6 +19171,8 @@ Feature: B
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
+            ai_interrupt_confirm: false,
+            ai_interrupt_selection: 0,
             status_message: None,
             status_message_deadline: None,
             version: String::new(),
