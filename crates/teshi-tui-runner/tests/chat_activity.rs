@@ -262,15 +262,32 @@ fn cancelling_a_turn_keeps_its_followup_available_for_editing() {
     terminal.write("RECLAIM_AFTER_CANCEL").unwrap();
     terminal.key("Enter").unwrap();
     terminal.expect_text("Queued 1:", true, 10000).unwrap();
-    terminal.key("Escape").unwrap();
+    // Esc withdraws the queued follow-up into the composer and keeps the run
+    // going. The first press only blurs a focused composer, so press until the
+    // withdrawal reports itself.
+    for _ in 0..2 {
+        terminal.key("Escape").unwrap();
+        if terminal
+            .expect_text("Queued message restored for editing", true, 2000)
+            .is_ok()
+        {
+            break;
+        }
+    }
+    terminal
+        .expect_text("RECLAIM_AFTER_CANCEL", true, 10000)
+        .unwrap();
     terminal
         .expect_text("Enter queues it", false, 10000)
         .unwrap();
+    // The withdrawal focused the composer, so blur it and then ask to stop.
     terminal.key("Escape").unwrap();
-    terminal.expect_text("cancelled", true, 10000).unwrap();
+    terminal.key("Escape").unwrap();
     terminal
-        .expect_text("/sendqueued to resume", true, 10000)
+        .expect_text("Interrupt the current run?", true, 10000)
         .unwrap();
+    terminal.key("Enter").unwrap();
+    terminal.expect_text("cancelled", true, 10000).unwrap();
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(
         fs::read_to_string(root.path().join("trace.jsonl"))
@@ -279,9 +296,7 @@ fn cancelling_a_turn_keeps_its_followup_available_for_editing() {
             .count(),
         1
     );
-    terminal.key("Enter").unwrap();
-    terminal.write("/unqueue").unwrap();
-    terminal.key("Enter").unwrap();
+    // The withdrawn follow-up is still the draft, so it can be edited and sent.
     terminal
         .expect_text("RECLAIM_AFTER_CANCEL", true, 10000)
         .unwrap();
