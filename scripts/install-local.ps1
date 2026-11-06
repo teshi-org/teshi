@@ -49,7 +49,10 @@ Set-Location $repo
 $buildScript = Join-Path $repo 'crates\teshi-core\build.rs'
 (Get-Item $buildScript).LastWriteTime = Get-Date
 
-# Stop only copies whose executable paths this install needs to replace.
+# Running copies lock the executables this install replaces. Windows still lets
+# a running executable be renamed, so move each locked file aside instead of
+# stopping it: open Teshi sessions (including the one an agent may be running
+# this script from) keep working, and new launches pick up the new build.
 # Resolve Cargo's target directory so custom CARGO_TARGET_DIR settings work too.
 $metadataJson = & cargo metadata --no-deps --format-version 1
 if ($LASTEXITCODE -ne 0) { throw "Failed to resolve Cargo's build directory." }
@@ -61,19 +64,18 @@ $replacementPaths = @(
     [IO.Path]::GetFullPath((Join-Path $metadata.target_directory 'debug\teshi.exe'))
     $installed
 )
-Get-CimInstance Win32_Process -Filter "Name = 'teshi.exe'" | ForEach-Object {
-    if ($_.ExecutablePath -and $replacementPaths -contains $_.ExecutablePath) {
-        Write-Host "Stopping Teshi process $($_.ProcessId): $($_.ExecutablePath)"
-        $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
-        if ($process) {
-            # Recheck the path in case the process exited and its PID was reused.
-            if ($replacementPaths -contains $process.Path) {
-                $process | Stop-Process -Force
-                if (-not $process.WaitForExit(10000)) {
-                    throw "Teshi process $($process.Id) did not exit."
-                }
-            }
-        }
+foreach ($path in $replacementPaths) {
+    # Files moved aside by earlier installs; ones still in use stay until their
+    # process exits and a later install removes them.
+    Get-ChildItem -Path "$path.*.old" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    try {
+        [IO.File]::Open($path, 'Open', 'ReadWrite', 'None').Dispose()
+    } catch [IO.IOException], [UnauthorizedAccessException] {
+        $aside = "$path.$(Get-Date -Format 'yyyyMMddHHmmssfff').old"
+        Write-Host "Teshi is running from $path; moving it aside to $aside"
+        Move-Item -LiteralPath $path -Destination $aside
     }
 }
 

@@ -92,7 +92,8 @@ fn keyboard_project_switch_reloads_project_feature_and_runner_config() {
     terminal
         .expect_text("Project: project-b", true, 15000)
         .unwrap();
-    terminal.key("Escape").unwrap();
+    // The command leaves the input unfocused; Esc here would open the quit
+    // prompt instead of returning to the tabs.
     terminal.key("1").unwrap();
     terminal.expect_text("project-b step", true, 15000).unwrap();
     terminal.key("ctrl+q").unwrap();
@@ -152,7 +153,8 @@ fn project_picker_pointer_and_open_path_switch_projects() {
     terminal
         .expect_text("Project: project-a", true, 15000)
         .unwrap();
-    terminal.key("Escape").unwrap();
+    // The command leaves the input unfocused; Esc here would open the quit
+    // prompt instead of returning to the tabs.
     terminal.key("1").unwrap();
     terminal.expect_text("project-a step", true, 15000).unwrap();
     terminal.key("ctrl+q").unwrap();

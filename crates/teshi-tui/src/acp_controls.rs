@@ -738,6 +738,7 @@ impl App {
     pub(crate) fn handle_acp_controls_key(&mut self, event: KeyEvent) -> bool {
         if self.pending_delete.is_some()
             || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
             || self.authoring_ui.overlay_active()
             || self.project_switch.overlay != crate::project_context::SwitchOverlay::None
             || self.has_acp_permission_prompt()
@@ -837,6 +838,7 @@ impl App {
             || self.model_panel_active
             || self.session_panel_active
             || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
         {
             return false;
         }

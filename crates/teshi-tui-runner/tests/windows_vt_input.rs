@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use teshi_tui_runner::{Launch, Terminal};
 
-#[test]
-#[ignore = "set TESHI_VT_INPUT_TEST_BIN to the built teshi-tui unit-test executable"]
-fn console_input_releases_reader_restores_mode_and_restarts() {
+/// Runs the console lifecycle fixture with `env`, typing `input` each cycle.
+fn run_console_fixture(mut env: Vec<(String, String)>, input: &str, artifact: &str) {
     let binary = fs::canonicalize(std::env::var_os("TESHI_VT_INPUT_TEST_BIN").unwrap()).unwrap();
     let root = tempfile::tempdir().unwrap();
+    env.push(("TESHI_VT_INPUT_FIXTURE".into(), "1".into()));
     let terminal = Terminal::launch(Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
@@ -20,10 +20,7 @@ fn console_input_releases_reader_restores_mode_and_restarts() {
             "--nocapture".into(),
         ],
         cwd: Some(root.path().to_string_lossy().into_owned()),
-        env: vec![
-            ("ZELLIJ".into(), "teshi-owned-console-acceptance".into()),
-            ("TESHI_VT_INPUT_FIXTURE".into(), "1".into()),
-        ],
+        env,
         cols: 100,
         rows: 25,
     })
@@ -32,7 +29,7 @@ fn console_input_releases_reader_restores_mode_and_restarts() {
         terminal
             .expect_text(&format!("vt-ready-{cycle}"), true, 10000)
             .unwrap();
-        terminal.write("甲🙂尾|").unwrap();
+        terminal.write(input).unwrap();
         terminal
             .expect_text(&format!("vt-released-{cycle}"), true, 5000)
             .unwrap();
@@ -45,12 +42,34 @@ fn console_input_releases_reader_restores_mode_and_restarts() {
         let directory = PathBuf::from(directory);
         fs::create_dir_all(&directory).unwrap();
         fs::write(
-            directory.join("console-lifecycle.txt"),
+            directory.join(format!("{artifact}.txt")),
             terminal.screen().unwrap(),
         )
         .unwrap();
         terminal
-            .screenshot(&directory.join("console-lifecycle.svg"))
+            .screenshot(&directory.join(format!("{artifact}.svg")))
             .unwrap();
     }
+}
+
+#[test]
+#[ignore = "set TESHI_VT_INPUT_TEST_BIN to the built teshi-tui unit-test executable"]
+fn console_input_releases_reader_restores_mode_and_restarts() {
+    run_console_fixture(
+        vec![("ZELLIJ".into(), "teshi-owned-console-acceptance".into())],
+        "甲🙂尾|",
+        "console-lifecycle",
+    );
+}
+
+#[test]
+#[ignore = "set TESHI_VT_INPUT_TEST_BIN to the built teshi-tui unit-test executable"]
+fn console_key_records_deliver_text_and_an_empty_paste() {
+    // An empty bracketed paste is how a terminal reports Ctrl+V with an
+    // image-only clipboard.
+    run_console_fixture(
+        Vec::new(),
+        "甲🙂尾\x1b[200~\x1b[201~|",
+        "console-key-records",
+    );
 }

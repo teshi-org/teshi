@@ -17,11 +17,13 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use serde_json::Value;
 use teshi_core::gherkin::BddProject;
 
+mod inline;
 mod pipeline;
 mod viewport;
 #[cfg(windows)]
 mod windows_probe;
 
+pub use inline::{InlineImages, InlineState};
 use pipeline::{Encoded, Prepared, Request, Worker};
 use viewport::Viewport;
 pub use viewport::{SourceRegion, ViewAction, ViewState};
@@ -485,12 +487,16 @@ impl ScreenshotPanel {
 
     /// Erases stale terminal pixels when closing, replacing, or resizing a capture.
     ///
+    /// Returns `true` when the whole terminal was cleared, which also erases
+    /// any other pixel layer drawn on screen.
+    ///
     /// # Errors
     /// Returns errors from querying or clearing the terminal.
     pub fn prepare_frame<B: ratatui::backend::Backend>(
         &mut self,
         terminal: &mut ratatui::Terminal<B>,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
+        let mut cleared = false;
         if let Some(previous_size) = self.pixel_screen_size {
             let resized = terminal.size()? != previous_size;
             let replaced = self
@@ -499,6 +505,7 @@ impl ScreenshotPanel {
                 .is_none_or(|image| image.painted_area.is_none());
             if !self.visible || replaced || resized {
                 terminal.clear()?;
+                cleared = true;
                 self.pixel_screen_size = None;
                 if let Some(image) = self.rendered.as_mut() {
                     image.painted_area = None;
@@ -508,7 +515,7 @@ impl ScreenshotPanel {
         if let Some(image) = self.rendered.as_mut() {
             image.pending_area = None;
         }
-        Ok(())
+        Ok(cleared)
     }
 
     /// Writes pixel payloads after Ratatui has flushed the cleared image region.
@@ -902,7 +909,14 @@ pub fn capture_path(project: &Path, shot: &ScreenshotRef) -> PathBuf {
 /// # Errors
 /// Returns an error when no viewer could be started.
 pub fn open_externally(project: &Path, shot: &ScreenshotRef) -> Result<()> {
-    let path = capture_path(project, shot);
+    open_path_externally(&capture_path(project, shot))
+}
+
+/// Hand any image file to the operating system's image viewer.
+///
+/// # Errors
+/// Returns an error when no viewer could be started.
+pub fn open_path_externally(path: &Path) -> Result<()> {
     let mut command = if cfg!(windows) {
         let mut command = Command::new("cmd");
         // `start` treats a quoted argument as a window title, so pass an empty one.
@@ -914,7 +928,7 @@ pub fn open_externally(project: &Path, shot: &ScreenshotRef) -> Result<()> {
         Command::new("xdg-open")
     };
     command
-        .arg(&path)
+        .arg(path)
         .spawn()
         .with_context(|| format!("cannot open {}", path.display()))?;
     Ok(())

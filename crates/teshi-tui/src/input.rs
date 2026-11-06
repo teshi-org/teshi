@@ -1,24 +1,35 @@
+//! Terminal input events.
+//!
+//! On Windows, terminal input is read as VT through an owned console handle
+//! rather than through crossterm's console-record backend. That backend never
+//! reports bracketed paste, so a terminal's empty paste for an image-only
+//! clipboard (how Ctrl+V reaches an application with a screenshot) would be
+//! lost. Set `TESHI_LEGACY_CONSOLE_INPUT` to use crossterm's backend instead.
+
 use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event};
 
+#[cfg(windows)]
+mod win32_keys;
+
 pub struct EventSource {
     #[cfg(windows)]
-    zellij_vt: Option<windows_vt::ZellijVtInput>,
+    vt: Option<windows_vt::VtInput>,
 }
 
 impl EventSource {
     pub fn new() -> Result<Self> {
         Ok(Self {
             #[cfg(windows)]
-            zellij_vt: windows_vt::ZellijVtInput::start_if_needed()?,
+            vt: windows_vt::VtInput::start_if_needed()?,
         })
     }
 
     pub fn next(&mut self, timeout: Duration) -> Result<Option<Event>> {
         #[cfg(windows)]
-        if let Some(input) = self.zellij_vt.as_mut() {
+        if let Some(input) = self.vt.as_mut() {
             return input.next(timeout);
         }
 
@@ -57,9 +68,13 @@ mod windows_vt {
         SetConsoleMode,
     };
 
-    const ESCAPE_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+    use super::win32_keys::{self, Decoder, Piece};
 
-    pub struct ZellijVtInput {
+    const ESCAPE_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+    /// Opts out of VT input and keeps crossterm's console-record backend.
+    const LEGACY_INPUT_ENV: &str = "TESHI_LEGACY_CONSOLE_INPUT";
+
+    pub struct VtInput {
         events: Receiver<io::Result<Event>>,
         stop: Arc<AtomicBool>,
         reader: Option<thread::JoinHandle<()>>,
@@ -82,7 +97,7 @@ mod windows_vt {
         let _ = reader.join();
     }
 
-    impl Drop for ZellijVtInput {
+    impl Drop for VtInput {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Release);
             while self.events.try_recv().is_ok() {}
@@ -97,13 +112,32 @@ mod windows_vt {
         }
     }
 
-    impl ZellijVtInput {
+    impl VtInput {
+        /// Starts VT input unless opted out.
+        ///
+        /// Zellij needs VT input to deliver mouse and paste at all, so a
+        /// failure there is an error. Elsewhere a console that refuses VT
+        /// input falls back to crossterm's backend. Zellij keeps plain VT
+        /// keys; direct consoles also get win32-input-mode for full key
+        /// fidelity.
         pub fn start_if_needed() -> Result<Option<Self>> {
-            if std::env::var_os("ZELLIJ").is_none() {
+            if std::env::var_os("ZELLIJ").is_some() {
+                return Self::start(false).map(Some);
+            }
+            if std::env::var_os(LEGACY_INPUT_ENV).is_some() {
                 return Ok(None);
             }
+            match Self::start(true) {
+                Ok(input) => Ok(Some(input)),
+                Err(error) => {
+                    tracing::debug!(error = %format!("{error:#}"), "console VT input unavailable");
+                    Ok(None)
+                }
+            }
+        }
 
-            let console_mode = ConsoleModeGuard::enable()
+        fn start(key_records: bool) -> Result<Self> {
+            let console_mode = ConsoleModeGuard::enable(key_records)
                 .context("failed to enable VT terminal input on Windows")?;
             // Cancellation must not leave a read pending on the process-wide
             // stdin handle: later consumers need a fresh console read state.
@@ -161,23 +195,30 @@ mod windows_vt {
             let parser_stop = stop.clone();
             let parser = thread::Builder::new()
                 .name("teshi-vt-input".to_string())
-                .spawn(move || parse_stdin(event_tx, bytes_rx, parser_stop));
+                .spawn(move || {
+                    parse_stdin(
+                        event_tx,
+                        bytes_rx,
+                        parser_stop,
+                        key_records.then(Decoder::default),
+                    )
+                });
             let parser = match parser {
                 Ok(parser) => parser,
                 Err(error) => {
                     stop.store(true, Ordering::Release);
                     stop_reader(reader);
-                    return Err(error).context("failed to start the Zellij VT input reader");
+                    return Err(error).context("failed to start the VT input parser");
                 }
             };
 
-            Ok(Some(Self {
+            Ok(Self {
                 events: event_rx,
                 stop,
                 reader: Some(reader),
                 parser: Some(parser),
                 _console_mode: console_mode,
-            }))
+            })
         }
 
         pub fn next(&mut self, timeout: Duration) -> Result<Option<Event>> {
@@ -186,13 +227,13 @@ mod windows_vt {
                 Ok(Err(error)) => Err(error.into()),
                 Err(RecvTimeoutError::Timeout) => Ok(None),
                 Err(RecvTimeoutError::Disconnected) => {
-                    Err(anyhow::anyhow!("Zellij VT input reader stopped"))
+                    Err(anyhow::anyhow!("VT input reader stopped"))
                 }
             }
         }
     }
 
-    fn decode_console_units(chunk: &[u16], pending_surrogate: &mut Option<u16>) -> Vec<u8> {
+    fn decode_console_units(chunk: &[u16], pending_surrogate: &mut Option<u16>) -> String {
         let mut units = Vec::with_capacity(chunk.len() + 1);
         units.extend(pending_surrogate.take());
         units.extend_from_slice(chunk);
@@ -204,15 +245,27 @@ mod windows_vt {
         {
             *pending_surrogate = units.pop();
         }
-        String::from_utf16_lossy(&units).into_bytes()
+        String::from_utf16_lossy(&units)
     }
 
+    /// Console input mode for VT reading, restored on drop.
     struct ConsoleModeGuard {
         original_mode: u32,
+        /// Whether win32-input-mode was requested and must be turned off.
+        key_records: bool,
+    }
+
+    /// Writes a mode switch to the console host. A console that does not
+    /// know the mode ignores it, which leaves plain VT input.
+    fn write_mode(sequence: &str) -> io::Result<()> {
+        use std::io::Write;
+        let mut stdout = io::stdout();
+        stdout.write_all(sequence.as_bytes())?;
+        stdout.flush()
     }
 
     impl ConsoleModeGuard {
-        fn enable() -> io::Result<Self> {
+        fn enable(key_records: bool) -> io::Result<Self> {
             unsafe {
                 let handle = GetStdHandle(STD_INPUT_HANDLE);
                 if handle.is_null() || handle == INVALID_HANDLE_VALUE {
@@ -231,14 +284,23 @@ mod windows_vt {
                 if SetConsoleMode(handle, vt_mode) == 0 {
                     return Err(io::Error::last_os_error());
                 }
-
-                Ok(Self { original_mode })
+                let guard = Self {
+                    original_mode,
+                    key_records,
+                };
+                if key_records {
+                    write_mode(win32_keys::ENABLE)?;
+                }
+                Ok(guard)
             }
         }
     }
 
     impl Drop for ConsoleModeGuard {
         fn drop(&mut self) {
+            if self.key_records {
+                let _ = write_mode(win32_keys::DISABLE);
+            }
             unsafe {
                 let handle = GetStdHandle(STD_INPUT_HANDLE);
                 if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
@@ -250,8 +312,9 @@ mod windows_vt {
 
     fn parse_stdin(
         event_tx: SyncSender<io::Result<Event>>,
-        bytes_rx: Receiver<io::Result<Vec<u8>>>,
+        text_rx: Receiver<io::Result<String>>,
         stop: Arc<AtomicBool>,
+        mut key_records: Option<Decoder>,
     ) {
         let mut parser = InputParser::new();
         let mut pressed_button = None;
@@ -259,23 +322,49 @@ mod windows_vt {
             if stop.load(Ordering::Acquire) {
                 return;
             }
-            let input_events = match bytes_rx.recv_timeout(ESCAPE_FLUSH_INTERVAL) {
-                Ok(Ok(bytes)) => parser.parse_as_vec(&bytes, true),
+            let mut events = Vec::new();
+            match text_rx.recv_timeout(ESCAPE_FLUSH_INTERVAL) {
+                Ok(Ok(text)) => {
+                    let pieces = match key_records.as_mut() {
+                        Some(decoder) => decoder.feed(&text),
+                        None => vec![Piece::Text(text)],
+                    };
+                    // Pieces keep arrival order: text parsed so far is
+                    // emitted before a key that followed it.
+                    for piece in pieces {
+                        match piece {
+                            Piece::Text(text) => events.extend(
+                                parser
+                                    .parse_as_vec(text.as_bytes(), true)
+                                    .into_iter()
+                                    .filter_map(|event| convert_event(event, &mut pressed_button)),
+                            ),
+                            Piece::Key(key) => events.push(Event::Key(key)),
+                        }
+                    }
+                }
                 Ok(Err(error)) => {
                     let _ = event_tx.send(Err(error));
                     break;
                 }
-                Err(RecvTimeoutError::Timeout) => parser.parse_as_vec(&[], false),
+                Err(RecvTimeoutError::Timeout) => {
+                    // Input paused: a held Escape is a key, not a sequence start.
+                    let held = key_records.as_mut().map(Decoder::flush).unwrap_or_default();
+                    events.extend(
+                        parser
+                            .parse_as_vec(held.as_bytes(), false)
+                            .into_iter()
+                            .filter_map(|event| convert_event(event, &mut pressed_button)),
+                    );
+                }
                 Err(RecvTimeoutError::Disconnected) => break,
-            };
+            }
 
-            for input_event in input_events {
+            for event in events {
                 if stop.load(Ordering::Acquire) {
                     return;
                 }
-                if let Some(event) = convert_event(input_event, &mut pressed_button)
-                    && event_tx.send(Ok(event)).is_err()
-                {
+                if event_tx.send(Ok(event)).is_err() {
                     return;
                 }
             }
@@ -396,40 +485,68 @@ mod windows_vt {
         #[test]
         fn console_read_boundary_preserves_supplementary_unicode() {
             let mut pending = None;
-            assert_eq!(
-                decode_console_units(&[0x7532, 0xd83d], &mut pending),
-                "甲".as_bytes()
-            );
+            assert_eq!(decode_console_units(&[0x7532, 0xd83d], &mut pending), "甲");
             assert_eq!(
                 decode_console_units(&[0xde42, 0x5c3e], &mut pending),
-                "🙂尾".as_bytes()
+                "🙂尾"
             );
             assert_eq!(pending, None);
-            assert_eq!(
-                decode_console_units(&[0xd83d, 0x61], &mut pending),
-                "�a".as_bytes()
-            );
+            assert_eq!(decode_console_units(&[0xd83d, 0x61], &mut pending), "�a");
+        }
+
+        /// Feeds `input` to a parser thread and returns the first `count` events.
+        fn parse_events(input: &str, key_records: bool, count: usize) -> Vec<Event> {
+            let (text_tx, text_rx) = mpsc::sync_channel(1);
+            let (event_tx, event_rx) = mpsc::sync_channel(16);
+            let stop = Arc::new(AtomicBool::new(false));
+            let parser_stop = stop.clone();
+            let decoder = key_records.then(Decoder::default);
+            let parser =
+                thread::spawn(move || parse_stdin(event_tx, text_rx, parser_stop, decoder));
+            text_tx.send(Ok(input.to_string())).unwrap();
+            let events = (0..count)
+                .map(|_| {
+                    event_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap()
+                        .unwrap()
+                })
+                .collect();
+            stop.store(true, Ordering::Release);
+            drop(text_tx);
+            parser.join().unwrap();
+            events
         }
 
         #[test]
         fn parser_flushes_lone_escape_without_waiting_for_another_key() {
-            let (bytes_tx, bytes_rx) = mpsc::sync_channel(1);
-            let (event_tx, event_rx) = mpsc::sync_channel(1);
-            let stop = Arc::new(AtomicBool::new(false));
-            let parser_stop = stop.clone();
-            let parser = thread::spawn(move || parse_stdin(event_tx, bytes_rx, parser_stop));
-            bytes_tx.send(Ok(vec![0x1b])).unwrap();
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap()
-                .unwrap();
+            for key_records in [false, true] {
+                assert_eq!(
+                    parse_events("\x1b", key_records, 1),
+                    [Event::Key(KeyEvent::new(
+                        KeyCode::Esc,
+                        KeyModifiers::empty()
+                    ))],
+                    "key records: {key_records}"
+                );
+            }
+        }
+
+        #[test]
+        fn key_records_keep_order_and_deliver_an_empty_paste() {
+            let synthetic: String = "\x1b[200~\x1b[201~"
+                .encode_utf16()
+                .map(|unit| format!("\x1b[0;0;{unit};1;0;1_"))
+                .collect();
+            let input = format!("\x1b[65;0;97;1;0;1_{synthetic}\x1b[13;0;13;1;16;1_");
             assert_eq!(
-                event,
-                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
+                parse_events(&input, true, 3),
+                [
+                    Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty())),
+                    Event::Paste(String::new()),
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+                ]
             );
-            stop.store(true, Ordering::Release);
-            drop(bytes_tx);
-            parser.join().unwrap();
         }
 
         #[test]
@@ -445,8 +562,14 @@ mod windows_vt {
             let stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
             let mut original_mode = 0;
             assert_ne!(unsafe { GetConsoleMode(stdin, &mut original_mode) }, 0);
+            // Without Zellij the source also runs win32-input-mode, and the
+            // PTY test sends an empty bracketed paste after the text.
+            let key_records = std::env::var_os("ZELLIJ").is_none();
+            if key_records {
+                print!("\x1b[?2004h");
+            }
             for cycle in 0..3 {
-                let mut source = ZellijVtInput::start_if_needed().unwrap().unwrap();
+                let mut source = VtInput::start_if_needed().unwrap().unwrap();
                 println!("vt-ready-{cycle}");
                 io::stdout().flush().unwrap();
                 let mut received = String::new();
@@ -458,13 +581,18 @@ mod windows_vt {
                                 received.push(character);
                             }
                         }
-                        Some(Event::Paste(text)) => received.push_str(&text),
+                        Some(Event::Paste(text)) => received.push_str(&format!("[paste:{text}]")),
                         event => {
                             panic!("unexpected console event: {event:?}; received {received:?}")
                         }
                     }
                 }
-                assert_eq!(received, "甲🙂尾");
+                let expected = if key_records {
+                    "甲🙂尾[paste:]"
+                } else {
+                    "甲🙂尾"
+                };
+                assert_eq!(received, expected);
                 let started = std::time::Instant::now();
                 drop(source);
                 assert!(
@@ -476,6 +604,9 @@ mod windows_vt {
                 assert_eq!(mode, original_mode, "console mode leaked after drop");
                 println!("vt-released-{cycle}");
                 io::stdout().flush().unwrap();
+            }
+            if key_records {
+                print!("\x1b[?2004l");
             }
             crossterm::terminal::disable_raw_mode().unwrap();
             println!("stdin-ready");

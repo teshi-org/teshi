@@ -186,7 +186,8 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Scroll history |
 | `i` / Enter | Focus input |
 | Ctrl+Shift+C | Copy the chat selection |
-| Esc (AI tab, request running) | Cancel the current request |
+| Esc (AI tab, request running) | Withdraw the newest queued follow-up, or ask before interrupting the turn |
+| Esc (AI tab, agent idle) | Ask to quit Teshi |
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
@@ -200,19 +201,34 @@ Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 | Ctrl+J / Shift+Enter | Insert a newline |
 | Left/Right, Up/Down | Move input cursor; Up/Down move between input lines |
 | Home/End | Move to the start/end of the current input line |
-| Backspace/Delete | Delete text |
-| Ctrl+V | Paste clipboard text |
+| Backspace/Delete | Delete text; an `[Image #N]` placeholder is deleted as a whole |
+| Ctrl+V / Alt+V | Paste clipboard text; with no text on the clipboard, attach its image or image files. In Windows Terminal, Ctrl+V reaches Teshi as the terminal's empty paste for an image-only clipboard; Alt+V reads the clipboard directly in any terminal |
 | Alt+arrows | Scroll history |
 | PageUp/PageDown, Ctrl+K | Scroll history vertically |
 | Ctrl+Home/End | History top/bottom |
 | Ctrl+Shift+C | Copy chat selection |
 | Esc | Return to Normal |
 
-In the AI tab, Esc from Input followed by Esc in Normal cancels a running
-request. Ctrl+Q exits from any mode, and `:` then `q` reaches the same exit
-without a control chord; Ctrl+C copies the selection instead.
+In the AI tab, Esc from Input returns to Normal; Esc there withdraws the newest
+queued follow-up back into the composer, or opens an "Interrupt the current
+run?" confirmation when nothing is queued. Enter or `y` interrupts, `n` or Esc
+keeps the turn running, so a second Esc never stops the run by itself. A
+confirmed interrupt ends the turn and keeps the ACP process and session for the
+next message. With no run in progress, Esc opens the quit confirmation: Enter or
+`y` exits, `n` or Esc stays. Ctrl+Q exits from any mode, and `:` then `q` reaches
+the same exit without a control chord; Ctrl+C copies the selection instead.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
+
+A pasted screenshot or a pasted or dropped image file appears in the input as
+an `[Image #N]` placeholder; typing `@path` to a PNG, JPEG, GIF, WebP, or BMP
+file also attaches it. Pasted screenshots are saved in the user cache, not the
+project. Each attachment shows as a `▣` chip above the input; click a chip to
+remove it. The agent receives the images as image blocks and the message text
+without their placeholders or paths. Images are sent only to ACP agents that
+accept them; otherwise the send is blocked and the draft stays. Sent images
+appear in the transcript under the message, as wide as the message and up to 16
+rows tall; click the `▣` row to open one in the system viewer.
 
 Drag over chat text to select it; Ctrl+Shift+C or right-click copies the displayed
 plain text without role rails or soft-wrap line breaks. Scrolling/resizing keep
@@ -285,6 +301,11 @@ Enter inserts a newline, Tab inserts four spaces, Backspace/Delete edit, and
 Ctrl+S saves without leaving Insert. Esc returns to Browse. Bracketed paste is
 accepted. Long lines soft-wrap; the editor and adjacent panes expose scrollbars.
 
+Outside Insert, a line with `![alt](path)` is followed by the image. Relative
+paths resolve from the document's folder, then from the project root; a missing
+file shows a `▣ Image not found` row. The cursor skips image rows, and Insert
+shows only the Markdown source.
+
 ## Test Points
 
 ### Normal
@@ -337,6 +358,7 @@ cancels/closes. Text forms preserve printable `j/k`.
 | Change Summary | List navigation; Enter jumps to the MindMap node |
 | ACP permission | List navigation; Enter submits the highlighted option; Esc rejects |
 | Quit confirmation | h/l or Left/Right select a button; Enter/q executes it; y/Y always exits; n/N/Esc cancels |
+| Interrupt confirmation | h/l or Left/Right select a button; Enter/y interrupts; n/N/Esc keeps the turn running; the prompt closes by itself when the turn ends |
 | Model/session deletion | Requested with dd, Delete, or the button; Enter/y confirms; Esc/n cancels; background input blocked |
 | Step keyword picker | List navigation; Enter applies; Esc cancels |
 | Scenario location | List navigation; Enter selects; o or Esc closes |

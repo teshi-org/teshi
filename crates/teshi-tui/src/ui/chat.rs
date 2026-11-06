@@ -54,6 +54,47 @@ struct ChatProjectedLine {
     line: Line<'static>,
     source: Option<ChatSourceRange>,
     action: Option<crate::keymap::Action>,
+    image: Option<ImageRow>,
+}
+
+/// One row of a cell box reserved for an attached image.
+#[derive(Clone)]
+struct ImageRow {
+    path: std::rc::Rc<std::path::PathBuf>,
+    /// Row within the box, from 0.
+    row: u16,
+    /// Box size in cells.
+    size: (u16, u16),
+}
+
+/// Tallest image box in the transcript, in rows.
+const IMAGE_BOX_MAX_ROWS: u16 = 16;
+
+/// Cell box for an image of `pixels`, fitted within `max_cols` x
+/// [`IMAGE_BOX_MAX_ROWS`] with its aspect ratio kept.
+///
+/// The box comes from the file header, not the decoded image, so the layout
+/// is final before the pixels arrive. Small images keep their native size:
+/// enlarging a screenshot only blurs it.
+fn image_box(
+    (width, height): (u32, u32),
+    (font_w, font_h): (u16, u16),
+    max_cols: u16,
+) -> (u16, u16) {
+    if width == 0 || height == 0 || max_cols == 0 {
+        return (0, 0);
+    }
+    let (font_w, font_h) = (f64::from(font_w.max(1)), f64::from(font_h.max(1)));
+    let (width, height) = (f64::from(width), f64::from(height));
+    let scale = (f64::from(max_cols) * font_w / width)
+        .min(f64::from(IMAGE_BOX_MAX_ROWS) * font_h / height)
+        .min(1.0);
+    let cells =
+        |pixels: f64, font: f64, max: u16| ((pixels * scale / font).ceil() as u16).clamp(1, max);
+    (
+        cells(width, font_w, max_cols),
+        cells(height, font_h, IMAGE_BOX_MAX_ROWS),
+    )
 }
 
 #[derive(Clone)]
@@ -162,8 +203,70 @@ fn append_unselectable(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>, lines: Vec
             line,
             source: None,
             action: None,
+            image: None,
         })
     }));
+}
+
+/// Appends a label row per image mentioned in a user message, plus a box of
+/// rows for its pixels when the terminal can draw them.
+///
+/// The label opens the image in the system viewer, so a terminal without a
+/// pixel protocol still gives access to the full image.
+fn append_message_images(
+    out: &mut Vec<std::rc::Rc<ChatProjectedLine>>,
+    app: &App,
+    content: &str,
+    width: usize,
+) {
+    let mentions = crate::chat_images::image_mentions(content, &app.project.root_dir);
+    let body = rail_body_width(width);
+    let font = app.inline_images.font_size();
+    let user_bg = Style::default().bg(theme::CHAT_USER_BG);
+    for (index, mention) in mentions.into_iter().enumerate() {
+        let exists = mention.path.is_file();
+        let name = crate::chat_images::display_name(&mention.path);
+        let tag = crate::chat_images::placeholder(index + 1);
+        let (label, style) = if exists {
+            (format!("▣ {tag} {name}"), muted())
+        } else {
+            (
+                format!("▣ {tag} {name} · file not found"),
+                fg(theme::WARNING),
+            )
+        };
+        let label = Line::styled(activity_summary(&label, body as usize), style).style(user_bg);
+        let size = match (exists, font) {
+            (true, Some(font)) => image::image_dimensions(&mention.path)
+                .map_or((0, 0), |pixels| image_box(pixels, font, body)),
+            _ => (0, 0),
+        };
+        let box_rows = if size.0 > 0 { size.1 } else { 0 };
+        let mut lines = Vec::new();
+        push_railed(
+            &mut lines,
+            std::iter::once(label)
+                .chain((0..box_rows).map(|_| Line::default().style(user_bg)))
+                .collect(),
+            RailKind::User,
+            width,
+        );
+        let path = std::rc::Rc::new(mention.path);
+        out.extend(lines.into_iter().enumerate().map(|(index, line)| {
+            let image = (index > 0).then(|| ImageRow {
+                path: path.clone(),
+                row: index as u16 - 1,
+                size,
+            });
+            std::rc::Rc::new(ChatProjectedLine {
+                line,
+                source: None,
+                action: (index == 0 && exists)
+                    .then(|| crate::keymap::Action::OpenImageExternally((*path).clone())),
+                image,
+            })
+        }));
+    }
 }
 
 fn append_blank(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>) {
@@ -171,6 +274,7 @@ fn append_blank(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>) {
         line: Line::default(),
         source: None,
         action: None,
+        image: None,
     }));
 }
 
@@ -203,6 +307,7 @@ fn carry_rail_through_gaps(out: &mut [std::rc::Rc<ChatProjectedLine>]) {
                 line: Line::from(Span::styled(QUIET_RAIL, fg(theme::BORDER))),
                 source: None,
                 action: None,
+                image: None,
             });
         }
     }
@@ -261,16 +366,30 @@ fn append_selectable_chunk(
             line,
             source,
             action: None,
+            image: None,
         }));
     }
 }
 
-fn block_text_for_message(msg: &AiChatMessage) -> String {
+fn block_text_for_message(msg: &AiChatMessage, base: &std::path::Path) -> String {
     if msg.source.as_deref() == Some("acp_reasoning") {
         plain_markdown_text(msg.reasoning_content.as_deref().unwrap_or_default())
     } else {
-        plain_markdown_text(&msg.content)
+        plain_markdown_text(&shown_content(msg, base))
     }
+}
+
+/// Message text as the transcript shows it: a user message's image mentions
+/// read as the same `[Image #N]` placeholders the draft showed, and the
+/// images follow below the text.
+fn shown_content<'a>(msg: &'a AiChatMessage, base: &std::path::Path) -> std::borrow::Cow<'a, str> {
+    if msg.role == AiRole::User {
+        let (shown, images) = crate::chat_images::collapse_mentions(&msg.content, base);
+        if !images.is_empty() {
+            return shown.into();
+        }
+    }
+    msg.content.as_str().into()
 }
 
 fn selected_interval(
@@ -571,7 +690,13 @@ pub(super) fn render_chat_panel(
     let input_active = focused && app.ai_input_focused;
     let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 7);
     let alert_height = u16::from(needs_chat_status(app) && inner.height >= 6);
-    let dock_height = 1 + queue_height + alert_height;
+    let attachments = crate::chat_images::draft_attachments(
+        &app.agent().input,
+        &app.agent().input_images,
+        &app.project.root_dir,
+    );
+    let attachment_height = u16::from(!attachments.is_empty() && inner.height >= 6);
+    let dock_height = 1 + queue_height + alert_height + attachment_height;
     let input_width = composer_text_width(inner.width);
     let input_rows =
         visual_line_count_for_width(&app.agent().input, input_width).min((inner.height / 3).max(3));
@@ -618,7 +743,7 @@ pub(super) fn render_chat_panel(
             .chat
             .queue
             .front()
-            .map(String::as_str)
+            .map(|message| crate::chat_images::collapse_mentions(message, &app.project.root_dir).0)
             .unwrap_or_default();
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -638,6 +763,15 @@ pub(super) fn render_chat_panel(
         shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
     );
     dock_y += 1;
+    if attachment_height > 0 {
+        render_chat_attachments(
+            frame,
+            app,
+            &attachments,
+            shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
+        );
+        dock_y += 1;
+    }
     if let Some(filter) = filter.as_deref()
         && suggestion_height > 0
     {
@@ -659,6 +793,54 @@ pub(super) fn render_chat_panel(
         ),
         input_active,
     );
+}
+
+/// One chip per image attached to the draft; clicking a chip removes it.
+///
+/// Chips that cannot fit collapse into a `+N` count so the row never wraps.
+fn render_chat_attachments(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    attachments: &[crate::chat_images::ImageMention],
+    area: Rect,
+) {
+    let mut x = area.x;
+    for (index, mention) in attachments.iter().enumerate() {
+        let info = app.chat_attachments.info(&mention.path);
+        let failed = info.is_err();
+        let label = format!(
+            " ▣ {} ✗ ",
+            activity_summary(&crate::chat_images::chip_label(&mention.path, &info), 40)
+        );
+        let width = label.width() as u16;
+        let remaining = attachments.len() - index;
+        let overflow = format!("+{remaining}");
+        // Keep room for the overflow count unless this is the last chip.
+        let reserve = if remaining > 1 {
+            overflow.width() as u16 + 1
+        } else {
+            0
+        };
+        if x.saturating_add(width + reserve) > area.right() {
+            frame.render_widget(
+                Paragraph::new(Line::styled(overflow, muted())),
+                Rect::new(x, area.y, area.right().saturating_sub(x), 1),
+            );
+            return;
+        }
+        let rect = Rect::new(x, area.y, width, 1);
+        let color = if failed { theme::ERROR } else { theme::PRIMARY };
+        frame.render_widget(
+            Paragraph::new(label).style(fg(color).bg(theme::CHAT_CHIP_BG)),
+            rect,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect,
+            action: crate::keymap::Action::AiRemoveAttachment(index),
+            modal: false,
+        });
+        x += width + 1;
+    }
 }
 
 /// Warnings and recovery remain visible; ordinary progress already lives in the transcript.
@@ -899,7 +1081,66 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
         }
     }
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
+    place_history_images(frame, app, &projection.lines, body, start);
     render_scrollbar(frame, scrollbar, total, height, start);
+}
+
+/// Places the visible rows of each image box, and notes boxes whose pixels
+/// are not shown yet.
+fn place_history_images(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    lines: &[std::rc::Rc<ChatProjectedLine>],
+    body: Rect,
+    start: usize,
+) {
+    let x = body.x + RAIL.width() as u16;
+    let end = start.saturating_add(body.height as usize).min(lines.len());
+    let mut index = start;
+    while index < end {
+        let Some(image) = lines[index].image.clone() else {
+            index += 1;
+            continue;
+        };
+        let first = index;
+        // A run is the visible, consecutive rows of one box.
+        while index < end
+            && lines[index].image.as_ref().is_some_and(|next| {
+                std::rc::Rc::ptr_eq(&next.path, &image.path)
+                    && usize::from(next.row) == usize::from(image.row) + (index - first)
+            })
+        {
+            index += 1;
+        }
+        let area = Rect::new(
+            x,
+            body.y + (first - start) as u16,
+            image.size.0.min(body.right().saturating_sub(x)),
+            (index - first) as u16,
+        );
+        let note = match app
+            .inline_images
+            .place(frame, &image.path, image.size, area, image.row)
+        {
+            crate::image_view::InlineState::Shown => None,
+            crate::image_view::InlineState::Loading => Some(("Loading image…".into(), muted())),
+            crate::image_view::InlineState::Failed(reason) => {
+                Some((format!("Cannot show image: {reason}"), fg(theme::WARNING)))
+            }
+            crate::image_view::InlineState::Placeholder => {
+                Some(("Scroll to show the image".into(), muted()))
+            }
+        };
+        if let Some((text, style)) = note {
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    activity_summary(&text, area.width as usize),
+                    style,
+                )),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+        }
+    }
 }
 
 fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, height: usize, start: usize) {
@@ -1049,6 +1290,7 @@ fn build_chat_projection(
                 ]),
                 source: None,
                 action: Some(crate::keymap::Action::AiToggleTurn(turn.start)),
+                image: None,
             }));
             append_blank(&mut out);
             if !expanded {
@@ -1117,6 +1359,7 @@ fn build_chat_projection(
                     line: header,
                     source: None,
                     action: Some(crate::keymap::Action::AiToggleTools(message_index)),
+                    image: None,
                 }));
             }
             append_selectable_chunk(&mut out, &mut blocks, rows.collect(), message_index, source);
@@ -1189,8 +1432,11 @@ fn build_chat_projection(
             &mut blocks,
             chunk,
             message_index,
-            block_text_for_message(msg),
+            block_text_for_message(msg, &app.project.root_dir),
         );
+        if msg.role == AiRole::User {
+            append_message_images(&mut out, app, &msg.content, width);
+        }
         if folded_answer != Some(message_index)
             && (msg.source.as_deref() == Some("acp_reasoning")
                 || msg
@@ -1502,8 +1748,9 @@ fn push_message(
         },
         display.completed,
     )];
-    if !msg.content.is_empty() {
-        body.extend(render_markdown_width(&msg.content, rail_body_width(width)));
+    let content = shown_content(msg, &app.project.root_dir);
+    if !content.is_empty() {
+        body.extend(render_markdown_width(&content, rail_body_width(width)));
     }
     if let Some(tool_calls) = &msg.tool_calls {
         body.extend(tool_calls.iter().map(|tc| tool_call_line(app, tc)));
@@ -3527,6 +3774,29 @@ mod tests {
         thoughts.clear();
         push_thinking(&mut thoughts, "First line\nSecond line", 72, true);
         assert_eq!(thoughts.len(), 3);
+    }
+
+    #[test]
+    fn test_image_box_keeps_aspect_within_width_and_row_cap() {
+        let font = (10, 20);
+        let cases = [
+            // A 16:9 screenshot reaches the row cap before the body width.
+            ((1920, 1080), 100, (57, 16)),
+            // A narrow body caps the width instead.
+            ((1920, 1080), 40, (40, 12)),
+            // A tall image is capped by rows, not stretched.
+            ((400, 2000), 100, (7, 16)),
+            // A small image keeps its native size.
+            ((50, 40), 100, (5, 2)),
+            ((0, 40), 100, (0, 0)),
+        ];
+        for (pixels, max_cols, expected) in cases {
+            assert_eq!(
+                image_box(pixels, font, max_cols),
+                expected,
+                "{pixels:?} in {max_cols} cols"
+            );
+        }
     }
 
     #[test]

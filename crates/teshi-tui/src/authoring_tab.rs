@@ -139,6 +139,24 @@ pub enum RequirementsFocus {
     LinkedTestPoints,
 }
 
+/// Widest image box in a requirement document, in cells.
+const EDITOR_IMAGE_COLS: usize = 64;
+
+/// Content of one display row below a line that references an image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorImageRow {
+    /// Row `row` of a `size` cell box showing the file at `path`.
+    Pixels {
+        path: PathBuf,
+        row: u16,
+        size: (u16, u16),
+    },
+    /// A one-row stand-in naming an existing image the terminal cannot draw.
+    Label { path: PathBuf, alt: String },
+    /// The reference names no existing file.
+    Missing { target: String },
+}
+
 /// UI state for requirement documents and linked test points.
 pub struct AuthoringUiState {
     pub artifacts: Option<AuthoringArtifacts>,
@@ -176,7 +194,16 @@ pub struct AuthoringUiState {
     /// First visible soft-wrapped display row in the Markdown editor.
     pub scroll_row: usize,
     /// Display rows mapped to document row and character range, including an end cursor cell.
+    ///
+    /// Image rows follow the line that references them as empty ranges
+    /// `(row, end, end)`, so no cursor position ever falls inside one.
     pub editor_display_rows: Vec<(usize, usize, usize)>,
+    /// Rows each `![alt](path)` image takes below its line: `None` while
+    /// inserting, so the source text is all that is on screen; `Some(1)` for
+    /// a one-row text stand-in when the terminal has no pixel protocol.
+    pub editor_image_rows: Option<u16>,
+    /// What each image display row shows, by display row index.
+    pub editor_images: HashMap<usize, EditorImageRow>,
     /// Width used by the most recent editor wrap map.
     pub editor_wrap_width: usize,
     /// Horizontal offsets for the tree, editor, and linked test points.
@@ -315,8 +342,10 @@ impl AuthoringUiState {
     /// Rebuilds soft-wrap coordinates without changing the document or its source ranges.
     pub fn wrap_editor_rows(&mut self, width: usize) {
         self.editor_display_rows.clear();
+        self.editor_images.clear();
         let width = width.max(1);
         self.editor_wrap_width = width;
+        let document_dir = self.current_document_dir();
         for row in 0..self.buffer.line_count() {
             let text = self.buffer.line(row);
             let mut start = 0;
@@ -334,7 +363,61 @@ impl AuthoringUiState {
                 end = col + 1;
             }
             self.editor_display_rows.push((row, start, end));
+            if let Some(box_rows) = self.editor_image_rows {
+                self.push_image_rows(row, end, &text, box_rows, document_dir.as_deref());
+            }
         }
+    }
+
+    /// Appends the image rows for the references on line `row`.
+    fn push_image_rows(
+        &mut self,
+        row: usize,
+        end: usize,
+        text: &str,
+        box_rows: u16,
+        document_dir: Option<&Path>,
+    ) {
+        let size = (
+            self.editor_wrap_width.min(EDITOR_IMAGE_COLS) as u16,
+            box_rows,
+        );
+        for reference in crate::doc_images::image_refs(text) {
+            let resolved =
+                crate::doc_images::resolve(&reference.target, document_dir, &self.project_root);
+            let rows = match resolved {
+                Some(path) if box_rows > 1 => (0..box_rows)
+                    .map(|row| EditorImageRow::Pixels {
+                        path: path.clone(),
+                        row,
+                        size,
+                    })
+                    .collect(),
+                Some(path) => vec![EditorImageRow::Label {
+                    path,
+                    alt: reference.alt,
+                }],
+                None => vec![EditorImageRow::Missing {
+                    target: reference.target,
+                }],
+            };
+            for image in rows {
+                self.editor_images
+                    .insert(self.editor_display_rows.len(), image);
+                self.editor_display_rows.push((row, end, end));
+            }
+        }
+    }
+
+    /// Folder of the open document, which relative image paths start from.
+    fn current_document_dir(&self) -> Option<PathBuf> {
+        let meta = self.current_document_meta()?;
+        let root = if self.requirements_root.as_os_str().is_empty() {
+            &self.project_root
+        } else {
+            &self.requirements_root
+        };
+        root.join(&meta.path).parent().map(Path::to_path_buf)
     }
 
     /// Maps a viewport cell to document character coordinates for clicking and selection.
@@ -607,6 +690,8 @@ impl AuthoringUiState {
             desired_col: 0,
             scroll_row: 0,
             editor_display_rows: Vec::new(),
+            editor_image_rows: None,
+            editor_images: HashMap::new(),
             editor_wrap_width: 0,
             horizontal_scroll: [0; 3],
             rendered_cursor: None,
@@ -1894,13 +1979,19 @@ impl AuthoringUiState {
                         .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
                         .sum()
                 });
-            let target = if delta < 0 {
-                current.saturating_sub(1)
-            } else {
-                current
-                    .saturating_add(1)
-                    .min(self.editor_display_rows.len().saturating_sub(1))
+            // Step over image rows; with only image rows left in that
+            // direction, stay put rather than jump to the line's end.
+            let is_text = |index: &usize| {
+                self.editor_display_rows
+                    .get(*index)
+                    .is_some_and(|&(_, start, end)| start < end)
             };
+            let target = if delta < 0 {
+                (0..current).rev().find(is_text)
+            } else {
+                (current + 1..self.editor_display_rows.len()).find(is_text)
+            }
+            .unwrap_or(current);
             let (row, start, end) = self.editor_display_rows[target];
             let mut column = start;
             let mut consumed = 0;
@@ -2385,6 +2476,57 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
     use teshi_core::authoring::{AuthoringArtifacts, RequirementDocumentIndex};
+
+    #[test]
+    fn test_image_rows_follow_their_line_and_are_skipped_by_the_cursor() {
+        let project = tempdir().unwrap();
+        fs::write(project.path().join("shot.png"), b"png").unwrap();
+        let mut state = AuthoringUiState::empty();
+        state.project_root = project.path().to_path_buf();
+        state.buffer =
+            EditorBuffer::from_string("intro\n![ui](shot.png) ![x](gone.png)\nafter".into());
+        state.editor_image_rows = Some(3);
+        state.wrap_editor_rows(80);
+        let line = "![ui](shot.png) ![x](gone.png)".chars().count() + 1;
+        assert_eq!(
+            state.editor_display_rows,
+            vec![
+                (0, 0, 6),
+                (1, 0, line),
+                (1, line, line),
+                (1, line, line),
+                (1, line, line),
+                (1, line, line),
+                (2, 0, 6),
+            ],
+            "three pixel rows for the found image, one note for the missing one"
+        );
+        assert!(matches!(
+            state.editor_images.get(&2),
+            Some(EditorImageRow::Pixels { row: 0, .. })
+        ));
+        assert_eq!(
+            state.editor_images.get(&5),
+            Some(&EditorImageRow::Missing {
+                target: "gone.png".into()
+            })
+        );
+        assert_eq!(state.editor_position_at(0, 3), Some((1, line - 1)));
+        state.cursor_row = 1;
+        state.cursor_col = 2;
+        state.move_cursor_vertical(1);
+        assert_eq!((state.cursor_row, state.cursor_col), (2, 2));
+        state.move_cursor_vertical(-1);
+        assert_eq!((state.cursor_row, state.cursor_col), (1, 2));
+
+        state.editor_image_rows = None;
+        state.wrap_editor_rows(80);
+        assert_eq!(
+            state.editor_display_rows.len(),
+            3,
+            "inserting shows source only"
+        );
+    }
 
     #[test]
     fn external_organization_refresh_preserves_dirty_markdown_and_reports_invalid_json() {

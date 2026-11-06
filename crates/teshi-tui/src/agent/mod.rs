@@ -3034,6 +3034,7 @@ mod pipeline_gate_tests {
             requirements_list_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            ai_interrupt_confirm: false,
             acp_permission_pending: false,
             project_switch_active: false,
             command_line_active: false,

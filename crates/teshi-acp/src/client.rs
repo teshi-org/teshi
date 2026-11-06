@@ -68,6 +68,19 @@ pub struct InitializeResult {
     pub raw: Value,
 }
 
+impl InitializeResult {
+    /// Whether the agent accepts image blocks in `session/prompt`.
+    ///
+    /// ACP makes image prompts opt-in through
+    /// `agentCapabilities.promptCapabilities.image`; anything else means text only.
+    pub fn accepts_images(&self) -> bool {
+        self.capabilities
+            .pointer("/promptCapabilities/image")
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcpSession {
     pub id: String,
@@ -483,14 +496,38 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     }
 
     pub async fn prompt(&self, session: &AcpSession, prompt: &str) -> AcpResult<Option<String>> {
+        self.prompt_blocks(session, &[crate::PromptBlock::Text(prompt.to_string())])
+            .await
+    }
+
+    /// Run one turn whose prompt is a sequence of content blocks.
+    ///
+    /// # Errors
+    /// Rejects image blocks when the agent did not advertise
+    /// `promptCapabilities.image`, as well as lifecycle, transport, and remote errors.
+    pub async fn prompt_blocks(
+        &self,
+        session: &AcpSession,
+        blocks: &[crate::PromptBlock],
+    ) -> AcpResult<Option<String>> {
         self.ensure_state(&[AcpLifecycle::Ready], "session/prompt")
             .await?;
+        if blocks.iter().any(crate::PromptBlock::is_image)
+            && !self
+                .initialized
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(InitializeResult::accepts_images)
+        {
+            return Err(AcpError::CapabilityUnsupported("image prompts"));
+        }
         PromptSlotGuard::try_acquire(&self.prompt_running)?;
         let peer = self.peer.clone();
         let slot = Arc::clone(&self.prompt_running);
         let params = json!({
             "sessionId": session.id,
-            "prompt": [{ "type": "text", "text": prompt }]
+            "prompt": blocks.iter().map(crate::PromptBlock::to_json).collect::<Vec<_>>()
         });
         let (result_tx, result_rx) = oneshot::channel();
         let (sent_tx, sent_rx) = watch::channel(None);

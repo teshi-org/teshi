@@ -529,6 +529,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         || app.model_panel_active
         || app.session_panel_active
         || app.quit_pending_confirm
+        || app.ai_interrupt_confirm
         || app.approval_panel_active
         || app.agent_profile_panel_active
         || app.change_summary_visible
@@ -571,6 +572,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.quit_pending_confirm {
         render_quit_panel(frame, app, frame.area());
+    }
+
+    if app.ai_interrupt_confirm {
+        render_interrupt_panel(frame, app, frame.area());
     }
 
     if app.approval_panel_active {
@@ -4126,7 +4131,11 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Centered message
-    let msg = "You have unsaved changes, quit anyway?";
+    let msg = if app.dirty {
+        "You have unsaved changes, quit anyway?"
+    } else {
+        "Quit Teshi and return to the shell?"
+    };
     let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
     lines.push(Line::styled(
         format!("{}{}", " ".repeat(msg_pad), msg),
@@ -4197,6 +4206,96 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Span::raw("  "),
     ]);
     lines.push(btn_line);
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
+/// Render the "interrupt the current run" confirmation popup.
+///
+/// Mirrors the host agent's own prompt: the turn is only cut when the user
+/// confirms, and the ACP session behind it is kept either way.
+fn render_interrupt_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let panel_w = area.width.min(56);
+    let panel_h = 8;
+    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
+    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = theme::popup_block(" Interrupt the current run? ");
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let inner_w = inner.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for text in [
+        "The turn ends; the session and its answer are kept.",
+        "Enter/y interrupt · Esc/n keep running",
+    ] {
+        let pad = inner_w.saturating_sub(text.chars().count()) / 2;
+        lines.push(Line::styled(
+            format!("{}{}", " ".repeat(pad), text),
+            Style::default().fg(theme::FG),
+        ));
+    }
+    lines.push(Line::raw(""));
+
+    let btn_row = inner.y + 3;
+    let btn_sep = "    ";
+    let btn_line_total = 13 + btn_sep.len() + 12;
+    let btn_left_pad = inner_w.saturating_sub(btn_line_total) / 2;
+    let col_interrupt_start = inner.x + btn_left_pad as u16;
+    let col_continue_start = col_interrupt_start + 13 + btn_sep.len() as u16;
+
+    let interrupt_hovered = app.mouse_position.is_some_and(|(mx, my)| {
+        my == btn_row && mx >= col_interrupt_start && mx < col_interrupt_start + 13
+    });
+    let continue_hovered = app.mouse_position.is_some_and(|(mx, my)| {
+        my == btn_row && mx >= col_continue_start && mx < col_continue_start + 12
+    });
+
+    app.clickable_regions
+        .push(ClickableRegion::AiInterruptConfirm {
+            row_y: btn_row,
+            col_x: col_interrupt_start,
+            col_right: col_interrupt_start + 13,
+        });
+    app.clickable_regions
+        .push(ClickableRegion::AiInterruptContinue {
+            row_y: btn_row,
+            col_x: col_continue_start,
+            col_right: col_continue_start + 12,
+        });
+
+    let interrupt_style = if app.ai_interrupt_selection == 0 {
+        theme::selected_row(true)
+    } else {
+        theme::chip("", theme::ERROR).style
+    };
+    let interrupt_style = if interrupt_hovered {
+        interrupt_style.add_modifier(Modifier::REVERSED)
+    } else {
+        interrupt_style
+    };
+    let continue_style = if app.ai_interrupt_selection == 1 {
+        theme::selected_row(true)
+    } else {
+        theme::chip("", theme::BORDER).style
+    };
+    let continue_style = if continue_hovered {
+        continue_style.add_modifier(Modifier::REVERSED)
+    } else {
+        continue_style
+    };
+
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(btn_left_pad)),
+        Span::styled(" [Interrupt] ", interrupt_style),
+        Span::raw(btn_sep),
+        Span::styled(" [Continue] ", continue_style),
+    ]));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
@@ -4871,6 +4970,7 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     {
         let ui = &mut app.authoring_ui;
+        let images = Some(&mut app.inline_images);
         for (index, pane) in layout.iter().enumerate() {
             ui.pane_areas[index] = *pane;
         }
@@ -4878,12 +4978,12 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         render_requirements_tree(frame, ui, layout[0], tree_focused);
 
         if layout.len() == 2 {
-            render_requirements_editor(frame, ui, layout[1], true);
+            render_requirements_editor(frame, ui, layout[1], true, images);
         } else {
             let editor_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Editor;
             let linked_focused =
                 ui.focus == crate::authoring_tab::RequirementsFocus::LinkedTestPoints;
-            render_requirements_editor(frame, ui, layout[1], editor_focused);
+            render_requirements_editor(frame, ui, layout[1], editor_focused, images);
             render_requirements_linked(frame, ui, layout[2], linked_focused);
         }
     }
@@ -5029,6 +5129,7 @@ fn render_requirements_editor(
     ui: &mut crate::authoring_tab::AuthoringUiState,
     area: Rect,
     focused: bool,
+    images: Option<&mut crate::image_view::InlineImages>,
 ) {
     let title = ui
         .current_document_meta()
@@ -5107,7 +5208,19 @@ fn render_requirements_editor(
     }
 
     ui.horizontal_scroll[1] = 0;
-    let resized = ui.editor_wrap_width != inner.width as usize;
+    let image_rows =
+        (ui.editor_mode != crate::authoring_tab::RequirementsEditorMode::Insert).then(|| {
+            if images.as_ref().is_some_and(|images| images.has_pixels()) {
+                REQUIREMENT_IMAGE_ROWS
+            } else {
+                1
+            }
+        });
+    // Adding or removing image rows moves every later line, so follow the
+    // cursor as after a resize.
+    let resized =
+        ui.editor_wrap_width != inner.width as usize || ui.editor_image_rows != image_rows;
+    ui.editor_image_rows = image_rows;
     ui.wrap_editor_rows(inner.width as usize);
     let cursor = (ui.cursor_row, ui.cursor_col);
     let cursor_display_row = ui
@@ -5139,12 +5252,17 @@ fn render_requirements_editor(
         .unwrap_or_default();
 
     let mut lines = Vec::with_capacity(visible_lines);
-    for &(row, start, end) in ui
+    for (index, &(row, start, end)) in ui
         .editor_display_rows
         .iter()
+        .enumerate()
         .skip(scroll_row)
         .take(visible_lines)
     {
+        if let Some(image) = ui.editor_images.get(&index) {
+            lines.push(requirement_image_label(image, inner.width as usize));
+            continue;
+        }
         let line_text = buffer.line(row);
         let mut styled = Line::from(line_text.clone());
 
@@ -5229,6 +5347,9 @@ fn render_requirements_editor(
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    if let Some(images) = images {
+        place_requirement_images(frame, ui, images, inner, scroll_row);
+    }
     render_requirement_scrollbars(
         frame,
         ui,
@@ -5237,6 +5358,96 @@ fn render_requirements_editor(
         (inner.width as usize, line_count),
         (0, scroll_row),
     );
+}
+
+/// Rows an image takes below its line in a requirement document.
+const REQUIREMENT_IMAGE_ROWS: u16 = 12;
+
+/// Text for an image display row: blank under pixels, otherwise a stand-in.
+fn requirement_image_label(
+    image: &crate::authoring_tab::EditorImageRow,
+    width: usize,
+) -> Line<'static> {
+    use crate::authoring_tab::EditorImageRow;
+    let (text, color) = match image {
+        EditorImageRow::Pixels { .. } => return Line::default(),
+        EditorImageRow::Label { path, alt } => {
+            let name = crate::chat_images::display_name(path);
+            let text = if alt.is_empty() {
+                format!("▣ {name}")
+            } else {
+                format!("▣ {alt} · {name}")
+            };
+            (text, theme::MUTED)
+        }
+        EditorImageRow::Missing { target } => {
+            (format!("▣ Image not found: {target}"), theme::WARNING)
+        }
+    };
+    truncate_line_to_cols(
+        Line::styled(text, Style::default().fg(color)),
+        width.min(u16::MAX as usize) as u16,
+    )
+}
+
+/// Places the visible rows of each image box in the requirement editor.
+fn place_requirement_images(
+    frame: &mut Frame<'_>,
+    ui: &crate::authoring_tab::AuthoringUiState,
+    images: &mut crate::image_view::InlineImages,
+    inner: Rect,
+    scroll_row: usize,
+) {
+    use crate::authoring_tab::EditorImageRow;
+    let end = scroll_row
+        .saturating_add(inner.height as usize)
+        .min(ui.editor_display_rows.len());
+    let mut index = scroll_row;
+    while index < end {
+        let Some(EditorImageRow::Pixels { path, row, size }) = ui.editor_images.get(&index) else {
+            index += 1;
+            continue;
+        };
+        let first = index;
+        // A run is the visible, consecutive rows of one box.
+        while index < end
+            && matches!(
+                ui.editor_images.get(&index),
+                Some(EditorImageRow::Pixels { path: next, row: next_row, .. })
+                    if next == path && usize::from(*next_row) == usize::from(*row) + (index - first)
+            )
+        {
+            index += 1;
+        }
+        let area = Rect::new(
+            inner.x,
+            inner.y + (first - scroll_row) as u16,
+            size.0.min(inner.width),
+            (index - first) as u16,
+        );
+        let note = match images.place(frame, path, *size, area, *row) {
+            crate::image_view::InlineState::Shown => None,
+            crate::image_view::InlineState::Loading => {
+                Some(("Loading image…".to_string(), theme::MUTED))
+            }
+            crate::image_view::InlineState::Failed(reason) => {
+                Some((format!("▣ Cannot show image: {reason}"), theme::WARNING))
+            }
+            crate::image_view::InlineState::Placeholder => Some((
+                format!("▣ {}", crate::chat_images::display_name(path)),
+                theme::MUTED,
+            )),
+        };
+        if let Some((text, color)) = note {
+            frame.render_widget(
+                Paragraph::new(truncate_line_to_cols(
+                    Line::styled(text, Style::default().fg(color)),
+                    area.width,
+                )),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+        }
+    }
 }
 
 fn apply_col_range_highlight(
@@ -7060,7 +7271,9 @@ Feature: Rule only
         ui.cursor_row = 19;
         let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
         terminal
-            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
             .expect("render");
         assert_eq!(ui.scroll_limits[1], [0, 56]);
         assert_eq!(ui.scroll_row, 54);
@@ -7069,7 +7282,9 @@ Feature: Rule only
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string("short".into());
         ui.cursor_row = 0;
         terminal
-            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
             .expect("render");
         assert_eq!(ui.scroll_limits[1], [0, 0]);
         assert_eq!(ui.horizontal_scroll[1], 0);
@@ -7084,13 +7299,17 @@ Feature: Rule only
         ui.cursor_col = original.chars().count();
         let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("terminal");
         terminal
-            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
             .expect("render");
         assert_eq!(ui.scroll_limits[1], [0, 2]);
         assert_eq!(ui.scroll_row, 2);
         ui.set_pane_scroll(1, 1, 0);
         terminal
-            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
             .expect("render");
         assert_eq!(ui.scroll_row, 0);
         assert_eq!(ui.cursor_col, original.chars().count());
@@ -7100,7 +7319,9 @@ Feature: Rule only
         assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "c");
         let mut narrow = Terminal::new(TestBackend::new(6, 4)).expect("terminal");
         narrow
-            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
             .expect("render");
         assert!(ui.scroll_row > 0);
         assert_eq!(ui.scroll_limits[1][0], 0);
@@ -7737,7 +7958,9 @@ Feature: Rule only
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 12)).unwrap();
         terminal
-            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         for (text, selected) in [("alpha", true), ("beta", true), ("gamma", false)] {

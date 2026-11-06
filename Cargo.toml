@@ -27,6 +27,13 @@ num-traits.opt-level = 3
 ordered-float.opt-level = 3
 ratatui-image.opt-level = 3
 base64-simd.opt-level = 3
+# Chat image attachments: clipboard bitmap conversion, content hashing, and
+# base64 for the ACP prompt run on the UI thread or right before a send.
+arboard.opt-level = 3
+clipboard-win.opt-level = 3
+sha2.opt-level = 3
+block-buffer.opt-level = 3
+base64.opt-level = 3
 
 [workspace]
 resolver = "3"
