@@ -124,6 +124,8 @@ pub struct AgentThread {
     pub status: AiStatus,
     pub input: String,
     pub input_cursor: usize,
+    /// Images behind the `[Image #N]` placeholders in [`Self::input`].
+    pub(crate) input_images: crate::chat_images::DraftImages,
     pub tool_status: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
@@ -280,6 +282,7 @@ impl AgentThread {
             status: AiStatus::Idle,
             input: String::new(),
             input_cursor: 0,
+            input_images: Default::default(),
             tool_status: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
@@ -901,6 +904,10 @@ pub struct App {
     pub preview_panel_rect: Option<ratatui::layout::Rect>,
     /// Replay screenshot panel state for the MindMap preview.
     pub screenshot: crate::image_view::ScreenshotPanel,
+    /// Images drawn inside the chat transcript and requirement documents.
+    pub inline_images: crate::image_view::InlineImages,
+    /// Chip metadata and send payloads for AI input attachments.
+    pub(crate) chat_attachments: crate::chat_images::AttachmentCache,
     /// Which scenarios have saved captures, for tree markers and the fallback
     /// list.
     pub capture_index: crate::image_view::CaptureIndex,
@@ -1088,6 +1095,37 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(s.len())
+}
+
+/// Turns the newest message, the user's turn, into text plus image blocks.
+///
+/// The `@path` mentions that named the images are removed from the text:
+/// local paths mean nothing to the agent, which gets the pixels instead.
+fn attach_prompt_images(
+    messages: &mut [crate::llm::ChatMessage],
+    images: Vec<crate::chat_images::PreparedImage>,
+    base: &Path,
+) {
+    use teshi_core::llm::{ContentBlock, ImageSource, MessageContent};
+    if images.is_empty() {
+        return;
+    }
+    let Some(message) = messages.last_mut().filter(|message| message.role == "user") else {
+        return;
+    };
+    let text =
+        crate::chat_images::strip_image_mentions(message.content.text().unwrap_or_default(), base);
+    let mut blocks: Vec<ContentBlock> = (!text.is_empty())
+        .then_some(ContentBlock::Text { text })
+        .into_iter()
+        .collect();
+    blocks.extend(images.into_iter().map(|image| ContentBlock::Image {
+        source: ImageSource::Data {
+            media_type: image.media_type.to_string(),
+            data: image.data,
+        },
+    }));
+    message.content = MessageContent::Blocks(blocks);
 }
 
 fn set_system_clipboard(text: &str) -> Result<arboard::Clipboard> {
@@ -2159,6 +2197,8 @@ impl App {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            inline_images: Default::default(),
+            chat_attachments: Default::default(),
             capture_index: Default::default(),
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
@@ -2367,6 +2407,8 @@ impl App {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            inline_images: Default::default(),
+            chat_attachments: Default::default(),
             capture_index: Default::default(),
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
@@ -2556,6 +2598,8 @@ impl App {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            inline_images: Default::default(),
+            chat_attachments: Default::default(),
             capture_index: Default::default(),
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
@@ -3109,14 +3153,15 @@ impl App {
         let Some(message) = self.agent_mut().chat.queue.pop_back() else {
             return;
         };
-        let draft = std::mem::take(&mut self.agent_mut().input);
+        // Join as message text and collapse once, so the draft's images and
+        // the queued message's images get one numbering.
+        let draft = self.take_ai_draft();
         let joined = if draft.trim().is_empty() {
             message
         } else {
             format!("{}\n{}", draft.trim_end(), message)
         };
-        self.agent_mut().input_cursor = joined.chars().count();
-        self.agent_mut().input = joined;
+        self.restore_ai_draft(self.selected_agent, &joined);
         self.ai_input_focused = true;
         self.status = "Queued message restored for editing".to_string();
     }
@@ -3356,6 +3401,138 @@ impl App {
     /// Try to find a sensible project root directory.
     pub(crate) fn find_project_dir(&self) -> &Path {
         &self.project.root_dir
+    }
+
+    fn insert_ai_text(&mut self, text: &str) {
+        let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
+        self.agent_mut().input.insert_str(byte_idx, text);
+        self.agent_mut().input_cursor += text.chars().count();
+    }
+
+    /// Attaches `paths` to the draft as `[Image #N]` placeholders at the
+    /// cursor, set apart from a neighboring word by spaces.
+    fn insert_ai_images(&mut self, paths: Vec<std::path::PathBuf>) {
+        let count = paths.len();
+        let agent = self.agent_mut();
+        let mut text = paths
+            .into_iter()
+            .map(|path| agent.input_images.attach(path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.push(' ');
+        let byte_idx = char_to_byte_idx(&agent.input, agent.input_cursor);
+        if agent.input[..byte_idx]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            text.insert(0, ' ');
+        }
+        self.insert_ai_text(&text);
+        self.status = match count {
+            1 => "Image attached; click its chip to remove it".to_string(),
+            count => format!("{count} images attached; click a chip to remove one"),
+        };
+    }
+
+    /// Takes the selected agent's draft as message text, with each image
+    /// placeholder expanded to its `@path` mention.
+    fn take_ai_draft(&mut self) -> String {
+        let agent = self.agent_mut();
+        let text = std::mem::take(&mut agent.input);
+        let images = std::mem::take(&mut agent.input_images);
+        agent.input_cursor = 0;
+        crate::chat_images::expand_placeholders(&text, &images)
+    }
+
+    /// Puts message text back into an agent's composer, showing its image
+    /// mentions as placeholders again.
+    fn restore_ai_draft(&mut self, agent_idx: usize, text: &str) {
+        let (draft, images) = crate::chat_images::collapse_mentions(text, &self.project.root_dir);
+        let agent = &mut self.agents[agent_idx];
+        agent.input_cursor = draft.chars().count();
+        agent.input = draft;
+        agent.input_images = images;
+    }
+
+    /// Byte range of the attached placeholder ending at (`before`) or starting
+    /// at the cursor, so editing keys treat it as one character.
+    fn placeholder_at_cursor(&self, before: bool) -> Option<std::ops::Range<usize>> {
+        let agent = self.agent();
+        let cursor = char_to_byte_idx(&agent.input, agent.input_cursor);
+        crate::chat_images::placeholders(&agent.input)
+            .into_iter()
+            .find(|(range, number)| {
+                agent.input_images.path(*number).is_some()
+                    && if before {
+                        range.end == cursor
+                    } else {
+                        range.start == cursor
+                    }
+            })
+            .map(|(range, _)| range)
+    }
+
+    /// Attaches the image files or bitmap on the clipboard.
+    ///
+    /// Returns `false` only when the clipboard holds no image, so the caller
+    /// can fall back to text; a read failure is reported and counts as handled.
+    fn attach_clipboard_images(&mut self) -> bool {
+        let dir = crate::chat_images::attachment_dir(&self.project.root_dir);
+        match crate::chat_images::clipboard_images(&dir, &mut self.chat_attachments) {
+            Ok(paths) if paths.is_empty() => false,
+            Ok(paths) => {
+                self.insert_ai_images(paths);
+                true
+            }
+            Err(error) => {
+                self.status = format!("{error:#}");
+                self.set_status_message(self.status.clone());
+                true
+            }
+        }
+    }
+
+    /// Loads the images mentioned in `text` for an agent turn.
+    ///
+    /// # Errors
+    /// Returns a user-facing reason when the agent cannot take images yet or
+    /// an image cannot be read; the caller keeps the draft for editing.
+    fn prepare_prompt_images(
+        &mut self,
+        agent_idx: usize,
+        text: &str,
+    ) -> std::result::Result<Vec<crate::chat_images::PreparedImage>, String> {
+        let mentions = crate::chat_images::image_mentions(text, &self.project.root_dir);
+        if mentions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let backend = &self.agents[agent_idx].backend;
+        if backend.kind() != teshi_agent::backend::AgentBackendKind::Acp {
+            return Err(
+                "Images need an ACP agent; switch agents with /agent or remove the images".into(),
+            );
+        }
+        let controls = backend.acp_controls().unwrap_or_default();
+        // The capability arrives with the session; sending earlier would only
+        // fail after the draft had left the input.
+        if !controls.ready {
+            return Err(
+                "Connecting to the agent to check image support; send again when it is ready"
+                    .into(),
+            );
+        }
+        if !controls.image_prompts {
+            return Err("This agent does not accept images; remove them and send again".into());
+        }
+        mentions
+            .iter()
+            .map(|mention| {
+                self.chat_attachments
+                    .prepare(&mention.path)
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .collect()
     }
 
     /// Apply backend progress to the TUI and provide Teshi's host tools.
@@ -4103,8 +4280,7 @@ impl App {
             // A rejected send must not reappear in a later restored provider
             // context. Keep it as an editable draft for an explicit retry.
             if restore_draft {
-                self.agents[agent_idx].input_cursor = user_msg.chars().count();
-                self.agents[agent_idx].input = user_msg;
+                self.restore_ai_draft(agent_idx, &user_msg);
             }
             return Ok(false);
         }
@@ -4112,6 +4288,18 @@ impl App {
             self.status = "Queued message paused: configure an Agent before /sendqueued".into();
             return Ok(false);
         }
+        let images = match self.prepare_prompt_images(agent_idx, &user_msg) {
+            Ok(images) => images,
+            Err(reason) => {
+                self.status = reason;
+                self.set_status_message(self.status.clone());
+                // A queued message stays queued and pauses the queue instead.
+                if restore_draft {
+                    self.restore_ai_draft(agent_idx, &user_msg);
+                }
+                return Ok(false);
+            }
+        };
         self.agents[agent_idx].last_finish_reason = None;
         self.agents[agent_idx].chat.queue_ready = false;
         self.agents[agent_idx].chat.rate.clear();
@@ -4128,7 +4316,8 @@ impl App {
             activity: None,
         });
         if self.agents[agent_idx].title.starts_with("Agent ") {
-            let name = user_msg
+            let name = crate::chat_images::collapse_mentions(&user_msg, &self.project.root_dir)
+                .0
                 .chars()
                 .take(30)
                 .collect::<String>()
@@ -4160,7 +4349,8 @@ impl App {
             self.status = "AI not configured".to_string();
         } else if self.agents[agent_idx].backend.is_connected() {
             self.compact_context_if_needed(agent_idx);
-            let messages = self.build_chat_messages_for_agent(agent_idx);
+            let mut messages = self.build_chat_messages_for_agent(agent_idx);
+            attach_prompt_images(&mut messages, images, &self.project.root_dir);
             let profile = self.agent_profile(agent_idx);
             let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
                 teshi_agent::definition::ToolPermission::All => None,
@@ -7097,6 +7287,7 @@ impl App {
 
     /// Records the terminal's pixel capability detected at startup.
     pub fn set_image_support(&mut self, detection: crate::image_view::Detection) {
+        self.inline_images.set_picker(detection.picker.clone());
         self.screenshot.picker = detection.picker;
         self.screenshot.support = detection.support;
         self.screenshot.support_detail = detection.detail;
@@ -9394,12 +9585,43 @@ impl App {
             }
             Action::AiPaste(text) => {
                 self.focus_ai_input();
-                // Normalize Windows line endings
-                let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-                self.agent_mut().input.insert_str(byte_idx, &text);
-                self.agent_mut().input_cursor += text.chars().count();
+                // Terminals send an empty bracketed paste when the clipboard
+                // holds only a bitmap.
+                if text.trim().is_empty() {
+                    if !self.attach_clipboard_images() {
+                        self.insert_ai_text(&text);
+                    }
+                } else if let Some(paths) =
+                    crate::chat_images::pasted_image_paths(&text, &self.project.root_dir)
+                {
+                    self.insert_ai_images(paths);
+                } else {
+                    // Normalize Windows line endings
+                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                    self.insert_ai_text(&text);
+                }
                 self.quit_pending_confirm = false;
+            }
+            Action::AiRemoveAttachment(index) => {
+                let root = self.project.root_dir.clone();
+                let mut input = std::mem::take(&mut self.agent_mut().input);
+                if let Some(start) = crate::chat_images::remove_attachment(
+                    &mut input,
+                    &self.agent().input_images,
+                    &root,
+                    index,
+                ) {
+                    self.agent_mut().input_cursor = input[..start].chars().count();
+                    self.status = "Image removed".to_string();
+                }
+                self.agent_mut().input = input;
+                self.quit_pending_confirm = false;
+            }
+            Action::OpenImageExternally(path) => {
+                self.status = match crate::image_view::open_path_externally(&path) {
+                    Ok(()) => format!("Opened {}", crate::chat_images::display_name(&path)),
+                    Err(error) => format!("{error:#}"),
+                };
             }
             Action::AiNewline => {
                 self.focus_ai_input();
@@ -9410,13 +9632,30 @@ impl App {
             }
             Action::AiClipboardPaste => {
                 self.focus_ai_input();
-                if let Ok(mut cb) = arboard::Clipboard::new()
-                    && let Ok(text) = cb.get_text()
-                {
-                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                    let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-                    self.agent_mut().input.insert_str(byte_idx, &text);
-                    self.agent_mut().input_cursor += text.chars().count();
+                // Office and browsers put a rendered bitmap beside copied
+                // text, so text wins and only a text-less clipboard is
+                // read as images.
+                let text = arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.get_text())
+                    .ok()
+                    .filter(|text| !text.trim().is_empty());
+                match text {
+                    Some(text) => {
+                        match crate::chat_images::pasted_image_paths(&text, &self.project.root_dir)
+                        {
+                            Some(paths) => self.insert_ai_images(paths),
+                            None => {
+                                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                                self.insert_ai_text(&text);
+                            }
+                        }
+                    }
+                    None => {
+                        if !self.attach_clipboard_images() {
+                            self.status = "The clipboard holds no text or image".to_string();
+                            self.set_status_message(self.status.clone());
+                        }
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -9453,8 +9692,7 @@ impl App {
                 ) || paused_queue)
                     && !self.agent().input.trim().starts_with('/')
                 {
-                    let message = std::mem::take(&mut self.agent_mut().input);
-                    self.agent_mut().input_cursor = 0;
+                    let message = self.take_ai_draft();
                     self.agent_mut().chat.queue.push_back(message);
                     if paused_queue {
                         // A stopped turn keeps the queue paused; a new message
@@ -9468,8 +9706,7 @@ impl App {
                     return Ok(());
                 }
 
-                let user_msg = std::mem::take(&mut self.agent_mut().input);
-                self.agent_mut().input_cursor = 0;
+                let user_msg = self.take_ai_draft();
 
                 // Intercept slash commands before sending to LLM
                 if let Some(cmd) = user_msg.strip_prefix('/') {
@@ -9481,7 +9718,11 @@ impl App {
                 self.dispatch_user_message(user_msg)?;
             }
             Action::AiBackspace => {
-                if self.agent().input_cursor > 0 {
+                if let Some(range) = self.placeholder_at_cursor(true) {
+                    let removed = self.agent().input[range.clone()].chars().count();
+                    self.agent_mut().input.replace_range(range, "");
+                    self.agent_mut().input_cursor -= removed;
+                } else if self.agent().input_cursor > 0 {
                     let byte_idx =
                         char_to_byte_idx(&self.agent().input, self.agent().input_cursor - 1);
                     self.agent_mut().input.remove(byte_idx);
@@ -9499,19 +9740,27 @@ impl App {
                 }
             }
             Action::AiDelete => {
-                if self.agent().input_cursor < self.agent().input.chars().count() {
+                if let Some(range) = self.placeholder_at_cursor(false) {
+                    self.agent_mut().input.replace_range(range, "");
+                } else if self.agent().input_cursor < self.agent().input.chars().count() {
                     let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
                     self.agent_mut().input.remove(byte_idx);
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorLeft => {
-                self.agent_mut().input_cursor = self.agent().input_cursor.saturating_sub(1);
+                let step = self
+                    .placeholder_at_cursor(true)
+                    .map_or(1, |range| self.agent().input[range].chars().count());
+                self.agent_mut().input_cursor = self.agent().input_cursor.saturating_sub(step);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorRight => {
+                let step = self
+                    .placeholder_at_cursor(false)
+                    .map_or(1, |range| self.agent().input[range].chars().count());
                 let max = self.agent().input.chars().count();
-                self.agent_mut().input_cursor = (self.agent().input_cursor + 1).min(max);
+                self.agent_mut().input_cursor = (self.agent().input_cursor + step).min(max);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorUp | Action::AiCursorDown => {
@@ -13196,8 +13445,8 @@ mod tests {
     use super::{
         AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
         ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
-        MindMapFocus, ModelPanelMode, RunStatus, ViewStage, completed_assistant_responses,
-        current_step_keyword_index, replace_step_keyword_line,
+        MindMapFocus, ModelPanelMode, RunStatus, ViewStage, attach_prompt_images,
+        completed_assistant_responses, current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -15257,6 +15506,153 @@ mod tests {
             session,
             "the follow-up turn must stay in the cancelled session"
         );
+    }
+
+    #[test]
+    fn test_image_draft_waits_for_the_agent_then_sends_image_blocks() {
+        let (mut app, _project, _store) = slash_test_app();
+        configure_acp_fixture(&mut app, "images");
+        app.active_tab = MainTab::Ai;
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))
+            .save(app.project.root_dir.join("shot.png"))
+            .unwrap();
+        app.agent_mut().input = "what is on @shot.png".to_string();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(
+            app.agent().input,
+            "what is on [Image #1]",
+            "the draft stays while image support is unknown, its image as a placeholder"
+        );
+        assert!(app.status.contains("image support"), "{}", app.status);
+        wait_mcp_fixture(&mut app, |app| {
+            app.agent()
+                .backend
+                .acp_controls()
+                .is_some_and(|controls| controls.ready)
+        });
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert!(app.agent().input.is_empty(), "{}", app.status);
+        wait_mcp_fixture(&mut app, |app| {
+            app.agent()
+                .messages()
+                .iter()
+                .any(|message| message.content.contains("image/png:"))
+        });
+    }
+
+    #[test]
+    fn test_native_agent_keeps_an_image_draft_with_a_reason() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        let mut images = crate::chat_images::DraftImages::default();
+        app.agent_mut().input = format!("see {}", images.attach("shot.png".into()));
+        app.agent_mut().input_images = images;
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(app.agent().input, "see [Image #1]");
+        assert_eq!(
+            app.agent().input_images.path(1),
+            Some(app.project.root_dir.join("shot.png").as_path()),
+            "the restored draft keeps its image"
+        );
+        assert!(app.status.contains("ACP agent"), "{}", app.status);
+        assert!(
+            app.agent().messages().is_empty(),
+            "a blocked send leaves no history"
+        );
+    }
+
+    #[test]
+    fn test_prompt_images_replace_their_mentions_in_the_turn_text() {
+        let image = || crate::chat_images::PreparedImage {
+            data: std::sync::Arc::from(&b"png"[..]),
+            media_type: "image/png",
+        };
+        let turn = |text: &str| crate::llm::ChatMessage {
+            role: "user".into(),
+            content: text.to_string().into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let base = Path::new("/p");
+        let mut messages = vec![turn("what is @/p/a.png here?")];
+        attach_prompt_images(&mut messages, vec![image()], base);
+        let teshi_core::llm::MessageContent::Blocks(blocks) = &messages[0].content else {
+            panic!("an image turn is sent as blocks");
+        };
+        assert!(matches!(
+            blocks.as_slice(),
+            [
+                teshi_core::llm::ContentBlock::Text { text },
+                teshi_core::llm::ContentBlock::Image { .. },
+            ] if text == "what is here?"
+        ));
+        let mut messages = vec![turn("@/p/a.png")];
+        attach_prompt_images(&mut messages, vec![image()], base);
+        let teshi_core::llm::MessageContent::Blocks(blocks) = &messages[0].content else {
+            panic!("an image turn is sent as blocks");
+        };
+        assert!(
+            matches!(
+                blocks.as_slice(),
+                [teshi_core::llm::ContentBlock::Image { .. }]
+            ),
+            "an image-only turn has no empty text block"
+        );
+    }
+
+    #[test]
+    fn test_pasted_image_paths_become_removable_placeholders() {
+        let (mut app, _project, _store) = slash_test_app();
+        let path = app.project.root_dir.join("drop.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        app.agent_mut().input = "compare".into();
+        app.agent_mut().input_cursor = 7;
+        app.handle_action(Action::AiPaste(format!("\"{}\"", path.display())))
+            .unwrap();
+        assert_eq!(app.agent().input, "compare [Image #1] ");
+        app.handle_action(Action::AiBackspace).unwrap();
+        app.handle_action(Action::AiBackspace).unwrap();
+        assert_eq!(
+            app.agent().input,
+            "compare ",
+            "Backspace deletes a placeholder as a whole"
+        );
+        app.handle_action(Action::AiPaste(path.display().to_string()))
+            .unwrap();
+        assert_eq!(app.agent().input, "compare [Image #2] ");
+        app.active_tab = MainTab::Ai;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("▣ drop.png 3×2 1 KB ✗"), "{screen}");
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ActionButton {
+                action: Action::AiRemoveAttachment(0),
+                ..
+            }
+        )));
+        app.handle_action(Action::AiRemoveAttachment(0)).unwrap();
+        assert_eq!(app.agent().input, "compare ");
+        app.handle_action(Action::AiPaste("plain text".into()))
+            .unwrap();
+        assert_eq!(app.agent().input, "compare plain text");
     }
 
     #[test]
@@ -18975,6 +19371,8 @@ mod tests {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            inline_images: Default::default(),
+            chat_attachments: Default::default(),
             capture_index: Default::default(),
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
@@ -19176,6 +19574,8 @@ Feature: B
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            inline_images: Default::default(),
+            chat_attachments: Default::default(),
             capture_index: Default::default(),
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),

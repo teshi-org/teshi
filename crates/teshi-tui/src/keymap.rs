@@ -305,8 +305,13 @@ pub enum Action {
     AiPaste(String),
     /// Insert a literal newline into the AI input (Shift+Enter).
     AiNewline,
-    /// Paste clipboard content into the AI input (Ctrl+V).
+    /// Paste clipboard content into the AI input (Ctrl+V or Alt+V); clipboard
+    /// images are attached as `@path` mentions.
     AiClipboardPaste,
+    /// Remove the n-th image attachment from the AI input.
+    AiRemoveAttachment(usize),
+    /// Open an image from the chat or a requirement in the system viewer.
+    OpenImageExternally(std::path::PathBuf),
     /// Cancel the current AI request / tool-call loop.
     AiCancel,
     /// Esc while a turn runs: ask before interrupting (or withdraw a queued
@@ -1460,7 +1465,11 @@ impl Action {
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                 (KeyCode::Home, _) => Some(Self::AiCursorHome),
                 (KeyCode::End, _) => Some(Self::AiCursorEnd),
-                (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
+                // Windows Terminal consumes Ctrl+V and forwards nothing when the
+                // clipboard holds only a bitmap, so Alt+V reads it directly.
+                (KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    Some(Self::AiClipboardPaste)
+                }
                 (KeyCode::Char('c'), modifiers)
                     if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
                 {
@@ -3005,6 +3014,22 @@ mod tests {
             ),
             Some(Action::ReqEditIteration)
         );
+    }
+
+    #[test]
+    fn test_ai_input_reads_the_clipboard_on_ctrl_v_and_alt_v() {
+        let context = KeyContext {
+            active_tab: MainTab::Ai,
+            ai_input_focused: true,
+            ..requirements_tree_context()
+        };
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(KeyCode::Char('v'), modifiers), context),
+                Some(Action::AiClipboardPaste),
+                "{modifiers:?}+V"
+            );
+        }
     }
 
     #[test]

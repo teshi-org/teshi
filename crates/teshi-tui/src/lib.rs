@@ -6,10 +6,12 @@ mod app;
 mod auth;
 mod authoring_tab;
 mod bdd_nav;
+mod chat_images;
 mod chat_state;
 mod cli;
 mod config;
 mod diff;
+mod doc_images;
 mod editor_buffer;
 mod engine;
 mod feature_browser;
@@ -344,12 +346,28 @@ pub fn run() -> Result<()> {
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();
         app.screenshot.poll();
-        app.screenshot.prepare_frame(&mut terminal)?;
+        app.inline_images.poll();
+        if app.screenshot.prepare_frame(&mut terminal)? {
+            app.inline_images.forget_painted();
+        }
+        app.inline_images.begin_frame();
         let completed = terminal.draw(|frame| ui::render(frame, &mut app))?;
         if let Some(path) = &test_frame_path {
             // A text fragment can precede the final layout in a PTY reader.
             // Publish only after draw/flush completed and hit regions exist.
             test_frame::publish(path, &completed)?;
+        }
+        let inline_buffer = app
+            .inline_images
+            .has_work()
+            .then(|| completed.buffer.clone());
+        if let Some(buffer) = inline_buffer {
+            // Inline repairs go first so the screenshot overlay's pixels end on top.
+            app.inline_images.finish_frame(
+                terminal.backend_mut(),
+                &buffer,
+                app.screenshot.visible,
+            )?;
         }
         app.screenshot.finish_frame(&mut terminal)?;
 
@@ -357,7 +375,7 @@ pub fn run() -> Result<()> {
         // redraw per character makes pasted prompts stall as history grows.
         // Worker results and bounded pixel batches are only handled between
         // iterations, so a busy image viewer must not idle for a full tick.
-        let first_wait = if app.screenshot.is_busy() {
+        let first_wait = if app.screenshot.is_busy() || app.inline_images.is_busy() {
             Duration::from_millis(4)
         } else {
             Duration::from_millis(50)

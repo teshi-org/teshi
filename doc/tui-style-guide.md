@@ -93,6 +93,7 @@ Keep existing node text, shape, IDs, navigation, and grouping unchanged.
 | Current menu item | `◦` |
 | Checkboxes | `[*] [ ]` |
 | Tab rule | `─`, active `━` |
+| Image | Attachment, inline image, or missing image `▣` |
 
 Existing literal text and punctuation remain unchanged during migration.
 
