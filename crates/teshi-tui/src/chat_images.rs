@@ -216,15 +216,12 @@ fn flatten_on_white(image: &DynamicImage) -> RgbImage {
         return image.to_rgb8();
     }
     let rgba = image.to_rgba8();
-    if rgba
-        .as_raw()
-        .chunks_exact(4)
-        .all(|pixel| pixel[3] == u8::MAX)
-    {
+    let (pixels, _) = rgba.as_raw().as_chunks::<4>();
+    if pixels.iter().all(|pixel| pixel[3] == u8::MAX) {
         return DynamicImage::ImageRgba8(rgba).to_rgb8();
     }
     let mut rgb = Vec::with_capacity(rgba.as_raw().len() / 4 * 3);
-    for pixel in rgba.as_raw().chunks_exact(4) {
+    for pixel in pixels {
         let alpha = u16::from(pixel[3]);
         for &channel in &pixel[..3] {
             rgb.push(((u16::from(channel) * alpha + 255 * (255 - alpha)) / 255) as u8);
