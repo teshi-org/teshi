@@ -127,8 +127,10 @@ for line in sys.stdin:
         if mode == "initialize_failed":
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "init rejected"}})
         else:
-            send({"jsonrpc": "2.0", "id": message["id"], "result": {
-                "protocolVersion": 1, "agentInfo": {"name": "fake-agent"}}})
+            result = {"protocolVersion": 1, "agentInfo": {"name": "fake-agent"}}
+            if mode == "images":
+                result["agentCapabilities"] = {"promptCapabilities": {"image": True}}
+            send({"jsonrpc": "2.0", "id": message["id"], "result": result})
     elif method == "session/new":
         if mode.startswith("mcp_"):
             mcp_server = message["params"]["mcpServers"][0]
@@ -174,6 +176,18 @@ for line in sys.stdin:
             "sessionUpdate": "current_mode_update", "currentModeId": approval}}})
     elif method == "session/prompt":
         prompt_count += 1
+        if mode == "images":
+            summary = [
+                block["type"] if block["type"] == "text"
+                else "{}:{}".format(block["mimeType"], len(block["data"]))
+                for block in message["params"]["prompt"]
+            ]
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "fake-session", "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": json.dumps(summary)}}}})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
         if mode == "refusal_once":
             assert message["params"]["sessionId"] == "fake-session"
             if prompt_count == 1:

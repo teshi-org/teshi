@@ -10,14 +10,15 @@ use std::{
     thread,
 };
 
+use base64::Engine as _;
 use teshi_acp::{
-    AcpClient, AcpEvent,
+    AcpClient, AcpEvent, PromptBlock,
     client::AcpClientConfig,
     command::AcpAgentCommand,
     permission::{PermissionDecision, PermissionHost, PermissionPolicy},
 };
 use teshi_agent::backend::{AgentBackendEvent, AgentBackendStatus, PermissionChoice};
-use teshi_core::llm::{ChatMessage, ContentBlock, MessageContent};
+use teshi_core::llm::{ChatMessage, ContentBlock, ImageSource, MessageContent};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::{AiChatMessage, AiRole};
@@ -71,7 +72,7 @@ const SHUTDOWN_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_sec
 const CANCEL_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 enum WorkerCommand {
-    Prompt(String),
+    Prompt(Vec<PromptBlock>),
     Configure {
         option: Box<teshi_acp::session_config::ConfigOption>,
         value: serde_json::Value,
@@ -99,6 +100,9 @@ pub struct AcpControls {
     pub revision: u64,
     /// Effective client approval policy.
     pub policy: Option<PermissionPolicy>,
+    /// Whether the agent advertised `promptCapabilities.image`; only
+    /// meaningful once `ready` is set.
+    pub image_prompts: bool,
 }
 
 /// Bridges an ACP agent's `session/request_permission` to a synchronous
@@ -465,6 +469,16 @@ impl AcpAgentBackend {
         if self.state != AgentBackendStatus::Running {
             anyhow::bail!("ACP backend has no active turn");
         }
+        let images = prompt_images(messages);
+        if !images.is_empty() {
+            let controls = self.controls();
+            // Before the session is ready the capability is unknown; the
+            // worker's client re-checks it, so the turn fails rather than
+            // silently dropping the images.
+            if controls.ready && !controls.image_prompts {
+                anyhow::bail!("This agent does not accept images; remove them and send again");
+            }
+        }
         let mut prompt = prompt_text(system.as_deref(), messages);
         if self.tool_bridge.is_some() {
             prompt.push_str("\n\nTeshi tools are available through the teshi-authoring MCP server. Your MCP client may prefix tool names with the server name. Use its submit_requirements, propose_test_points, generate_plan, create_feature_file, insert_scenario, and validate_feature tools for this workflow. Do not replace human review with chat approval. After proposing test points, stop and wait for the user to review them in Teshi and continue generation.");
@@ -486,10 +500,12 @@ impl AcpAgentBackend {
             prompt =
                 format!("[Restored conversation history]\n{history}\n\n[Current turn]\n{prompt}");
         }
+        let mut blocks = vec![PromptBlock::Text(prompt)];
+        blocks.extend(images);
         self.commands
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ACP worker is unavailable"))?
-            .send(WorkerCommand::Prompt(prompt))
+            .send(WorkerCommand::Prompt(blocks))
             .map_err(|_| anyhow::anyhow!("ACP worker exited"))?;
         self.submitted_prompt = true;
         Ok(())
@@ -788,6 +804,31 @@ fn prompt_text(system: Option<&str>, messages: &[ChatMessage]) -> String {
     parts.join("\n\n")
 }
 
+/// Inline images of the turn's message, in order, as ACP image blocks.
+///
+/// Only the newest message is sent to a live ACP session; earlier images
+/// already belong to the agent's own history, and a restored transcript is
+/// replayed as text.
+fn prompt_images(messages: &[ChatMessage]) -> Vec<PromptBlock> {
+    let Some(MessageContent::Blocks(blocks)) = messages.last().map(|message| &message.content)
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image {
+                source: ImageSource::Data { media_type, data },
+            } => Some(PromptBlock::Image {
+                media_type: media_type.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(data),
+            }),
+            // ACP image blocks carry bytes; a remote URL has nothing to send.
+            _ => None,
+        })
+        .collect()
+}
+
 async fn run_worker(
     config: AcpBackendConfig,
     mut commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
@@ -844,10 +885,10 @@ async fn run_worker(
             .new_session_with_mcp(cwd, servers)
             .await
             .map_err(|e| format!("ACP session creation failed: {e}"))?;
-        Ok::<_, String>((session, model))
+        Ok::<_, String>((session, model, initialized.accepts_images()))
     }
     .await;
-    let (mut session, model) = match result {
+    let (mut session, model, image_prompts) = match result {
         Ok(value) => value,
         Err(error) => {
             if let Ok(mut state) = controls.lock() {
@@ -915,6 +956,7 @@ async fn run_worker(
         state.config = session.config.clone();
         state.error = preference_error;
         state.session_id = Some(session.id.clone());
+        state.image_prompts = image_prompts;
         state.ready = true;
         state.revision += 1;
     }
@@ -999,13 +1041,13 @@ async fn run_worker(
                     // Scoped so the turn future's borrow of `prompt` ends before
                     // a deferred prompt replaces it.
                     let (stop, deferred_prompt) = {
-                        let mut turn = Box::pin(client.prompt(&session, &prompt));
+                        let mut turn = Box::pin(client.prompt_blocks(&session, &prompt));
                         let mut cancelled = false;
                         // Re-armed on every cancel so an agent that ignores
                         // `session/cancel` degrades to a real teardown instead of
                         // parking the worker forever.
                         let mut cancel_deadline = tokio::time::Instant::now() + CANCEL_ACK_BUDGET;
-                        let mut deferred_prompt: Option<String> = None;
+                        let mut deferred_prompt: Option<Vec<PromptBlock>> = None;
                         let mut protocol_failed = false;
                         let mut turn_failed = false;
                         loop {

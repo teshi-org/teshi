@@ -20,6 +20,7 @@ pub mod jsonrpc;
 pub mod permission;
 mod process_tree;
 pub mod profile;
+pub mod prompt;
 pub mod registry;
 pub mod session_config;
 
@@ -31,3 +32,4 @@ pub use command::{AcpAgentCommand, CursorAcpConfig, EnvironmentRedaction, resolv
 pub use error::{AcpError, AcpResult};
 pub use permission::{PermissionDecision, PermissionHost, PermissionOption, PermissionPolicy};
 pub use profile::AcpAgentProfile;
+pub use prompt::PromptBlock;

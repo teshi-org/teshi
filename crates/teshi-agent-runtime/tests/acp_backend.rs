@@ -235,6 +235,57 @@ fn successful_session_converts_stream_and_completion() {
     assert_eq!(backend.status(), AgentBackendStatus::Completed);
 }
 
+fn image_message(text: &str) -> ChatMessage {
+    use teshi_core::llm::{ContentBlock, ImageSource, MessageContent};
+    ChatMessage::text(
+        "user",
+        MessageContent::Blocks(vec![
+            ContentBlock::Text { text: text.into() },
+            ContentBlock::Image {
+                source: ImageSource::Data {
+                    media_type: "image/png".into(),
+                    data: std::sync::Arc::from([1_u8, 2, 3]),
+                },
+            },
+        ]),
+    )
+}
+
+#[test]
+fn test_image_blocks_reach_an_agent_that_accepts_images() {
+    let mut backend = backend("images");
+    backend.connect_acp().unwrap();
+    assert!(wait_controls(&backend, |s| s.ready).image_prompts);
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![image_message("look")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    // Three bytes are four base64 characters.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content } if content == r#"["text", "image/png:4"]"#
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn test_text_only_agent_rejects_images_before_sending() {
+    let mut backend = backend("success");
+    backend.connect_acp().unwrap();
+    assert!(!wait_controls(&backend, |s| s.ready).image_prompts);
+    backend.start().unwrap();
+    let error = backend
+        .submit_turn(None, vec![image_message("look")], None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("does not accept images"),
+        "{error}"
+    );
+}
+
 fn wait_controls(
     backend: &AgentBackendRuntime,
     predicate: impl Fn(&teshi_agent_runtime::AcpControls) -> bool,
