@@ -105,9 +105,12 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
             0,
             "focus must not send a prompt"
         );
+        // Browsing the tabs must not start a process. Blur first: Esc on an
+        // idle chat asks to quit, and Enter there would confirm it.
+        terminal.key("Escape").unwrap();
         for _ in 0..2 {
-            terminal.key("Escape").unwrap();
-            terminal.key("Enter").unwrap();
+            terminal.key("1").unwrap();
+            terminal.key("3").unwrap();
         }
         assert_eq!(count_method(&trace, "spawn"), 1);
         assert_eq!(count_method(&trace, "session/prompt"), 0);
@@ -121,7 +124,6 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         terminal.key("Enter").unwrap();
         terminal.expect_text("Beta", true, 3000).unwrap();
         fs::write(output.join("model-picker.txt"), terminal.screen().unwrap()).unwrap();
-        terminal.key("Escape").unwrap();
         terminal.key("Escape").unwrap();
         terminal.key("1").unwrap();
         terminal.key("3").unwrap();
@@ -244,7 +246,8 @@ fn failed_explicit_selection_does_not_retry_while_browsing_and_can_be_reselected
         PathBuf::from(std::env::var("TESHI_ACP_DISCOVERY_ARTIFACTS").unwrap()).join("failure");
     fs::create_dir_all(&output).unwrap();
     fs::write(output.join("startup-error.txt"), terminal.screen().unwrap()).unwrap();
-    terminal.key("Escape").unwrap();
+    // Browsing must not retry the failed startup. Only ever blur: Esc on an
+    // idle chat opens the quit prompt, and a following Enter would quit.
     for _ in 0..3 {
         terminal.key("1").unwrap();
         terminal.key("3").unwrap();
