@@ -262,7 +262,10 @@ fn pane(screen: &str, start: usize, end: usize) -> String {
 /// Column where the right-hand stack starts, measured from the rendered pane
 /// borders so the assertions follow the layout instead of a fixed geometry.
 fn right_column(screen: &str) -> usize {
-    let Some(line) = screen.lines().nth(2) else {
+    let Some(line) = screen
+        .lines()
+        .find(|line| line.chars().filter(|&character| character == '╭').count() > 1)
+    else {
         return 0;
     };
     let mut boxes = line

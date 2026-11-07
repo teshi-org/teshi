@@ -18,6 +18,8 @@ pub struct KeyContext {
     pub mindmap_focus: MindMapFocus,
     pub mindmap_ai_panel_visible: bool,
     pub ai_input_focused: bool,
+    /// Whether the AI tab's Chat sidebar owns list navigation.
+    pub ai_sidebar_focused: bool,
     pub slash_suggestion_active: bool,
     /// Whether the auth management panel is currently open (as an overlay).
     pub auth_panel_active: bool,
@@ -301,6 +303,12 @@ pub enum Action {
     AiScrollTop,
     /// Jump to bottom of chat history (Ctrl+End).
     AiScrollBottom,
+    /// Scroll half a viewport up (Ctrl+U).
+    AiHalfPageUp,
+    /// Scroll half a viewport down (Ctrl+D).
+    AiHalfPageDown,
+    /// Collapse or expand the AI tab conversation sidebar (b).
+    AiToggleSidebar,
     /// Insert pasted text into the AI input buffer in one shot.
     AiPaste(String),
     /// Insert a literal newline into the AI input (Shift+Enter).
@@ -1055,6 +1063,44 @@ impl Action {
             }
         }
 
+        // A focused Chat sidebar is a conversation list: j/k switch threads and
+        // Enter/l/i hand the keyboard back to the conversation.
+        if context.ai_sidebar_focused
+            && !context.ai_input_focused
+            && context.active_tab == MainTab::Ai
+        {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPrev)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AgentNext)
+                }
+                (KeyCode::Char('['), KeyModifiers::NONE) => Some(Self::AgentPrev),
+                (KeyCode::Char(']'), KeyModifiers::NONE) => Some(Self::AgentNext),
+                (KeyCode::Enter, _)
+                | (KeyCode::Char('l'), KeyModifiers::NONE)
+                | (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::AiFocusInput),
+                (KeyCode::Esc, _) => Some(Self::FocusNextColumn),
+                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentNew),
+                (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Self::AgentClose),
+                // Raw-mode terminals deliver Ctrl+G as BEL with no modifiers.
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _) => {
+                    Some(Self::AiToggleSidebar)
+                }
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
+                _ => None,
+            };
+        }
+
         // A blurred chat is a browsing surface, independent of its host tab.
         let chat_browse = !context.ai_input_focused
             && (context.active_tab == MainTab::Ai
@@ -1073,6 +1119,13 @@ impl Action {
                 }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
                     Some(Self::AiScrollRight)
+                }
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageUp),
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageDown),
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _)
+                    if context.active_tab == MainTab::Ai =>
+                {
+                    Some(Self::AiToggleSidebar)
                 }
                 (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
                     Some(Self::AiFocusInput)
@@ -1475,6 +1528,13 @@ impl Action {
                 {
                     Some(Self::CopySelection)
                 }
+                // Ctrl+G toggles the conversation sidebar without leaving the
+                // composer; it is a control chord, not typable text.
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _)
+                    if context.active_tab == MainTab::Ai =>
+                {
+                    Some(Self::AiToggleSidebar)
+                }
                 (KeyCode::Char(ch), modifiers)
                     if !ch.is_control()
                         && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
@@ -1790,6 +1850,100 @@ mod tests {
     }
 
     #[test]
+    fn chat_half_page_and_sidebar_toggle_stay_in_browse_mode() {
+        for tab in [MainTab::Ai, MainTab::MindMap] {
+            let context = chat_context(tab, MindMapFocus::AiPanel, false);
+            for (key, expected) in [
+                (KeyCode::Char('d'), Action::AiHalfPageDown),
+                (KeyCode::Char('u'), Action::AiHalfPageUp),
+            ] {
+                assert_eq!(
+                    Action::from_key_event(KeyEvent::new(key, KeyModifiers::CONTROL), context),
+                    Some(expected)
+                );
+            }
+        }
+
+        // The sidebar only exists on the AI tab, and Ctrl+G is its toggle in
+        // every AI tab mode. A bare `b` stays available to the surface.
+        let ai = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), ai),
+            Some(Action::AiToggleSidebar)
+        );
+        // Raw-mode input can surface Ctrl+G as BEL.
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('\u{7}'), KeyModifiers::NONE),
+                ai
+            ),
+            Some(Action::AiToggleSidebar)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), ai),
+            None
+        );
+        let mindmap = chat_context(MainTab::MindMap, MindMapFocus::AiPanel, false);
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                mindmap
+            ),
+            None
+        );
+
+        // Typing keeps `b` literal, while Ctrl+G still toggles the sidebar.
+        let input = chat_context(MainTab::Ai, MindMapFocus::Main, true);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), input),
+            Some(Action::AiSendChar('b'))
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                input
+            ),
+            Some(Action::AiToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn focused_chat_sidebar_navigates_conversations_instead_of_scrolling() {
+        let context = KeyContext {
+            ai_sidebar_focused: true,
+            ..chat_context(MainTab::Ai, MindMapFocus::Main, false)
+        };
+        for (key, expected) in [
+            (KeyCode::Down, Action::AgentNext),
+            (KeyCode::Char('j'), Action::AgentNext),
+            (KeyCode::Up, Action::AgentPrev),
+            (KeyCode::Char('k'), Action::AgentPrev),
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), context),
+                Some(expected)
+            );
+        }
+        for key in [KeyCode::Enter, KeyCode::Char('l'), KeyCode::Char('i')] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), context),
+                Some(Action::AiFocusInput)
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::FocusNextColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::AiToggleSidebar)
+        );
+    }
+
+    #[test]
     fn pane_chord_has_arrow_equivalents_and_delete_confirmation_blocks_commands() {
         let context = KeyContext {
             pending_char: Some('w'),
@@ -1843,6 +1997,7 @@ mod tests {
             mindmap_focus,
             mindmap_ai_panel_visible: true,
             ai_input_focused,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2092,6 +2247,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2138,6 +2294,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2184,6 +2341,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: true,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2269,6 +2427,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2325,6 +2484,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2381,6 +2541,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2445,6 +2606,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2491,6 +2653,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2537,6 +2700,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2607,6 +2771,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2637,6 +2802,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             ..delete_context
         };
@@ -2670,6 +2836,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2840,6 +3007,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -3021,6 +3189,7 @@ mod tests {
         let context = KeyContext {
             active_tab: MainTab::Ai,
             ai_input_focused: true,
+            ai_sidebar_focused: false,
             ..requirements_tree_context()
         };
         for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
@@ -3094,6 +3263,7 @@ mod tests {
             KeyContext {
                 active_tab: MainTab::Ai,
                 ai_input_focused: true,
+                ai_sidebar_focused: false,
                 ..base
             },
             KeyContext {
@@ -3107,6 +3277,7 @@ mod tests {
                 mindmap_focus: MindMapFocus::AiPanel,
                 mindmap_ai_panel_visible: true,
                 ai_input_focused: true,
+                ai_sidebar_focused: false,
                 ..base
             },
             KeyContext {
