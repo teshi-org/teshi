@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use teshi_core::authoring::{
     legacy_project_requirements_dir, mark_document_links_missing, re_resolve_document_links,
-    requirement_title, resolve_requirement_store_path, testpoints_file, validate_loaded_artifacts,
+    requirement_title, resolve_requirement_store_path, validate_loaded_artifacts,
     validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity,
     DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
 };
@@ -447,7 +447,7 @@ pub fn load_authoring_artifacts(
             recover_requirement_store_unlocked(requirements_root)
         })?;
     }
-    let testpoints_path = testpoints_file(project_root);
+    let testpoints_path = crate::workspace::testpoints_path(project_root)?;
     let has_index = index_file.is_file();
     let has_testpoints = testpoints_path.is_file();
     let store_dir_exists = requirements_root.is_dir();
@@ -712,9 +712,10 @@ pub fn set_requirement_document_iteration(
 ///
 /// # Errors
 ///
-/// Returns an error when serialization or the atomic write fails.
+/// Returns an error when the workspace registry cannot be read, or when
+/// serialization or the atomic write fails.
 pub fn save_test_points(project_root: &Path, file: &TestPointsFile) -> Result<()> {
-    let path = testpoints_file(project_root);
+    let path = crate::workspace::testpoints_path(project_root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("create testpoints directory")?;
     }
@@ -758,6 +759,7 @@ fn refresh_link_resolutions(artifacts: &mut AuthoringArtifacts) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teshi_core::authoring::testpoints_file;
     use teshi_core::authoring::{
         HierarchyPath, QuoteSelector, RequirementDocumentMeta, RequirementLink,
         RequirementPriority, ResolutionState, ReviewState, TestPoint, TextRange,

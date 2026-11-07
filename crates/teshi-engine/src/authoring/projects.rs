@@ -24,9 +24,20 @@ pub struct RequirementProject {
 
 /// Reads a project's identity without creating files or assigning old requirements.
 ///
+/// A directory registered in a workspace reports the workspace's project id, so
+/// all members share one requirement library identity regardless of any local
+/// `.teshi/project.json`.
+///
 /// # Errors
-/// Returns malformed identity or filesystem errors; missing files return `None`.
+/// Returns malformed identity, unreadable workspace registry, or filesystem
+/// errors; missing files return `None`. A broken registry is an error rather
+/// than a fallback to the local file, which would split a workspace's identity.
 pub fn read_requirement_project(project_root: &Path) -> Result<Option<RequirementProject>> {
+    if let Some(identity) = crate::workspace::project_identity(project_root)? {
+        if let Some(id) = identity.project_id {
+            return Ok(Some(RequirementProject { id }));
+        }
+    }
     let path = project_root.join(".teshi/project.json");
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -45,13 +56,24 @@ pub fn read_requirement_project(project_root: &Path) -> Result<Option<Requiremen
 /// should create their own identity before associating requirements.
 ///
 /// # Errors
-/// Returns an error for an invalid project directory, malformed identity, or failed write.
+/// Returns an error for an invalid project directory, malformed identity, an
+/// unreadable workspace registry, or failed write.
 pub fn ensure_requirement_project(project_root: &Path) -> Result<RequirementProject> {
     if !project_root.is_dir() {
         bail!(
             "project directory does not exist: {}",
             project_root.display()
         );
+    }
+    if let Some(identity) = crate::workspace::project_identity(project_root)? {
+        if let Some(id) = identity.project_id {
+            return Ok(RequirementProject { id });
+        }
+        // The workspace owns the identity: assign and persist it there instead
+        // of writing a per-directory file that other members would not share.
+        let candidate = uuid::Uuid::new_v4().to_string();
+        let id = crate::workspace::set_project_id(&identity.workspace_id, &candidate)?;
+        return Ok(RequirementProject { id });
     }
     if let Some(project) = read_requirement_project(project_root)? {
         return Ok(project);

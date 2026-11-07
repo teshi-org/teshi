@@ -25,6 +25,10 @@ pub struct Session {
     /// Installed ACP agent ID used for this conversation.
     #[serde(default)]
     pub acp_agent_id: Option<String>,
+    /// Workspace member directory the conversation ran in; absent when it ran
+    /// in the project root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_dir: Option<PathBuf>,
     /// Unsent drafts survive restart, but are never automatically sent on restore.
     #[serde(default)]
     pub pending_messages: std::collections::VecDeque<String>,
@@ -63,6 +67,7 @@ impl Session {
             project_root: None,
             backend_kind: None,
             acp_agent_id: None,
+            member_dir: None,
             pending_messages: Default::default(),
         }
     }

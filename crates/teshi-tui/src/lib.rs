@@ -246,6 +246,9 @@ pub fn run() -> Result<()> {
                 requirements_root.as_deref(),
             );
         }
+        Some(cli::Command::Workspace { action }) => {
+            return cli::workspace::handle_workspace_command(&action);
+        }
         Some(cli::Command::Tui {
             path,
             scenario,

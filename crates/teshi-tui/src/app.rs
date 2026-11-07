@@ -163,6 +163,10 @@ pub struct AgentThread {
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
     /// Finish reason from the most recent production model response.
     pub last_finish_reason: Option<String>,
+    /// Workspace member directory this conversation runs in; `None` means the
+    /// open project root. Fixed once the backend process has started, because
+    /// an ACP agent's cwd cannot change afterwards.
+    pub(crate) member_dir: Option<std::path::PathBuf>,
     saved_session: Option<crate::session::Session>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
@@ -307,6 +311,7 @@ impl AgentThread {
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
+            member_dir: None,
             saved_session: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
@@ -356,6 +361,7 @@ impl AgentThread {
             &self.selected_acp_id,
             &model,
             project,
+            &self.member_dir,
         ))?;
         if snapshot == self.last_session_snapshot {
             return Ok(());
@@ -375,6 +381,7 @@ impl AgentThread {
         }
         session.backend_kind = Some(self.backend_kind());
         session.acp_agent_id = self.selected_acp_id.clone();
+        session.member_dir = self.member_dir.clone();
         session.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -820,10 +827,36 @@ pub(crate) struct ExploreColumnViewport {
     pub(crate) last_owner: Option<(usize, Option<usize>, Option<usize>)>,
 }
 
+/// Inputs that decide whether the cached workspace context is still valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceContextKey {
+    dir: PathBuf,
+    registry_modified: Option<std::time::SystemTime>,
+}
+
+/// Whether one conversation still owns live work: a turn, a pending approval,
+/// or a backend process that has not finished shutting down.
+fn agent_busy(agent: &AgentThread) -> bool {
+    agent.shutdown_pending()
+        || matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
+        || matches!(
+            agent.backend.status(),
+            teshi_agent::backend::AgentBackendStatus::Running
+                | teshi_agent::backend::AgentBackendStatus::WaitingForPermission
+                | teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
+        )
+}
+
 /// Application state shared by the terminal views and input handlers.
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
+    /// Workspace membership of `project.root_dir`, cached per directory and
+    /// registry version.
+    workspace_context: Option<(
+        WorkspaceContextKey,
+        Option<teshi_engine::workspace::WorkspaceContext>,
+    )>,
     /// Optional Git status/diff projection aligned with `project.features`.
     pub git_status: teshi_core::git::FeatureGitStatusModel,
     /// Latest background Git projection result, if a refresh is in flight.
@@ -1374,16 +1407,7 @@ impl App {
         self.runner_rx.is_some()
             || self.explore_state.is_some()
             || self.generation_stage != teshi_agent::pipeline::GenerationStage::Idle
-            || self.agents.iter().any(|agent| {
-                agent.shutdown_pending()
-                    || matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
-                    || matches!(
-                        agent.backend.status(),
-                        teshi_agent::backend::AgentBackendStatus::Running
-                            | teshi_agent::backend::AgentBackendStatus::WaitingForPermission
-                            | teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
-                    )
-            })
+            || self.agents.iter().any(agent_busy)
     }
 
     /// Start a safe project switch. Preparation is detached from the active
@@ -2141,6 +2165,7 @@ impl App {
             )
         };
         let mut app = Self {
+            workspace_context: None,
             project,
             git_status,
             git_status_rx: None,
@@ -2346,6 +2371,7 @@ impl App {
         let project_identity = teshi_engine::ProjectIdentity::new(&project_root)
             .context("resolve project identity")?;
         let mut app = Self {
+            workspace_context: None,
             project,
             git_status,
             git_status_rx: None,
@@ -2537,6 +2563,7 @@ impl App {
         let mut mindmap_index = mindmap::build_index(&project);
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
         let mut app = Self {
+            workspace_context: None,
             project,
             git_status: teshi_core::git::FeatureGitStatusModel::default(),
             git_status_rx: None,
@@ -3210,7 +3237,7 @@ impl App {
             && self.agents[agent_idx].backend.status()
                 == teshi_agent::backend::AgentBackendStatus::Unavailable
         {
-            let cwd = self.find_project_dir().to_path_buf();
+            let cwd = self.agent_dir(agent_idx).to_path_buf();
             let command = if let Some(id) = self.agents[agent_idx].selected_acp_id.as_ref() {
                 let root = self.agents[agent_idx]
                     .selection_root
@@ -3249,6 +3276,13 @@ impl App {
                     )),
                 }
             };
+            // Workspace context travels with the agent process: it explains which
+            // member directory the session works in and what siblings share it.
+            let workspace_env = teshi_engine::workspace::agent_env(self.agent_dir(agent_idx));
+            let command = command.map(|mut command| {
+                command.env.extend(workspace_env);
+                command
+            });
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
                 config.tool_bridge = Some(teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
@@ -3398,9 +3432,113 @@ impl App {
             .unwrap_or_else(|| self.agent_registry.default())
     }
 
+    /// Binds the selected agent to the next member of the project's workspace.
+    ///
+    /// Members cycle in registration order and wrap around. Only the selected
+    /// conversation moves; other agents keep running in their own members, which
+    /// is what lets several worktrees progress in parallel from one TUI. A
+    /// conversation that already has history stays where it is, because its
+    /// agent process and transcript are tied to that directory.
+    fn bind_agent_to_next_workspace_member(&mut self) -> Result<()> {
+        let idx = self.selected_agent;
+        let current = self.agent_dir(idx).to_path_buf();
+        let root = teshi_engine::workspace::workspaces_dir(None)?;
+        let registry = teshi_engine::workspace::load_registry(&root)?;
+        let Some(workspace) = teshi_engine::workspace::workspace_for_path(&registry, &current)
+        else {
+            self.status = format!("{} belongs to no workspace", current.display());
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        };
+        if workspace.members.len() < 2 {
+            self.status = format!("Workspace {} has a single member", workspace.name);
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        }
+        let agent = &self.agents[idx];
+        if agent_busy(agent) || !agent.messages().is_empty() || !agent.chat.queue.is_empty() {
+            self.status = format!(
+                "{} already works in this member; press a for a new agent in another member",
+                agent.title
+            );
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        }
+        // `workspace_for_path` matched, so the normalized lookup finds the member;
+        // a raw `==` on the path could miss it and "switch" to the same member.
+        let Some(index) = workspace.member_for_path(&current).and_then(|found| {
+            workspace
+                .members
+                .iter()
+                .position(|member| member.path == found.path)
+        }) else {
+            return Ok(());
+        };
+        let next = workspace.members[(index + 1) % workspace.members.len()].clone();
+        let project_member = workspace
+            .member_for_path(&self.project.root_dir)
+            .map(|member| member.path.clone());
+        let agent = &mut self.agents[idx];
+        // The project root is the implicit default, so binding back to it
+        // clears the override instead of pinning the path.
+        agent.member_dir = (project_member.as_ref() != Some(&next.path)).then(|| next.path.clone());
+        // A connected but unused backend was spawned in the old directory;
+        // restart it so the next prompt runs in the new member.
+        if agent.backend.is_connected() {
+            let kind = agent.backend.kind();
+            agent.replace_backend(kind);
+            if self.ai_input_focused {
+                self.focus_ai_input();
+            }
+        }
+        let label = match &next.branch {
+            Some(branch) => format!("{} @ {branch}", next.name),
+            None => next.name.clone(),
+        };
+        self.status = format!("{} now works in {label}", self.agents[idx].title);
+        self.set_status_message(self.status.clone());
+        Ok(())
+    }
+
     /// Try to find a sensible project root directory.
     pub(crate) fn find_project_dir(&self) -> &Path {
         &self.project.root_dir
+    }
+
+    /// Working directory of one agent conversation: its workspace member, or
+    /// the open project root when it is not bound to a member.
+    pub(crate) fn agent_dir(&self, agent_idx: usize) -> &Path {
+        self.agents
+            .get(agent_idx)
+            .and_then(|agent| agent.member_dir.as_deref())
+            .unwrap_or(&self.project.root_dir)
+    }
+
+    /// Workspace membership of the selected agent's directory.
+    ///
+    /// Cached per directory and registry modification time, so rendering only
+    /// stats the registry each frame; selecting another agent, rebinding it, or
+    /// a CLI `attach` / `archive` refreshes the cache.
+    pub(crate) fn workspace_context(
+        &mut self,
+    ) -> Option<&teshi_engine::workspace::WorkspaceContext> {
+        let key = WorkspaceContextKey {
+            dir: self.agent_dir(self.selected_agent).to_path_buf(),
+            registry_modified: teshi_engine::workspace::workspaces_dir(None)
+                .ok()
+                .and_then(|root| teshi_engine::workspace::registry_modified(&root)),
+        };
+        let stale = self
+            .workspace_context
+            .as_ref()
+            .is_none_or(|(cached, _)| cached != &key);
+        if stale {
+            let context = teshi_engine::workspace::context(&key.dir);
+            self.workspace_context = Some((key, context));
+        }
+        self.workspace_context
+            .as_ref()
+            .and_then(|(_, context)| context.as_ref())
     }
 
     fn insert_ai_text(&mut self, text: &str) {
@@ -9822,6 +9960,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiOpenAgentSelector => self.execute_slash_command("agent")?,
+            Action::WorkspaceNextMember => self.bind_agent_to_next_workspace_member()?,
             Action::AiToggleTurn(start) => {
                 self.agent_mut().chat.revision += 1;
                 let default = self.agent().activity_details_expanded;
@@ -13198,9 +13337,11 @@ impl App {
         let id = self.agent().id;
         let title = self.agent().title.clone();
         let profile_id = self.agent().profile_id.clone();
+        let member_dir = self.agent().member_dir.clone();
         let root = self.agent().selection_root.clone();
         *self.agent_mut() = AgentThread::new_with_selection(id, &title, root);
         self.agent_mut().profile_id = profile_id;
+        self.agent_mut().member_dir = member_dir;
         self.status = "New session started".to_string();
         if self.ai_input_focused {
             self.focus_ai_input();
@@ -13398,6 +13539,9 @@ impl App {
         );
         *agent.messages_mut() = session.messages.clone();
         agent.selected_acp_id = session.acp_agent_id.clone();
+        // An archived worktree no longer exists; resuming there would fail to
+        // spawn the agent, so fall back to the project root.
+        agent.member_dir = session.member_dir.clone().filter(|dir| dir.is_dir());
         agent.backend_selected = session.backend_kind.is_some();
         agent.acp_controls_ui = Default::default();
         agent.chat = crate::chat_state::ChatState {
@@ -13739,6 +13883,106 @@ mod tests {
         )
         .unwrap();
         (app, project, store)
+    }
+
+    /// Runs `f` with `TESHI_WORKSPACES_DIR` pointing at a temporary registry,
+    /// restoring the previous value even if `f` panics.
+    fn with_workspaces_dir(f: impl FnOnce(&Path)) {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let key = teshi_engine::workspace::WORKSPACES_DIR_ENV;
+                // SAFETY: serialized by ENV_LOCK, which outlives this guard.
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = tempdir().unwrap();
+        let key = teshi_engine::workspace::WORKSPACES_DIR_ENV;
+        let _restore = Restore(std::env::var_os(key));
+        // SAFETY: serialized by ENV_LOCK; restored by `_restore`.
+        unsafe { std::env::set_var(key, registry.path()) };
+        f(registry.path());
+    }
+
+    #[test]
+    fn workspace_badge_binds_only_the_selected_agent_to_the_next_member() {
+        with_workspaces_dir(|registry| {
+            let (mut app, project, _store) = slash_test_app();
+            let sibling = tempdir().unwrap();
+            let workspace = teshi_engine::workspace::create_workspace(
+                registry,
+                "demo",
+                &[project.path().to_path_buf(), sibling.path().to_path_buf()],
+            )
+            .unwrap();
+            let sibling_path = workspace.members[1].path.clone();
+
+            app.handle_action(Action::WorkspaceNextMember).unwrap();
+            assert_eq!(
+                app.agent().member_dir.as_deref(),
+                Some(sibling_path.as_path()),
+                "first click binds the agent to the sibling member"
+            );
+            assert_eq!(app.agent_dir(0), sibling_path.as_path());
+
+            app.handle_action(Action::AgentNew).unwrap();
+            assert_eq!(
+                app.agent().member_dir,
+                None,
+                "a new agent starts in the project root"
+            );
+            assert_eq!(
+                app.agents[0].member_dir.as_deref(),
+                Some(sibling_path.as_path()),
+                "other agents keep their member"
+            );
+
+            app.selected_agent = 0;
+            app.handle_action(Action::WorkspaceNextMember).unwrap();
+            assert_eq!(
+                app.agent().member_dir,
+                None,
+                "cycling back to the project member clears the override"
+            );
+        });
+    }
+
+    #[test]
+    fn workspace_badge_keeps_an_agent_with_history_in_its_member() {
+        with_workspaces_dir(|registry| {
+            let (mut app, project, _store) = slash_test_app();
+            let sibling = tempdir().unwrap();
+            teshi_engine::workspace::create_workspace(
+                registry,
+                "demo",
+                &[project.path().to_path_buf(), sibling.path().to_path_buf()],
+            )
+            .unwrap();
+            app.agent_mut().messages_mut().push(AiChatMessage {
+                role: AiRole::User,
+                content: "hello".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            });
+
+            app.handle_action(Action::WorkspaceNextMember).unwrap();
+            assert_eq!(
+                app.agent().member_dir,
+                None,
+                "a conversation with history must not move"
+            );
+            assert!(app.status.contains("new agent"), "status: {}", app.status);
+        });
     }
 
     #[test]
@@ -19320,6 +19564,7 @@ mod tests {
         let tree_state = crate::mindmap::init_tree_state(&mut mindmap_index);
 
         let mut app = App {
+            workspace_context: None,
             project,
             git_status: teshi_core::git::FeatureGitStatusModel::default(),
             git_status_rx: None,
@@ -19523,6 +19768,7 @@ Feature: B
         let tree_state = crate::mindmap::init_tree_state(&mut mindmap_index);
 
         let mut app = App {
+            workspace_context: None,
             project,
             git_status: teshi_core::git::FeatureGitStatusModel::default(),
             git_status_rx: None,

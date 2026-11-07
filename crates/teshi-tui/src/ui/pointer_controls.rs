@@ -84,10 +84,19 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
             AiStatus::Error => ("●", theme::ERROR),
             AiStatus::Idle => ("○", theme::MUTED),
         };
-        let line = Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!(" {dot} "), Style::default().fg(color)),
             Span::raw(agent.title.clone()),
-        ]);
+        ];
+        // Agents in another worktree are told apart by their directory name;
+        // the full `member @ branch` label is on the composer border.
+        if let Some(name) = agent.member_dir.as_deref().and_then(|dir| dir.file_name()) {
+            spans.push(Span::styled(
+                format!(" {}", name.to_string_lossy()),
+                theme::muted(),
+            ));
+        }
+        let line = Line::from(spans);
         lines.push(if index == app.selected_agent {
             line.style(Style::default().bg(theme::CHAT_CHIP_BG).fg(theme::FG))
         } else {

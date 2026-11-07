@@ -134,6 +134,7 @@ pub(crate) fn category(name: &str) -> &'static str {
         | "read_feature"
         | "get_requirements"
         | "get_project_info"
+        | "get_workspace_info"
         | "get_feature_content"
         | "list_requirement_documents"
         | "read_requirement_document" => "reads",
@@ -227,6 +228,7 @@ pub(crate) fn native_summary(call: &ToolCall) -> String {
                 .map(|p| format!(": {}", scalar(p)))
                 .unwrap_or_default()
         )),
+        "get_workspace_info" => Some("Inspected workspace".into()),
         "submit_requirements" => Some("Submitted requirement draft".into()),
         "propose_test_points" => Some("Proposed test points".into()),
         "generate_plan" => Some("Prepared feature generation plan".into()),
