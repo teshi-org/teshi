@@ -29,7 +29,7 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             Action::AiFocusInput,
         )
     };
-    let controls = vec![
+    let mut controls = vec![
         first,
         (
             if compact { " Blur" } else { " Blur [Esc]" },
@@ -43,11 +43,14 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             },
             Action::ModelPanelOpen,
         ),
-        (
+    ];
+    // The toggle only advertises a surface this terminal can actually show.
+    if super::ai_sidebar_width(frame.area().width).is_some() {
+        controls.push((
             if compact { " Chats" } else { " Chats [Ctrl+g]" },
             Action::AiToggleSidebar,
-        ),
-    ];
+        ));
+    }
     let mode = if app.ai_sidebar_focused {
         "[CHATS] "
     } else if app.ai_input_focused {

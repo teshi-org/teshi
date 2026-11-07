@@ -247,9 +247,8 @@ fn step_line_display(
 /// Workspace identity pinned to the right of the tab row: project name, then
 /// build version.
 ///
-/// Both are secondary chrome, so they yield from the right edge inward: the
-/// project label is dropped first on narrow terminals, then the version is
-/// clipped to the remaining room.
+/// The project label is the only affordance for the switcher, so it keeps the
+/// row; the version yields entirely when the two cannot share it.
 fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
     let tabs_end = app
         .clickable_regions
@@ -267,23 +266,24 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
     }
 
     let version_text = format!("v{}", app.version);
-    let version_width = if app.version.is_empty() {
-        0
-    } else {
-        (version_text.width() as u16).min(room)
-    };
-    let version_x = row.right() - version_width;
-
-    const META_GAP: u16 = 1;
     let project_label = format!(
         " Project: {} ",
         app.project_switch.active.identity.display_name()
     );
+    const META_GAP: u16 = 1;
+    let version_width = if app.version.is_empty() {
+        0
+    } else {
+        version_text.width() as u16
+    };
+    let project_width = project_label.width() as u16;
+    let show_version = version_width > 0 && project_width + META_GAP + version_width <= room;
+    let version_width = if show_version { version_width } else { 0 };
     let project_room = room.saturating_sub(version_width).saturating_sub(META_GAP);
-    let project_width = (project_label.width() as u16).min(project_room);
+    let project_width = project_width.min(project_room);
     if project_width > 0 {
         let rect = Rect::new(
-            version_x - META_GAP - project_width,
+            row.right() - version_width - project_width,
             row.y,
             project_width,
             1,
@@ -300,7 +300,7 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
             Paragraph::new(version_text)
                 .style(theme::muted())
                 .alignment(Alignment::Right),
-            Rect::new(version_x, row.y, version_width, 1),
+            Rect::new(row.right() - version_width, row.y, version_width, 1),
         );
     }
 }
@@ -865,7 +865,7 @@ const AI_SIDEBAR_MAX_WIDTH: u16 = 30;
 const AI_CHAT_MIN_WIDTH: u16 = 50;
 
 /// Resolve the sidebar width, or `None` when the chat should own the row.
-fn ai_sidebar_width(panel_width: u16) -> Option<u16> {
+pub(super) fn ai_sidebar_width(panel_width: u16) -> Option<u16> {
     if panel_width < AI_SIDEBAR_MIN_PANEL_WIDTH {
         return None;
     }
@@ -6838,19 +6838,19 @@ mod truncate_tests {
             "the version sits in the corner"
         );
 
-        // A narrow row drops the project label before it clips the version.
+        // A narrow row keeps the project control and drops the version.
         let mut narrow = Terminal::new(TestBackend::new(120, 24)).unwrap();
         narrow.draw(|frame| render(frame, &mut app)).unwrap();
         let row: String = (0..120)
             .map(|x| narrow.backend().buffer()[(x, 0)].symbol())
             .collect();
-        assert!(!row.contains("Project:"), "{row}");
-        assert!(row.contains("v0.7.10-local"), "{row}");
+        assert!(row.contains("Project: "), "{row}");
+        assert!(!row.contains("v0.7.10-local"), "{row}");
         assert!(
-            !app.clickable_regions
+            app.clickable_regions
                 .iter()
                 .any(|region| matches!(region, ClickableRegion::ProjectControl { .. })),
-            "a label that is not on screen cannot take clicks"
+            "the project label stays clickable when the version yields"
         );
     }
 
