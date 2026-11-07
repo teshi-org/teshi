@@ -3075,6 +3075,7 @@ mod pipeline_gate_tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
+            ai_sidebar_focused: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,

@@ -1016,6 +1016,12 @@ pub struct App {
     pub slash_suggestion_selection: usize,
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
     pub ai_input_focused: bool,
+    /// Whether the AI tab hides its conversation sidebar so the chat owns the row.
+    pub ai_sidebar_collapsed: bool,
+    /// Whether the Chat sidebar is the focused pane on the AI tab.
+    pub ai_sidebar_focused: bool,
+    /// Whether the last frame actually drew the sidebar (width permitting).
+    pub ai_sidebar_visible: bool,
     pub quit_pending_confirm: bool,
     /// Which button is focused in quit confirm panel: 0 = Yes, 1 = No.
     pub quit_panel_selection: usize,
@@ -2275,6 +2281,9 @@ impl App {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            ai_sidebar_collapsed: false,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
@@ -2413,6 +2422,9 @@ impl App {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            ai_sidebar_collapsed: false,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -2605,6 +2617,9 @@ impl App {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            ai_sidebar_collapsed: false,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -3340,6 +3355,7 @@ impl App {
 
     fn focus_ai_input(&mut self) {
         self.ai_input_focused = true;
+        self.ai_sidebar_focused = false;
         self.agent_mut().backend_selected = true;
         // Focusing prepares a connection, not a turn. It must never reset an
         // active response or send an empty prompt, including on repeated clicks.
@@ -10002,6 +10018,20 @@ impl App {
             Action::AiScrollBottom => {
                 self.agent_mut().scroll_offset = 0;
             }
+            Action::AiHalfPageUp => self.scroll_chat_half_page(true),
+            Action::AiHalfPageDown => self.scroll_chat_half_page(false),
+            Action::AiToggleSidebar => {
+                self.ai_sidebar_collapsed = !self.ai_sidebar_collapsed;
+                if self.ai_sidebar_collapsed {
+                    self.ai_sidebar_focused = false;
+                }
+                self.status = if self.ai_sidebar_collapsed {
+                    "Chat sidebar hidden".to_string()
+                } else {
+                    "Chat sidebar shown".to_string()
+                };
+                self.quit_pending_confirm = false;
+            }
             Action::AiSlashPrev => {
                 self.slash_suggestion_selection = self.slash_suggestion_selection.saturating_sub(1);
                 self.quit_pending_confirm = false;
@@ -10193,6 +10223,8 @@ impl App {
                     self.status = format!("Switched to {}", self.agent().title);
                     if self.ai_input_focused {
                         self.focus_ai_input();
+                    } else if self.ai_sidebar_visible {
+                        self.ai_sidebar_focused = true;
                     }
                 }
                 self.quit_pending_confirm = false;
@@ -10553,6 +10585,12 @@ impl App {
                     self.ai_input_focused = false;
                 }
             }
+            // The AI tab has [Chats | chat] when the sidebar is on screen.
+            // Focus stops at the edges, like the other tabs.
+            MainTab::Ai if self.ai_sidebar_visible => {
+                self.ai_input_focused = false;
+                self.ai_sidebar_focused = !next;
+            }
             MainTab::Ai | MainTab::MindMap | MainTab::Explore => {}
         }
         self.quit_pending_confirm = false;
@@ -10570,6 +10608,7 @@ impl App {
         }
         self.test_points_ui.editing = false;
         self.clear_chat_selection();
+        self.ai_sidebar_focused = false;
         if self.active_tab == MainTab::Requirements
             && self.authoring_ui.guard_unsaved(
                 crate::authoring_tab::RequirementsPendingAction::Action(Action::SelectTab(tab)),
@@ -10787,6 +10826,19 @@ impl App {
             && (self.active_tab == MainTab::Ai
                 || (self.active_tab == MainTab::MindMap
                     && self.mindmap_focus == MindMapFocus::AiPanel))
+    }
+
+    /// Move the chat by half of the last rendered viewport, mirroring Ctrl+D/U.
+    fn scroll_chat_half_page(&mut self, up: bool) {
+        let rows = self
+            .chat_history_rect
+            .map_or(10, |rect| (rect.height as usize / 2).max(1));
+        let offset = self.agent().scroll_offset;
+        self.agent_mut().scroll_offset = if up {
+            offset.saturating_add(rows)
+        } else {
+            offset.saturating_sub(rows)
+        };
     }
 
     fn navigate_boundary(&mut self, end: bool) -> Result<()> {
@@ -14140,6 +14192,150 @@ mod tests {
         app.handle_action(Action::RequestQuit).unwrap();
         app.handle_action(Action::Quit).unwrap();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ai_tab_sidebar_is_proportional_and_collapses_to_full_width() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = false;
+        app.agents[0].status = AiStatus::Idle;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let expanded_x = app.chat_history_rect.expect("chat renders").x;
+        assert!(
+            expanded_x >= 30,
+            "the sidebar takes a proportional share, chat starts at {expanded_x}"
+        );
+        assert!(app.ai_sidebar_visible);
+
+        app.handle_action(Action::AiToggleSidebar).unwrap();
+        assert!(app.ai_sidebar_collapsed);
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(app.chat_history_rect.expect("chat renders").x, 2);
+        assert!(screen.contains("chats hidden [Ctrl+g]"), "{screen}");
+        assert!(
+            !app.clickable_regions.iter().any(|region| matches!(
+                region,
+                ClickableRegion::ActionButton {
+                    action: Action::AgentSelect(_),
+                    ..
+                }
+            )),
+            "the collapsed sidebar leaves no hit targets"
+        );
+
+        // Below 90 columns the sidebar never squeezes the conversation.
+        app.ai_sidebar_collapsed = false;
+        let mut narrow = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        narrow
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(app.chat_history_rect.expect("chat renders").x, 2);
+        assert!(!app.ai_sidebar_visible);
+    }
+
+    #[test]
+    fn ctrl_w_moves_focus_between_the_chat_sidebar_and_the_chat() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = false;
+        app.ai_sidebar_visible = true;
+
+        app.handle_action(Action::FocusPrevColumn).unwrap();
+        assert!(app.ai_sidebar_focused);
+        assert!(!app.ai_input_focused);
+
+        // Moving left again stops at the edge, like every other pane row.
+        app.handle_action(Action::FocusPrevColumn).unwrap();
+        assert!(app.ai_sidebar_focused);
+
+        app.handle_action(Action::FocusNextColumn).unwrap();
+        assert!(!app.ai_sidebar_focused);
+        app.handle_action(Action::FocusNextColumn).unwrap();
+        assert!(!app.ai_sidebar_focused);
+
+        // Focusing the composer leaves the list, and hiding the list drops focus.
+        app.handle_action(Action::FocusPrevColumn).unwrap();
+        app.handle_action(Action::AiFocusInput).unwrap();
+        assert!(!app.ai_sidebar_focused);
+        app.ai_sidebar_focused = true;
+        app.handle_action(Action::AiToggleSidebar).unwrap();
+        assert!(app.ai_sidebar_collapsed);
+        assert!(!app.ai_sidebar_focused);
+
+        // A sidebar that is not on screen cannot take focus.
+        app.ai_sidebar_collapsed = false;
+        app.ai_sidebar_visible = false;
+        app.handle_action(Action::FocusPrevColumn).unwrap();
+        assert!(!app.ai_sidebar_focused);
+    }
+
+    #[test]
+    fn ai_chat_panel_border_marks_which_pane_owns_focus() {
+        use crate::theme;
+
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = false;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let history = app.chat_history_rect.expect("chat renders");
+        // The frame corner sits one cell outside the padded transcript.
+        let corner = (history.x - 2, history.y - 1);
+        assert_eq!(
+            terminal.backend().buffer()[corner].fg,
+            theme::PRIMARY,
+            "the chat pane outlines itself while it owns the keyboard"
+        );
+
+        app.ai_sidebar_focused = true;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[corner].fg,
+            theme::BORDER,
+            "the sidebar takes the outline when it owns the keyboard"
+        );
+
+        // A live composer draws the outline itself; the frame stays quiet.
+        app.ai_sidebar_focused = false;
+        app.ai_input_focused = true;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[corner].fg, theme::BORDER);
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_move_half_the_rendered_chat_viewport() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.chat_history_rect = Some(Rect::new(0, 0, 80, 20));
+        app.agent_mut().scroll_offset = 0;
+        app.handle_action(Action::AiHalfPageUp).unwrap();
+        assert_eq!(app.agent().scroll_offset, 10);
+        app.handle_action(Action::AiHalfPageDown).unwrap();
+        assert_eq!(app.agent().scroll_offset, 0);
+        app.agent_mut().scroll_offset = 4;
+        app.handle_action(Action::AiHalfPageDown).unwrap();
+        assert_eq!(app.agent().scroll_offset, 0);
     }
 
     #[test]
@@ -18953,9 +19149,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_click_moves_underline_to_registered_title() {
+    fn test_tab_click_highlights_the_registered_title() {
         let mut app = App::from_args().expect("app init should work");
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
@@ -18968,14 +19164,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(regions.len(), 5);
-        let project_control = app
-            .clickable_regions
-            .iter()
-            .find_map(|region| match region {
-                ClickableRegion::ProjectControl { rect } => Some(*rect),
-                _ => None,
-            });
-        for (tab, rect) in regions {
+        assert!(
+            app.clickable_regions
+                .iter()
+                .any(|region| matches!(region, ClickableRegion::ProjectControl { .. })),
+            "a wide tab row keeps the project control clickable"
+        );
+        for &(tab, rect) in &regions {
             app.handle_mouse_event(
                 MouseEventKind::Down(MouseButton::Left),
                 rect.x + rect.width / 2,
@@ -18988,24 +19183,14 @@ mod tests {
                 .draw(|frame| crate::ui::render(frame, &mut app))
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            for x in 0..83 {
-                if project_control
-                    .is_some_and(|control| control.contains(ratatui::layout::Position::new(x, 1)))
-                {
-                    continue;
-                }
-                assert_eq!(
-                    buffer[(x, 1)].symbol(),
-                    if (rect.x..rect.right()).contains(&x) {
-                        "━"
-                    } else {
-                        "─"
-                    },
-                    "tab {tab:?}, column {x}"
-                );
-                if (rect.x..rect.right()).contains(&x) {
-                    assert_eq!(buffer[(x, 1)].fg, crate::theme::PRIMARY);
-                    assert_eq!(buffer[(x, 0)].bg, crate::theme::TAB_ACTIVE_BG);
+            for &(other, other_rect) in &regions {
+                let active = other == tab;
+                for x in other_rect.x..other_rect.right() {
+                    assert_eq!(
+                        buffer[(x, other_rect.y)].bg == crate::theme::TAB_ACTIVE_BG,
+                        active,
+                        "tab {other:?} when {tab:?} is selected, column {x}"
+                    );
                 }
             }
         }
@@ -19669,6 +19854,9 @@ mod tests {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            ai_sidebar_collapsed: false,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
@@ -19873,6 +20061,9 @@ Feature: B
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            ai_sidebar_collapsed: false,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,

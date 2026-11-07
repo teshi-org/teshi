@@ -354,15 +354,11 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
     let terminal = fixture.launch();
     terminal.key("4").unwrap();
     terminal.expect_text("# Req 01", true, 10000).unwrap();
-    let tree_border = terminal
-        .screen()
-        .unwrap()
+    let screen = terminal.screen().unwrap();
+    let tree_border = screen
         .lines()
-        .nth(2)
-        .unwrap()
-        .chars()
-        .position(|ch| ch == '╮')
-        .unwrap()
+        .find_map(|line| line.chars().position(|ch| ch == '╮'))
+        .expect("the tree pane draws a top border")
         + 1;
     capture(&terminal, "requirements-initial");
     for _ in 0..9 {

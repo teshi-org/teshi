@@ -244,6 +244,67 @@ fn step_line_display(
     (out, pad, pad_start)
 }
 
+/// Workspace identity pinned to the right of the tab row: project name, then
+/// build version.
+///
+/// The project label is the only affordance for the switcher, so it keeps the
+/// row; the version yields entirely when the two cannot share it.
+fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
+    let tabs_end = app
+        .clickable_regions
+        .iter()
+        .filter_map(|region| match region {
+            ClickableRegion::Tab { rect, .. } => Some(rect.right()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(row.x);
+    // One column of breathing room keeps the last tab's padding intact.
+    let room = row.right().saturating_sub(tabs_end.saturating_add(1));
+    if room == 0 {
+        return;
+    }
+
+    let version_text = format!("v{}", app.version);
+    let project_label = format!(
+        " Project: {} ",
+        app.project_switch.active.identity.display_name()
+    );
+    const META_GAP: u16 = 1;
+    let version_width = if app.version.is_empty() {
+        0
+    } else {
+        version_text.width() as u16
+    };
+    let project_width = project_label.width() as u16;
+    let show_version = version_width > 0 && project_width + META_GAP + version_width <= room;
+    let version_width = if show_version { version_width } else { 0 };
+    let project_room = room.saturating_sub(version_width).saturating_sub(META_GAP);
+    let project_width = project_width.min(project_room);
+    if project_width > 0 {
+        let rect = Rect::new(
+            row.right() - version_width - project_width,
+            row.y,
+            project_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(project_label).style(theme::muted().add_modifier(Modifier::BOLD)),
+            rect,
+        );
+        app.clickable_regions
+            .push(ClickableRegion::ProjectControl { rect });
+    }
+    if version_width > 0 {
+        frame.render_widget(
+            Paragraph::new(version_text)
+                .style(theme::muted())
+                .alignment(Alignment::Right),
+            Rect::new(row.right() - version_width, row.y, version_width, 1),
+        );
+    }
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // Validate the raw editor buffer on every redraw.  The parser-backed
     // project remains permissive; these diagnostics are only an editor aid
@@ -253,18 +314,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.agent_mut().acp_controls_ui.clear_regions();
     app.chat_history_rect = None;
 
-    let chunks = Layout::default()
+    let [tabs_row, content_row, footer_row] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
-        .split(frame.area());
+        .areas(frame.area());
 
     let top_tabs = Tabs::new(
-        main_tabs(chunks[0].width)
+        main_tabs(tabs_row.width)
             .iter()
             .map(|&(_, title)| Line::from(title))
             .collect::<Vec<_>>(),
@@ -285,83 +345,21 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     )
     .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
     .divider(TAB_DIVIDER);
-    frame.render_widget(top_tabs, chunks[0]);
+    frame.render_widget(top_tabs, tabs_row);
 
-    register_tab_regions(app, chunks[0]);
+    register_tab_regions(app, tabs_row);
+    render_workspace_meta(frame, app, tabs_row);
 
-    let active_tab_rect = app
-        .clickable_regions
-        .iter()
-        .find_map(|region| match region {
-            ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
-            _ => None,
-        });
-    let version_text = format!("v{}", app.version);
-    // A long local build identity must not consume the active tab's underline.
-    // Clip only the version's viewport when both labels cannot fit on this row.
-    let version_room = active_tab_rect
-        .map(|rect| {
-            chunks[1]
-                .right()
-                .saturating_sub(rect.right().saturating_add(1))
-        })
-        .unwrap_or(chunks[1].width);
-    let version_width = (version_text.width() as u16).min(version_room);
-    frame.render_widget(
-        Paragraph::new("─".repeat(chunks[1].width as usize))
-            .style(Style::default().fg(theme::BORDER)),
-        chunks[1],
-    );
-    if let Some(rect) = active_tab_rect
-        && chunks[1].height > 0
-    {
-        frame.render_widget(
-            Paragraph::new("━".repeat(rect.width as usize))
-                .style(Style::default().fg(theme::PRIMARY)),
-            Rect::new(rect.x, chunks[1].y, rect.width, 1),
-        );
-    }
-    let project_label = format!(
-        " Project: {} ",
-        app.project_switch.active.identity.display_name()
-    );
-    let project_width = (project_label.width() as u16).min(
-        chunks[1]
-            .width
-            .saturating_sub(version_width.saturating_add(1)),
-    );
-    if project_width > 0 && chunks[1].height > 0 {
-        frame.render_widget(
-            Paragraph::new(project_label).style(theme::muted().add_modifier(Modifier::BOLD)),
-            Rect::new(chunks[1].x, chunks[1].y, project_width, 1),
-        );
-        app.clickable_regions.push(ClickableRegion::ProjectControl {
-            rect: Rect::new(chunks[1].x, chunks[1].y, project_width, 1),
-        });
-    }
-    if !app.version.is_empty() && version_width > 0 && chunks[1].height > 0 {
-        frame.render_widget(
-            Paragraph::new(version_text)
-                .style(theme::muted())
-                .alignment(Alignment::Right),
-            Rect::new(
-                chunks[1].right() - version_width,
-                chunks[1].y,
-                version_width,
-                1,
-            ),
-        );
-    }
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
-        chunks[3],
+        footer_row,
     );
     // Quit stays pinned to the bottom-right of every tab so it is always
     // discoverable and clickable. Exiting is a deliberate chord now, and the
     // label is the only place it is advertised. Tab footers render into the
     // remaining width and cannot cover the control.
     const EXIT_LABEL: &str = " ^q 退出";
-    let full_footer = chunks[3];
+    let full_footer = footer_row;
     // Very narrow terminals keep their tab footer intact: those rows already
     // shed their key hints, and the chord remains the affordance there.
     let exit_width = if full_footer.width >= 60 {
@@ -373,16 +371,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         width: full_footer.width.saturating_sub(exit_width),
         ..full_footer
     };
-    // Shadow the layout so every tab footer below renders into the narrowed
-    // row and leaves the right edge to the exit control.
-    let chunks = [chunks[0], chunks[1], chunks[2], footer];
-    render_main_panel(frame, app, chunks[2]);
+    // Every tab footer below renders into `footer`, leaving the right edge to
+    // the exit control.
+    render_main_panel(frame, app, content_row);
     render_tree_pointer_feedback(frame, app);
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
     if app.command_line.is_some() {
-        render_command_line(frame, app, chunks[3]);
+        render_command_line(frame, app, footer);
     } else if let Some(ref msg) = app.status_message {
         let status_line = Line::from(vec![Span::styled(
             msg.as_str(),
@@ -391,11 +388,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 .bg(theme::FOOTER_BG)
                 .add_modifier(Modifier::BOLD),
         )]);
-        frame.render_widget(Paragraph::new(status_line), chunks[3]);
+        frame.render_widget(Paragraph::new(status_line), footer);
     } else if app.active_tab == MainTab::Explore && !app.is_editor_active() {
-        render_explore_footer(frame, app, chunks[3]);
+        render_explore_footer(frame, app, footer);
     } else if app.active_tab == MainTab::Ai {
-        render_ai_footer(frame, app, chunks[3]);
+        render_ai_footer(frame, app, footer);
     } else if app.active_tab == MainTab::Requirements {
         use crate::authoring_tab::RequirementsEditorMode;
         let mode = match app.authoring_ui.editor_mode {
@@ -404,15 +401,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             RequirementsEditorMode::VisualChar => "[VISUAL]",
             RequirementsEditorMode::VisualLine => "[V-LINE]",
         };
-        let controls = requirements_footer_controls(&app.authoring_ui, chunks[3].width);
-        render_action_bar(frame, app, chunks[3], mode, &controls, false);
+        let controls = requirements_footer_controls(&app.authoring_ui, footer.width);
+        render_action_bar(frame, app, footer, mode, &controls, false);
     } else if app.active_tab == MainTab::TestPoints {
         let inserting = app.test_points_ui.editing;
         if inserting {
             render_action_bar(
                 frame,
                 app,
-                chunks[3],
+                footer,
                 "[INSERT] ",
                 &[
                     ("Save [Ctrl+s] ", Action::Save),
@@ -420,11 +417,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 ],
                 false,
             );
-        } else if chunks[3].width < 40 {
+        } else if footer.width < 40 {
             render_action_bar(
                 frame,
                 app,
-                chunks[3],
+                footer,
                 "",
                 &[
                     (" Save", Action::Save),
@@ -434,7 +431,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 false,
             );
         } else {
-            let compact = chunks[3].width < 100;
+            let compact = footer.width < 100;
             let controls = [
                 (
                     if compact { " Approve" } else { " Approve [a]" },
@@ -465,7 +462,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             render_action_bar(
                 frame,
                 app,
-                chunks[3],
+                footer,
                 if compact {
                     "[NORMAL] "
                 } else {
@@ -477,23 +474,23 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         }
     } else {
         let key_hints = theme::footer_line(footer_hints(app).spans);
-        let controls_width = chunks[3].width.min(31);
+        let controls_width = footer.width.min(31);
         render_action_bar(
             frame,
             app,
-            Rect::new(chunks[3].x, chunks[3].y, controls_width, chunks[3].height),
+            Rect::new(footer.x, footer.y, controls_width, footer.height),
             "",
             &[(" Save", Action::Save), (" Model", Action::ModelPanelOpen)],
             false,
         );
-        if chunks[3].width > controls_width {
+        if footer.width > controls_width {
             frame.render_widget(
                 Paragraph::new(key_hints),
                 Rect::new(
-                    chunks[3].x + controls_width,
-                    chunks[3].y,
-                    chunks[3].width - controls_width,
-                    chunks[3].height,
+                    footer.x + controls_width,
+                    footer.y,
+                    footer.width - controls_width,
+                    footer.height,
                 ),
             );
         }
@@ -548,10 +545,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         // Modal rendering replaces the interactive layer, not just its pixels.
         app.clickable_regions.clear();
     }
-    render_external_change_prompt(frame, app, chunks[2]);
+    render_external_change_prompt(frame, app, content_row);
 
     // Change Summary overlay (MindMap tab)
-    render_change_summary_panel(frame, app, chunks[2]);
+    render_change_summary_panel(frame, app, content_row);
     if let Some(editor_area) = app.editor_panel_rect
         && app.step_keyword_picker.is_some()
     {
@@ -601,9 +598,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     {
         render_requirements_overlay(frame, app, frame.area());
     }
-    render_screenshot_overlay(frame, app, chunks[2]);
+    render_screenshot_overlay(frame, app, content_row);
     crate::acp_controls::render_picker(frame, app);
-    pointer_controls::render_pending_review(frame, app, chunks[2]);
+    pointer_controls::render_pending_review(frame, app, content_row);
     if app.pending_delete.is_some() {
         // The confirmation is the only interactive layer, including its mouse
         // targets; covered list rows must not change the captured target.
@@ -857,22 +854,58 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Minimum panel width that still shows the agent sidebar. Narrower panels
+/// keep the chat at full width instead of squeezing both surfaces.
+const AI_SIDEBAR_MIN_PANEL_WIDTH: u16 = 90;
+/// The sidebar takes a quarter of the panel but never drops below this width.
+const AI_SIDEBAR_MIN_WIDTH: u16 = 20;
+/// Beyond this width extra columns belong to the conversation, not the list.
+const AI_SIDEBAR_MAX_WIDTH: u16 = 30;
+/// The sidebar never appears when the conversation would fall below this.
+const AI_CHAT_MIN_WIDTH: u16 = 50;
+
+/// Resolve the sidebar width, or `None` when the chat should own the row.
+pub(super) fn ai_sidebar_width(panel_width: u16) -> Option<u16> {
+    if panel_width < AI_SIDEBAR_MIN_PANEL_WIDTH {
+        return None;
+    }
+    let width = (panel_width / 4).clamp(AI_SIDEBAR_MIN_WIDTH, AI_SIDEBAR_MAX_WIDTH);
+    (panel_width.saturating_sub(width) >= AI_CHAT_MIN_WIDTH).then_some(width)
+}
+
 /// Renders the AI chat panel with a sidebar for agent management.
 fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 25 || area.height < 3 {
         return;
     }
 
-    if area.width < 90 {
-        chat::render_chat_panel(frame, app, area, true, chat::ChatPlacement::Tab);
+    let sidebar_width = if app.ai_sidebar_collapsed {
+        None
+    } else {
+        ai_sidebar_width(area.width)
+    };
+    let Some(sidebar_width) = sidebar_width else {
+        // Layout: chat only, keeping the full reading width.
+        app.ai_sidebar_visible = false;
+        app.ai_sidebar_focused = false;
+        // A single pane needs no focus outline; the composer already marks the caret.
+        chat::render_chat_panel(frame, app, area, false, chat::ChatPlacement::Tab);
         return;
-    }
+    };
+    app.ai_sidebar_visible = true;
     // Layout: sidebar (left) + main panel (right)
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(22), Constraint::Min(10)]).areas(area);
+        Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(10)]).areas(area);
 
     chat::render_agent_sidebar(frame, app, sidebar_area);
-    chat::render_chat_panel(frame, app, main_area, true, chat::ChatPlacement::Tab);
+    // The sidebar paints its own focus outline when it owns the keyboard.
+    chat::render_chat_panel(
+        frame,
+        app,
+        main_area,
+        !app.ai_sidebar_focused,
+        chat::ChatPlacement::Tab,
+    );
 }
 
 /// Renders the footer bar for the AI tab.
@@ -6786,33 +6819,38 @@ mod truncate_tests {
     use teshi_core::gherkin;
 
     #[test]
-    fn long_local_version_does_not_clip_active_tab_underline() {
+    fn workspace_meta_pins_the_version_to_the_tab_row() {
         let mut app = App::from_args().expect("app init");
         app.version = "0.7.10-local.20261014.1700+0800 (1234567)".into();
-        app.active_tab = crate::app::MainTab::TestPoints;
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let rect = app
-            .clickable_regions
-            .iter()
-            .find_map(|region| match region {
-                ClickableRegion::Tab {
-                    tab: crate::app::MainTab::TestPoints,
-                    rect,
-                } => Some(*rect),
-                _ => None,
-            })
-            .unwrap();
-        for x in rect.x..rect.right() {
-            assert_eq!(
-                terminal.backend().buffer()[(x, 1)].symbol(),
-                "━",
-                "column {x}"
-            );
-        }
+
+        // A wide row seats the project label left of the version.
+        let mut wide = Terminal::new(TestBackend::new(200, 24)).unwrap();
+        wide.draw(|frame| render(frame, &mut app)).unwrap();
+        let row: String = (0..200)
+            .map(|x| wide.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert!(row.contains("Test Points [5]"), "tabs keep their row");
+        assert!(row.contains("Project:"), "{row}");
+        assert!(row.ends_with("(1234567)"), "{row}");
         assert_eq!(
-            terminal.backend().buffer()[(119, 1)].fg,
-            crate::theme::MUTED
+            wide.backend().buffer()[(199, 0)].fg,
+            crate::theme::MUTED,
+            "the version sits in the corner"
+        );
+
+        // A narrow row keeps the project control and drops the version.
+        let mut narrow = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        narrow.draw(|frame| render(frame, &mut app)).unwrap();
+        let row: String = (0..120)
+            .map(|x| narrow.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert!(row.contains("Project: "), "{row}");
+        assert!(!row.contains("v0.7.10-local"), "{row}");
+        assert!(
+            app.clickable_regions
+                .iter()
+                .any(|region| matches!(region, ClickableRegion::ProjectControl { .. })),
+            "the project label stays clickable when the version yields"
         );
     }
 
