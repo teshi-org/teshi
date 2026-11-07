@@ -182,8 +182,10 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | `j/k`, Down/Up | Scroll vertically |
 | `h/l`, Left/Right | Scroll horizontally |
 | Alt+arrows | Scroll in the corresponding direction |
+| Ctrl+U / Ctrl+D | Scroll half a viewport up / down |
 | `gg/G`, Home/End | History top/bottom |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Scroll history |
+| Ctrl+G | Show or hide the AI tab Chats sidebar, also while typing |
 | `i` / Enter | Focus input |
 | Ctrl+Shift+C | Copy the chat selection |
 | Esc (AI tab, request running) | Withdraw the newest queued follow-up, or ask before interrupting the turn |
@@ -191,6 +193,11 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
+**Ctrl+W h** moves focus from the chat to the Chats sidebar and **Ctrl+W l**
+moves back (the chord stops at the edges like other pane rows). A focused
+sidebar shows a highlighted border and `j/k` selects the previous/next
+conversation; Enter, `l`, or `i` returns to the composer and Esc returns to the
+chat without focusing input. Clicking a conversation focuses the sidebar too.
 
 ### Input
 
@@ -427,7 +434,9 @@ button; continuing is explicit and does not bypass generation review.
 - Requirements, Testpoints and Explore use two columns with vertically combined
   details. Below 70 columns or 12 body rows only the focused pane is shown; normal
   pane navigation still reaches every pane. AI hides its chat sidebar below 90
-  columns; **[ / ]** still switches conversations at these widths.
+  columns or when the conversation would drop under 50 columns; **[ / ]** still
+  switches conversations at these widths, and **Ctrl+G** collapses the sidebar
+  on demand.
 - The input focus border no longer adds a transient shortcut title. **Enter**
   sends; **Ctrl+J / Shift+Enter** inserts a newline, as before.
 
@@ -478,9 +487,12 @@ newest finished answer also opens on a green `▌` bar. Thinking, tools and repl
 still streaming keep the quiet `│` guide. Thinking, tools and secondary metadata remain muted. Code-block
 and text-selection colors retain their own meaning within a user message.
 
-The chat sidebar uses 22 columns and a subdued selected-row fill. It disappears
-below 90 columns so the conversation keeps its reading width. Agent selection,
-model selection and overflow settings remain available above the composer. The
+The chat sidebar takes a quarter of the AI tab, clamped between 20 and 30
+columns, and a subdued selected-row fill. It disappears below 90 columns so the
+conversation keeps its reading width, and **Ctrl+G** (or the footer Chats
+control) hides it on wider terminals; the chat title then reads "chats hidden
+[Ctrl+g]". Agent selection, model selection and overflow settings remain
+available above the composer. The
 time, context and optional token totals use complete fields rather than clipped
 numbers. A compact context percentage preserves the warning in narrow layouts.
 

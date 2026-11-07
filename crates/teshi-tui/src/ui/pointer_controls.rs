@@ -43,8 +43,14 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             },
             Action::ModelPanelOpen,
         ),
+        (
+            if compact { " Chats" } else { " Chats [Ctrl+g]" },
+            Action::AiToggleSidebar,
+        ),
     ];
-    let mode = if app.ai_input_focused {
+    let mode = if app.ai_sidebar_focused {
+        "[CHATS] "
+    } else if app.ai_input_focused {
         "[INPUT] "
     } else {
         "[NORMAL] "
@@ -55,9 +61,14 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             .iter()
             .map(|(label, _)| label.width() as u16)
             .sum::<u16>();
+    let hint = if app.ai_sidebar_focused {
+        "j/k chat · Enter open · Ctrl+W l back"
+    } else {
+        "hjkl/Arrows scroll · Ctrl+D/U half · [/] chat"
+    };
     if !app.ai_input_focused && used + 2 < area.width {
         frame.render_widget(
-            Paragraph::new("hjkl/Arrows scroll · [/] chat").style(theme::muted()),
+            Paragraph::new(hint).style(theme::muted()),
             Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
         );
     }
@@ -68,7 +79,8 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     if area.width < 5 || area.height < 3 {
         return;
     }
-    let block = theme::panel_block(" Chats ", false).title_style(theme::muted());
+    let block =
+        theme::panel_block(" Chats [Ctrl+g] ", app.ai_sidebar_focused).title_style(theme::muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {

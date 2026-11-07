@@ -439,6 +439,7 @@ pub fn run() -> Result<()> {
                             mindmap_focus: app.mindmap_focus,
                             mindmap_ai_panel_visible: app.mindmap_ai_panel_visible,
                             ai_input_focused: app.ai_input_focused,
+                            ai_sidebar_focused: app.ai_sidebar_focused,
                             slash_suggestion_active: app.slash_suggestion_active,
                             auth_panel_active: app.auth_panel_active,
                             model_panel_active: app.model_panel_active,

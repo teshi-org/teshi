@@ -678,8 +678,13 @@ pub(super) fn render_chat_panel(
             muted(),
         ));
     }
-    // The composer owns the bright focus outline; the enclosing frame stays quiet.
-    let block = theme::panel_block(title, false);
+    if placement == ChatPlacement::Tab && app.ai_sidebar_collapsed {
+        title.push_span(Span::styled("· chats hidden [Ctrl+g] ", muted()));
+    }
+    // A focused pane owns the bright outline. The live composer draws its own,
+    // so the enclosing frame stays quiet while the user is typing and only
+    // lights up when the chat pane is focused without the caret.
+    let block = theme::panel_block(title, focused && !app.ai_input_focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_approval_badge(frame, app, area);
