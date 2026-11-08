@@ -13136,6 +13136,12 @@ impl App {
         if command == "copy" {
             return self.cmd_copy(None);
         }
+        if command == "copy-code" {
+            return self.cmd_copy_code_block(None);
+        }
+        if let Some(argument) = command.strip_prefix("copy-code ") {
+            return self.cmd_copy_code_block(Some(argument));
+        }
         if let Some(argument) = command.strip_prefix("copy ") {
             return self.cmd_copy(Some(argument));
         }
@@ -13236,7 +13242,7 @@ impl App {
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
         Ok(())
     }
 
@@ -13343,6 +13349,48 @@ impl App {
             return Ok(());
         }
         self.status = format!("Copied last {} assistant response(s) to clipboard", count);
+        self.set_status_message(self.status.clone());
+        Ok(())
+    }
+
+    /// Handle `/copy-code [N]` — copy block N from the last assistant response.
+    fn cmd_copy_code_block(&mut self, argument: Option<&str>) -> Result<()> {
+        let index = match argument.map(str::trim) {
+            None | Some("") => 0,
+            Some(value) => match value.parse::<usize>() {
+                Ok(0) | Err(_) => {
+                    self.status = "Usage: /copy-code [N] where N is a positive integer".to_string();
+                    self.set_status_message(self.status.clone());
+                    return Ok(());
+                }
+                Ok(n) => n - 1,
+            },
+        };
+        let content = self
+            .agent()
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == AiRole::Assistant
+                    && message.source.as_deref() != Some("agent_progress")
+            })
+            .map(|message| message.content.clone());
+        let Some(content) = content else {
+            self.status = "No assistant response to copy a code block from".to_string();
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        };
+        let Some(source) = crate::markdown::code_block_source(&content, index) else {
+            self.status = format!("No code block {} in the last assistant response", index + 1);
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        };
+        if !self.try_copy_to_clipboard(&source) {
+            return Ok(());
+        }
+        let lines = source.lines().count().max(1);
+        self.status = format!("Copied code block {} ({lines} line(s))", index + 1);
         self.set_status_message(self.status.clone());
         Ok(())
     }
@@ -13660,6 +13708,39 @@ mod tests {
         assert_eq!(app.status, "Usage: /copy [N] where N is a positive integer");
         app.execute_slash_command("copy").unwrap();
         assert_eq!(app.status, "No completed assistant responses to copy");
+    }
+
+    #[test]
+    fn copy_code_command_rejects_invalid_counts_and_missing_blocks() {
+        let (mut app, _project, _store) = slash_test_app();
+
+        app.execute_slash_command("copy-code 0").unwrap();
+        assert_eq!(
+            app.status,
+            "Usage: /copy-code [N] where N is a positive integer"
+        );
+        app.execute_slash_command("copy-code nope").unwrap();
+        assert_eq!(
+            app.status,
+            "Usage: /copy-code [N] where N is a positive integer"
+        );
+        app.execute_slash_command("copy-code").unwrap();
+        assert_eq!(
+            app.status,
+            "No assistant response to copy a code block from"
+        );
+
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: "plain answer without fences".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        app.execute_slash_command("copy-code 1").unwrap();
+        assert_eq!(app.status, "No code block 1 in the last assistant response");
     }
 
     #[test]
