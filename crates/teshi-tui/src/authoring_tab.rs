@@ -2461,10 +2461,7 @@ pub fn requirements_footer_line(
         Span::raw(" "),
         Span::styled(" Priority [p] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(
-            " New doc [Ctrl+n] ",
-            Style::default().fg(theme::FOOTER_DESC),
-        ),
+        Span::styled(" New doc [n] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
         Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
     ])

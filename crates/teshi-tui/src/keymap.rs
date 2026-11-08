@@ -1349,7 +1349,8 @@ impl Action {
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
                 }
-                (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Char('n'), KeyModifiers::NONE)
+                | (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
                 (KeyCode::Delete, _) | (KeyCode::Char('d'), KeyModifiers::NONE) => {
                     Some(Self::ReqDeleteDocument)
                 }
@@ -3088,6 +3089,18 @@ mod tests {
             project_switch_active: false,
             command_line_active: false,
         }
+    }
+
+    #[test]
+    fn requirements_tree_accepts_n_for_new_document() {
+        let context = requirements_tree_context();
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ReqNewDocument)
+        );
     }
 
     #[test]
