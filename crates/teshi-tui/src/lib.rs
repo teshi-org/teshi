@@ -29,6 +29,7 @@ mod profiles;
 mod project_context;
 mod runner;
 mod session;
+mod terminal_title;
 mod test_frame;
 mod test_points_tab;
 mod theme;
@@ -330,6 +331,7 @@ pub fn run() -> Result<()> {
     app.set_image_support(image_detection);
     app.version = version_display().to_string();
     let mut event_source = input::EventSource::new()?;
+    let mut terminal_title = terminal_title::TerminalTitle::new();
     let test_frame_path = std::env::var_os("TESHI_TEST_FRAME_PATH").map(std::path::PathBuf::from);
 
     while !app.should_quit {
@@ -351,6 +353,7 @@ pub fn run() -> Result<()> {
             app.inline_images.forget_painted();
         }
         app.inline_images.begin_frame();
+        terminal_title.sync(&app);
         let completed = terminal.draw(|frame| ui::render(frame, &mut app))?;
         if let Some(path) = &test_frame_path {
             // A text fragment can precede the final layout in a PTY reader.
@@ -564,6 +567,7 @@ pub fn run() -> Result<()> {
     // reaping agent processes can block for seconds; the shell must come back
     // at once, with that work visible in the normal terminal instead of behind
     // a frozen full-screen UI.
+    drop(terminal_title);
     drop(terminal);
     drop(_guard);
     // Only the Windows reader thread outlives the loop; elsewhere there is
