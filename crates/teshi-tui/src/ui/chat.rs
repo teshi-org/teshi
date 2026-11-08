@@ -1267,7 +1267,11 @@ fn build_chat_projection(
     }
 
     let messages = agent.messages();
-    let completed = completed_answer(app, messages);
+    let completed = agent.completed_answer.filter(|index| {
+        messages
+            .get(*index)
+            .is_some_and(|message| message.role == AiRole::Assistant)
+    });
     let mut cache = app.chat_layout_cache.borrow_mut();
     let context = (
         app.selected_agent,
@@ -1740,31 +1744,6 @@ fn push_railed(
         }
     }
     starts
-}
-
-/// Identifies the newest answer that finished, so the transcript keeps one completion
-/// cue without tinting every reply column. Partial, cancelled and interrupted turns do
-/// not qualify; their progress rows already say what happened.
-fn completed_answer(app: &App, messages: &[AiChatMessage]) -> Option<usize> {
-    let agent = app.agent();
-    if agent.status != AiStatus::Idle
-        || agent.task_interrupted()
-        || matches!(
-            agent.last_finish_reason.as_deref(),
-            Some("cancelled" | "length" | "max_tokens")
-        )
-    {
-        return None;
-    }
-    messages.iter().rposition(|message| {
-        message.role == AiRole::Assistant
-            && message.source.as_deref() != Some("agent_progress")
-            && message
-                .tool_calls
-                .as_ref()
-                .is_none_or(|calls| calls.is_empty())
-            && !message.content.trim().is_empty()
-    })
 }
 
 /// How one message is drawn: its thinking open or folded, its reasoning shown, its
@@ -2884,6 +2863,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        app.agents[0].completed_answer = Some(3);
         let marked = marks(&app);
         assert_eq!(
             marked.len(),
@@ -2893,15 +2873,34 @@ mod tests {
         assert!(marked[0].contains("ANSWER_TWO"), "{marked:?}");
 
         app.agents[0].status = AiStatus::Waiting;
-        assert!(
-            marks(&app).is_empty(),
-            "a running turn must not claim completion"
+        let running = marks(&app);
+        assert_eq!(
+            running.len(),
+            1,
+            "the previous answer keeps its cue during the next turn: {running:?}"
         );
+        assert!(running[0].contains("ANSWER_TWO"), "{running:?}");
+
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "QUESTION_THREE", None),
+            message(AiRole::Assistant, "ANSWER_THREE", None),
+        ]);
+        app.agents[0].completed_answer = Some(5);
         app.agents[0].status = AiStatus::Idle;
+        let newest = marks(&app);
+        assert_eq!(newest.len(), 1, "{newest:?}");
+        assert!(newest[0].contains("ANSWER_THREE"), "{newest:?}");
+
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "QUESTION_FOUR", None),
+            message(AiRole::Assistant, "CANCELLED_ANSWER", None),
+        ]);
         app.agents[0].last_finish_reason = Some("cancelled".into());
+        let cancelled = marks(&app);
+        assert_eq!(cancelled.len(), 1, "{cancelled:?}");
         assert!(
-            marks(&app).is_empty(),
-            "cancelled turns are not completion markers"
+            cancelled[0].contains("ANSWER_THREE"),
+            "a cancelled turn keeps the previous marker: {cancelled:?}"
         );
     }
 
@@ -2952,6 +2951,30 @@ mod tests {
             assert!(screen.contains("ctx unknown"), "{screen}");
             assert!(!screen.contains("Enter send"), "{screen}");
         }
+    }
+
+    #[test]
+    fn completed_marker_survives_the_next_running_turn() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.agents[0]
+            .messages_mut()
+            .push(message(AiRole::Assistant, "first answer", None));
+        app.agents[0].completed_answer = Some(0);
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0]
+            .partial_response_mut()
+            .push_str("second answer in progress");
+        let projection = build_chat_projection(&app, 80, 40, ChatPlacement::Tab);
+        let rows: Vec<String> = projection
+            .lines
+            .iter()
+            .map(|row| line_text(&row.line))
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains('✓')),
+            "the previous answer keeps its completion cue: {rows:?}"
+        );
     }
 
     #[test]
@@ -3131,6 +3154,7 @@ mod tests {
             ),
             message(AiRole::Assistant, "ANSWER_BODY", None),
         ]);
+        app.agents[0].completed_answer = Some(1);
         for width in [24, 48, 80] {
             let projection = build_chat_projection(&app, width, 40, ChatPlacement::Tab);
             let rows: Vec<_> = projection
@@ -3857,6 +3881,7 @@ mod tests {
             call,
             message(AiRole::Assistant, "ANSWER", None),
         ]);
+        app.agents[0].completed_answer = Some(3);
 
         let lines = build_chat_lines(&app, 72, 40, ChatPlacement::Tab);
         let rows = row_texts(&lines);

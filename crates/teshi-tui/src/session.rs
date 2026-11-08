@@ -28,6 +28,9 @@ pub struct Session {
     /// Unsent drafts survive restart, but are never automatically sent on restore.
     #[serde(default)]
     pub pending_messages: std::collections::VecDeque<String>,
+    /// Latest assistant answer that completed a normal turn.
+    #[serde(default)]
+    pub completed_answer: Option<usize>,
 }
 
 impl Session {
@@ -64,6 +67,7 @@ impl Session {
             backend_kind: None,
             acp_agent_id: None,
             pending_messages: Default::default(),
+            completed_answer: None,
         }
     }
 

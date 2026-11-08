@@ -163,6 +163,11 @@ pub struct AgentThread {
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
     /// Finish reason from the most recent production model response.
     pub last_finish_reason: Option<String>,
+    /// Index of the latest assistant message that completed a normal turn.
+    ///
+    /// Kept on the thread rather than derived from the live status so the
+    /// completion cue survives into the next running turn.
+    pub completed_answer: Option<usize>,
     saved_session: Option<crate::session::Session>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
@@ -307,6 +312,7 @@ impl AgentThread {
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
+            completed_answer: None,
             saved_session: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
@@ -375,6 +381,7 @@ impl AgentThread {
         }
         session.backend_kind = Some(self.backend_kind());
         session.acp_agent_id = self.selected_acp_id.clone();
+        session.completed_answer = self.completed_answer;
         session.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -1147,6 +1154,23 @@ fn set_system_clipboard(text: &str) -> Result<arboard::Clipboard> {
 /// that already completed cleanly. That message is not user-facing content.
 fn is_ignorable_agent_error(message: &str) -> bool {
     message.contains("WritableIterable is closed")
+}
+
+/// The latest assistant message that represents a finished answer, not
+/// progress, reasoning, activity, or a tool-call carrier.
+fn latest_answer_index(messages: &[AiChatMessage]) -> Option<usize> {
+    messages.iter().rposition(|message| {
+        message.role == AiRole::Assistant
+            && !matches!(
+                message.source.as_deref(),
+                Some("agent_progress" | "acp_activity" | "acp_reasoning")
+            )
+            && !message.content.trim().is_empty()
+            && message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty())
+    })
 }
 
 fn completed_assistant_responses(messages: &[AiChatMessage], limit: usize) -> Vec<&str> {
@@ -3594,7 +3618,21 @@ impl App {
                             )
                         );
                         self.agents[i].chat.rate.clear();
+                        let completed_normally = !matches!(
+                            finish_reason.as_deref(),
+                            Some(
+                                "cancelled"
+                                    | "refusal"
+                                    | "max_tokens"
+                                    | "length"
+                                    | "max_turn_requests"
+                            )
+                        );
                         self.agents[i].last_finish_reason = finish_reason;
+                        if completed_normally {
+                            self.agents[i].completed_answer =
+                                latest_answer_index(self.agents[i].messages());
+                        }
                         let interrupted = matches!(
                             self.agents[i].last_finish_reason.as_deref(),
                             Some("refusal" | "max_tokens" | "max_turn_requests")
@@ -5540,6 +5578,15 @@ impl App {
             chat.thoughts.clear();
             chat.groups.clear();
             chat.revision += 1;
+            // Draining removed messages shifts every later index; a marker on
+            // a removed turn disappears, later ones move with the summary slot.
+            if let Some(index) = self.agents[agent_idx].completed_answer {
+                self.agents[agent_idx].completed_answer = if index < compact_end {
+                    None
+                } else {
+                    Some(index - compact_end + 1)
+                };
+            }
             self.agents[agent_idx].last_input_tokens = None;
             self.status_message = Some(format!(
                 "Context compacted: {removed_count} message(s) → summary ({} token window)",
@@ -13535,6 +13582,7 @@ impl App {
             queue: session.pending_messages.clone(),
             ..Default::default()
         };
+        agent.completed_answer = session.completed_answer;
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
         agent.tool_status = None;
@@ -13712,6 +13760,40 @@ mod tests {
         assert_eq!(app.status, "Usage: /copy [N] where N is a positive integer");
         app.execute_slash_command("copy").unwrap();
         assert_eq!(app.status, "No completed assistant responses to copy");
+    }
+
+    #[test]
+    fn latest_answer_index_skips_progress_and_tool_carriers() {
+        let messages = vec![
+            AiChatMessage {
+                role: AiRole::User,
+                content: "question".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "final answer".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "streaming progress".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: Some("agent_progress".into()),
+                activity: None,
+            },
+        ];
+        assert_eq!(super::latest_answer_index(&messages), Some(1));
     }
 
     #[test]
