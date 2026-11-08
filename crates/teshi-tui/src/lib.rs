@@ -346,6 +346,7 @@ pub fn run() -> Result<()> {
         app.poll_git_status();
         app.poll_feature_browser_search();
         app.poll_external_feature_changes();
+        app.poll_external_requirement_changes();
         app.poll_status_message_expiry();
         app.screenshot.poll();
         app.inline_images.poll();

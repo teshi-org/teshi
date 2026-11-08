@@ -161,6 +161,8 @@ pub enum Action {
     ReqEditIteration,
     /// Edit the selected document's optional priority (`p` on the Requirements tree).
     ReqEditPriority,
+    /// Reload the shared requirement library from disk (`R` on the tree).
+    ReqReloadStore,
     /// Bounded Vim append/open/delete/yank operations for Requirements.
     ReqVimAppend,
     ReqVimOpenBelow,
@@ -1365,6 +1367,9 @@ impl Action {
                 (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ReqActionMenu),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqEditPriority),
+                (KeyCode::Char('R'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::ReqReloadStore)
+                }
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
@@ -3100,6 +3105,13 @@ mod tests {
                 context
             ),
             Some(Action::ReqNewDocument)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+                context
+            ),
+            Some(Action::ReqReloadStore)
         );
     }
 

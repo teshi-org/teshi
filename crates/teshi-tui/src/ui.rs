@@ -4984,6 +4984,7 @@ fn requirements_footer_controls(
         ));
     }
     controls.extend([
+        (label(" Reload [R]", " Reload"), Action::ReqReloadStore),
         (label(" Actions [Space]", " Actions"), Action::ReqActionMenu),
         (label(" New doc [n]", " New"), Action::ReqNewDocument),
     ]);

@@ -5,6 +5,7 @@ pub use organize::{CursorMotion, LineInput, MenuCommand, OrganizationForm, TreeT
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::theme;
 use anyhow::{Context, Result};
@@ -157,6 +158,13 @@ pub enum EditorImageRow {
     Missing { target: String },
 }
 
+/// Cheap fingerprint of the shared requirement index. Document bodies change
+/// through the index revision on every successful store write.
+fn requirement_store_signature(root: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = std::fs::metadata(root.join("_teshi.json")).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 /// UI state for requirement documents and linked test points.
 pub struct AuthoringUiState {
     pub artifacts: Option<AuthoringArtifacts>,
@@ -169,6 +177,10 @@ pub struct AuthoringUiState {
     pub show_completed: bool,
     /// Last loaded project organization; external edits are detected against it.
     organization: Option<teshi_engine::organization::RequirementOrganization>,
+    /// Fingerprint of the shared requirement index at the last successful load.
+    store_signature: Option<(SystemTime, u64)>,
+    /// Throttles background checks of the shared requirement store.
+    last_store_check: Option<Instant>,
     /// Draft document and the folder it was created in, filed on its first save.
     draft_folder: Option<(String, String)>,
     /// Visible labels of tree nodes whose label is not derivable from the node ID.
@@ -671,6 +683,8 @@ impl AuthoringUiState {
             project_identity_error: None,
             show_completed: false,
             organization: None,
+            store_signature: None,
+            last_store_check: None,
             draft_folder: None,
             tree_labels: HashMap::new(),
             tree_items: Vec::new(),
@@ -736,6 +750,7 @@ impl AuthoringUiState {
                 let _ = error;
             }
         }
+        state.store_signature = requirement_store_signature(requirements_root);
         state
     }
 
@@ -809,7 +824,29 @@ impl AuthoringUiState {
             self.selection_end = selection_end;
         }
         self.editor_mode = editor_mode;
+        self.store_signature = requirement_store_signature(&self.requirements_root);
+        self.last_store_check = Some(Instant::now());
         Ok(())
+    }
+
+    /// Reloads when another Teshi process or the CLI changed the shared store.
+    ///
+    /// Returns whether a reload happened. A failed read keeps the current
+    /// snapshot; the next successful poll can recover.
+    pub fn poll_external_store_changes(&mut self) -> Result<bool> {
+        if self
+            .last_store_check
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+        {
+            return Ok(false);
+        }
+        self.last_store_check = Some(Instant::now());
+        let signature = requirement_store_signature(&self.requirements_root);
+        if signature.is_none() || signature == self.store_signature {
+            return Ok(false);
+        }
+        self.reload_from_disk()?;
+        Ok(true)
     }
 
     /// Rebuilds the requirement tree from the current index, filter, and group mode.
@@ -2461,6 +2498,8 @@ pub fn requirements_footer_line(
         Span::raw(" "),
         Span::styled(" Priority [p] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
+        Span::styled(" Reload [R] ", Style::default().fg(theme::FOOTER_DESC)),
+        Span::raw(" "),
         Span::styled(" New doc [n] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
         Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
@@ -2523,6 +2562,33 @@ mod tests {
             3,
             "inserting shows source only"
         );
+    }
+
+    #[test]
+    fn external_document_write_reloads_the_store_without_dropping_edits() {
+        let store = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        teshi_engine::ensure_requirement_project(project.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        state.buffer = EditorBuffer::from_string("unsaved draft".into());
+        state.buffer_dirty = true;
+
+        teshi_engine::create_requirement_document(store.path(), "# External\n", None, None, None)
+            .unwrap();
+        state.last_store_check = None;
+        assert!(state.poll_external_store_changes().unwrap());
+        assert!(
+            state
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .documents
+                .iter()
+                .any(|document| document.meta.title == "External")
+        );
+        assert!(state.buffer_dirty);
+        assert_eq!(state.buffer.as_string(), "unsaved draft");
     }
 
     #[test]

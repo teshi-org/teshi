@@ -5253,6 +5253,34 @@ impl App {
     }
 
     /// Polls external Feature discovery and disk changes.
+    /// Refreshes the shared requirement library when another process changed it.
+    pub fn poll_external_requirement_changes(&mut self) {
+        let before = self
+            .authoring_ui
+            .current_document_meta()
+            .map(|meta| (meta.id.clone(), meta.revision.clone()));
+        match self.authoring_ui.poll_external_store_changes() {
+            Ok(true) => {
+                let after = self
+                    .authoring_ui
+                    .current_document_meta()
+                    .map(|meta| (meta.id.clone(), meta.revision.clone()));
+                self.status =
+                    if self.authoring_ui.buffer_dirty && before.is_some() && after != before {
+                        "Requirement changed on disk; unsaved edits kept".to_string()
+                    } else {
+                        "Requirement library refreshed".to_string()
+                    };
+                self.set_status_message(self.status.clone());
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.status = format!("Requirement library refresh failed: {error}");
+                self.set_status_message(self.status.clone());
+            }
+        }
+    }
+
     pub fn poll_external_feature_changes(&mut self) {
         if self.external_change_prompt.is_some() {
             return;
@@ -9431,6 +9459,16 @@ impl App {
                     } else {
                         self.status = "Select a requirement document to set its iteration".into();
                     }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqReloadStore => {
+                if self.active_tab == MainTab::Requirements {
+                    self.status = match self.authoring_ui.reload_from_disk() {
+                        Ok(()) => "Requirement library reloaded".to_string(),
+                        Err(error) => format!("Requirement library reload failed: {error}"),
+                    };
+                    self.set_status_message(self.status.clone());
                     self.quit_pending_confirm = false;
                 }
             }
