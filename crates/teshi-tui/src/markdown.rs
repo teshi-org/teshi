@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use teshi_core::markdown::strip_think_tags;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme;
 
@@ -187,7 +187,7 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> RenderedBlocks {
         } else if let Some(block) = try_list(remaining, ctx) {
             pos += block.consumed;
             append_block(&mut lines, &mut code_blocks, block);
-        } else if let Some(block) = try_table(remaining) {
+        } else if let Some(block) = try_table(remaining, ctx) {
             pos += block.consumed;
             append_block(&mut lines, &mut code_blocks, block);
         } else {
@@ -565,7 +565,7 @@ fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     })
 }
 
-fn try_table(text: &str) -> Option<BlockResult> {
+fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     let mut consumed = 0usize;
     let mut raw_lines: Vec<String> = Vec::new();
 
@@ -622,6 +622,13 @@ fn try_table(text: &str) -> Option<BlockResult> {
         }
     }
 
+    let natural_total = col_widths.iter().map(|width| width + 2).sum::<usize>() + col_count + 1;
+    if ctx.width > 0 && natural_total > ctx.width {
+        let mut block = render_compact_table(rows, &col_widths, ctx.width);
+        block.consumed = consumed;
+        return Some(block);
+    }
+
     let header_style = Style::default()
         .fg(theme::PRIMARY)
         .add_modifier(Modifier::BOLD);
@@ -676,7 +683,197 @@ fn try_table(text: &str) -> Option<BlockResult> {
     })
 }
 
-/// Checks whether a line is a table separator (only `|`, `-`, `:`, and spaces).
+/// Renders a table that cannot keep its natural width: cells wrap inside the
+/// available columns, and extremely narrow panes fall back to a borderless list.
+fn render_compact_table(rows: Vec<Vec<String>>, natural: &[usize], limit: usize) -> BlockResult {
+    let columns = natural.len();
+    // Below three content cells per column the box is unreadable; list mode is
+    // the honest fallback.
+    let min_total = columns * 6 + 1;
+    if limit < min_total {
+        return table_list_fallback(&rows);
+    }
+
+    let budget = limit - (columns * 3 + 1);
+    let mut widths = natural.to_vec();
+    while widths.iter().sum::<usize>() > budget {
+        let Some(widest) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 1)
+            .max_by_key(|(_, width)| **width)
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        widths[widest] -= 1;
+    }
+
+    let border_style = Style::default()
+        .fg(theme::BORDER)
+        .add_modifier(Modifier::DIM);
+    let header_style = Style::default()
+        .fg(theme::PRIMARY)
+        .add_modifier(Modifier::BOLD);
+    let rule = |left: &str, mid: &str, right: &str| {
+        let body = widths
+            .iter()
+            .map(|width| "─".repeat(width + 2))
+            .collect::<Vec<_>>()
+            .join(mid);
+        Line::styled(format!("{left}{body}{right}"), border_style)
+    };
+
+    let mut lines = Vec::new();
+    lines.push(rule("┌", "┬", "┐"));
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index == 1 {
+            lines.push(rule("├", "┼", "┤"));
+            continue;
+        }
+        let base_style = if row_index == 0 {
+            header_style
+        } else {
+            Style::default()
+        };
+        let wrapped: Vec<Vec<Vec<Span<'static>>>> = row
+            .iter()
+            .enumerate()
+            .map(|(column, cell)| wrap_table_cell(cell, widths[column], base_style))
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..height {
+            let mut spans = vec![Span::styled("│", border_style)];
+            for column in 0..columns {
+                let content = wrapped[column].get(line_index);
+                let used = content
+                    .map(|spans| spans.iter().map(|span| span.content.width()).sum::<usize>())
+                    .unwrap_or(0);
+                spans.push(Span::raw(" "));
+                if let Some(content) = content {
+                    spans.extend(content.iter().cloned());
+                }
+                spans.push(Span::raw(
+                    " ".repeat(widths[column].saturating_sub(used) + 1),
+                ));
+                spans.push(Span::styled("│", border_style));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(rule("└", "┴", "┘"));
+
+    BlockResult {
+        consumed: 0,
+        lines,
+        code_blocks: Vec::new(),
+    }
+}
+
+/// Wraps one cell to a column width while keeping inline span styles.
+fn wrap_table_cell(text: &str, width: usize, base: Style) -> Vec<Vec<Span<'static>>> {
+    let width = width.max(1);
+    let parsed = parse_inline_with_style(text.trim(), base);
+    let cells: Vec<(char, Style)> = parsed
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = base.patch(span.style);
+            span.content
+                .chars()
+                .map(move |character| (character, style))
+        })
+        .collect();
+    if cells.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let mut remaining = cells;
+    let mut rows = Vec::new();
+    while !remaining.is_empty() {
+        let mut used = 0usize;
+        let mut take = 0usize;
+        let mut last_space = None;
+        for (index, (character, _)) in remaining.iter().enumerate() {
+            let character_width = character.width().unwrap_or(0);
+            if take > 0 && used + character_width > width {
+                break;
+            }
+            used += character_width;
+            take = index + 1;
+            if character.is_whitespace() {
+                last_space = Some(take);
+            }
+            if used >= width {
+                break;
+            }
+        }
+        if take == 0 {
+            take = 1;
+        }
+        let split = last_space
+            .filter(|split| *split > 0 && *split < take)
+            .unwrap_or(take);
+        let rest = remaining.split_off(split);
+        rows.push(table_spans(remaining));
+        remaining = rest;
+    }
+    rows
+}
+
+fn table_spans(cells: Vec<(char, Style)>) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    let mut current: Option<Style> = None;
+    for (character, style) in cells {
+        if current.is_some_and(|current| current != style) {
+            spans.push(Span::styled(
+                std::mem::take(&mut buffer),
+                current.unwrap_or_default(),
+            ));
+        }
+        current = Some(style);
+        buffer.push(character);
+    }
+    if !buffer.is_empty() {
+        spans.push(Span::styled(buffer, current.unwrap_or_default()));
+    }
+    spans
+}
+
+fn table_list_fallback(rows: &[Vec<String>]) -> BlockResult {
+    let headers = rows.first().cloned().unwrap_or_default();
+    let mut lines = Vec::new();
+    for row in rows.iter().skip(2) {
+        for (column, cell) in row.iter().enumerate() {
+            let label = headers
+                .get(column)
+                .map(|header| header.trim())
+                .unwrap_or("");
+            let text = if label.is_empty() {
+                cell.trim().to_string()
+            } else {
+                format!("{label}: {}", cell.trim())
+            };
+            lines.push(parse_inline_with_style(&text, Style::default()));
+        }
+        lines.push(Line::default());
+    }
+    if lines.is_empty() {
+        for header in &headers {
+            lines.push(parse_inline_with_style(header.trim(), Style::default()));
+        }
+    } else {
+        lines.pop();
+    }
+    BlockResult {
+        consumed: 0,
+        lines,
+        code_blocks: Vec::new(),
+    }
+}
+
+/// Checks whether a line is a table separator (only |, -, :, and spaces).
 fn is_table_separator(line: &str) -> bool {
     line.trim()
         .chars()
@@ -1339,6 +1536,65 @@ mod tests {
     }
 
     // ── Table tests ───────────────────────────────────────────────
+
+    #[test]
+    fn wide_table_wraps_inside_cells_and_keeps_borders_aligned() {
+        let text = "| 工具 | worktree 放在哪 | 初始化 | 结果怎么回到主工作区 |\n|---|---|---|---|\n| conductor | 主仓库的 .worktrees 目录 | conductor.json 里定义 setup、run、archive 三个脚本以及环境变量 | 通过 worktree 路径读取 |";
+        let lines = render_markdown_width(text, 64);
+        let widths: Vec<usize> = lines.iter().map(Line::width).collect();
+        assert!(
+            widths.iter().all(|width| *width == 64),
+            "every row keeps the pane width: {widths:?}"
+        );
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        let borders = |row: &str| {
+            let mut columns = Vec::new();
+            let mut width = 0;
+            for character in row.chars() {
+                if character == '│' {
+                    columns.push(width);
+                }
+                width += character.width().unwrap_or(0);
+            }
+            columns
+        };
+        let reference = borders(
+            rows.iter()
+                .find(|row| row.starts_with('│'))
+                .expect("a content row"),
+        );
+        for row in rows.iter().filter(|row| row.starts_with('│')) {
+            assert_eq!(borders(row), reference, "row: {row}");
+        }
+        assert!(rows.iter().any(|row| row.starts_with('┌')));
+        assert!(rows.iter().any(|row| row.starts_with('└')));
+    }
+
+    #[test]
+    fn very_narrow_table_falls_back_to_a_list() {
+        let text = "| 工具 | 结果 |\n|---|---|\n| conductor | 回到主工作区 |";
+        let lines = render_markdown_width(text, 10);
+        let text: String = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains('│'), "{text}");
+        assert!(!text.contains('┌'), "{text}");
+        assert!(text.contains("工具: conductor"), "{text}");
+        assert!(text.contains("结果: 回到主工作区"), "{text}");
+    }
+
+    #[test]
+    fn wrapped_table_cells_keep_inline_styles() {
+        let text = "| Column |\n|---|\n| **bold words that wrap** |";
+        let lines = render_markdown_width(text, 12);
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+    }
 
     #[test]
     fn test_table_single_column() {
