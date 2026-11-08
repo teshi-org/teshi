@@ -64,12 +64,14 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             .iter()
             .map(|(label, _)| label.width() as u16)
             .sum::<u16>();
-    let hint = if app.ai_sidebar_focused {
+    let hint = if app.ai_input_focused {
+        "Esc then j/k scroll"
+    } else if app.ai_sidebar_focused {
         "j/k chat · Enter open · Ctrl+W l back"
     } else {
-        "hjkl/Arrows scroll · Ctrl+D/U half · [/] chat"
+        "hjkl/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
     };
-    if !app.ai_input_focused && used + 2 < area.width {
+    if used + 2 < area.width {
         frame.render_widget(
             Paragraph::new(hint).style(theme::muted()),
             Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),

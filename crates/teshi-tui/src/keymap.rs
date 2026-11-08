@@ -1025,6 +1025,12 @@ impl Action {
             return Some(Self::CommandLineOpen);
         }
         if !text_input {
+            // A blurred chat owns j/k/g/G for transcript scrolling; global
+            // first/last navigation would otherwise steal the vim keys.
+            let chat_browsing = !context.ai_input_focused
+                && (context.active_tab == MainTab::Ai
+                    || (context.active_tab == MainTab::MindMap
+                        && context.mindmap_focus == MindMapFocus::AiPanel));
             let navigation = match (event.code, event.modifiers) {
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
@@ -1033,15 +1039,20 @@ impl Action {
                 (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                     Some(Self::PageDown)
                 }
-                (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                    if !chat_browsing =>
+                {
                     Some(Self::NavigateLast)
                 }
-                (KeyCode::Char('g'), KeyModifiers::NONE) if context.pending_char == Some('g') => {
+                (KeyCode::Char('g'), KeyModifiers::NONE)
+                    if !chat_browsing && context.pending_char == Some('g') =>
+                {
                     Some(Self::NavigateFirst)
                 }
                 (KeyCode::Char('g'), KeyModifiers::NONE)
-                    if context.active_tab != MainTab::Requirements
-                        || context.requirements_focus == RequirementsFocus::Editor =>
+                    if !chat_browsing
+                        && (context.active_tab != MainTab::Requirements
+                            || context.requirements_focus == RequirementsFocus::Editor) =>
                 {
                     Some(Self::PendingChar('g'))
                 }
@@ -1127,6 +1138,13 @@ impl Action {
                 }
                 (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageUp),
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageDown),
+                (KeyCode::Char('G'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::AiScrollBottom)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) if context.pending_char == Some('g') => {
+                    Some(Self::AiScrollTop)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::PendingChar('g')),
                 (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _)
                     if context.active_tab == MainTab::Ai =>
                 {
@@ -1845,6 +1863,10 @@ mod tests {
                 ([KeyCode::Char('h'), KeyCode::Left], Action::AiScrollLeft),
                 ([KeyCode::Char('l'), KeyCode::Right], Action::AiScrollRight),
                 ([KeyCode::Char('i'), KeyCode::Enter], Action::AiFocusInput),
+                (
+                    [KeyCode::Char('G'), KeyCode::Char('G')],
+                    Action::AiScrollBottom,
+                ),
             ] {
                 for key in keys {
                     assert_eq!(
@@ -1853,6 +1875,17 @@ mod tests {
                     );
                 }
             }
+            let pending = KeyContext {
+                pending_char: Some('g'),
+                ..context
+            };
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                    pending
+                ),
+                Some(Action::AiScrollTop)
+            );
         }
         let context = chat_context(MainTab::Ai, MindMapFocus::Main, false);
         assert_eq!(
