@@ -9176,9 +9176,11 @@ impl App {
                     match self.authoring_ui.create_default_document() {
                         Ok(id) => {
                             // A new document starts as an unsaved draft, so hand the
-                            // keyboard to the editor instead of leaving it on the tree.
+                            // keyboard to the editor in insert mode instead of leaving
+                            // it on the tree in browse mode.
                             self.authoring_ui.focus =
                                 crate::authoring_tab::RequirementsFocus::Editor;
+                            self.authoring_ui.enter_insert_mode();
                             self.status = format!("Created requirement document {id}.md");
                         }
                         Err(error) => {
@@ -13712,6 +13714,14 @@ mod tests {
         );
         assert_eq!(app.authoring_ui.buffer.as_string(), "# Document 2\n\n");
         assert!(app.authoring_ui.buffer_dirty);
+        assert_eq!(
+            app.authoring_ui.focus,
+            crate::authoring_tab::RequirementsFocus::Editor
+        );
+        assert_eq!(
+            app.authoring_ui.editor_mode,
+            crate::authoring_tab::RequirementsEditorMode::Insert
+        );
         let artifacts = app.authoring_ui.artifacts.as_ref().unwrap();
         let new = artifacts.index.documents.last().unwrap();
         assert_eq!(new.id, "doc-2");
