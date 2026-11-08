@@ -249,14 +249,33 @@ pub(crate) fn diff_style(kind: DiffStatus) -> Style {
     })
 }
 
+/// Minimum vertical thumb length. Proportional geometry collapses to a single
+/// row on very long content, which is hard to see and to grab.
+const MIN_SCROLLBAR_THUMB: usize = 3;
+
 /// Vertical scrollbar rows; empty when content fits, with out-of-range starts clamped.
 pub(crate) fn scrollbar_lines(total: usize, height: usize, start: usize) -> Vec<Line<'static>> {
+    scrollbar_lines_with_min(total, height, start, MIN_SCROLLBAR_THUMB)
+}
+
+/// Shared geometry for both axes. The vertical bar applies a minimum thumb
+/// length; the horizontal bar keeps its existing proportions.
+fn scrollbar_lines_with_min(
+    total: usize,
+    height: usize,
+    start: usize,
+    min_thumb: usize,
+) -> Vec<Line<'static>> {
     if height == 0 || total <= height {
         return Vec::new();
     }
+    // Keep at least one track row visible when the viewport allows it, so a
+    // short panel does not render a full-height thumb.
+    let min_thumb = min_thumb.min(height.saturating_sub(1).max(1));
     let thumb_len = height
         .saturating_mul(height)
         .div_ceil(total)
+        .max(min_thumb)
         .clamp(1, height);
     let track = height - thumb_len;
     let scrollable = total - height;
@@ -275,7 +294,7 @@ pub(crate) fn scrollbar_lines(total: usize, height: usize, start: usize) -> Vec<
 /// Horizontal track using the same bounded geometry as the vertical bar.
 pub(crate) fn horizontal_scrollbar(total: usize, width: usize, start: usize) -> Line<'static> {
     Line::from(
-        scrollbar_lines(total, width, start)
+        scrollbar_lines_with_min(total, width, start, 1)
             .into_iter()
             .map(|line| {
                 let thumb = line.spans[0].content == "┃";
@@ -323,6 +342,44 @@ mod tests {
         );
         assert_eq!(scrollbar_lines(10, 4, 0)[0].spans[0].content, "┃");
         assert_eq!(scrollbar_lines(10, 4, 6)[3].spans[0].content, "┃");
+    }
+
+    fn thumb_rows(lines: &[Line<'static>]) -> usize {
+        lines
+            .iter()
+            .filter(|line| line.spans[0].content == "┃")
+            .count()
+    }
+
+    #[test]
+    fn vertical_scrollbar_keeps_a_grabbable_thumb() {
+        assert_eq!(
+            thumb_rows(&scrollbar_lines(1000, 20, 0)),
+            MIN_SCROLLBAR_THUMB
+        );
+        let lengths = [40, 200, 2000].map(|total| thumb_rows(&scrollbar_lines(total, 20, 0)));
+        assert!(lengths[0] >= lengths[1] && lengths[1] >= lengths[2]);
+        assert!(lengths[2] >= MIN_SCROLLBAR_THUMB);
+        // Tiny viewports still leave one track row instead of a full thumb.
+        assert_eq!(thumb_rows(&scrollbar_lines(1000, 2, 0)), 1);
+    }
+
+    #[test]
+    fn vertical_scrollbar_thumb_sticks_to_both_ends() {
+        let top = scrollbar_lines(1000, 20, 0);
+        assert_eq!(top[0].spans[0].content, "┃");
+        let bottom = scrollbar_lines(1000, 20, 980);
+        assert_eq!(bottom[0].spans[0].content, "│");
+        assert_eq!(bottom[19].spans[0].content, "┃");
+    }
+
+    #[test]
+    fn horizontal_scrollbar_keeps_its_old_geometry() {
+        let line = horizontal_scrollbar(1000, 20, 0);
+        assert_eq!(
+            line.spans.iter().filter(|span| span.content == "━").count(),
+            1
+        );
     }
 
     #[test]
