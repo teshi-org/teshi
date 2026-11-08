@@ -83,6 +83,11 @@ pub enum Action {
     AiToggleThought(usize),
     /// Toggle one external tool group inside a turn's execution process.
     AiToggleTools(usize),
+    /// Copy one fenced code block from a chat message.
+    AiCopyCodeBlock {
+        message_index: usize,
+        block_index: usize,
+    },
     /// Rescan Feature files while preserving unsaved buffers.
     RefreshFeatures,
     /// Pan the focused Explore pane without moving keyboard focus.

@@ -9861,6 +9861,31 @@ impl App {
                 }
                 self.clear_chat_selection();
             }
+            Action::AiCopyCodeBlock {
+                message_index,
+                block_index,
+            } => {
+                let source = self
+                    .agent()
+                    .messages()
+                    .get(message_index)
+                    .and_then(|message| {
+                        crate::markdown::code_block_source(&message.content, block_index)
+                    });
+                match source {
+                    Some(source) => {
+                        if self.try_copy_to_clipboard(&source) {
+                            let lines = source.lines().count().max(1);
+                            self.status = format!("Copied code block ({lines} line(s))");
+                            self.set_status_message(self.status.clone());
+                        }
+                    }
+                    None => {
+                        self.status = "Code block is no longer available".to_string();
+                        self.set_status_message(self.status.clone());
+                    }
+                }
+            }
             Action::AiScrollUp => {
                 self.agent_mut().scroll_offset = self.agent().scroll_offset.saturating_add(5);
             }

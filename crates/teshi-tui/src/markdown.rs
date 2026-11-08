@@ -14,6 +14,9 @@ const DEFAULT_RULE_WIDTH: usize = 50;
 /// Left padding (in cells) inside fenced code blocks.
 const CODE_LEFT_PAD: &str = "  ";
 
+/// Clickable copy affordance shown on a chat code block's language row.
+pub(crate) const CODE_COPY_LABEL: &str = "[copy]";
+
 /// Prefix drawn in front of every blockquote line, repeated per nesting level.
 const QUOTE_BAR: &str = "▌ ";
 
@@ -41,6 +44,8 @@ struct BlockCtx {
     list_depth: usize,
     /// Suppresses blank separator lines between blocks (list item bodies).
     compact: bool,
+    /// Draw the chat-only copy affordance on code blocks.
+    code_copy: bool,
 }
 
 /// Renders a Markdown text string into styled `ratatui` lines.
@@ -84,12 +89,68 @@ pub fn render_markdown_width(text: &str, width: u16) -> Vec<Line<'static>> {
             width: width as usize,
             list_depth: 0,
             compact: false,
+            code_copy: false,
         },
     )
+    .lines
 }
 
-fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
+/// One fenced code block found while rendering Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodeBlockSpan {
+    /// Index of the block's top (language) row in the rendered lines.
+    pub line: usize,
+    /// Raw code, without the fence rows or the info string.
+    pub source: String,
+    /// Whether a chat copy affordance was drawn for this block.
+    pub copy_label: bool,
+}
+
+struct RenderedBlocks {
+    lines: Vec<Line<'static>>,
+    code_blocks: Vec<CodeBlockSpan>,
+}
+
+/// Renders chat message content and reports its fenced code blocks so the
+/// caller can attach copy hitboxes to the language rows.
+pub(crate) fn render_markdown_width_with_code_blocks(
+    text: &str,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<CodeBlockSpan>) {
+    let text = strip_think_tags(text);
+    let rendered = render_blocks(
+        &text,
+        BlockCtx {
+            width: width as usize,
+            list_depth: 0,
+            compact: false,
+            code_copy: true,
+        },
+    );
+    (rendered.lines, rendered.code_blocks)
+}
+
+/// Returns the raw source of the block at the given render order index.
+pub(crate) fn code_block_source(markdown: &str, index: usize) -> Option<String> {
+    let text = strip_think_tags(markdown);
+    render_blocks(
+        &text,
+        BlockCtx {
+            width: 0,
+            list_depth: 0,
+            compact: false,
+            code_copy: false,
+        },
+    )
+    .code_blocks
+    .into_iter()
+    .nth(index)
+    .map(|block| block.source)
+}
+
+fn render_blocks(input: &str, ctx: BlockCtx) -> RenderedBlocks {
     let mut lines = Vec::new();
+    let mut code_blocks = Vec::new();
     let mut pos = 0usize;
     let mut needs_sep = false;
 
@@ -113,7 +174,7 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
         // Detect block type by the first non-empty line.
         if let Some(block) = try_fenced_code_block(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else if let Some(block) = try_heading(remaining) {
             pos += block.consumed;
             lines.push(block.line);
@@ -122,13 +183,13 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
             lines.push(block.line);
         } else if let Some(block) = try_blockquote(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else if let Some(block) = try_list(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else if let Some(block) = try_table(remaining) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else {
             let block = take_paragraph(remaining);
             pos += block.consumed;
@@ -141,7 +202,20 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
         needs_sep = true;
     }
 
-    lines
+    RenderedBlocks { lines, code_blocks }
+}
+
+fn append_block(
+    lines: &mut Vec<Line<'static>>,
+    code_blocks: &mut Vec<CodeBlockSpan>,
+    block: BlockResult,
+) {
+    let base = lines.len();
+    lines.extend(block.lines);
+    for mut code_block in block.code_blocks {
+        code_block.line += base;
+        code_blocks.push(code_block);
+    }
 }
 
 fn is_blank_line(line: &Line<'_>) -> bool {
@@ -178,6 +252,7 @@ fn prefix_lines<'a>(
 struct BlockResult {
     consumed: usize,
     lines: Vec<Line<'static>>,
+    code_blocks: Vec<CodeBlockSpan>,
 }
 
 struct SingleLineResult {
@@ -242,12 +317,24 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     };
     let mut out: Vec<Line<'static>> = Vec::with_capacity(code_lines.len().saturating_add(2));
 
+    let source = code_lines.join("\n");
+
     // The top padding row doubles as the language label so the label never
     // costs an extra row.
     let mut top = vec![Span::styled(CODE_LEFT_PAD, surface)];
     if has_lang {
         top.push(Span::styled(lang.to_string(), surface.fg(theme::MUTED)));
     }
+    // The chat layer overlays the clickable copy label after selection mapping,
+    // so the label never enters the selectable text projection.
+    let copy_label = ctx.code_copy
+        && ctx.width > 0
+        && ctx.width
+            > top
+                .iter()
+                .map(|span| span.content.width())
+                .sum::<usize>()
+                .saturating_add(CODE_COPY_LABEL.width());
     out.push(surface_line(top));
 
     for code in code_lines {
@@ -261,6 +348,11 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     Some(BlockResult {
         consumed,
         lines: out,
+        code_blocks: vec![CodeBlockSpan {
+            line: 0,
+            source,
+            copy_label,
+        }],
     })
 }
 
@@ -337,7 +429,8 @@ fn try_blockquote(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
         ..ctx
     };
     let inner = render_blocks(&raw_lines.join("\n"), inner_ctx);
-    let lines = prefix_lines(inner, &bar)
+    let code_blocks = inner.code_blocks;
+    let lines = prefix_lines(inner.lines, &bar)
         .map(|line| {
             let style = surface.patch(line.style);
             let mut line = line.style(style);
@@ -346,7 +439,11 @@ fn try_blockquote(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
         })
         .collect();
 
-    Some(BlockResult { consumed, lines })
+    Some(BlockResult {
+        consumed,
+        lines,
+        code_blocks,
+    })
 }
 
 fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
@@ -416,6 +513,7 @@ fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     consumed = consumed.min(text.len());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut code_blocks = Vec::new();
     for (idx, item_lines) in items.iter().enumerate() {
         let first = &item_lines[0];
         // Check for task list: "- [x] ..." or "- [ ] ..."
@@ -447,13 +545,24 @@ fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
                 width: ctx.width.saturating_sub(marker_width),
                 list_depth: ctx.list_depth + 1,
                 compact: true,
+                code_copy: ctx.code_copy,
             };
             let indent = Span::raw(" ".repeat(marker_width));
-            lines.extend(prefix_lines(render_blocks(&body, child_ctx), &indent));
+            let inner = render_blocks(&body, child_ctx);
+            let base = lines.len();
+            lines.extend(prefix_lines(inner.lines, &indent));
+            for mut code_block in inner.code_blocks {
+                code_block.line += base;
+                code_blocks.push(code_block);
+            }
         }
     }
 
-    Some(BlockResult { consumed, lines })
+    Some(BlockResult {
+        consumed,
+        lines,
+        code_blocks,
+    })
 }
 
 fn try_table(text: &str) -> Option<BlockResult> {
@@ -560,7 +669,11 @@ fn try_table(text: &str) -> Option<BlockResult> {
     }
     lines.push(rule("└", "┴", "┘"));
 
-    Some(BlockResult { consumed, lines })
+    Some(BlockResult {
+        consumed,
+        lines,
+        code_blocks: Vec::new(),
+    })
 }
 
 /// Checks whether a line is a table separator (only `|`, `-`, `:`, and spaces).
@@ -652,6 +765,7 @@ fn take_paragraph(text: &str) -> BlockResult {
     BlockResult {
         consumed,
         lines: lines.into_iter().map(Line::raw).collect(),
+        code_blocks: Vec::new(),
     }
 }
 
@@ -1065,6 +1179,48 @@ mod tests {
         let lines = render_markdown(text);
         assert_eq!(lines.len(), 3, "got {} lines", lines.len());
         assert_eq!(lines[1].spans[1].content, "code here");
+    }
+
+    #[test]
+    fn code_block_render_reports_exact_source_and_copy_label() {
+        let text = "~~~rust\nfn main() {\n    println!(\"hi\");\n}\n~~~\n\n~~~sh\necho hi\n~~~";
+        let (lines, blocks) = render_markdown_width_with_code_blocks(text, 40);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].source, "fn main() {\n    println!(\"hi\");\n}");
+        assert_eq!(blocks[1].source, "echo hi");
+        assert!(blocks.iter().all(|block| block.copy_label));
+        for block in &blocks {
+            assert!(
+                lines[block.line]
+                    .spans
+                    .iter()
+                    .all(|span| span.content != CODE_COPY_LABEL),
+                "the chat layer owns the copy label"
+            );
+        }
+        assert_eq!(code_block_source(text, 1).as_deref(), Some("echo hi"));
+        assert_eq!(code_block_source(text, 2), None);
+    }
+
+    #[test]
+    fn long_code_block_source_copies_beyond_the_viewport() {
+        let code = (0..500)
+            .map(|line| format!("let value_{line} = {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!("~~~rust\n{code}\n~~~");
+        assert_eq!(code_block_source(&text, 0), Some(code));
+    }
+
+    #[test]
+    fn plain_markdown_titles_have_no_copy_label() {
+        let lines = render_markdown_width("~~~rust\nx\n~~~", 40);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| span.content != CODE_COPY_LABEL)
+        );
     }
 
     #[test]

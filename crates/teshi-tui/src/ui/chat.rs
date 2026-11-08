@@ -1038,6 +1038,32 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 }
 
+/// Replaces the trailing cells of a code block's language row with the copy
+/// affordance. The label is drawn here, after selection mapping, so it never
+/// becomes part of the copied chat text.
+fn overlay_copy_label(line: &mut Line<'static>, width: u16, hovered: bool) {
+    let label_width = crate::markdown::CODE_COPY_LABEL.width() as u16;
+    let target = width.saturating_sub(label_width);
+    let current = line.width() as u16;
+    let mut rendered = std::mem::take(line);
+    if current > target {
+        rendered = super::truncate_line_to_cols(rendered, target);
+    } else if current < target {
+        rendered
+            .spans
+            .push(Span::raw(" ".repeat((target - current) as usize)));
+    }
+    let style = if hovered {
+        fg(theme::PRIMARY).add_modifier(Modifier::BOLD)
+    } else {
+        fg(theme::MUTED)
+    };
+    rendered
+        .spans
+        .push(Span::styled(crate::markdown::CODE_COPY_LABEL, style));
+    *line = rendered;
+}
+
 /// Renders the scrolled chat history plus a thin scrollbar on the right.
 fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placement: ChatPlacement) {
     if area.width == 0 || area.height == 0 {
@@ -1064,22 +1090,37 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
     let height = body.height as usize;
     let max_start = total.saturating_sub(height);
     let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
+    let mut visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
         .map(|index| projection.highlighted_line(index, selection))
         .collect();
+    let copy_width = (crate::markdown::CODE_COPY_LABEL.width() as u16).min(body.width);
     for (row, projected) in projection.lines.iter().skip(start).take(height).enumerate() {
         if let Some(action) = &projected.action {
+            let copy_block = matches!(action, crate::keymap::Action::AiCopyCodeBlock { .. });
+            let rect = Rect::new(
+                if copy_block {
+                    body.right().saturating_sub(copy_width)
+                } else {
+                    body.x
+                },
+                body.y + row as u16,
+                if copy_block {
+                    copy_width
+                } else if matches!(action, crate::keymap::Action::AiToggleThought(_)) {
+                    body.width.min(14)
+                } else {
+                    body.width
+                },
+                1,
+            );
+            if copy_block && let Some(line) = visible.get_mut(row) {
+                let hovered = app
+                    .mouse_position
+                    .is_some_and(|(x, y)| rect.contains(ratatui::layout::Position::new(x, y)));
+                overlay_copy_label(line, body.width, hovered);
+            }
             app.clickable_regions.push(ClickableRegion::ActionButton {
-                rect: Rect::new(
-                    body.x,
-                    body.y + row as u16,
-                    if matches!(action, crate::keymap::Action::AiToggleThought(_)) {
-                        body.width.min(14)
-                    } else {
-                        body.width
-                    },
-                    1,
-                ),
+                rect,
                 action: action.clone(),
                 modal: false,
             });
@@ -1416,8 +1457,11 @@ fn build_chat_projection(
         let line_start = out.len();
         let block_start = blocks.len();
         let mut chunk = Vec::new();
-        match msg.role {
-            AiRole::Tool => push_tool_result(&mut chunk, msg, width),
+        let copy_rows = match msg.role {
+            AiRole::Tool => {
+                push_tool_result(&mut chunk, msg, width);
+                Vec::new()
+            }
             AiRole::User | AiRole::Assistant => push_message(
                 &mut chunk,
                 app,
@@ -1431,7 +1475,7 @@ fn build_chat_projection(
                     completed: completed == Some(message_index),
                 },
             ),
-        }
+        };
         append_selectable_chunk(
             &mut out,
             &mut blocks,
@@ -1439,6 +1483,14 @@ fn build_chat_projection(
             message_index,
             block_text_for_message(msg, &app.project.root_dir),
         );
+        for (row, block_index) in copy_rows {
+            if let Some(line) = out.get_mut(line_start + row) {
+                std::rc::Rc::make_mut(line).action = Some(crate::keymap::Action::AiCopyCodeBlock {
+                    message_index,
+                    block_index,
+                });
+            }
+        }
         if msg.role == AiRole::User {
             append_message_images(&mut out, app, &msg.content, width);
         }
@@ -1663,15 +1715,19 @@ impl RailKind {
 
 /// Wraps `lines` to the space right of the rail and prefixes every row with `rail`,
 /// so wrapped continuation rows stay visually grouped.
+/// Returns the output row where each input line starts, so callers can attach
+/// row-level hitboxes after wrapping.
 fn push_railed(
     out: &mut Vec<Line<'static>>,
     lines: Vec<Line<'static>>,
     rail: RailKind,
     width: usize,
-) {
+) -> Vec<usize> {
     let body_width = rail_body_width(width) as usize;
     let rail = Span::styled(rail.glyph(), fg(rail.color()));
+    let mut starts = Vec::with_capacity(lines.len());
     for line in lines {
+        starts.push(out.len());
         for row in wrap_line_to_width(line, body_width) {
             let mut spans = Vec::with_capacity(row.spans.len() + 1);
             spans.push(rail.clone());
@@ -1679,6 +1735,7 @@ fn push_railed(
             out.push(Line::from(spans));
         }
     }
+    starts
 }
 
 /// Identifies the newest answer that finished, so the transcript keeps one completion
@@ -1722,7 +1779,8 @@ fn push_message(
     msg: &AiChatMessage,
     width: usize,
     display: MessageDisplay,
-) {
+) -> Vec<(usize, usize)> {
+    let entry = out.len();
     if msg.source.as_deref() == Some("acp_reasoning") {
         push_thinking_state(
             out,
@@ -1731,7 +1789,7 @@ fn push_message(
             display.expanded,
             display.live,
         );
-        return;
+        return Vec::new();
     }
     if let Some(reasoning) = &msg.reasoning_content
         && !reasoning.is_empty()
@@ -1754,8 +1812,14 @@ fn push_message(
         display.completed,
     )];
     let content = shown_content(msg, &app.project.root_dir);
+    let mut code_blocks = Vec::new();
     if !content.is_empty() {
-        body.extend(render_markdown_width(&content, rail_body_width(width)));
+        let (lines, blocks) = crate::markdown::render_markdown_width_with_code_blocks(
+            &content,
+            rail_body_width(width),
+        );
+        body.extend(lines);
+        code_blocks = blocks;
     }
     if let Some(tool_calls) = &msg.tool_calls {
         body.extend(tool_calls.iter().map(|tc| tool_call_line(app, tc)));
@@ -1770,7 +1834,17 @@ fn push_message(
             line.style = line.style.bg(theme::CHAT_USER_BG);
         }
     }
-    push_railed(out, body, rail, width);
+    let starts = push_railed(out, body, rail, width);
+    // The role header occupies body row 0; the markdown rows follow it.
+    code_blocks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, block)| block.copy_label && block.line + 1 < starts.len())
+        .map(|(block_index, block)| {
+            let row = starts[block.line + 1].saturating_sub(entry);
+            (row, block_index)
+        })
+        .collect()
 }
 
 /// Fits compact activity labels in terminal cells, including wide Unicode.
@@ -2874,6 +2948,64 @@ mod tests {
             assert!(screen.contains("ctx unknown"), "{screen}");
             assert!(!screen.contains("Enter send"), "{screen}");
         }
+    }
+
+    #[test]
+    fn chat_code_blocks_register_independent_copy_hitboxes() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        let text = "~~~rust\nfn main() {}\n~~~\n\n~~~sh\necho hi\n~~~";
+        app.agents[0]
+            .messages_mut()
+            .push(message(AiRole::Assistant, text, None));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        let mut hits = Vec::new();
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ActionButton {
+                rect,
+                action:
+                    crate::keymap::Action::AiCopyCodeBlock {
+                        message_index,
+                        block_index,
+                    },
+                ..
+            } = region
+            {
+                hits.push((*message_index, *block_index, *rect));
+            }
+        }
+        assert_eq!(hits.len(), 2, "one hitbox per fenced block");
+        assert_eq!((hits[0].0, hits[0].1), (0, 0));
+        assert_eq!((hits[1].0, hits[1].1), (0, 1));
+        let label_width = crate::markdown::CODE_COPY_LABEL.width() as u16;
+        assert!(hits.iter().all(|hit| hit.2.width == label_width));
+        assert_ne!(hits[0].2.y, hits[1].2.y);
+        let label = hits[0].2;
+        let before = terminal.backend().buffer()[(label.x, label.y)].fg;
+        assert_eq!(before, theme::MUTED);
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Moved,
+            label.x + 1,
+            label.y,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(label.x, label.y)].fg,
+            theme::PRIMARY,
+            "hovering the copy label highlights it"
+        );
     }
 
     #[test]
