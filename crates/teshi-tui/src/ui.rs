@@ -4965,6 +4965,10 @@ fn requirements_footer_controls(
                 label(" Iteration [I]", " Iteration"),
                 Action::ReqEditIteration,
             ),
+            (
+                label(" Priority [Ctrl+p]", " Priority"),
+                Action::ReqEditPriority,
+            ),
             (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
         ];
     }
@@ -6861,13 +6865,13 @@ mod truncate_tests {
             (
                 RequirementsFocus::Editor,
                 RequirementsEditorMode::Browse,
-                "[BROWSE] Save [Ctrl+s] Point [n] Iteration [I] New doc [Ctrl+n]",
+                "[BROWSE] Save [Ctrl+s] Point [n] Iteration [I] Priority [Ctrl+p] New doc [Ctrl+n]",
                 "[Ctrl+s]",
             ),
             (
                 RequirementsFocus::Editor,
                 RequirementsEditorMode::Insert,
-                "[INSERT] Save [Ctrl+s] Point [n] Iteration [I] New doc [Ctrl+n]",
+                "[INSERT] Save [Ctrl+s] Point [n] Iteration [I] Priority [Ctrl+p] New doc [Ctrl+n]",
                 "[Ctrl+s]",
             ),
             (

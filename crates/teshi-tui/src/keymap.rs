@@ -1185,6 +1185,11 @@ impl Action {
                     return match (event.code, event.modifiers) {
                         (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
                         (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                        // Ctrl+P mirrors the tree's priority shortcut without
+                        // colliding with vim paste in browse mode.
+                        (KeyCode::Char('p' | 'P'), KeyModifiers::CONTROL) => {
+                            Some(Self::ReqEditPriority)
+                        }
                         (KeyCode::Left, _) => Some(Self::MoveLeft),
                         (KeyCode::Right, _) => Some(Self::MoveRight),
                         (KeyCode::Up, _) => Some(Self::MoveUp),
@@ -1280,6 +1285,11 @@ impl Action {
                     (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::Redo),
                     (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         Some(Self::ReqEditIteration)
+                    }
+                    // Ctrl+P mirrors the tree's priority shortcut; plain p is
+                    // vim paste-after in browse mode.
+                    (KeyCode::Char('p' | 'P'), KeyModifiers::CONTROL) => {
+                        Some(Self::ReqEditPriority)
                     }
                     (KeyCode::Home, _) => Some(Self::MoveHome),
                     (KeyCode::End, _) => Some(Self::MoveEnd),
@@ -2916,6 +2926,13 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
             None
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::ReqEditPriority)
         );
         context.requirements_editor_mode = RequirementsEditorMode::Insert;
         for (key, modifiers, expected) in [
