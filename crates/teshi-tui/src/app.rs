@@ -404,6 +404,13 @@ impl AgentThread {
             && self.status == AiStatus::Idle
     }
 
+    /// Saved session id for the current conversation, when one exists.
+    pub fn current_session_id(&self) -> Option<&str> {
+        self.saved_session
+            .as_ref()
+            .map(|session| session.id.as_str())
+    }
+
     pub fn messages(&self) -> &[AiChatMessage] {
         self.backend.messages()
     }

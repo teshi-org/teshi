@@ -4058,9 +4058,51 @@ fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Re
 }
 
 /// Renders the session browser overlay panel.
+fn format_session_size(bytes: Option<u64>) -> String {
+    match bytes {
+        Some(bytes) => format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)),
+        None => "—".to_string(),
+    }
+}
+
+fn session_relative_age(updated_at: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let Ok(updated) = updated_at.parse::<u64>() else {
+        return "—".to_string();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(updated);
+    let seconds = now.saturating_sub(updated) / 1000;
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
+fn session_label(text: &str, width: u16) -> String {
+    let truncated = truncate_string_to_cols(text, width);
+    if truncated.chars().count() < text.chars().count() && width > 1 {
+        format!(
+            "{}…",
+            truncate_string_to_cols(text, width.saturating_sub(1))
+        )
+    } else {
+        truncated
+    }
+}
+
 fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_w = area.width.min(60);
-    let panel_h = area.height.min(20);
+    let session_count = app.session_list.len();
+    let panel_w = area.width.min(88);
+    let desired_height = (session_count as u16)
+        .saturating_mul(2)
+        .saturating_add(4)
+        .max(10);
+    let panel_h = area.height.min(desired_height);
     let x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let y = area.y + (area.height.saturating_sub(panel_h)) / 2;
     let panel_area = Rect::new(x, y, panel_w, panel_h);
@@ -4068,11 +4110,15 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Dim background
     frame.render_widget(Clear, panel_area);
 
-    let block = theme::popup_block(if app.session_panel_legacy {
-        " Legacy / Unassigned "
+    let title = if app.session_panel_legacy {
+        format!(" Legacy / Unassigned · {session_count} ")
     } else {
-        " Project sessions "
-    });
+        format!(
+            " Sessions · {} · {session_count} ",
+            app.project_switch.active.identity.display_name()
+        )
+    };
+    let block = theme::popup_block(title.as_str());
     let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
         .areas(block.inner(panel_area));
     frame.render_widget(block, panel_area);
@@ -4098,32 +4144,68 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             "  Type /new to start a session that will be saved.",
         ));
     } else {
-        for (i, session) in app.session_list.iter().enumerate() {
-            if let Some(rect) = visible_content_rows(
-                inner,
-                lines.len(),
-                if session.model_label.is_some() { 2 } else { 1 },
-                0,
-            ) {
+        let visible_sessions = (inner.height.saturating_sub(1) as usize / 2).max(1);
+        let start = app
+            .session_panel_selection
+            .saturating_sub(visible_sessions.saturating_sub(1));
+        for (index, session) in app
+            .session_list
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_sessions)
+        {
+            let is_selected = index == app.session_panel_selection;
+            let current = app.agent().current_session_id() == Some(session.id.as_str());
+            let row = lines.len();
+            if let Some(rect) = visible_content_rows(inner, row, 2, 0) {
                 app.clickable_regions
-                    .push(ClickableRegion::SessionRow { rect, index: i });
+                    .push(ClickableRegion::SessionRow { rect, index });
             }
-            let is_selected = i == app.session_panel_selection;
-            let prefix = if is_selected { " ▸ " } else { "   " };
-            // Show created_at as readable date
-            let date = session.created_at.as_str();
-            let label = format!("{}{} msgs — {}", prefix, session.message_count, date);
+            let marker = if current {
+                "●"
+            } else if is_selected {
+                "▸"
+            } else {
+                " "
+            };
+            let dir = session
+                .project_root
+                .as_ref()
+                .and_then(|root| root.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unassigned".to_string());
+            let model = session
+                .model_label
+                .clone()
+                .or_else(|| session.acp_agent_id.clone())
+                .unwrap_or_else(|| "—".to_string());
+            let first = session_label(
+                &format!(
+                    " {marker} {}  ·  {} msgs  ·  {}",
+                    session.display_title(),
+                    session.message_count,
+                    format_session_size(session.file_size())
+                ),
+                inner.width,
+            );
+            let second = session_label(
+                &format!(
+                    "     {dir}  ·  {}  ·  {model}",
+                    session_relative_age(&session.updated_at)
+                ),
+                inner.width,
+            );
             let style = if is_selected {
                 theme::selected_row(true)
             } else {
                 Style::default()
             };
-            lines.push(Line::styled(label, style));
-            if let Some(ref ml) = session.model_label {
-                lines.push(
-                    Line::raw(format!("    Model: {ml}")).style(Style::default().fg(theme::MUTED)),
-                );
-            }
+            lines.push(Line::styled(first, style));
+            lines.push(Line::styled(
+                second,
+                style.patch(Style::default().fg(theme::MUTED)),
+            ));
         }
     }
 
@@ -8022,5 +8104,42 @@ Feature: Rule only
                 );
             }
         }
+    }
+
+    #[test]
+    fn session_panel_shows_titles_metadata_and_scope() {
+        let mut app = App::from_args().expect("app init");
+        app.session_panel_active = true;
+        app.active_tab = crate::app::MainTab::Ai;
+        let message = crate::app::AiChatMessage {
+            role: crate::app::AiRole::User,
+            content: "Fix login flow".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        };
+        let mut session =
+            crate::session::Session::from_messages(vec![message], Some("gpt-test".into()));
+        session.project_root = Some(PathBuf::from("demo-project"));
+        app.session_list = vec![session];
+        app.session_panel_selection = 0;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Sessions ·"), "{screen}");
+        assert!(screen.contains("Fix login flow"), "{screen}");
+        assert!(screen.contains("1 msgs"), "{screen}");
+        assert!(screen.contains("demo-project"), "{screen}");
+        assert!(screen.contains("gpt-test"), "{screen}");
     }
 }

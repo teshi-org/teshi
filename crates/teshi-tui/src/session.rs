@@ -34,6 +34,30 @@ pub struct Session {
 }
 
 impl Session {
+    /// Human-readable title: the first user line, or a short session id.
+    pub fn display_title(&self) -> String {
+        let first = self
+            .messages
+            .iter()
+            .find(|message| message.role == crate::app::AiRole::User)
+            .map(|message| message.content.as_str())
+            .unwrap_or("");
+        let line = first.lines().next().unwrap_or("").trim();
+        if line.is_empty() {
+            let short: String = self.id.chars().take(8).collect();
+            format!("Session {short}")
+        } else {
+            line.chars().take(48).collect()
+        }
+    }
+
+    /// On-disk size of this session, without loading its messages.
+    pub fn file_size(&self) -> Option<u64> {
+        std::fs::metadata(Self::storage_dir().join(format!("{}.json", self.id)))
+            .ok()
+            .map(|metadata| metadata.len())
+    }
+
     /// Directory where session JSON files are stored.
     pub fn storage_dir() -> PathBuf {
         if let Ok(override_dir) = std::env::var(SESSION_DIR_ENV) {
