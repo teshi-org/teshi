@@ -1143,6 +1143,12 @@ fn set_system_clipboard(text: &str) -> Result<arboard::Clipboard> {
     Ok(clipboard)
 }
 
+/// ACP workers may report a closed write channel while shutting down a turn
+/// that already completed cleanly. That message is not user-facing content.
+fn is_ignorable_agent_error(message: &str) -> bool {
+    message.contains("WritableIterable is closed")
+}
+
 fn completed_assistant_responses(messages: &[AiChatMessage], limit: usize) -> Vec<&str> {
     let mut responses: Vec<&str> = messages
         .iter()
@@ -3758,19 +3764,17 @@ impl App {
                     }
                     Ok(Some(AgentBackendEvent::Failed(message))) => {
                         self.agents[i].chat.queue_ready = false;
-                        self.agents[i].retain_partial_response();
-                        self.agents[i].messages_mut().push(AiChatMessage {
-                            role: AiRole::Assistant,
-                            content: format!("Error: {message}"),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                            source: Some("agent_progress".into()),
-                            activity: None,
-                        });
-                        self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
+                        if is_ignorable_agent_error(&message) {
+                            // A completed ACP turn can report this while its
+                            // worker tears down the event channel. It is
+                            // transport noise, not model output.
+                            self.agents[i].status = AiStatus::Idle;
+                            continue;
+                        }
+                        self.agents[i].retain_partial_response();
+                        self.agents[i].status = AiStatus::Error;
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
                             self.set_status_message(self.status.clone());
@@ -13708,6 +13712,17 @@ mod tests {
         assert_eq!(app.status, "Usage: /copy [N] where N is a positive integer");
         app.execute_slash_command("copy").unwrap();
         assert_eq!(app.status, "No completed assistant responses to copy");
+    }
+
+    #[test]
+    fn acp_channel_close_noise_is_ignorable() {
+        assert!(super::is_ignorable_agent_error(
+            "Error: RetriableError: WritableIterable is closed"
+        ));
+        assert!(super::is_ignorable_agent_error(
+            "RetriableError: WritableIterable is closed"
+        ));
+        assert!(!super::is_ignorable_agent_error("network unreachable"));
     }
 
     #[test]

@@ -1555,13 +1555,17 @@ fn build_chat_projection(
             agent.partial_response(),
             rail_body_width(width),
         ));
-        let cursor = Span::styled(
-            STREAM_CURSOR,
-            fg(theme::ACCENT).add_modifier(Modifier::SLOW_BLINK),
-        );
-        match body.last_mut() {
-            Some(last) => last.spans.push(cursor),
-            None => body.push(Line::from(cursor)),
+        // The blinking cursor marks an actively running turn. A finished turn
+        // must never leave it at the end of the transcript.
+        if agent.status == AiStatus::Waiting {
+            let cursor = Span::styled(
+                STREAM_CURSOR,
+                fg(theme::ACCENT).add_modifier(Modifier::SLOW_BLINK),
+            );
+            match body.last_mut() {
+                Some(last) => last.spans.push(cursor),
+                None => body.push(Line::from(cursor)),
+            }
         }
         let mut chunk = Vec::new();
         push_railed(&mut chunk, body, RailKind::Guide, width);
@@ -2948,6 +2952,39 @@ mod tests {
             assert!(screen.contains("ctx unknown"), "{screen}");
             assert!(!screen.contains("Enter send"), "{screen}");
         }
+    }
+
+    #[test]
+    fn finished_turn_leaves_no_stream_cursor() {
+        let (mut idle, _project, _store) = activity_test_app();
+        idle.active_tab = crate::app::MainTab::Ai;
+        idle.agents[0]
+            .partial_response_mut()
+            .push_str("partial text");
+        idle.agents[0].status = AiStatus::Idle;
+        let idle_projection = build_chat_projection(&idle, 80, 40, ChatPlacement::Tab);
+        assert!(
+            idle_projection
+                .lines
+                .iter()
+                .all(|row| !line_text(&row.line).contains(STREAM_CURSOR)),
+            "a finished turn must not keep the streaming cursor"
+        );
+
+        let (mut running, _project, _store) = activity_test_app();
+        running.active_tab = crate::app::MainTab::Ai;
+        running.agents[0]
+            .partial_response_mut()
+            .push_str("partial text");
+        running.agents[0].status = AiStatus::Waiting;
+        let running_projection = build_chat_projection(&running, 80, 40, ChatPlacement::Tab);
+        assert!(
+            running_projection
+                .lines
+                .iter()
+                .any(|row| line_text(&row.line).contains(STREAM_CURSOR)),
+            "a running turn keeps the streaming cursor"
+        );
     }
 
     #[test]
