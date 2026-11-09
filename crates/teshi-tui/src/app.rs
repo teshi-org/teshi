@@ -107,6 +107,109 @@ pub struct ChatSelection {
     pub focus: ChatAnchor,
 }
 
+/// A scrollbar as drawn last frame, so the pointer can grab the cells the user
+/// sees. Vertical bars carry one row per extent cell; horizontal bars carry one
+/// cell per column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScrollbarBar {
+    pub rect: ratatui::layout::Rect,
+    pub axis: crate::theme::ScrollAxis,
+    /// Total content extent: rows when vertical, cells when horizontal.
+    pub total: usize,
+}
+
+impl ScrollbarBar {
+    /// Visible extent, which is also the bar's length along its axis.
+    pub(crate) fn view(&self) -> usize {
+        match self.axis {
+            crate::theme::ScrollAxis::Vertical => self.rect.height as usize,
+            crate::theme::ScrollAxis::Horizontal => self.rect.width as usize,
+        }
+    }
+
+    /// First visible index at which the content ends.
+    pub(crate) fn max_start(&self) -> usize {
+        self.total.saturating_sub(self.view())
+    }
+
+    pub(crate) fn thumb(&self, start: usize) -> Option<(usize, usize)> {
+        crate::theme::scrollbar_thumb(self.total, self.view(), start, self.axis)
+    }
+
+    /// Pointer position measured in cells along the bar's axis.
+    pub(crate) fn track_pos(&self, pos: ratatui::layout::Position) -> u16 {
+        match self.axis {
+            crate::theme::ScrollAxis::Vertical => pos.y.saturating_sub(self.rect.y),
+            crate::theme::ScrollAxis::Horizontal => pos.x.saturating_sub(self.rect.x),
+        }
+    }
+}
+
+/// What a pointer event asks a scrollbar to do. Each surface applies the
+/// result to its own offset model, because chat counts rows up from the bottom
+/// while panes and columns count from the top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScrollbarAction {
+    /// The thumb was pressed; the value is the offset inside it.
+    Grab(u16),
+    PageBack,
+    PageForward,
+    /// The grabbed thumb moved to this track cell.
+    DragTo(u16),
+}
+
+/// Classifies a press or drag against the bar drawn at `start`.
+pub(crate) fn scrollbar_mouse(
+    kind: MouseEventKind,
+    pos: ratatui::layout::Position,
+    bar: &ScrollbarBar,
+    start: usize,
+) -> Option<ScrollbarAction> {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) if bar.rect.contains(pos) => {
+            let (thumb_pos, thumb_len) = bar.thumb(start).unwrap_or((0, bar.view()));
+            let at = bar.track_pos(pos);
+            if (thumb_pos as u16..(thumb_pos + thumb_len) as u16).contains(&at) {
+                Some(ScrollbarAction::Grab(at - thumb_pos as u16))
+            } else if at < thumb_pos as u16 {
+                Some(ScrollbarAction::PageBack)
+            } else {
+                Some(ScrollbarAction::PageForward)
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            Some(ScrollbarAction::DragTo(bar.track_pos(pos)))
+        }
+        _ => None,
+    }
+}
+
+/// New first-visible index for a thumb dragged to `pointer` while the press
+/// landed `grab` cells into it, so the thumb never jumps to the pointer.
+pub(crate) fn scrollbar_drag_offset(bar: &ScrollbarBar, pointer: u16, grab: u16) -> usize {
+    let (_, thumb_len) = bar.thumb(0).unwrap_or((0, bar.view()));
+    let track = bar.view().saturating_sub(thumb_len);
+    let top = (pointer.saturating_sub(grab) as usize).min(track);
+    top.saturating_mul(bar.max_start())
+        .checked_div(track)
+        .unwrap_or(0)
+}
+
+/// Pointer state for painting a bar: dragging wins over hover.
+pub(crate) fn scrollbar_state(
+    mouse: Option<(u16, u16)>,
+    bar: &ScrollbarBar,
+    grabbed: bool,
+) -> crate::theme::ThumbState {
+    if grabbed {
+        crate::theme::ThumbState::Grabbed
+    } else if mouse.is_some_and(|(x, y)| bar.rect.contains(ratatui::layout::Position::new(x, y))) {
+        crate::theme::ThumbState::Hovered
+    } else {
+        crate::theme::ThumbState::Idle
+    }
+}
+
 /// A pending ACP `session/request_permission` prompt for one agent.
 #[derive(Debug, Clone)]
 pub struct AcpPermissionPrompt {
@@ -163,6 +266,11 @@ pub struct AgentThread {
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
     /// Finish reason from the most recent production model response.
     pub last_finish_reason: Option<String>,
+    /// Indices of assistant messages that finished a normal turn.
+    ///
+    /// Kept on the thread rather than derived from the live status so every
+    /// finished answer keeps its completion cue as the conversation continues.
+    pub completed_answers: std::collections::BTreeSet<usize>,
     saved_session: Option<crate::session::Session>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
@@ -307,6 +415,7 @@ impl AgentThread {
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
+            completed_answers: Default::default(),
             saved_session: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
@@ -356,6 +465,9 @@ impl AgentThread {
             &self.selected_acp_id,
             &model,
             project,
+            // A turn can finish without touching the transcript: the final
+            // answer is already streamed in, only its mark is new.
+            &self.completed_answers,
         ))?;
         if snapshot == self.last_session_snapshot {
             return Ok(());
@@ -375,6 +487,7 @@ impl AgentThread {
         }
         session.backend_kind = Some(self.backend_kind());
         session.acp_agent_id = self.selected_acp_id.clone();
+        session.completed_answers = self.completed_answers.iter().copied().collect();
         session.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -395,6 +508,13 @@ impl AgentThread {
             Some("refusal" | "max_tokens" | "max_turn_requests")
         ) && self.backend_kind() == teshi_agent::backend::AgentBackendKind::Acp
             && self.status == AiStatus::Idle
+    }
+
+    /// Saved session id for the current conversation, when one exists.
+    pub fn current_session_id(&self) -> Option<&str> {
+        self.saved_session
+            .as_ref()
+            .map(|session| session.id.as_str())
     }
 
     pub fn messages(&self) -> &[AiChatMessage] {
@@ -889,6 +1009,10 @@ pub struct App {
     /// Reusable message layouts for chat rendering and selection.
     pub(crate) chat_layout_cache: std::cell::RefCell<crate::ui::chat::ChatLayoutCache>,
     pub chat_history_rect: Option<ratatui::layout::Rect>,
+    /// Chat scrollbar from the last frame; `None` when the history fits.
+    pub(crate) chat_scrollbar: Option<ScrollbarBar>,
+    /// Pointer offset below the thumb top while the scrollbar is being dragged.
+    pub(crate) chat_scrollbar_grab: Option<u16>,
     /// Current chat text selection, if any.
     pub chat_selection: Option<ChatSelection>,
     // X11 serves selection data from the owning process. Retain the handle
@@ -947,8 +1071,9 @@ pub struct App {
     /// Independent horizontal offsets for the three Explore columns.
     pub explore_horizontal_scroll: [usize; 3],
     pub(crate) explore_viewports: [ExploreColumnViewport; 3],
-    /// Explore scrollbar currently controlled by a left-button drag.
-    pub explore_horizontal_scroll_drag: Option<ColumnFocus>,
+    /// Explore column scrollbar held by the pointer: the column and the offset
+    /// inside its thumb, so a drag never jumps the thumb to the pointer.
+    pub explore_horizontal_scroll_grab: Option<(ColumnFocus, u16)>,
     pub explore_edit_mode: bool,
     /// When set, the editor dims steps in non-focused scenarios.
     /// Stores the buffer row of the focused scenario's header line.
@@ -1141,6 +1266,42 @@ fn set_system_clipboard(text: &str) -> Result<arboard::Clipboard> {
         .set_text(text)
         .map_err(|error| anyhow::anyhow!("failed to set clipboard: {error}"))?;
     Ok(clipboard)
+}
+
+/// Chat history rows register hitboxes for inline controls; a left click on one
+/// runs the control instead of starting a text selection. Keep this in sync with
+/// the actions the chat projection assigns to rows.
+pub(crate) fn is_chat_inline_control(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::AiToggleTurn(_)
+            | Action::AiToggleThought(_)
+            | Action::AiToggleTools(_)
+            | Action::AiCopyCodeBlock { .. }
+    )
+}
+
+/// ACP workers may report a closed write channel while shutting down a turn
+/// that already completed cleanly. That message is not user-facing content.
+fn is_ignorable_agent_error(message: &str) -> bool {
+    message.contains("WritableIterable is closed")
+}
+
+/// The latest assistant message that represents a finished answer, not
+/// progress, reasoning, activity, or a tool-call carrier.
+fn latest_answer_index(messages: &[AiChatMessage]) -> Option<usize> {
+    messages.iter().rposition(|message| {
+        message.role == AiRole::Assistant
+            && !matches!(
+                message.source.as_deref(),
+                Some("agent_progress" | "acp_activity" | "acp_reasoning")
+            )
+            && !message.content.trim().is_empty()
+            && message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty())
+    })
 }
 
 fn completed_assistant_responses(messages: &[AiChatMessage], limit: usize) -> Vec<&str> {
@@ -1562,7 +1723,7 @@ impl App {
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
         self.explore_horizontal_scroll = [0; 3];
-        self.explore_horizontal_scroll_drag = None;
+        self.explore_horizontal_scroll_grab = None;
         self.explore_edit_mode = false;
         self.editor_focus_scenario_row = None;
         self.scenario_dropdown_open = false;
@@ -2196,6 +2357,8 @@ impl App {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -2231,7 +2394,7 @@ impl App {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -2412,6 +2575,8 @@ impl App {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -2447,7 +2612,7 @@ impl App {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -2606,6 +2771,8 @@ impl App {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -2641,7 +2808,7 @@ impl App {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -3588,7 +3755,22 @@ impl App {
                             )
                         );
                         self.agents[i].chat.rate.clear();
+                        let completed_normally = !matches!(
+                            finish_reason.as_deref(),
+                            Some(
+                                "cancelled"
+                                    | "refusal"
+                                    | "max_tokens"
+                                    | "length"
+                                    | "max_turn_requests"
+                            )
+                        );
                         self.agents[i].last_finish_reason = finish_reason;
+                        if completed_normally
+                            && let Some(index) = latest_answer_index(self.agents[i].messages())
+                        {
+                            self.agents[i].completed_answers.insert(index);
+                        }
                         let interrupted = matches!(
                             self.agents[i].last_finish_reason.as_deref(),
                             Some("refusal" | "max_tokens" | "max_turn_requests")
@@ -3758,19 +3940,17 @@ impl App {
                     }
                     Ok(Some(AgentBackendEvent::Failed(message))) => {
                         self.agents[i].chat.queue_ready = false;
-                        self.agents[i].retain_partial_response();
-                        self.agents[i].messages_mut().push(AiChatMessage {
-                            role: AiRole::Assistant,
-                            content: format!("Error: {message}"),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                            source: Some("agent_progress".into()),
-                            activity: None,
-                        });
-                        self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
+                        if is_ignorable_agent_error(&message) {
+                            // A completed ACP turn can report this while its
+                            // worker tears down the event channel. It is
+                            // transport noise, not model output.
+                            self.agents[i].status = AiStatus::Idle;
+                            continue;
+                        }
+                        self.agents[i].retain_partial_response();
+                        self.agents[i].status = AiStatus::Error;
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
                             self.set_status_message(self.status.clone());
@@ -5211,6 +5391,34 @@ impl App {
     }
 
     /// Polls external Feature discovery and disk changes.
+    /// Refreshes the shared requirement library when another process changed it.
+    pub fn poll_external_requirement_changes(&mut self) {
+        let before = self
+            .authoring_ui
+            .current_document_meta()
+            .map(|meta| (meta.id.clone(), meta.revision.clone()));
+        match self.authoring_ui.poll_external_store_changes() {
+            Ok(true) => {
+                let after = self
+                    .authoring_ui
+                    .current_document_meta()
+                    .map(|meta| (meta.id.clone(), meta.revision.clone()));
+                self.status =
+                    if self.authoring_ui.buffer_dirty && before.is_some() && after != before {
+                        "Requirement changed on disk; unsaved edits kept".to_string()
+                    } else {
+                        "Requirement library refreshed".to_string()
+                    };
+                self.set_status_message(self.status.clone());
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.status = format!("Requirement library refresh failed: {error}");
+                self.set_status_message(self.status.clone());
+            }
+        }
+    }
+
     pub fn poll_external_feature_changes(&mut self) {
         if self.external_change_prompt.is_some() {
             return;
@@ -5536,6 +5744,14 @@ impl App {
             chat.thoughts.clear();
             chat.groups.clear();
             chat.revision += 1;
+            // Draining removed messages shifts every later index; a mark on a
+            // removed turn disappears, later ones move with the summary slot.
+            let marks = &mut self.agents[agent_idx].completed_answers;
+            *marks = marks
+                .iter()
+                .filter(|index| **index >= compact_end)
+                .map(|index| *index - compact_end + 1)
+                .collect();
             self.agents[agent_idx].last_input_tokens = None;
             self.status_message = Some(format!(
                 "Context compacted: {removed_count} message(s) → summary ({} token window)",
@@ -9176,9 +9392,11 @@ impl App {
                     match self.authoring_ui.create_default_document() {
                         Ok(id) => {
                             // A new document starts as an unsaved draft, so hand the
-                            // keyboard to the editor instead of leaving it on the tree.
+                            // keyboard to the editor in insert mode instead of leaving
+                            // it on the tree in browse mode.
                             self.authoring_ui.focus =
                                 crate::authoring_tab::RequirementsFocus::Editor;
+                            self.authoring_ui.enter_insert_mode();
                             self.status = format!("Created requirement document {id}.md");
                         }
                         Err(error) => {
@@ -9378,6 +9596,16 @@ impl App {
                     } else {
                         self.status = "Select a requirement document to set its iteration".into();
                     }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqReloadStore => {
+                if self.active_tab == MainTab::Requirements {
+                    self.status = match self.authoring_ui.reload_from_disk() {
+                        Ok(()) => "Requirement library reloaded".to_string(),
+                        Err(error) => format!("Requirement library reload failed: {error}"),
+                    };
+                    self.set_status_message(self.status.clone());
                     self.quit_pending_confirm = false;
                 }
             }
@@ -9858,6 +10086,31 @@ impl App {
                     self.agent_mut().chat.thoughts.insert(index);
                 }
                 self.clear_chat_selection();
+            }
+            Action::AiCopyCodeBlock {
+                message_index,
+                block_index,
+            } => {
+                let source = self
+                    .agent()
+                    .messages()
+                    .get(message_index)
+                    .and_then(|message| {
+                        crate::markdown::code_block_source(&message.content, block_index)
+                    });
+                match source {
+                    Some(source) => {
+                        if self.try_copy_to_clipboard(&source) {
+                            let lines = source.lines().count().max(1);
+                            self.status = format!("Copied code block ({lines} line(s))");
+                            self.set_status_message(self.status.clone());
+                        }
+                    }
+                    None => {
+                        self.status = "Code block is no longer available".to_string();
+                        self.set_status_message(self.status.clone());
+                    }
+                }
             }
             Action::AiScrollUp => {
                 self.agent_mut().scroll_offset = self.agent().scroll_offset.saturating_add(5);
@@ -10689,6 +10942,74 @@ impl App {
                     && self.mindmap_focus == MindMapFocus::AiPanel))
     }
 
+    /// Pointer handling for the chat transcript scrollbar: grabbing the thumb
+    /// follows the pointer, and a click on the track pages toward the click.
+    fn handle_chat_scrollbar_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        pos: ratatui::layout::Position,
+    ) -> Result<bool> {
+        if matches!(kind, MouseEventKind::Up(MouseButton::Left))
+            && self.chat_scrollbar_grab.take().is_some()
+        {
+            return Ok(true);
+        }
+        let Some(bar) = self.chat_scrollbar else {
+            return Ok(false);
+        };
+        let height = bar.view();
+        let max_start = bar.max_start();
+        let start = max_start.saturating_sub(self.agent().scroll_offset.min(max_start));
+        match scrollbar_mouse(kind, pos, &bar, start) {
+            Some(ScrollbarAction::Grab(offset)) => {
+                self.chat_scrollbar_grab = Some(offset);
+                Ok(true)
+            }
+            Some(ScrollbarAction::PageBack) => {
+                self.set_chat_scroll_start(start.saturating_sub(height), max_start);
+                Ok(true)
+            }
+            Some(ScrollbarAction::PageForward) => {
+                self.set_chat_scroll_start(start.saturating_add(height), max_start);
+                Ok(true)
+            }
+            Some(ScrollbarAction::DragTo(pointer)) => {
+                let Some(grab) = self.chat_scrollbar_grab else {
+                    return Ok(false);
+                };
+                let start = scrollbar_drag_offset(&bar, pointer, grab);
+                self.set_chat_scroll_start(start, max_start);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Positions the transcript by its first visible row. The stored offset
+    /// counts rows up from the bottom, so new output still pins to the end.
+    fn set_chat_scroll_start(&mut self, start: usize, max_start: usize) {
+        self.agent_mut().scroll_offset = max_start.saturating_sub(start);
+    }
+
+    /// The Explore column's scrollbar as drawn last frame.
+    fn explore_scrollbar(&self, column: ColumnFocus) -> Option<ScrollbarBar> {
+        self.clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ExploreHorizontalScrollbar {
+                    column: candidate,
+                    rect,
+                    content_width,
+                    ..
+                } if *candidate == column => Some(ScrollbarBar {
+                    rect: *rect,
+                    axis: crate::theme::ScrollAxis::Horizontal,
+                    total: *content_width,
+                }),
+                _ => None,
+            })
+    }
+
     /// Move the chat by half of the last rendered viewport, mirroring Ctrl+D/U.
     fn scroll_chat_half_page(&mut self, up: bool) {
         let rows = self
@@ -11487,47 +11808,41 @@ impl App {
             let pane = ui.pane_areas.iter().position(|area| area.contains(pos));
             if matches!(kind, MouseEventKind::Up(MouseButton::Left)) {
                 ui.selection_dragging = false;
-                ui.scrollbar_drag = None;
+                if ui.scrollbar_grab.take().is_some() {
+                    return Ok(());
+                }
             }
-            let dragging = matches!(kind, MouseEventKind::Drag(MouseButton::Left));
-            if dragging && let Some((pane, axis)) = ui.scrollbar_drag {
-                let area = ui.pane_areas[pane];
-                let (position, start, length) = if axis == 0 {
-                    (col, area.x + 1, area.width.saturating_sub(2))
-                } else {
-                    (row, area.y + 1, area.height.saturating_sub(2))
-                };
-                let value = position.saturating_sub(start).min(length.saturating_sub(1)) as usize
-                    * ui.scroll_limits[pane][axis]
-                    / length.saturating_sub(1).max(1) as usize;
+            if matches!(kind, MouseEventKind::Drag(MouseButton::Left))
+                && let Some((pane, axis, grab)) = ui.scrollbar_grab
+                && let Some(bar) = ui.pane_bars[pane][axis]
+            {
+                let pointer = bar.track_pos(pos);
+                let value = scrollbar_drag_offset(&bar, pointer, grab);
                 ui.set_pane_scroll(pane, axis, value);
                 return Ok(());
             }
             if let Some(pane) = pane {
-                let area = ui.pane_areas[pane];
                 if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
-                    let axis = if row == area.bottom().saturating_sub(1)
-                        && ui.scroll_limits[pane][0] > 0
-                    {
-                        Some(0)
-                    } else if col == area.right().saturating_sub(1) && ui.scroll_limits[pane][1] > 0
-                    {
-                        Some(1)
-                    } else {
-                        None
-                    };
-                    if let Some(axis) = axis {
-                        let (position, start, length) = if axis == 0 {
-                            (col, area.x + 1, area.width.saturating_sub(2))
-                        } else {
-                            (row, area.y + 1, area.height.saturating_sub(2))
+                    for axis in [0, 1] {
+                        let Some(bar) = ui.pane_bars[pane][axis] else {
+                            continue;
                         };
-                        let value = position.saturating_sub(start).min(length.saturating_sub(1))
-                            as usize
-                            * ui.scroll_limits[pane][axis]
-                            / length.saturating_sub(1).max(1) as usize;
-                        ui.set_pane_scroll(pane, axis, value);
-                        ui.scrollbar_drag = Some((pane, axis));
+                        let start = ui.pane_scroll(pane, axis);
+                        let Some(action) = scrollbar_mouse(kind, pos, &bar, start) else {
+                            continue;
+                        };
+                        match action {
+                            ScrollbarAction::Grab(offset) => {
+                                ui.scrollbar_grab = Some((pane, axis, offset));
+                            }
+                            ScrollbarAction::PageBack => {
+                                ui.set_pane_scroll(pane, axis, start.saturating_sub(bar.view()));
+                            }
+                            ScrollbarAction::PageForward => {
+                                ui.set_pane_scroll(pane, axis, start.saturating_add(bar.view()));
+                            }
+                            ScrollbarAction::DragTo(_) => {}
+                        }
                         return Ok(());
                     }
                 }
@@ -11545,15 +11860,7 @@ impl App {
                                 MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
                             ),
                     );
-                    let old = if axis == 0 {
-                        ui.horizontal_scroll[pane]
-                    } else {
-                        match pane {
-                            0 => ui.tree_state.get_offset(),
-                            1 => ui.scroll_row,
-                            _ => ui.linked_scroll,
-                        }
-                    };
+                    let old = ui.pane_scroll(pane, axis);
                     let value =
                         if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) {
                             old.saturating_sub(3)
@@ -11655,17 +11962,15 @@ impl App {
             && self
                 .chat_history_rect
                 .is_some_and(|rect| rect.contains(pos));
+        if chat_context && self.handle_chat_scrollbar_mouse(kind, pos)? {
+            return Ok(());
+        }
         if chat_context && (in_chat_history || self.chat_selection_dragging) {
             match kind {
                 MouseEventKind::Down(MouseButton::Left) if in_chat_history => {
                     if let Some(ClickableRegion::ActionButton { action, .. }) =
                         self.hit_test(&pos).cloned()
-                        && matches!(
-                            action,
-                            Action::AiToggleTurn(_)
-                                | Action::AiToggleThought(_)
-                                | Action::AiToggleTools(_)
-                        )
+                        && is_chat_inline_control(&action)
                     {
                         return self.handle_action(action);
                     }
@@ -11783,16 +12088,13 @@ impl App {
             }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left
-                    && let Some(column) = self.explore_horizontal_scroll_drag
+                    && let Some((column, grab)) = self.explore_horizontal_scroll_grab
+                    && let Some(bar) = self.explore_scrollbar(column)
                 {
-                    if let Some(region) = self
-                        .clickable_regions
-                        .iter()
-                        .find(|region| matches!(region, ClickableRegion::ExploreHorizontalScrollbar { column: candidate, .. } if *candidate == column))
-                        .cloned()
-                    {
-                        self.handle_region_click(&region, &pos)?;
-                    }
+                    let pointer = bar.track_pos(pos);
+                    self.explore_horizontal_scroll[column.index()] =
+                        scrollbar_drag_offset(&bar, pointer, grab);
+                    self.explore_focus = column;
                 } else if button == MouseButton::Left
                     && let Some((buf_row, buf_col)) = self.screen_to_buffer_pos(col, row)
                 {
@@ -11800,7 +12102,7 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.explore_horizontal_scroll_drag = None;
+                self.explore_horizontal_scroll_grab = None;
             }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Try clickable regions first (e.g. right-click on a tab/item)
@@ -12205,20 +12507,28 @@ impl App {
                 content_width,
                 viewport_width,
             } => {
-                let max_scroll = content_width.saturating_sub(*viewport_width);
-                let track_width = rect.width as usize;
-                if track_width > 0 && max_scroll > 0 {
-                    let thumb_width = ((*viewport_width * track_width) / *content_width)
-                        .clamp(4.min(track_width), track_width);
-                    let travel = track_width.saturating_sub(thumb_width);
-                    let pointer = pos.x.saturating_sub(rect.x) as usize;
-                    let thumb_start = pointer.saturating_sub(thumb_width / 2).min(travel);
-                    self.explore_horizontal_scroll[column.index()] = thumb_start
-                        .saturating_mul(max_scroll)
-                        .checked_div(travel)
-                        .unwrap_or(0);
-                    self.explore_horizontal_scroll_drag = Some(*column);
-                    self.explore_focus = *column;
+                let bar = ScrollbarBar {
+                    rect: *rect,
+                    axis: crate::theme::ScrollAxis::Horizontal,
+                    total: *content_width,
+                };
+                let start = self.explore_horizontal_scroll[column.index()];
+                match scrollbar_mouse(MouseEventKind::Down(MouseButton::Left), *pos, &bar, start) {
+                    Some(ScrollbarAction::Grab(offset)) => {
+                        self.explore_horizontal_scroll_grab = Some((*column, offset));
+                        self.explore_focus = *column;
+                    }
+                    Some(ScrollbarAction::PageBack) => {
+                        self.explore_horizontal_scroll[column.index()] =
+                            start.saturating_sub(*viewport_width);
+                        self.explore_focus = *column;
+                    }
+                    Some(ScrollbarAction::PageForward) => {
+                        let step = start.saturating_add(*viewport_width);
+                        self.explore_horizontal_scroll[column.index()] = step.min(bar.max_start());
+                        self.explore_focus = *column;
+                    }
+                    _ => {}
                 }
             }
             ClickableRegion::ApprovalBadge { .. } => {
@@ -13082,7 +13392,13 @@ impl App {
             return Ok(());
         }
         if command == "sendqueued" {
+            // A failed turn parks the queue in the error state, which the
+            // dispatcher never drains; resuming has to leave it first.
+            let failed = self.agent().status == AiStatus::Error;
             self.agent_mut().chat.queue_ready = true;
+            if failed {
+                self.agent_mut().status = AiStatus::Idle;
+            }
             self.status = "Queued messages will send when this turn is ready".into();
             return Ok(());
         }
@@ -13108,6 +13424,12 @@ impl App {
         }
         if command == "copy" {
             return self.cmd_copy(None);
+        }
+        if command == "copy-code" {
+            return self.cmd_copy_code_block(None);
+        }
+        if let Some(argument) = command.strip_prefix("copy-code ") {
+            return self.cmd_copy_code_block(Some(argument));
         }
         if let Some(argument) = command.strip_prefix("copy ") {
             return self.cmd_copy(Some(argument));
@@ -13209,7 +13531,7 @@ impl App {
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
         Ok(())
     }
 
@@ -13316,6 +13638,48 @@ impl App {
             return Ok(());
         }
         self.status = format!("Copied last {} assistant response(s) to clipboard", count);
+        self.set_status_message(self.status.clone());
+        Ok(())
+    }
+
+    /// Handle `/copy-code [N]` — copy block N from the last assistant response.
+    fn cmd_copy_code_block(&mut self, argument: Option<&str>) -> Result<()> {
+        let index = match argument.map(str::trim) {
+            None | Some("") => 0,
+            Some(value) => match value.parse::<usize>() {
+                Ok(0) | Err(_) => {
+                    self.status = "Usage: /copy-code [N] where N is a positive integer".to_string();
+                    self.set_status_message(self.status.clone());
+                    return Ok(());
+                }
+                Ok(n) => n - 1,
+            },
+        };
+        let content = self
+            .agent()
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == AiRole::Assistant
+                    && message.source.as_deref() != Some("agent_progress")
+            })
+            .map(|message| message.content.clone());
+        let Some(content) = content else {
+            self.status = "No assistant response to copy a code block from".to_string();
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        };
+        let Some(source) = crate::markdown::code_block_source(&content, index) else {
+            self.status = format!("No code block {} in the last assistant response", index + 1);
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        };
+        if !self.try_copy_to_clipboard(&source) {
+            return Ok(());
+        }
+        let lines = source.lines().count().max(1);
+        self.status = format!("Copied code block {} ({lines} line(s))", index + 1);
         self.set_status_message(self.status.clone());
         Ok(())
     }
@@ -13456,6 +13820,7 @@ impl App {
             queue: session.pending_messages.clone(),
             ..Default::default()
         };
+        agent.completed_answers = session.completed_answers.iter().copied().collect();
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
         agent.tool_status = None;
@@ -13636,6 +14001,84 @@ mod tests {
     }
 
     #[test]
+    fn latest_answer_index_skips_progress_and_tool_carriers() {
+        let messages = vec![
+            AiChatMessage {
+                role: AiRole::User,
+                content: "question".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "final answer".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "streaming progress".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: Some("agent_progress".into()),
+                activity: None,
+            },
+        ];
+        assert_eq!(super::latest_answer_index(&messages), Some(1));
+    }
+
+    #[test]
+    fn acp_channel_close_noise_is_ignorable() {
+        assert!(super::is_ignorable_agent_error(
+            "Error: RetriableError: WritableIterable is closed"
+        ));
+        assert!(super::is_ignorable_agent_error(
+            "RetriableError: WritableIterable is closed"
+        ));
+        assert!(!super::is_ignorable_agent_error("network unreachable"));
+    }
+
+    #[test]
+    fn copy_code_command_rejects_invalid_counts_and_missing_blocks() {
+        let (mut app, _project, _store) = slash_test_app();
+
+        app.execute_slash_command("copy-code 0").unwrap();
+        assert_eq!(
+            app.status,
+            "Usage: /copy-code [N] where N is a positive integer"
+        );
+        app.execute_slash_command("copy-code nope").unwrap();
+        assert_eq!(
+            app.status,
+            "Usage: /copy-code [N] where N is a positive integer"
+        );
+        app.execute_slash_command("copy-code").unwrap();
+        assert_eq!(
+            app.status,
+            "No assistant response to copy a code block from"
+        );
+
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: "plain answer without fences".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        app.execute_slash_command("copy-code 1").unwrap();
+        assert_eq!(app.status, "No code block 1 in the last assistant response");
+    }
+
+    #[test]
     fn requirements_save_refreshes_rendered_title_and_rejects_invalid_edits() {
         let (mut app, _project, store) = requirements_test_app();
         let original = app.authoring_ui.artifacts.as_ref().unwrap().index.documents[0].clone();
@@ -13712,6 +14155,14 @@ mod tests {
         );
         assert_eq!(app.authoring_ui.buffer.as_string(), "# Document 2\n\n");
         assert!(app.authoring_ui.buffer_dirty);
+        assert_eq!(
+            app.authoring_ui.focus,
+            crate::authoring_tab::RequirementsFocus::Editor
+        );
+        assert_eq!(
+            app.authoring_ui.editor_mode,
+            crate::authoring_tab::RequirementsEditorMode::Insert
+        );
         let artifacts = app.authoring_ui.artifacts.as_ref().unwrap();
         let new = artifacts.index.documents.last().unwrap();
         assert_eq!(new.id, "doc-2");
@@ -14550,7 +15001,7 @@ mod tests {
         });
         app.pending_char = Some('d');
         app.explore_horizontal_scroll = [80, 90, 100];
-        app.explore_horizontal_scroll_drag = Some(ColumnFocus::Step);
+        app.explore_horizontal_scroll_grab = Some((ColumnFocus::Step, 0));
         app.explore_edit_mode = true;
         app.editor_focus_scenario_row = Some(99);
         app.scenario_dropdown_open = true;
@@ -14568,7 +15019,7 @@ mod tests {
         assert!(app.step_keyword_picker.is_none());
         assert!(app.pending_char.is_none());
         assert_eq!(app.explore_horizontal_scroll, [0; 3]);
-        assert!(app.explore_horizontal_scroll_drag.is_none());
+        assert!(app.explore_horizontal_scroll_grab.is_none());
         assert!(!app.explore_edit_mode);
         assert!(app.editor_focus_scenario_row.is_none());
         assert!(!app.scenario_dropdown_open);
@@ -15054,6 +15505,9 @@ mod tests {
             activity: None,
         });
         agent.partial_response_mut().push_str("unfinished");
+        // The partial reply becomes assistant message 1; the mark must survive
+        // the checkpoint round trip.
+        agent.completed_answers = [1].into_iter().collect();
         agent
             .save_session_to(root.path(), project.path(), None)
             .unwrap();
@@ -15061,6 +15515,7 @@ mod tests {
         let path = root.path().join(format!("{id}.json"));
         let first = crate::session::Session::load_from_file(&path).unwrap();
         assert_eq!(first.messages.last().unwrap().content, "unfinished");
+        assert_eq!(first.completed_answers, vec![1]);
         assert_eq!(first.acp_agent_id.as_deref(), Some("example"));
         assert_eq!(first.project_root.as_deref(), Some(project.path()));
         agent.partial_response_mut().push_str(" reply");
@@ -15110,6 +15565,54 @@ mod tests {
         );
         assert_eq!(app.agent().selected_acp_id.as_deref(), Some("example"));
         assert_eq!(app.agent().saved_session.as_ref().unwrap().id, id);
+        assert_eq!(app.agent().completed_answers, [1].into_iter().collect());
+    }
+
+    #[test]
+    fn a_new_completion_mark_is_checkpointed_without_a_new_message() {
+        let root = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let mut agent = AgentThread::new_with_backend(
+            1,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        for (role, content) in [(AiRole::User, "question"), (AiRole::Assistant, "answer")] {
+            agent.messages_mut().push(super::AiChatMessage {
+                role,
+                content: content.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            });
+        }
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        let id = agent.saved_session.as_ref().unwrap().id.clone();
+        let path = root.path().join(format!("{id}.json"));
+        assert!(
+            crate::session::Session::load_from_file(&path)
+                .unwrap()
+                .completed_answers
+                .is_empty(),
+            "the transcript checkpoint carries no mark yet"
+        );
+
+        // The turn ends after the answer was already checkpointed, so the mark
+        // is the only thing that changed.
+        agent.completed_answers.insert(1);
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        assert_eq!(
+            crate::session::Session::load_from_file(&path)
+                .unwrap()
+                .completed_answers,
+            vec![1]
+        );
     }
 
     #[test]
@@ -18187,31 +18690,51 @@ mod tests {
         let pane = app.authoring_ui.pane_areas[1];
         let original = app.authoring_ui.buffer.as_string();
         assert_eq!(app.authoring_ui.scroll_limits[1][0], 0);
+        let bar = app.authoring_ui.pane_bars[1][1].expect("overflowing editor draws a bar");
+        // A press on the track below the thumb pages forward without selecting.
+        let (thumb_pos, thumb_len) = bar.thumb(0).expect("editor overflow");
+        let page_y = bar.rect.y + (thumb_pos + thumb_len) as u16;
         app.handle_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
-            pane.right() - 1,
-            pane.y + 3,
+            bar.rect.x,
+            page_y,
             KeyModifiers::NONE,
         )
         .unwrap();
-        assert!(app.authoring_ui.scroll_row > 0);
+        assert_eq!(
+            app.authoring_ui.scroll_row,
+            bar.view().min(app.authoring_ui.scroll_limits[1][1]),
+            "a track click pages by exactly one viewport"
+        );
         assert!(!app.authoring_ui.selection_dragging);
+        // Grabbing the thumb and dragging it to the top scrolls back to the start.
+        let (thumb_pos, _) = bar
+            .thumb(app.authoring_ui.scroll_row)
+            .expect("editor overflow");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            bar.rect.x,
+            bar.rect.y + thumb_pos as u16,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.authoring_ui.scrollbar_grab.is_some());
         app.handle_mouse_event(
             MouseEventKind::Drag(MouseButton::Left),
-            pane.right() - 1,
-            pane.y + 1,
+            bar.rect.x,
+            bar.rect.y,
             KeyModifiers::NONE,
         )
         .unwrap();
         assert_eq!(app.authoring_ui.scroll_row, 0);
         app.handle_mouse_event(
             MouseEventKind::Up(MouseButton::Left),
-            pane.right() - 1,
-            pane.y + 1,
+            bar.rect.x,
+            bar.rect.y,
             KeyModifiers::NONE,
         )
         .unwrap();
-        assert!(app.authoring_ui.scrollbar_drag.is_none());
+        assert!(app.authoring_ui.scrollbar_grab.is_none());
         app.handle_mouse_event(
             MouseEventKind::ScrollDown,
             pane.x + 2,
@@ -18329,27 +18852,46 @@ mod tests {
     }
 
     #[test]
-    fn explore_horizontal_scrollbar_click_moves_and_starts_drag() {
+    fn explore_horizontal_scrollbar_pages_on_track_and_grabs_the_thumb() {
         let mut app = App::from_args().expect("app init");
+        let rect = ratatui::layout::Rect::new(10, 5, 20, 2);
         let region = ClickableRegion::ExploreHorizontalScrollbar {
             column: ColumnFocus::Scenario,
-            rect: ratatui::layout::Rect::new(10, 5, 20, 2),
+            rect,
             content_width: 100,
             viewport_width: 20,
         };
 
+        // Clicking the track right of the thumb pages forward by one viewport.
         app.handle_region_click(&region, &ratatui::layout::Position::new(29, 5))
             .expect("scrollbar click");
-
         assert_eq!(
             app.explore_horizontal_scroll[ColumnFocus::Scenario.index()],
-            80
-        );
-        assert_eq!(
-            app.explore_horizontal_scroll_drag,
-            Some(ColumnFocus::Scenario)
+            20
         );
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+        assert!(app.explore_horizontal_scroll_grab.is_none());
+
+        // Pressing the thumb starts a grab at the row inside it, without paging.
+        app.handle_region_click(&region, &ratatui::layout::Position::new(15, 5))
+            .expect("thumb press");
+        assert_eq!(
+            app.explore_horizontal_scroll[ColumnFocus::Scenario.index()],
+            20
+        );
+        assert_eq!(
+            app.explore_horizontal_scroll_grab,
+            Some((ColumnFocus::Scenario, 1))
+        );
+
+        // A dragged thumb follows the pointer through the grab offset.
+        let bar = super::ScrollbarBar {
+            rect,
+            axis: crate::theme::ScrollAxis::Horizontal,
+            total: 100,
+        };
+        assert_eq!(super::scrollbar_drag_offset(&bar, 11, 1), 50);
+        assert_eq!(super::scrollbar_drag_offset(&bar, 19, 1), 80);
     }
 
     fn en() -> &'static teshi_core::gherkin_lang::GherkinLanguage {
@@ -19549,6 +20091,8 @@ mod tests {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -19584,7 +20128,7 @@ mod tests {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -19755,6 +20299,8 @@ Feature: B
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -19790,7 +20336,7 @@ Feature: B
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),

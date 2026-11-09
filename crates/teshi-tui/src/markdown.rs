@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use teshi_core::markdown::strip_think_tags;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme;
 
@@ -13,6 +13,9 @@ const DEFAULT_RULE_WIDTH: usize = 50;
 
 /// Left padding (in cells) inside fenced code blocks.
 const CODE_LEFT_PAD: &str = "  ";
+
+/// Clickable copy affordance shown on a chat code block's language row.
+pub(crate) const CODE_COPY_LABEL: &str = "[copy]";
 
 /// Prefix drawn in front of every blockquote line, repeated per nesting level.
 const QUOTE_BAR: &str = "▌ ";
@@ -41,6 +44,8 @@ struct BlockCtx {
     list_depth: usize,
     /// Suppresses blank separator lines between blocks (list item bodies).
     compact: bool,
+    /// Draw the chat-only copy affordance on code blocks.
+    code_copy: bool,
 }
 
 /// Renders a Markdown text string into styled `ratatui` lines.
@@ -84,12 +89,68 @@ pub fn render_markdown_width(text: &str, width: u16) -> Vec<Line<'static>> {
             width: width as usize,
             list_depth: 0,
             compact: false,
+            code_copy: false,
         },
     )
+    .lines
 }
 
-fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
+/// One fenced code block found while rendering Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodeBlockSpan {
+    /// Index of the block's top (language) row in the rendered lines.
+    pub line: usize,
+    /// Raw code, without the fence rows or the info string.
+    pub source: String,
+    /// Whether a chat copy affordance was drawn for this block.
+    pub copy_label: bool,
+}
+
+struct RenderedBlocks {
+    lines: Vec<Line<'static>>,
+    code_blocks: Vec<CodeBlockSpan>,
+}
+
+/// Renders chat message content and reports its fenced code blocks so the
+/// caller can attach copy hitboxes to the language rows.
+pub(crate) fn render_markdown_width_with_code_blocks(
+    text: &str,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<CodeBlockSpan>) {
+    let text = strip_think_tags(text);
+    let rendered = render_blocks(
+        &text,
+        BlockCtx {
+            width: width as usize,
+            list_depth: 0,
+            compact: false,
+            code_copy: true,
+        },
+    );
+    (rendered.lines, rendered.code_blocks)
+}
+
+/// Returns the raw source of the block at the given render order index.
+pub(crate) fn code_block_source(markdown: &str, index: usize) -> Option<String> {
+    let text = strip_think_tags(markdown);
+    render_blocks(
+        &text,
+        BlockCtx {
+            width: 0,
+            list_depth: 0,
+            compact: false,
+            code_copy: false,
+        },
+    )
+    .code_blocks
+    .into_iter()
+    .nth(index)
+    .map(|block| block.source)
+}
+
+fn render_blocks(input: &str, ctx: BlockCtx) -> RenderedBlocks {
     let mut lines = Vec::new();
+    let mut code_blocks = Vec::new();
     let mut pos = 0usize;
     let mut needs_sep = false;
 
@@ -113,7 +174,7 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
         // Detect block type by the first non-empty line.
         if let Some(block) = try_fenced_code_block(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else if let Some(block) = try_heading(remaining) {
             pos += block.consumed;
             lines.push(block.line);
@@ -122,13 +183,13 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
             lines.push(block.line);
         } else if let Some(block) = try_blockquote(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else if let Some(block) = try_list(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
-        } else if let Some(block) = try_table(remaining) {
+            append_block(&mut lines, &mut code_blocks, block);
+        } else if let Some(block) = try_table(remaining, ctx) {
             pos += block.consumed;
-            lines.extend(block.lines);
+            append_block(&mut lines, &mut code_blocks, block);
         } else {
             let block = take_paragraph(remaining);
             pos += block.consumed;
@@ -141,7 +202,20 @@ fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
         needs_sep = true;
     }
 
-    lines
+    RenderedBlocks { lines, code_blocks }
+}
+
+fn append_block(
+    lines: &mut Vec<Line<'static>>,
+    code_blocks: &mut Vec<CodeBlockSpan>,
+    block: BlockResult,
+) {
+    let base = lines.len();
+    lines.extend(block.lines);
+    for mut code_block in block.code_blocks {
+        code_block.line += base;
+        code_blocks.push(code_block);
+    }
 }
 
 fn is_blank_line(line: &Line<'_>) -> bool {
@@ -178,6 +252,7 @@ fn prefix_lines<'a>(
 struct BlockResult {
     consumed: usize,
     lines: Vec<Line<'static>>,
+    code_blocks: Vec<CodeBlockSpan>,
 }
 
 struct SingleLineResult {
@@ -242,12 +317,24 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     };
     let mut out: Vec<Line<'static>> = Vec::with_capacity(code_lines.len().saturating_add(2));
 
+    let source = code_lines.join("\n");
+
     // The top padding row doubles as the language label so the label never
     // costs an extra row.
     let mut top = vec![Span::styled(CODE_LEFT_PAD, surface)];
     if has_lang {
         top.push(Span::styled(lang.to_string(), surface.fg(theme::MUTED)));
     }
+    // The chat layer overlays the clickable copy label after selection mapping,
+    // so the label never enters the selectable text projection.
+    let copy_label = ctx.code_copy
+        && ctx.width > 0
+        && ctx.width
+            > top
+                .iter()
+                .map(|span| span.content.width())
+                .sum::<usize>()
+                .saturating_add(CODE_COPY_LABEL.width());
     out.push(surface_line(top));
 
     for code in code_lines {
@@ -261,6 +348,11 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     Some(BlockResult {
         consumed,
         lines: out,
+        code_blocks: vec![CodeBlockSpan {
+            line: 0,
+            source,
+            copy_label,
+        }],
     })
 }
 
@@ -337,7 +429,8 @@ fn try_blockquote(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
         ..ctx
     };
     let inner = render_blocks(&raw_lines.join("\n"), inner_ctx);
-    let lines = prefix_lines(inner, &bar)
+    let code_blocks = inner.code_blocks;
+    let lines = prefix_lines(inner.lines, &bar)
         .map(|line| {
             let style = surface.patch(line.style);
             let mut line = line.style(style);
@@ -346,7 +439,11 @@ fn try_blockquote(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
         })
         .collect();
 
-    Some(BlockResult { consumed, lines })
+    Some(BlockResult {
+        consumed,
+        lines,
+        code_blocks,
+    })
 }
 
 fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
@@ -416,6 +513,7 @@ fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     consumed = consumed.min(text.len());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut code_blocks = Vec::new();
     for (idx, item_lines) in items.iter().enumerate() {
         let first = &item_lines[0];
         // Check for task list: "- [x] ..." or "- [ ] ..."
@@ -447,16 +545,27 @@ fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
                 width: ctx.width.saturating_sub(marker_width),
                 list_depth: ctx.list_depth + 1,
                 compact: true,
+                code_copy: ctx.code_copy,
             };
             let indent = Span::raw(" ".repeat(marker_width));
-            lines.extend(prefix_lines(render_blocks(&body, child_ctx), &indent));
+            let inner = render_blocks(&body, child_ctx);
+            let base = lines.len();
+            lines.extend(prefix_lines(inner.lines, &indent));
+            for mut code_block in inner.code_blocks {
+                code_block.line += base;
+                code_blocks.push(code_block);
+            }
         }
     }
 
-    Some(BlockResult { consumed, lines })
+    Some(BlockResult {
+        consumed,
+        lines,
+        code_blocks,
+    })
 }
 
-fn try_table(text: &str) -> Option<BlockResult> {
+fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     let mut consumed = 0usize;
     let mut raw_lines: Vec<String> = Vec::new();
 
@@ -513,6 +622,13 @@ fn try_table(text: &str) -> Option<BlockResult> {
         }
     }
 
+    let natural_total = col_widths.iter().map(|width| width + 2).sum::<usize>() + col_count + 1;
+    if ctx.width > 0 && natural_total > ctx.width {
+        let mut block = render_compact_table(rows, &col_widths, ctx.width);
+        block.consumed = consumed;
+        return Some(block);
+    }
+
     let header_style = Style::default()
         .fg(theme::PRIMARY)
         .add_modifier(Modifier::BOLD);
@@ -560,10 +676,204 @@ fn try_table(text: &str) -> Option<BlockResult> {
     }
     lines.push(rule("└", "┴", "┘"));
 
-    Some(BlockResult { consumed, lines })
+    Some(BlockResult {
+        consumed,
+        lines,
+        code_blocks: Vec::new(),
+    })
 }
 
-/// Checks whether a line is a table separator (only `|`, `-`, `:`, and spaces).
+/// Renders a table that cannot keep its natural width: cells wrap inside the
+/// available columns, and extremely narrow panes fall back to a borderless list.
+fn render_compact_table(rows: Vec<Vec<String>>, natural: &[usize], limit: usize) -> BlockResult {
+    let columns = natural.len();
+    // Below three content cells per column the box is unreadable; list mode is
+    // the honest fallback.
+    let min_total = columns * 6 + 1;
+    if limit < min_total {
+        return table_list_fallback(&rows);
+    }
+
+    let budget = limit - (columns * 3 + 1);
+    let mut widths = natural.to_vec();
+    while widths.iter().sum::<usize>() > budget {
+        let Some(widest) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 1)
+            .max_by_key(|(_, width)| **width)
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        widths[widest] -= 1;
+    }
+
+    let border_style = Style::default()
+        .fg(theme::BORDER)
+        .add_modifier(Modifier::DIM);
+    let header_style = Style::default()
+        .fg(theme::PRIMARY)
+        .add_modifier(Modifier::BOLD);
+    let rule = |left: &str, mid: &str, right: &str| {
+        let body = widths
+            .iter()
+            .map(|width| "─".repeat(width + 2))
+            .collect::<Vec<_>>()
+            .join(mid);
+        Line::styled(format!("{left}{body}{right}"), border_style)
+    };
+
+    let mut lines = Vec::new();
+    lines.push(rule("┌", "┬", "┐"));
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index == 1 {
+            lines.push(rule("├", "┼", "┤"));
+            continue;
+        }
+        let base_style = if row_index == 0 {
+            header_style
+        } else {
+            Style::default()
+        };
+        let wrapped: Vec<Vec<Vec<Span<'static>>>> = row
+            .iter()
+            .enumerate()
+            .map(|(column, cell)| wrap_table_cell(cell, widths[column], base_style))
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..height {
+            let mut spans = vec![Span::styled("│", border_style)];
+            for column in 0..columns {
+                let content = wrapped[column].get(line_index);
+                let used = content
+                    .map(|spans| spans.iter().map(|span| span.content.width()).sum::<usize>())
+                    .unwrap_or(0);
+                spans.push(Span::raw(" "));
+                if let Some(content) = content {
+                    spans.extend(content.iter().cloned());
+                }
+                spans.push(Span::raw(
+                    " ".repeat(widths[column].saturating_sub(used) + 1),
+                ));
+                spans.push(Span::styled("│", border_style));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(rule("└", "┴", "┘"));
+
+    BlockResult {
+        consumed: 0,
+        lines,
+        code_blocks: Vec::new(),
+    }
+}
+
+/// Wraps one cell to a column width while keeping inline span styles.
+fn wrap_table_cell(text: &str, width: usize, base: Style) -> Vec<Vec<Span<'static>>> {
+    let width = width.max(1);
+    let parsed = parse_inline_with_style(text.trim(), base);
+    let cells: Vec<(char, Style)> = parsed
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = base.patch(span.style);
+            span.content
+                .chars()
+                .map(move |character| (character, style))
+        })
+        .collect();
+    if cells.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let mut remaining = cells;
+    let mut rows = Vec::new();
+    while !remaining.is_empty() {
+        let mut used = 0usize;
+        let mut take = 0usize;
+        let mut last_space = None;
+        for (index, (character, _)) in remaining.iter().enumerate() {
+            let character_width = character.width().unwrap_or(0);
+            if take > 0 && used + character_width > width {
+                break;
+            }
+            used += character_width;
+            take = index + 1;
+            if character.is_whitespace() {
+                last_space = Some(take);
+            }
+            if used >= width {
+                break;
+            }
+        }
+        if take == 0 {
+            take = 1;
+        }
+        let split = last_space
+            .filter(|split| *split > 0 && *split < take)
+            .unwrap_or(take);
+        let rest = remaining.split_off(split);
+        rows.push(table_spans(remaining));
+        remaining = rest;
+    }
+    rows
+}
+
+fn table_spans(cells: Vec<(char, Style)>) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    let mut current: Option<Style> = None;
+    for (character, style) in cells {
+        if current.is_some_and(|current| current != style) {
+            spans.push(Span::styled(
+                std::mem::take(&mut buffer),
+                current.unwrap_or_default(),
+            ));
+        }
+        current = Some(style);
+        buffer.push(character);
+    }
+    if !buffer.is_empty() {
+        spans.push(Span::styled(buffer, current.unwrap_or_default()));
+    }
+    spans
+}
+
+fn table_list_fallback(rows: &[Vec<String>]) -> BlockResult {
+    let headers = rows.first().cloned().unwrap_or_default();
+    let mut lines = Vec::new();
+    for row in rows.iter().skip(2) {
+        for (column, cell) in row.iter().enumerate() {
+            let label = headers
+                .get(column)
+                .map(|header| header.trim())
+                .unwrap_or("");
+            let text = if label.is_empty() {
+                cell.trim().to_string()
+            } else {
+                format!("{label}: {}", cell.trim())
+            };
+            lines.push(parse_inline_with_style(&text, Style::default()));
+        }
+        lines.push(Line::default());
+    }
+    if lines.is_empty() {
+        for header in &headers {
+            lines.push(parse_inline_with_style(header.trim(), Style::default()));
+        }
+    } else {
+        lines.pop();
+    }
+    BlockResult {
+        consumed: 0,
+        lines,
+        code_blocks: Vec::new(),
+    }
+}
+
+/// Checks whether a line is a table separator (only |, -, :, and spaces).
 fn is_table_separator(line: &str) -> bool {
     line.trim()
         .chars()
@@ -652,6 +962,7 @@ fn take_paragraph(text: &str) -> BlockResult {
     BlockResult {
         consumed,
         lines: lines.into_iter().map(Line::raw).collect(),
+        code_blocks: Vec::new(),
     }
 }
 
@@ -1068,6 +1379,48 @@ mod tests {
     }
 
     #[test]
+    fn code_block_render_reports_exact_source_and_copy_label() {
+        let text = "~~~rust\nfn main() {\n    println!(\"hi\");\n}\n~~~\n\n~~~sh\necho hi\n~~~";
+        let (lines, blocks) = render_markdown_width_with_code_blocks(text, 40);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].source, "fn main() {\n    println!(\"hi\");\n}");
+        assert_eq!(blocks[1].source, "echo hi");
+        assert!(blocks.iter().all(|block| block.copy_label));
+        for block in &blocks {
+            assert!(
+                lines[block.line]
+                    .spans
+                    .iter()
+                    .all(|span| span.content != CODE_COPY_LABEL),
+                "the chat layer owns the copy label"
+            );
+        }
+        assert_eq!(code_block_source(text, 1).as_deref(), Some("echo hi"));
+        assert_eq!(code_block_source(text, 2), None);
+    }
+
+    #[test]
+    fn long_code_block_source_copies_beyond_the_viewport() {
+        let code = (0..500)
+            .map(|line| format!("let value_{line} = {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!("~~~rust\n{code}\n~~~");
+        assert_eq!(code_block_source(&text, 0), Some(code));
+    }
+
+    #[test]
+    fn plain_markdown_titles_have_no_copy_label() {
+        let lines = render_markdown_width("~~~rust\nx\n~~~", 40);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| span.content != CODE_COPY_LABEL)
+        );
+    }
+
+    #[test]
     fn test_horizontal_rules() {
         for rule in &["---", "***", "___", "-----", "*****", "_____"] {
             let lines = render_markdown(rule);
@@ -1183,6 +1536,65 @@ mod tests {
     }
 
     // ── Table tests ───────────────────────────────────────────────
+
+    #[test]
+    fn wide_table_wraps_inside_cells_and_keeps_borders_aligned() {
+        let text = "| 工具 | worktree 放在哪 | 初始化 | 结果怎么回到主工作区 |\n|---|---|---|---|\n| conductor | 主仓库的 .worktrees 目录 | conductor.json 里定义 setup、run、archive 三个脚本以及环境变量 | 通过 worktree 路径读取 |";
+        let lines = render_markdown_width(text, 64);
+        let widths: Vec<usize> = lines.iter().map(Line::width).collect();
+        assert!(
+            widths.iter().all(|width| *width == 64),
+            "every row keeps the pane width: {widths:?}"
+        );
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        let borders = |row: &str| {
+            let mut columns = Vec::new();
+            let mut width = 0;
+            for character in row.chars() {
+                if character == '│' {
+                    columns.push(width);
+                }
+                width += character.width().unwrap_or(0);
+            }
+            columns
+        };
+        let reference = borders(
+            rows.iter()
+                .find(|row| row.starts_with('│'))
+                .expect("a content row"),
+        );
+        for row in rows.iter().filter(|row| row.starts_with('│')) {
+            assert_eq!(borders(row), reference, "row: {row}");
+        }
+        assert!(rows.iter().any(|row| row.starts_with('┌')));
+        assert!(rows.iter().any(|row| row.starts_with('└')));
+    }
+
+    #[test]
+    fn very_narrow_table_falls_back_to_a_list() {
+        let text = "| 工具 | 结果 |\n|---|---|\n| conductor | 回到主工作区 |";
+        let lines = render_markdown_width(text, 10);
+        let text: String = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains('│'), "{text}");
+        assert!(!text.contains('┌'), "{text}");
+        assert!(text.contains("工具: conductor"), "{text}");
+        assert!(text.contains("结果: 回到主工作区"), "{text}");
+    }
+
+    #[test]
+    fn wrapped_table_cells_keep_inline_styles() {
+        let text = "| Column |\n|---|\n| **bold words that wrap** |";
+        let lines = render_markdown_width(text, 12);
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+    }
 
     #[test]
     fn test_table_single_column() {

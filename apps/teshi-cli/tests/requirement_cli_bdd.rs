@@ -57,12 +57,27 @@ fn features_dir() -> PathBuf {
 /// True when the feature is a requirement-library CLI feature.
 ///
 /// Validation self-bootstrap Features also use `@cli`, but have a dedicated
-/// runner and are intentionally excluded from this requirement runner.
+/// runner and are intentionally excluded from this requirement runner. Authored
+/// Features whose header declares them unbound are excluded too, matching the
+/// pending convention in `scripts/check-feature-e2e-catalog.py`.
 fn is_requirement_cli_feature(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|content| {
         let tags: Vec<&str> = content.lines().flat_map(str::split_whitespace).collect();
-        tags.contains(&"@cli") && !tags.contains(&"@validation-e2e")
+        tags.contains(&"@cli")
+            && !tags.contains(&"@validation-e2e")
+            && !bindings_explicitly_pending(&content)
     })
+}
+
+/// True when the lines above the Feature keyword say bindings do not exist yet.
+fn bindings_explicitly_pending(content: &str) -> bool {
+    let header = content
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with("Feature:") && !line.starts_with("功能:"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    header.contains("not bound") || header.contains("remain pending")
 }
 
 fn copy_cli_features(locale: &str, dst: &Path) {

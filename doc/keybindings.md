@@ -400,6 +400,7 @@ Agent mode settings and Teshi approval modes remain separate controls.
 | `/resume` | Resume the current project's most recent session |
 | `/retry` | Continue an interrupted ACP task in the current session |
 | `/copy`, `/copy N` | Copy the latest / last N completed nonempty assistant answers |
+| `/copy-code [N]` | Copy block N (default 1) from the last assistant answer |
 | `/details` | Toggle full thinking and tool details |
 | `/models` | Native model profiles or ACP model settings |
 | `/sessions`, `/sessions legacy` | Project conversations / explicitly unassigned legacy history |

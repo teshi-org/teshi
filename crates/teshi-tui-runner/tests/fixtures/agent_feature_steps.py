@@ -19,6 +19,9 @@ import xml.etree.ElementTree as ET
 
 
 SYNTHETIC_CREDENTIAL = "P7-SYNTHETIC-CREDENTIAL"
+# The project session picker title reads "Sessions · <project> · <count>";
+# the legacy picker is titled "Legacy / Unassigned" instead.
+PROJECT_SESSIONS_TITLE = "Sessions · "
 
 
 def emit(kind, **values):
@@ -357,10 +360,11 @@ class World:
     def _open_session_browser(self, legacy=False):
         if self.process is None:
             self.open_chat()
-        if "Project sessions" in self.screen() or "Legacy / Unassigned" in self.screen():
+        screen = self.screen()
+        if PROJECT_SESSIONS_TITLE in screen or "Legacy / Unassigned" in screen:
             self.op("key", "Escape")
         self.command("/sessions legacy" if legacy else "/sessions")
-        self.expect("Legacy / Unassigned" if legacy else "Project sessions")
+        self.expect("Legacy / Unassigned" if legacy else PROJECT_SESSIONS_TITLE)
 
     def assert_reply_style(self, reply, green):
         """Measure the actual reply's header and rail in the rendered SVG."""
@@ -456,7 +460,7 @@ class World:
         # A conversation title is not evidence that its transcript has loaded.
         # Existing text may also remain behind the shutdown-wait modal.
         self.expect("▌ " + latest["messages"][0]["content"])
-        self.absent("Project sessions", timeout=30)
+        self.absent(PROJECT_SESSIONS_TITLE, timeout=30)
         self.absent("Waiting for the previous Agent", timeout=30)
 
     def quit_app(self):

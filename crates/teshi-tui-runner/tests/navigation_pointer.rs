@@ -339,10 +339,8 @@ fn session_modal_blocks_background_pointer_and_selects_target_history() {
     capture(&terminal, "session-modal-after-close");
     terminal.expect_text("HISTORY_LINE_64", true, 1000).unwrap();
     command(&terminal, "/sessions");
-    terminal
-        .expect_text("Model: Session Beta", true, 5000)
-        .unwrap();
-    terminal.click_text("Model: Session Beta", 5000).unwrap();
+    terminal.expect_text("Session Beta", true, 5000).unwrap();
+    terminal.click_text("Session Beta", 5000).unwrap();
     capture(&terminal, "session-pointer-selected-beta");
     terminal.key("Enter").unwrap();
     terminal.expect_text("Load [Enter]", false, 5000).unwrap();
@@ -389,10 +387,8 @@ fn session_pointer_row_selects_target_history() {
     terminal.expect_text("AI Chat", true, 5000).unwrap();
     terminal.key("Enter").unwrap();
     command(&terminal, "/sessions");
-    terminal
-        .expect_text("Model: Session Beta", true, 5000)
-        .unwrap();
-    terminal.click_text("Model: Session Beta", 5000).unwrap();
+    terminal.expect_text("Session Beta", true, 5000).unwrap();
+    terminal.click_text("Session Beta", 5000).unwrap();
     capture(&terminal, "session-row-selected-beta");
     terminal.key("Enter").unwrap();
     terminal.expect_text("Load [Enter]", false, 5000).unwrap();

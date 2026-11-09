@@ -530,6 +530,7 @@ Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are
 | `TESHI_DIAG_PATH` | — | Write diagnostic log to this file path |
 | `TESHI_NO_RAW` | — | Disable raw terminal mode |
 | `TESHI_NO_ALT` | — | Disable alternate screen |
+| `TESHI_NO_TITLE` | — | Leave the terminal title untouched (also implied by `TESHI_TUI_RUNNER`) |
 | `TESHI_OPENAI_API_KEY` | — | Legacy (migrated by `teshi auth migrate`) |
 
 Precedence for runner settings: `teshi.toml` → environment variables → CLI flags.

@@ -9,6 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FEATURES = ROOT / "features"
 RUNNER_TAGS = {"@api", "@cli", "@validation-e2e", "@web-ui", "@winapp", "@tui"}
+# `@teshi-tp:<id>` links a scenario to a reviewable test point; it declares
+# intent rather than a runner surface, so it is not an ownership tag.
+TEST_POINT_TAG_PREFIX = "@teshi-tp:"
 LANGUAGE_BY_DIRECTORY = {"en-US": "# language: en", "zh-CN": "# language: zh-CN"}
 
 
@@ -86,7 +89,11 @@ def main() -> int:
         if "@winapp" in tags:
             require_binding(path, relative, content, "@winapp", errors, pending)
 
-        unknown = sorted(tag for tag in tags if tag.startswith("@") and tag not in RUNNER_TAGS)
+        unknown = sorted(
+            tag
+            for tag in tags
+            if tag not in RUNNER_TAGS and not tag.startswith(TEST_POINT_TAG_PREFIX)
+        )
         if unknown:
             errors.append(f"{relative}: unknown runner tag(s): {', '.join(unknown)}")
 
