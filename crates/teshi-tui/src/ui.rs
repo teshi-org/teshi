@@ -888,8 +888,9 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         // Layout: chat only, keeping the full reading width.
         app.ai_sidebar_visible = false;
         app.ai_sidebar_focused = false;
-        // A single pane needs no focus outline; the composer already marks the caret.
-        chat::render_chat_panel(frame, app, area, false, chat::ChatPlacement::Tab);
+        // The chat is the only pane here, so it always owns the keyboard; passing
+        // `false` would also dim a focused composer.
+        chat::render_chat_panel(frame, app, area, true, chat::ChatPlacement::Tab);
         return;
     };
     app.ai_sidebar_visible = true;

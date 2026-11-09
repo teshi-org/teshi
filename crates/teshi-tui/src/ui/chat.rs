@@ -2451,7 +2451,12 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
     };
     frame.render_widget(Paragraph::new(display), text_area);
     if active && text_width > 0 {
-        frame.set_cursor_position((text_x + cursor.1, inner.y + cursor.0 - scroll));
+        let position = (text_x + cursor.1, inner.y + cursor.0 - scroll);
+        let under = agent.input.chars().nth(agent.input_cursor);
+        paint_block_cursor(frame, text_area, position, under);
+        // The hardware cursor stays at the caret so OS IME candidate windows
+        // anchor to the typed text even when the terminal hides it.
+        frame.set_cursor_position(position);
     }
     if button_width > 0 {
         let busy = matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval);
@@ -2476,6 +2481,26 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
             action,
             modal: false,
         });
+    }
+}
+
+/// Paints a solid block over the composer caret.
+///
+/// Many terminals draw the hardware cursor as a thin or invisible bar, which
+/// leaves an empty focused composer indistinguishable from an idle one. The
+/// block covers both cells of a wide character so it never splits a glyph.
+fn paint_block_cursor(frame: &mut Frame<'_>, area: Rect, (x, y): (u16, u16), under: Option<char>) {
+    let cells = under
+        .filter(|ch| !ch.is_control())
+        .and_then(UnicodeWidthChar::width)
+        .unwrap_or(1)
+        .max(1) as u16;
+    let style = Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG);
+    let buffer = frame.buffer_mut();
+    for column in x..x.saturating_add(cells).min(area.right()) {
+        if area.contains((column, y).into()) {
+            buffer[(column, y)].set_style(style);
+        }
     }
 }
 
@@ -3456,6 +3481,61 @@ mod tests {
         };
         assert!(line(input.y - 1).contains("ctx"));
         assert!(!line(input.y).contains("ctx"));
+    }
+
+    #[test]
+    fn test_focused_composer_paints_block_cursor_at_caret() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        fn cursor_cells(
+            terminal: &mut Terminal<TestBackend>,
+            app: &mut App,
+        ) -> Vec<((u16, u16), String)> {
+            terminal
+                .draw(|frame| render_chat_panel(frame, app, frame.area(), true, ChatPlacement::Tab))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let area = buffer.area;
+            (area.top()..area.bottom())
+                .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+                .filter(|&position| buffer[position].bg == theme::CURSOR_BG)
+                .map(|position| (position, buffer[position].symbol().to_string()))
+                .collect()
+        }
+
+        let (mut app, _project, _store) = activity_test_app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+
+        // Cases: (draft, caret, expected glyphs under the block).
+        let cases: [(&str, usize, &[&str]); 4] = [
+            ("", 0, &["T"]),
+            ("ab", 1, &["b"]),
+            ("ab", 2, &[" "]),
+            ("a中", 1, &["中", " "]),
+        ];
+        for (draft, caret, expected) in cases {
+            app.ai_input_focused = true;
+            app.agent_mut().input = draft.to_string();
+            app.agent_mut().input_cursor = caret;
+            let cells = cursor_cells(&mut terminal, &mut app);
+            let glyphs: Vec<&str> = cells.iter().map(|(_, glyph)| glyph.as_str()).collect();
+            assert_eq!(glyphs, expected, "block cursor for {draft:?} at {caret}");
+            assert_eq!(
+                terminal.get_cursor_position().unwrap(),
+                cells[0].0.into(),
+                "the hardware cursor stays on the block for IME anchoring"
+            );
+        }
+
+        // A fresh backend: diff rendering skips wide-glyph continuation cells,
+        // so a reused test buffer would keep the previous frame's block.
+        app.ai_input_focused = false;
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        let cells = cursor_cells(&mut terminal, &mut app);
+        assert!(
+            cells.is_empty(),
+            "an unfocused composer shows no caret: {cells:?}"
+        );
     }
 
     #[test]

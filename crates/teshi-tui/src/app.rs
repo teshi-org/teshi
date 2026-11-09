@@ -14912,6 +14912,35 @@ mod tests {
     }
 
     #[test]
+    fn test_hidden_chat_sidebar_keeps_focused_composer_highlighted() {
+        use crate::theme;
+
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiToggleSidebar).unwrap();
+        assert!(app.ai_sidebar_collapsed);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let input = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ChatInput { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("composer renders");
+        assert_eq!(
+            terminal.backend().buffer()[(input.x, input.y)].fg,
+            theme::PRIMARY,
+            "a focused composer stays highlighted after hiding the sidebar"
+        );
+    }
+
+    #[test]
     fn ctrl_d_and_ctrl_u_move_half_the_rendered_chat_viewport() {
         let (mut app, _project, _store) = slash_test_app();
         app.chat_history_rect = Some(Rect::new(0, 0, 80, 20));
