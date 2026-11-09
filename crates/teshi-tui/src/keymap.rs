@@ -85,6 +85,11 @@ pub enum Action {
     AiToggleThought(usize),
     /// Toggle one external tool group inside a turn's execution process.
     AiToggleTools(usize),
+    /// Copy one fenced code block from a chat message.
+    AiCopyCodeBlock {
+        message_index: usize,
+        block_index: usize,
+    },
     /// Rescan Feature files while preserving unsaved buffers.
     RefreshFeatures,
     /// Pan the focused Explore pane without moving keyboard focus.
@@ -158,6 +163,8 @@ pub enum Action {
     ReqEditIteration,
     /// Edit the selected document's optional priority (`p` on the Requirements tree).
     ReqEditPriority,
+    /// Reload the shared requirement library from disk (`R` on the tree).
+    ReqReloadStore,
     /// Bounded Vim append/open/delete/yank operations for Requirements.
     ReqVimAppend,
     ReqVimOpenBelow,
@@ -1022,6 +1029,12 @@ impl Action {
             return Some(Self::CommandLineOpen);
         }
         if !text_input {
+            // A blurred chat owns j/k/g/G for transcript scrolling; global
+            // first/last navigation would otherwise steal the vim keys.
+            let chat_browsing = !context.ai_input_focused
+                && (context.active_tab == MainTab::Ai
+                    || (context.active_tab == MainTab::MindMap
+                        && context.mindmap_focus == MindMapFocus::AiPanel));
             let navigation = match (event.code, event.modifiers) {
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
@@ -1030,15 +1043,20 @@ impl Action {
                 (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                     Some(Self::PageDown)
                 }
-                (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                    if !chat_browsing =>
+                {
                     Some(Self::NavigateLast)
                 }
-                (KeyCode::Char('g'), KeyModifiers::NONE) if context.pending_char == Some('g') => {
+                (KeyCode::Char('g'), KeyModifiers::NONE)
+                    if !chat_browsing && context.pending_char == Some('g') =>
+                {
                     Some(Self::NavigateFirst)
                 }
                 (KeyCode::Char('g'), KeyModifiers::NONE)
-                    if context.active_tab != MainTab::Requirements
-                        || context.requirements_focus == RequirementsFocus::Editor =>
+                    if !chat_browsing
+                        && (context.active_tab != MainTab::Requirements
+                            || context.requirements_focus == RequirementsFocus::Editor) =>
                 {
                     Some(Self::PendingChar('g'))
                 }
@@ -1124,6 +1142,13 @@ impl Action {
                 }
                 (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageUp),
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageDown),
+                (KeyCode::Char('G'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::AiScrollBottom)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) if context.pending_char == Some('g') => {
+                    Some(Self::AiScrollTop)
+                }
+                (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::PendingChar('g')),
                 (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _)
                     if context.active_tab == MainTab::Ai =>
                 {
@@ -1187,6 +1212,14 @@ impl Action {
                     return match (event.code, event.modifiers) {
                         (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
                         (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                        // The footer advertises Ctrl+n in every editor mode, and a
+                        // draft created from a draft must not require an Esc first.
+                        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                        // Ctrl+P mirrors the tree's priority shortcut without
+                        // colliding with vim paste in browse mode.
+                        (KeyCode::Char('p' | 'P'), KeyModifiers::CONTROL) => {
+                            Some(Self::ReqEditPriority)
+                        }
                         (KeyCode::Left, _) => Some(Self::MoveLeft),
                         (KeyCode::Right, _) => Some(Self::MoveRight),
                         (KeyCode::Up, _) => Some(Self::MoveUp),
@@ -1283,6 +1316,11 @@ impl Action {
                     (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         Some(Self::ReqEditIteration)
                     }
+                    // Ctrl+P mirrors the tree's priority shortcut; plain p is
+                    // vim paste-after in browse mode.
+                    (KeyCode::Char('p' | 'P'), KeyModifiers::CONTROL) => {
+                        Some(Self::ReqEditPriority)
+                    }
                     (KeyCode::Home, _) => Some(Self::MoveHome),
                     (KeyCode::End, _) => Some(Self::MoveEnd),
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
@@ -1318,7 +1356,8 @@ impl Action {
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
                 }
-                (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Char('n'), KeyModifiers::NONE)
+                | (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
                 (KeyCode::Delete, _) | (KeyCode::Char('d'), KeyModifiers::NONE) => {
                     Some(Self::ReqDeleteDocument)
                 }
@@ -1333,6 +1372,9 @@ impl Action {
                 (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ReqActionMenu),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqEditPriority),
+                (KeyCode::Char('R'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::ReqReloadStore)
+                }
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
@@ -1832,6 +1874,10 @@ mod tests {
                 ([KeyCode::Char('h'), KeyCode::Left], Action::AiScrollLeft),
                 ([KeyCode::Char('l'), KeyCode::Right], Action::AiScrollRight),
                 ([KeyCode::Char('i'), KeyCode::Enter], Action::AiFocusInput),
+                (
+                    [KeyCode::Char('G'), KeyCode::Char('G')],
+                    Action::AiScrollBottom,
+                ),
             ] {
                 for key in keys {
                     assert_eq!(
@@ -1840,6 +1886,17 @@ mod tests {
                     );
                 }
             }
+            let pending = KeyContext {
+                pending_char: Some('g'),
+                ..context
+            };
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                    pending
+                ),
+                Some(Action::AiScrollTop)
+            );
         }
         let context = chat_context(MainTab::Ai, MindMapFocus::Main, false);
         assert_eq!(
@@ -2919,6 +2976,13 @@ mod tests {
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
             None
         );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::ReqEditPriority)
+        );
         context.requirements_editor_mode = RequirementsEditorMode::Insert;
         for (key, modifiers, expected) in [
             (
@@ -3035,6 +3099,25 @@ mod tests {
             project_switch_active: false,
             command_line_active: false,
         }
+    }
+
+    #[test]
+    fn requirements_tree_accepts_n_for_new_document() {
+        let context = requirements_tree_context();
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ReqNewDocument)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+                context
+            ),
+            Some(Action::ReqReloadStore)
+        );
     }
 
     #[test]

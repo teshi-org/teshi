@@ -142,6 +142,15 @@ impl Fixture {
         if self.config.cols >= 60 {
             return;
         }
+        // A new draft opens in insert mode, which owns Ctrl+w for text editing;
+        // leave it first so the chord is not typed into the document.
+        let screen = terminal.screen().unwrap();
+        if ["[INSERT]", "[VISUAL]", "[V-LINE]"]
+            .iter()
+            .any(|mode| screen.contains(mode))
+        {
+            terminal.key("Escape").unwrap();
+        }
         // The editor owns Left/Right for cursor movement, so cross panes with
         // the vim window prefix the app documents for this tab.
         terminal.key("Ctrl+w").unwrap();

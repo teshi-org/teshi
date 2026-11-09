@@ -5,6 +5,7 @@ pub use organize::{CursorMotion, LineInput, MenuCommand, OrganizationForm, TreeT
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::theme;
 use anyhow::{Context, Result};
@@ -157,6 +158,13 @@ pub enum EditorImageRow {
     Missing { target: String },
 }
 
+/// Cheap fingerprint of the shared requirement index. Document bodies change
+/// through the index revision on every successful store write.
+fn requirement_store_signature(root: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = std::fs::metadata(root.join("_teshi.json")).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 /// UI state for requirement documents and linked test points.
 pub struct AuthoringUiState {
     pub artifacts: Option<AuthoringArtifacts>,
@@ -169,6 +177,10 @@ pub struct AuthoringUiState {
     pub show_completed: bool,
     /// Last loaded project organization; external edits are detected against it.
     organization: Option<teshi_engine::organization::RequirementOrganization>,
+    /// Fingerprint of the shared requirement index at the last successful load.
+    store_signature: Option<(SystemTime, u64)>,
+    /// Throttles background checks of the shared requirement store.
+    last_store_check: Option<Instant>,
     /// Draft document and the folder it was created in, filed on its first save.
     draft_folder: Option<(String, String)>,
     /// Visible labels of tree nodes whose label is not derivable from the node ID.
@@ -216,8 +228,13 @@ pub struct AuthoringUiState {
     pub rendered_linked_selection: Option<usize>,
     /// Last rendered overflow limits, indexed by pane and axis (horizontal, vertical).
     pub scroll_limits: [[usize; 2]; 3],
-    /// Scrollbar being dragged (pane, axis).
-    pub scrollbar_drag: Option<(usize, usize)>,
+    /// Scrollbars drawn last frame, indexed by pane and axis (horizontal, vertical).
+    /// `None` when that pane does not overflow, so no stale bar keeps a hitbox.
+    pub pane_bars: [[Option<crate::app::ScrollbarBar>; 2]; 3],
+    /// Bar being dragged: pane, axis, and the pointer offset inside the thumb.
+    pub scrollbar_grab: Option<(usize, usize, u16)>,
+    /// Pointer position from the last render, used to highlight a hovered bar.
+    pub pointer: Option<(u16, u16)>,
     pub selection_anchor: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
     pub iteration_filter: RequirementIterationFilter,
@@ -310,6 +327,18 @@ impl AuthoringUiState {
         )?;
         self.reload_from_disk()?;
         Ok(linked)
+    }
+
+    /// First visible index of one pane's axis, matching [`Self::set_pane_scroll`].
+    pub fn pane_scroll(&self, pane: usize, axis: usize) -> usize {
+        if axis == 0 {
+            return self.horizontal_scroll[pane];
+        }
+        match pane {
+            0 => self.tree_state.get_offset(),
+            1 => self.scroll_row,
+            _ => self.linked_scroll,
+        }
     }
 
     /// Moves a pane viewport, clamping to the last rendered overflow limits.
@@ -671,6 +700,8 @@ impl AuthoringUiState {
             project_identity_error: None,
             show_completed: false,
             organization: None,
+            store_signature: None,
+            last_store_check: None,
             draft_folder: None,
             tree_labels: HashMap::new(),
             tree_items: Vec::new(),
@@ -698,7 +729,9 @@ impl AuthoringUiState {
             linked_scroll: 0,
             rendered_linked_selection: None,
             scroll_limits: [[0; 2]; 3],
-            scrollbar_drag: None,
+            pane_bars: [[None; 2]; 3],
+            scrollbar_grab: None,
+            pointer: None,
             selection_anchor: None,
             selection_end: None,
             iteration_filter: RequirementIterationFilter::All,
@@ -736,7 +769,30 @@ impl AuthoringUiState {
                 let _ = error;
             }
         }
+        state.store_signature = requirement_store_signature(requirements_root);
         state
+    }
+
+    /// Records the store fingerprint after a write from this process so the next
+    /// poll does not mistake our own save for an external change.
+    fn note_store_write(&mut self) {
+        self.store_signature = requirement_store_signature(&self.requirements_root);
+        self.last_store_check = Some(Instant::now());
+    }
+
+    /// The draft document that exists only in memory, with its unpersisted body.
+    fn preserved_draft_document(
+        &self,
+    ) -> Option<(teshi_core::authoring::RequirementDocumentMeta, String)> {
+        let id = self.draft_document_id.as_ref()?;
+        let artifacts = self.artifacts.as_ref()?;
+        let meta = artifacts
+            .index
+            .documents
+            .iter()
+            .find(|doc| doc.id == *id)?
+            .clone();
+        Some((meta, self.buffer.as_string()))
     }
 
     /// Reloads the requirement store from disk, preserving view state.
@@ -756,6 +812,7 @@ impl AuthoringUiState {
         let group_mode = self.group_mode;
         let overlay = self.overlay.clone();
         let editor_mode = self.editor_mode;
+        let focus = self.focus;
         let dirty = self.buffer_dirty;
         let preserved_buffer = dirty.then(|| self.buffer.clone());
         let cursor_row = self.cursor_row;
@@ -775,12 +832,28 @@ impl AuthoringUiState {
         // Requirement Markdown/`_teshi.json` can change on disk; keep in-memory test
         // points so unsaved review-state edits are not discarded at an agent boundary.
         let preserved_test_points = self.artifacts.as_ref().map(|a| a.test_points.clone());
+        // An unsaved draft exists only in memory, so a reload from disk would
+        // leave the editor on a document id the index no longer contains.
+        let preserved_draft = self.preserved_draft_document();
         self.discovered = loaded.discovered;
         self.artifacts = loaded.artifacts;
         if let (Some(artifacts), Some(test_points)) =
             (self.artifacts.as_mut(), preserved_test_points)
         {
             artifacts.test_points = test_points;
+        }
+        if let Some(artifacts) = self.artifacts.as_mut()
+            && let Some((meta, body)) = preserved_draft
+            && !artifacts
+                .index
+                .documents
+                .iter()
+                .any(|doc| doc.id == meta.id)
+        {
+            artifacts.index.documents.push(meta.clone());
+            artifacts
+                .documents
+                .push(teshi_core::authoring::RequirementDocumentContent { meta, body });
         }
         self.iteration_filter = filter;
         self.group_mode = group_mode;
@@ -809,7 +882,30 @@ impl AuthoringUiState {
             self.selection_end = selection_end;
         }
         self.editor_mode = editor_mode;
+        self.focus = focus;
+        self.store_signature = requirement_store_signature(&self.requirements_root);
+        self.last_store_check = Some(Instant::now());
         Ok(())
+    }
+
+    /// Reloads when another Teshi process or the CLI changed the shared store.
+    ///
+    /// Returns whether a reload happened. A failed read keeps the current
+    /// snapshot; the next successful poll can recover.
+    pub fn poll_external_store_changes(&mut self) -> Result<bool> {
+        if self
+            .last_store_check
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+        {
+            return Ok(false);
+        }
+        self.last_store_check = Some(Instant::now());
+        let signature = requirement_store_signature(&self.requirements_root);
+        if signature.is_none() || signature == self.store_signature {
+            return Ok(false);
+        }
+        self.reload_from_disk()?;
+        Ok(true)
     }
 
     /// Rebuilds the requirement tree from the current index, filter, and group mode.
@@ -1036,6 +1132,7 @@ impl AuthoringUiState {
             self.scroll_row = 0;
         }
         self.rebuild_tree();
+        self.note_store_write();
 
         if let Some(result) = test_points_result {
             result?;
@@ -1224,6 +1321,7 @@ impl AuthoringUiState {
         }
         self.overlay = RequirementsOverlay::None;
         self.rebuild_tree();
+        self.note_store_write();
         Ok(())
     }
 
@@ -1266,6 +1364,7 @@ impl AuthoringUiState {
         }
         self.overlay = RequirementsOverlay::None;
         self.rebuild_tree();
+        self.note_store_write();
         Ok(())
     }
 
@@ -1732,6 +1831,7 @@ impl AuthoringUiState {
         test_points_result?;
         self.buffer_dirty = false;
         self.draft_document_id = None;
+        self.note_store_write();
         filing_result
     }
 
@@ -2461,10 +2561,9 @@ pub fn requirements_footer_line(
         Span::raw(" "),
         Span::styled(" Priority [p] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(
-            " New doc [Ctrl+n] ",
-            Style::default().fg(theme::FOOTER_DESC),
-        ),
+        Span::styled(" Reload [R] ", Style::default().fg(theme::FOOTER_DESC)),
+        Span::raw(" "),
+        Span::styled(" New doc [n] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
         Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
     ])
@@ -2526,6 +2625,33 @@ mod tests {
             3,
             "inserting shows source only"
         );
+    }
+
+    #[test]
+    fn external_document_write_reloads_the_store_without_dropping_edits() {
+        let store = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        teshi_engine::ensure_requirement_project(project.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        state.buffer = EditorBuffer::from_string("unsaved draft".into());
+        state.buffer_dirty = true;
+
+        teshi_engine::create_requirement_document(store.path(), "# External\n", None, None, None)
+            .unwrap();
+        state.last_store_check = None;
+        assert!(state.poll_external_store_changes().unwrap());
+        assert!(
+            state
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .documents
+                .iter()
+                .any(|document| document.meta.title == "External")
+        );
+        assert!(state.buffer_dirty);
+        assert_eq!(state.buffer.as_string(), "unsaved draft");
     }
 
     #[test]

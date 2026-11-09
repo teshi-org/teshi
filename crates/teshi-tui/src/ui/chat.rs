@@ -123,7 +123,7 @@ type CachedActivity = (
 /// Cached immutable message layouts, shared by drawing and pointer projection.
 #[derive(Default)]
 pub(crate) struct ChatLayoutCache {
-    context: (usize, usize, bool, u64, Option<usize>),
+    context: (usize, usize, bool, u64, Vec<usize>),
     activities: std::collections::HashMap<usize, CachedActivity>,
     entries: std::collections::HashMap<usize, (AiChatMessage, ChatProjection)>,
 }
@@ -1038,6 +1038,32 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 }
 
+/// Replaces the trailing cells of a code block's language row with the copy
+/// affordance. The label is drawn here, after selection mapping, so it never
+/// becomes part of the copied chat text.
+fn overlay_copy_label(line: &mut Line<'static>, width: u16, hovered: bool) {
+    let label_width = crate::markdown::CODE_COPY_LABEL.width() as u16;
+    let target = width.saturating_sub(label_width);
+    let current = line.width() as u16;
+    let mut rendered = std::mem::take(line);
+    if current > target {
+        rendered = super::truncate_line_to_cols(rendered, target);
+    } else if current < target {
+        rendered
+            .spans
+            .push(Span::raw(" ".repeat((target - current) as usize)));
+    }
+    let style = if hovered {
+        fg(theme::PRIMARY).add_modifier(Modifier::BOLD)
+    } else {
+        fg(theme::MUTED)
+    };
+    rendered
+        .spans
+        .push(Span::styled(crate::markdown::CODE_COPY_LABEL, style));
+    *line = rendered;
+}
+
 /// Renders the scrolled chat history plus a thin scrollbar on the right.
 fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placement: ChatPlacement) {
     if area.width == 0 || area.height == 0 {
@@ -1064,22 +1090,37 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
     let height = body.height as usize;
     let max_start = total.saturating_sub(height);
     let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
+    let mut visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
         .map(|index| projection.highlighted_line(index, selection))
         .collect();
+    let copy_width = (crate::markdown::CODE_COPY_LABEL.width() as u16).min(body.width);
     for (row, projected) in projection.lines.iter().skip(start).take(height).enumerate() {
         if let Some(action) = &projected.action {
+            let copy_block = matches!(action, crate::keymap::Action::AiCopyCodeBlock { .. });
+            let rect = Rect::new(
+                if copy_block {
+                    body.right().saturating_sub(copy_width)
+                } else {
+                    body.x
+                },
+                body.y + row as u16,
+                if copy_block {
+                    copy_width
+                } else if matches!(action, crate::keymap::Action::AiToggleThought(_)) {
+                    body.width.min(14)
+                } else {
+                    body.width
+                },
+                1,
+            );
+            if copy_block && let Some(line) = visible.get_mut(row) {
+                let hovered = app
+                    .mouse_position
+                    .is_some_and(|(x, y)| rect.contains(ratatui::layout::Position::new(x, y)));
+                overlay_copy_label(line, body.width, hovered);
+            }
             app.clickable_regions.push(ClickableRegion::ActionButton {
-                rect: Rect::new(
-                    body.x,
-                    body.y + row as u16,
-                    if matches!(action, crate::keymap::Action::AiToggleThought(_)) {
-                        body.width.min(14)
-                    } else {
-                        body.width
-                    },
-                    1,
-                ),
+                rect,
                 action: action.clone(),
                 modal: false,
             });
@@ -1087,7 +1128,7 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
     }
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
     place_history_images(frame, app, &projection.lines, body, start);
-    render_scrollbar(frame, scrollbar, total, height, start);
+    render_scrollbar(frame, app, scrollbar, total, height, start);
 }
 
 /// Places the visible rows of each image box, and notes boxes whose pixels
@@ -1148,11 +1189,33 @@ fn place_history_images(
     }
 }
 
-fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, height: usize, start: usize) {
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    total: usize,
+    height: usize,
+    start: usize,
+) {
     if total <= height || area.width == 0 || height == 0 {
+        app.chat_scrollbar = None;
         return;
     }
-    let lines = theme::scrollbar_lines(total, height, start);
+    let bar = crate::app::ScrollbarBar {
+        rect: area,
+        axis: crate::theme::ScrollAxis::Vertical,
+        total,
+    };
+    app.chat_scrollbar = Some(bar);
+    let state =
+        crate::app::scrollbar_state(app.mouse_position, &bar, app.chat_scrollbar_grab.is_some());
+    let lines = theme::scrollbar_lines(
+        total,
+        height,
+        start,
+        crate::theme::ScrollAxis::Vertical,
+        state,
+    );
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -1226,14 +1289,25 @@ fn build_chat_projection(
     }
 
     let messages = agent.messages();
-    let completed = completed_answer(app, messages);
+    let completed: Vec<usize> = agent
+        .completed_answers
+        .iter()
+        .copied()
+        .filter(|index| {
+            messages
+                .get(*index)
+                .is_some_and(|message| message.role == AiRole::Assistant)
+        })
+        .collect();
+    // Every finished answer keeps its green rail for good: the mark records the
+    // turn that ended, so later turns must not repaint it as a quiet guide.
     let mut cache = app.chat_layout_cache.borrow_mut();
     let context = (
         app.selected_agent,
         width,
         agent.activity_details_expanded,
         agent.chat.revision,
-        completed,
+        completed.clone(),
     );
     if cache.context != context {
         cache.entries.clear();
@@ -1416,8 +1490,11 @@ fn build_chat_projection(
         let line_start = out.len();
         let block_start = blocks.len();
         let mut chunk = Vec::new();
-        match msg.role {
-            AiRole::Tool => push_tool_result(&mut chunk, msg, width),
+        let copy_rows = match msg.role {
+            AiRole::Tool => {
+                push_tool_result(&mut chunk, msg, width);
+                Vec::new()
+            }
             AiRole::User | AiRole::Assistant => push_message(
                 &mut chunk,
                 app,
@@ -1428,10 +1505,10 @@ fn build_chat_projection(
                         || agent.chat.thoughts.contains(&message_index),
                     show_reasoning: folded_answer != Some(message_index),
                     live: live_thought,
-                    completed: completed == Some(message_index),
+                    completed: completed.contains(&message_index),
                 },
             ),
-        }
+        };
         append_selectable_chunk(
             &mut out,
             &mut blocks,
@@ -1439,6 +1516,14 @@ fn build_chat_projection(
             message_index,
             block_text_for_message(msg, &app.project.root_dir),
         );
+        for (row, block_index) in copy_rows {
+            if let Some(line) = out.get_mut(line_start + row) {
+                std::rc::Rc::make_mut(line).action = Some(crate::keymap::Action::AiCopyCodeBlock {
+                    message_index,
+                    block_index,
+                });
+            }
+        }
         if msg.role == AiRole::User {
             append_message_images(&mut out, app, &msg.content, width);
         }
@@ -1503,13 +1588,17 @@ fn build_chat_projection(
             agent.partial_response(),
             rail_body_width(width),
         ));
-        let cursor = Span::styled(
-            STREAM_CURSOR,
-            fg(theme::ACCENT).add_modifier(Modifier::SLOW_BLINK),
-        );
-        match body.last_mut() {
-            Some(last) => last.spans.push(cursor),
-            None => body.push(Line::from(cursor)),
+        // The blinking cursor marks an actively running turn. A finished turn
+        // must never leave it at the end of the transcript.
+        if agent.status == AiStatus::Waiting {
+            let cursor = Span::styled(
+                STREAM_CURSOR,
+                fg(theme::ACCENT).add_modifier(Modifier::SLOW_BLINK),
+            );
+            match body.last_mut() {
+                Some(last) => last.spans.push(cursor),
+                None => body.push(Line::from(cursor)),
+            }
         }
         let mut chunk = Vec::new();
         push_railed(&mut chunk, body, RailKind::Guide, width);
@@ -1633,12 +1722,12 @@ fn role_header(role: AiRole, source: Option<&str>, completed: bool) -> Line<'sta
 ///
 /// The rail marks the column, not the block state: every row of a block shares one rail
 /// so a turn reads as one column. Only two boundaries change it — the accent bar opens a
-/// user turn, and the green bar marks the newest answer that finished.
+/// user turn, and the green bar marks every answer that finished.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RailKind {
     /// Accent bar that opens a user turn.
     User,
-    /// Green bar on the newest finished answer.
+    /// Green bar on a finished answer.
     Answer,
     /// Quiet thin guide for thinking, tools and unfinished replies.
     Guide,
@@ -1663,15 +1752,19 @@ impl RailKind {
 
 /// Wraps `lines` to the space right of the rail and prefixes every row with `rail`,
 /// so wrapped continuation rows stay visually grouped.
+/// Returns the output row where each input line starts, so callers can attach
+/// row-level hitboxes after wrapping.
 fn push_railed(
     out: &mut Vec<Line<'static>>,
     lines: Vec<Line<'static>>,
     rail: RailKind,
     width: usize,
-) {
+) -> Vec<usize> {
     let body_width = rail_body_width(width) as usize;
     let rail = Span::styled(rail.glyph(), fg(rail.color()));
+    let mut starts = Vec::with_capacity(lines.len());
     for line in lines {
+        starts.push(out.len());
         for row in wrap_line_to_width(line, body_width) {
             let mut spans = Vec::with_capacity(row.spans.len() + 1);
             spans.push(rail.clone());
@@ -1679,35 +1772,11 @@ fn push_railed(
             out.push(Line::from(spans));
         }
     }
-}
-
-/// Identifies the newest answer that finished, so the transcript keeps one completion
-/// cue without tinting every reply column. Partial, cancelled and interrupted turns do
-/// not qualify; their progress rows already say what happened.
-fn completed_answer(app: &App, messages: &[AiChatMessage]) -> Option<usize> {
-    let agent = app.agent();
-    if agent.status != AiStatus::Idle
-        || agent.task_interrupted()
-        || matches!(
-            agent.last_finish_reason.as_deref(),
-            Some("cancelled" | "length" | "max_tokens")
-        )
-    {
-        return None;
-    }
-    messages.iter().rposition(|message| {
-        message.role == AiRole::Assistant
-            && message.source.as_deref() != Some("agent_progress")
-            && message
-                .tool_calls
-                .as_ref()
-                .is_none_or(|calls| calls.is_empty())
-            && !message.content.trim().is_empty()
-    })
+    starts
 }
 
 /// How one message is drawn: its thinking open or folded, its reasoning shown, its
-/// stream still running, and whether it is the newest answer that finished.
+/// stream still running, and whether it finished a turn.
 #[derive(Clone, Copy)]
 struct MessageDisplay {
     expanded: bool,
@@ -1722,7 +1791,8 @@ fn push_message(
     msg: &AiChatMessage,
     width: usize,
     display: MessageDisplay,
-) {
+) -> Vec<(usize, usize)> {
+    let entry = out.len();
     if msg.source.as_deref() == Some("acp_reasoning") {
         push_thinking_state(
             out,
@@ -1731,7 +1801,7 @@ fn push_message(
             display.expanded,
             display.live,
         );
-        return;
+        return Vec::new();
     }
     if let Some(reasoning) = &msg.reasoning_content
         && !reasoning.is_empty()
@@ -1754,8 +1824,14 @@ fn push_message(
         display.completed,
     )];
     let content = shown_content(msg, &app.project.root_dir);
+    let mut code_blocks = Vec::new();
     if !content.is_empty() {
-        body.extend(render_markdown_width(&content, rail_body_width(width)));
+        let (lines, blocks) = crate::markdown::render_markdown_width_with_code_blocks(
+            &content,
+            rail_body_width(width),
+        );
+        body.extend(lines);
+        code_blocks = blocks;
     }
     if let Some(tool_calls) = &msg.tool_calls {
         body.extend(tool_calls.iter().map(|tc| tool_call_line(app, tc)));
@@ -1770,7 +1846,17 @@ fn push_message(
             line.style = line.style.bg(theme::CHAT_USER_BG);
         }
     }
-    push_railed(out, body, rail, width);
+    let starts = push_railed(out, body, rail, width);
+    // The role header occupies body row 0; the markdown rows follow it.
+    code_blocks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, block)| block.copy_label && block.line + 1 < starts.len())
+        .map(|(block_index, block)| {
+            let row = starts[block.line + 1].saturating_sub(entry);
+            (row, block_index)
+        })
+        .collect()
 }
 
 /// Fits compact activity labels in terminal cells, including wide Unicode.
@@ -2797,7 +2883,7 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_finished_answer_carries_one_green_check() {
+    fn every_finished_answer_keeps_its_green_rail() {
         let (mut app, _project, _store) = activity_test_app();
         app.agents[0].messages_mut().extend([
             message(AiRole::User, "QUESTION_ONE", None),
@@ -2827,6 +2913,9 @@ mod tests {
                         .find(|span| span.content.contains('✓'))
                         .unwrap();
                     assert_eq!(mark.style.fg, Some(theme::SUCCESS), "completion mark");
+                    let rail = &projection.lines[index].line.spans[0];
+                    assert_eq!(rail.content, RAIL, "finished answers keep the green bar");
+                    assert_eq!(rail.style.fg, Some(theme::SUCCESS), "green bar colour");
                     rows[index + 1..]
                         .iter()
                         .find(|row| !row.is_empty())
@@ -2834,24 +2923,44 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        app.agents[0].completed_answers = [1, 3].into_iter().collect();
         let marked = marks(&app);
         assert_eq!(
             marked.len(),
-            1,
-            "only the newest answer is marked: {marked:?}"
+            2,
+            "each finished answer is marked: {marked:?}"
         );
-        assert!(marked[0].contains("ANSWER_TWO"), "{marked:?}");
+        assert!(marked[0].contains("ANSWER_ONE"), "{marked:?}");
+        assert!(marked[1].contains("ANSWER_TWO"), "{marked:?}");
 
         app.agents[0].status = AiStatus::Waiting;
-        assert!(
-            marks(&app).is_empty(),
-            "a running turn must not claim completion"
+        let running = marks(&app);
+        assert_eq!(
+            running.len(),
+            2,
+            "finished answers keep their cues during the next turn: {running:?}"
         );
+
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "QUESTION_THREE", None),
+            message(AiRole::Assistant, "ANSWER_THREE", None),
+        ]);
+        app.agents[0].completed_answers.insert(5);
         app.agents[0].status = AiStatus::Idle;
+        let newest = marks(&app);
+        assert_eq!(newest.len(), 3, "{newest:?}");
+        assert!(newest[2].contains("ANSWER_THREE"), "{newest:?}");
+
+        app.agents[0].messages_mut().extend([
+            message(AiRole::User, "QUESTION_FOUR", None),
+            message(AiRole::Assistant, "CANCELLED_ANSWER", None),
+        ]);
         app.agents[0].last_finish_reason = Some("cancelled".into());
+        let cancelled = marks(&app);
+        assert_eq!(cancelled.len(), 3, "{cancelled:?}");
         assert!(
-            marks(&app).is_empty(),
-            "cancelled turns are not completion markers"
+            !cancelled.iter().any(|row| row.contains("CANCELLED_ANSWER")),
+            "a cancelled turn earns no marker: {cancelled:?}"
         );
     }
 
@@ -2902,6 +3011,269 @@ mod tests {
             assert!(screen.contains("ctx unknown"), "{screen}");
             assert!(!screen.contains("Enter send"), "{screen}");
         }
+    }
+
+    #[test]
+    fn completed_marker_survives_the_next_running_turn() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.agents[0]
+            .messages_mut()
+            .push(message(AiRole::Assistant, "first answer", None));
+        app.agents[0].completed_answers.insert(0);
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0]
+            .partial_response_mut()
+            .push_str("second answer in progress");
+        let projection = build_chat_projection(&app, 80, 40, ChatPlacement::Tab);
+        let rows: Vec<String> = projection
+            .lines
+            .iter()
+            .map(|row| line_text(&row.line))
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains('✓')),
+            "the previous answer keeps its completion cue: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn finished_turn_leaves_no_stream_cursor() {
+        let (mut idle, _project, _store) = activity_test_app();
+        idle.active_tab = crate::app::MainTab::Ai;
+        idle.agents[0]
+            .partial_response_mut()
+            .push_str("partial text");
+        idle.agents[0].status = AiStatus::Idle;
+        let idle_projection = build_chat_projection(&idle, 80, 40, ChatPlacement::Tab);
+        assert!(
+            idle_projection
+                .lines
+                .iter()
+                .all(|row| !line_text(&row.line).contains(STREAM_CURSOR)),
+            "a finished turn must not keep the streaming cursor"
+        );
+
+        let (mut running, _project, _store) = activity_test_app();
+        running.active_tab = crate::app::MainTab::Ai;
+        running.agents[0]
+            .partial_response_mut()
+            .push_str("partial text");
+        running.agents[0].status = AiStatus::Waiting;
+        let running_projection = build_chat_projection(&running, 80, 40, ChatPlacement::Tab);
+        assert!(
+            running_projection
+                .lines
+                .iter()
+                .any(|row| line_text(&row.line).contains(STREAM_CURSOR)),
+            "a running turn keeps the streaming cursor"
+        );
+    }
+
+    #[test]
+    fn chat_code_blocks_register_independent_copy_hitboxes() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        let text = "~~~rust\nfn main() {}\n~~~\n\n~~~sh\necho hi\n~~~";
+        app.agents[0]
+            .messages_mut()
+            .push(message(AiRole::Assistant, text, None));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        let mut hits = Vec::new();
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ActionButton {
+                rect,
+                action:
+                    crate::keymap::Action::AiCopyCodeBlock {
+                        message_index,
+                        block_index,
+                    },
+                ..
+            } = region
+            {
+                hits.push((*message_index, *block_index, *rect));
+            }
+        }
+        assert_eq!(hits.len(), 2, "one hitbox per fenced block");
+        assert_eq!((hits[0].0, hits[0].1), (0, 0));
+        assert_eq!((hits[1].0, hits[1].1), (0, 1));
+        let label_width = crate::markdown::CODE_COPY_LABEL.width() as u16;
+        assert!(hits.iter().all(|hit| hit.2.width == label_width));
+        assert_ne!(hits[0].2.y, hits[1].2.y);
+        let history = app.chat_history_rect.expect("chat renders");
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ActionButton { rect, action, .. } = region
+                && history.contains(ratatui::layout::Position::new(rect.x, rect.y))
+            {
+                assert!(
+                    crate::app::is_chat_inline_control(action),
+                    "a chat row hitbox must run its action instead of starting a selection: {action:?}"
+                );
+            }
+        }
+        let label = hits[0].2;
+        let before = terminal.backend().buffer()[(label.x, label.y)].fg;
+        assert_eq!(before, theme::MUTED);
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Moved,
+            label.x + 1,
+            label.y,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(label.x, label.y)].fg,
+            theme::PRIMARY,
+            "hovering the copy label highlights it"
+        );
+    }
+
+    #[test]
+    fn chat_scrollbar_paints_one_solid_cell_and_highlights_on_hover() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        for index in 0..40 {
+            app.agents[0].messages_mut().push(message(
+                AiRole::Assistant,
+                &format!("scrollable line {index}"),
+                None,
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width;
+        let thumb: Vec<(u16, u16)> = buffer
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.bg == theme::SCROLL_THUMB)
+            .map(|(index, _)| ((index as u16) % width, (index as u16) / width))
+            .collect();
+        let (thumb_x, thumb_y) = *thumb.first().expect("a scrollbar thumb");
+        assert!(
+            !thumb
+                .iter()
+                .any(|(x, y)| *x == thumb_x + 1 && *y == thumb_y),
+            "the thumb is one cell wide"
+        );
+
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Moved,
+            thumb_x,
+            thumb_y,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(thumb_x, thumb_y)].bg,
+            theme::SCROLL_THUMB_HOVER,
+            "hovering the bar lifts its thumb"
+        );
+    }
+
+    #[test]
+    fn chat_scrollbar_pages_on_track_click_and_drags_the_thumb() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        for index in 0..40 {
+            app.agents[0].messages_mut().push(message(
+                AiRole::Assistant,
+                &format!("scrollable line {index}"),
+                None,
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut draw = |app: &mut crate::app::App| {
+            terminal
+                .draw(|frame| render_chat_panel(frame, app, frame.area(), true, ChatPlacement::Tab))
+                .unwrap();
+        };
+        draw(&mut app);
+        let bar = app.chat_scrollbar.expect("overflowing history draws a bar");
+        let height = bar.rect.height as usize;
+        let max_start = bar.total - height;
+        let x = bar.rect.x;
+        assert_eq!(app.agent().scroll_offset, 0);
+
+        // Clicking the track above the thumb pages up by one viewport.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.agent().scroll_offset, height);
+
+        // Grabbing the thumb moves the transcript with the pointer.
+        draw(&mut app);
+        let start = max_start - app.agent().scroll_offset;
+        let (thumb_pos, _) = crate::theme::scrollbar_thumb(
+            bar.total,
+            height,
+            start,
+            crate::theme::ScrollAxis::Vertical,
+        )
+        .unwrap();
+        let grab_y = bar.rect.y + thumb_pos as u16;
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            grab_y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent().scroll_offset,
+            max_start,
+            "dragging the thumb to the top shows the first row"
+        );
+        assert!(app.chat_scrollbar_grab.is_none());
     }
 
     #[test]
@@ -2990,6 +3362,7 @@ mod tests {
             ),
             message(AiRole::Assistant, "ANSWER_BODY", None),
         ]);
+        app.agents[0].completed_answers.insert(1);
         for width in [24, 48, 80] {
             let projection = build_chat_projection(&app, width, 40, ChatPlacement::Tab);
             let rows: Vec<_> = projection
@@ -3716,6 +4089,7 @@ mod tests {
             call,
             message(AiRole::Assistant, "ANSWER", None),
         ]);
+        app.agents[0].completed_answers.insert(3);
 
         let lines = build_chat_lines(&app, 72, 40, ChatPlacement::Tab);
         let rows = row_texts(&lines);
