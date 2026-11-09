@@ -181,7 +181,7 @@ fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
     command(&terminal, "/sessions");
     terminal.expect_text("Load [Enter]", true, 5000).unwrap();
     capture(&terminal, &format!("{stage}-session-open"));
-    terminal.click_text("Model: Session Beta", 5000).unwrap();
+    terminal.click_text("Session Beta", 5000).unwrap();
     click_footer(&terminal, "Load");
     terminal.expect_text("Load [Enter]", false, 5000).unwrap();
     terminal
@@ -191,16 +191,16 @@ fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
     focus_composer(&terminal);
     command(&terminal, "/sessions");
     terminal
-        .expect_text("Model: Session Alpha", true, 5000)
+        .expect_text("Session Alpha", true, 5000)
         .unwrap();
-    terminal.click_text("Model: Session Alpha", 5000).unwrap();
+    terminal.click_text("Session Alpha", 5000).unwrap();
     click_footer(&terminal, "Delete");
     terminal
         .expect_text("Confirm deletion", true, 5000)
         .unwrap();
     click_footer(&terminal, "Delete [Enter/y]");
     terminal
-        .expect_text("Model: Session Alpha", false, 5000)
+        .expect_text("Session Alpha", false, 5000)
         .unwrap();
     assert!(
         !fixture.session_path("Alpha").exists(),
