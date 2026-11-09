@@ -36,6 +36,9 @@ pub struct AcpBackendConfig {
     pub permission_host: Option<Arc<ChannelPermissionHost>>,
     /// Optional per-agent file for the last successfully selected model.
     pub model_preference_path: Option<PathBuf>,
+    /// Optional per-agent file for the other confirmed session options (mode,
+    /// thinking level, agent-advertised approval), keyed by option id.
+    pub option_preferences_path: Option<PathBuf>,
     /// Optional live-host MCP transport supplied by an interactive frontend.
     pub tool_bridge: Option<crate::tool_bridge::ToolBridgeConfig>,
 }
@@ -49,6 +52,7 @@ impl AcpBackendConfig {
             client: AcpClientConfig::default(),
             permission_host: None,
             model_preference_path: None,
+            option_preferences_path: None,
             tool_bridge: None,
         }
     }
@@ -829,6 +833,126 @@ fn prompt_images(messages: &[ChatMessage]) -> Vec<PromptBlock> {
         .collect()
 }
 
+fn is_model_option(option: &teshi_acp::session_config::ConfigOption) -> bool {
+    option.category.as_deref() == Some("model") || option.id == "model"
+}
+
+/// Whether a confirmed value belongs in the per-agent option preferences.
+///
+/// The model keeps its own preference file; read-only types cannot be reapplied.
+fn remembers_option(option: &teshi_acp::session_config::ConfigOption) -> bool {
+    !is_model_option(option) && matches!(option.kind.as_str(), "select" | "boolean")
+}
+
+/// Merge a successful mutation response into the confirmed settings.
+fn apply_option_response(
+    config: &mut teshi_acp::session_config::SessionConfig,
+    id: &str,
+    value: serde_json::Value,
+    response: &serde_json::Value,
+) {
+    if response.get("configOptions").is_some() {
+        config.replace_modern(response.get("configOptions"));
+    } else if let Some(current) = config.options.iter_mut().find(|o| o.id == id) {
+        current.current = value;
+    }
+}
+
+fn append_notice(target: &mut Option<String>, notice: String) {
+    *target = Some(match target.take() {
+        Some(existing) => format!("{existing}; {notice}"),
+        None => notice,
+    });
+}
+
+/// Read the saved option values; a missing file means nothing is remembered.
+fn read_option_preferences(
+    path: &std::path::Path,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Record one confirmed value while keeping the agent's other saved options.
+///
+/// A corrupt file is reported instead of replaced so the user's other values
+/// are not silently lost.
+fn save_option_preference(
+    path: &std::path::Path,
+    id: &str,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let mut saved = read_option_preferences(path)?;
+    saved.insert(id.to_owned(), value.clone());
+    teshi_engine::write_atomic(path, &saved)
+}
+
+/// Reapply remembered non-model options to a new session before its first prompt.
+///
+/// Returns user-facing notices for values that fell back to the agent default
+/// because the agent no longer offers them or refused them. A timeout is an
+/// error: the remote value is then unknown.
+async fn restore_option_preferences(
+    client: &AcpClient<tokio::process::ChildStdin>,
+    session: &mut teshi_acp::AcpSession,
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
+    let order: Vec<String> = session
+        .config
+        .options
+        .iter()
+        .map(|o| o.id.clone())
+        .collect();
+    let mut saved: Vec<_> = read_option_preferences(path)?.into_iter().collect();
+    // Follow the agent's advertised order so dependent options see their
+    // controlling option's restored value first.
+    saved.sort_by_key(|(id, _)| order.iter().position(|o| o == id).unwrap_or(usize::MAX));
+    let mut notices = Vec::new();
+    for (id, value) in saved {
+        // Each mutation may replace the advertised list, so resolve against
+        // the latest confirmed settings rather than the initial snapshot.
+        let Some(option) = session
+            .config
+            .options
+            .iter()
+            .find(|o| o.id == id && remembers_option(o))
+            .cloned()
+        else {
+            notices.push(format!(
+                "Saved setting {id} is no longer offered; using the agent default"
+            ));
+            continue;
+        };
+        if !option.accepts(&value) {
+            notices.push(format!(
+                "Saved {} is no longer available; using the agent default",
+                option.name
+            ));
+            continue;
+        }
+        if option.current == value {
+            continue;
+        }
+        match client
+            .set_session_option(session, &option, value.clone())
+            .await
+        {
+            Ok(response) => {
+                apply_option_response(&mut session.config, &option.id, value, &response)
+            }
+            Err(error @ teshi_acp::AcpError::Timeout(_)) => return Err(error.into()),
+            Err(error) => notices.push(format!(
+                "Saved {} could not be restored: {error}; using the agent default",
+                option.name
+            )),
+        }
+    }
+    Ok(notices)
+}
+
 async fn run_worker(
     config: AcpBackendConfig,
     mut commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
@@ -839,6 +963,7 @@ async fn run_worker(
     let (updates_tx, mut updates_rx) = async_mpsc::channel(128);
     let cwd: PathBuf = config.command.cwd.clone();
     let model_preference_path = config.model_preference_path.clone();
+    let option_preferences_path = config.option_preferences_path.clone();
     let auth_method = config.auth_method.clone();
     let permission_host: Option<Arc<dyn PermissionHost>> = config
         .permission_host
@@ -912,7 +1037,7 @@ async fn run_worker(
                 .config
                 .options
                 .iter()
-                .find(|o| o.category.as_deref() == Some("model") || o.id == "model")
+                .find(|o| is_model_option(o))
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("Agent has no model setting"))?;
             anyhow::ensure!(option.accepts(&value), "Saved model is no longer available");
@@ -920,16 +1045,7 @@ async fn run_worker(
                 let response = client
                     .set_session_option(&session, &option, value.clone())
                     .await?;
-                if response.get("configOptions").is_some() {
-                    session.config.replace_modern(response.get("configOptions"));
-                } else if let Some(current) = session
-                    .config
-                    .options
-                    .iter_mut()
-                    .find(|o| o.id == option.id)
-                {
-                    current.current = value;
-                }
+                apply_option_response(&mut session.config, &option.id, value, &response);
             }
             Ok::<(), anyhow::Error>(())
         }
@@ -949,6 +1065,35 @@ async fn run_worker(
                 }
                 let _ = client.shutdown().await;
                 return;
+            }
+        }
+    }
+    // Restored after the model, whose choice can change which values the agent
+    // advertises for dependent options such as thinking levels.
+    if let Some(path) = &option_preferences_path {
+        match restore_option_preferences(&client, &mut session, path).await {
+            Ok(notices) => {
+                for notice in notices {
+                    append_notice(&mut preference_error, notice);
+                }
+            }
+            Err(error) => {
+                append_notice(
+                    &mut preference_error,
+                    format!("ACP session options could not be restored: {error}"),
+                );
+                // Same contract as the model: an unconfirmed remote value must
+                // not receive prompts.
+                if error
+                    .downcast_ref::<teshi_acp::AcpError>()
+                    .is_some_and(|e| matches!(e, teshi_acp::AcpError::Timeout(_)))
+                {
+                    if let Ok(mut state) = controls.lock() {
+                        state.error = preference_error;
+                    }
+                    let _ = client.shutdown().await;
+                    return;
+                }
             }
         }
     }
@@ -999,24 +1144,33 @@ async fn run_worker(
                     state.pending = false;
                     match result {
                         Ok(response) => {
-                            if response.get("configOptions").is_some() {
-                                state.config.replace_modern(response.get("configOptions"));
-                            } else if let Some(current) =
-                                state.config.options.iter_mut().find(|o| o.id == option.id)
-                            {
-                                current.current = value;
-                            }
+                            apply_option_response(&mut state.config, &option.id, value, &response);
                             state.error = None;
-                            if (option.category.as_deref() == Some("model") || option.id == "model")
-                                && let Some(path) = &model_preference_path
-                                && let Some(current) =
-                                    state.config.options.iter().find(|o| o.id == option.id)
-                                && let Err(error) =
-                                    teshi_engine::write_atomic(path, &current.current)
-                            {
-                                state.error = Some(format!(
-                                    "Model changed, but saving its preference failed: {error}"
-                                ));
+                            // Persist the agent-confirmed value, which may differ
+                            // from the request when the agent normalizes it.
+                            let confirmed = state
+                                .config
+                                .options
+                                .iter()
+                                .find(|o| o.id == option.id)
+                                .map(|o| o.current.clone());
+                            if let Some(confirmed) = confirmed {
+                                let saved = if is_model_option(&option) {
+                                    model_preference_path.as_ref().map(|path| {
+                                        teshi_engine::write_atomic(path, &confirmed)
+                                            .map_err(|e| format!("Model changed, but saving its preference failed: {e}"))
+                                    })
+                                } else if remembers_option(&option) {
+                                    option_preferences_path.as_ref().map(|path| {
+                                        save_option_preference(path, &option.id, &confirmed)
+                                            .map_err(|e| format!("{} changed, but saving its preference failed: {e}", option.name))
+                                    })
+                                } else {
+                                    None
+                                };
+                                if let Some(Err(error)) = saved {
+                                    state.error = Some(error);
+                                }
                             }
                             state.revision += 1;
                         }

@@ -26,7 +26,32 @@ fn backend_with(
     env: HashMap<String, String>,
     path: Option<PathBuf>,
 ) -> AgentBackendRuntime {
+    let mut config = fixture_config(mode, extra_args, env);
+    config.model_preference_path = path;
     let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    backend.configure_acp(config).unwrap();
+    backend
+}
+
+/// Builds a backend with both per-agent preference files.
+fn backend_with_option_preferences(
+    mode: &str,
+    model: Option<PathBuf>,
+    options: PathBuf,
+) -> AgentBackendRuntime {
+    let mut config = fixture_config(mode, Vec::new(), HashMap::new());
+    config.model_preference_path = model;
+    config.option_preferences_path = Some(options);
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    backend.configure_acp(config).unwrap();
+    backend
+}
+
+fn fixture_config(
+    mode: &str,
+    extra_args: Vec<String>,
+    env: HashMap<String, String>,
+) -> AcpBackendConfig {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_acp_agent.py");
     let mut args = vec![script.display().to_string(), mode.into()];
     args.extend(extra_args);
@@ -37,12 +62,142 @@ fn backend_with(
         env,
     };
     let mut config = AcpBackendConfig::new(command);
-    config.model_preference_path = path;
     config.client.initialize_timeout = Duration::from_secs(2);
     config.client.request_timeout = Duration::from_secs(2);
     config.client.shutdown_timeout = Duration::from_secs(2);
+    config
+}
+
+fn option_value<'a>(
+    state: &'a teshi_agent_runtime::AcpControls,
+    id: &str,
+) -> &'a serde_json::Value {
+    &state
+        .config
+        .options
+        .iter()
+        .find(|o| o.id == id)
+        .unwrap_or_else(|| panic!("option {id} is advertised: {state:?}"))
+        .current
+}
+
+#[test]
+fn confirmed_session_options_survive_backend_recreation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("options.json");
+    {
+        let mut first = backend_with_option_preferences("settings_approval", None, path.clone());
+        first.connect_acp().unwrap();
+        let initial = wait_controls(&first, |s| s.ready);
+        first
+            .set_acp_option("fast", true.into(), initial.revision)
+            .unwrap();
+        let fast = wait_controls(&first, |s| !s.pending);
+        assert!(fast.error.is_none(), "{:?}", fast.error);
+        first
+            .set_acp_option("approval_policy", "auto".into(), fast.revision)
+            .unwrap();
+        let approval = wait_controls(&first, |s| !s.pending);
+        assert!(approval.error.is_none(), "{:?}", approval.error);
+        first
+            .set_acp_option("approval_policy", "reject".into(), approval.revision)
+            .unwrap();
+        let rejected = wait_controls(&first, |s| !s.pending);
+        assert!(rejected.error.is_some(), "rejection is visible");
+    }
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        serde_json::json!({"fast": true, "approval_policy": "auto"}),
+        "only confirmed non-model values are saved"
+    );
+    let mut second = backend_with_option_preferences("settings_approval", None, path.clone());
+    second.connect_acp().unwrap();
+    let restored = wait_controls(&second, |s| s.ready);
+    assert!(restored.error.is_none(), "{:?}", restored.error);
+    assert_eq!(option_value(&restored, "fast"), &serde_json::json!(true));
+    assert_eq!(option_value(&restored, "approval_policy"), "auto");
+    let mut other =
+        backend_with_option_preferences("settings_approval", None, root.path().join("other.json"));
+    other.connect_acp().unwrap();
+    let isolated = wait_controls(&other, |s| s.ready);
+    assert_eq!(option_value(&isolated, "fast"), &serde_json::json!(false));
+    assert_eq!(option_value(&isolated, "approval_policy"), "ask");
+}
+
+#[test]
+fn saved_options_restore_after_model_and_fall_back_when_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let model = root.path().join("model.json");
+    let options = root.path().join("options.json");
+    std::fs::write(&model, "\"b\"").unwrap();
+    // Model "b" only offers the "low" thinking level, so "high" must fall back.
+    std::fs::write(&options, r#"{"effort":"high","fast":true,"removed":"x"}"#).unwrap();
+    let mut backend = backend_with_option_preferences("settings", Some(model), options);
+    backend.connect_acp().unwrap();
+    let state = wait_controls(&backend, |s| s.ready);
+    assert_eq!(option_value(&state, "model"), "b");
+    assert_eq!(option_value(&state, "effort"), "low");
+    assert_eq!(option_value(&state, "fast"), &serde_json::json!(true));
+    let error = state.error.expect("fallbacks are reported");
+    assert!(
+        error.contains("Saved Thinking is no longer available"),
+        "{error}"
+    );
+    assert!(
+        error.contains("Saved setting removed is no longer offered"),
+        "{error}"
+    );
+}
+
+#[test]
+fn option_restore_timeout_blocks_the_uncertain_session() {
+    let root = tempfile::tempdir().unwrap();
+    let options = root.path().join("options.json");
+    std::fs::write(&options, r#"{"fast":true}"#).unwrap();
+    let mut config = fixture_config("settings_timeout", Vec::new(), HashMap::new());
+    config.option_preferences_path = Some(options);
+    config.client.request_timeout = Duration::from_millis(200);
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
     backend.configure_acp(config).unwrap();
+    backend.connect_acp().unwrap();
+    let state = wait_controls(&backend, |s| s.error.is_some());
+    assert!(!state.ready, "an uncertain session is never marked ready");
+    assert!(
+        state
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("session options could not be restored"),
+        "{:?}",
+        state.error
+    );
+}
+
+#[test]
+fn corrupt_option_preferences_are_reported_and_not_overwritten() {
+    let root = tempfile::tempdir().unwrap();
+    let options = root.path().join("options.json");
+    std::fs::write(&options, "not json").unwrap();
+    let mut backend = backend_with_option_preferences("settings", None, options.clone());
+    backend.connect_acp().unwrap();
+    let state = wait_controls(&backend, |s| s.ready);
+    assert!(state.error.is_some(), "corrupt preferences are visible");
     backend
+        .set_acp_option("fast", true.into(), state.revision)
+        .unwrap();
+    let changed = wait_controls(&backend, |s| !s.pending);
+    assert_eq!(option_value(&changed, "fast"), &serde_json::json!(true));
+    assert!(
+        changed
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("saving its preference failed")),
+        "{:?}",
+        changed.error
+    );
+    assert_eq!(std::fs::read_to_string(&options).unwrap(), "not json");
 }
 
 #[test]

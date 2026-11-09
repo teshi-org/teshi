@@ -576,7 +576,58 @@ impl App {
             Some(teshi_acp::PermissionPolicy::Manual) => ApprovalMode::Manual,
             Some(teshi_acp::PermissionPolicy::Auto) => ApprovalMode::Auto,
             Some(teshi_acp::PermissionPolicy::Bypass) => ApprovalMode::Bypass,
-            None => self.approval_mode,
+            None => self.thread_approval_mode(self.selected_agent),
+        }
+    }
+
+    /// Approval mode governing one conversation: its ACP agent's remembered
+    /// mode when present, otherwise the application-wide mode.
+    pub(crate) fn thread_approval_mode(&self, index: usize) -> teshi_agent::approval::ApprovalMode {
+        self.agents
+            .get(index)
+            .and_then(|thread| thread.acp_approval)
+            .unwrap_or(self.approval_mode)
+    }
+
+    /// Apply a local approval choice to the current conversation.
+    ///
+    /// Installed ACP agents remember it per agent for their future sessions;
+    /// their other open conversations keep their current mode. Backends without
+    /// an agent identity change the application-wide mode instead.
+    pub(crate) fn select_approval_mode(&mut self, mode: teshi_agent::approval::ApprovalMode) {
+        let index = self.selected_agent;
+        let old = self.thread_approval_mode(index);
+        self.approval_panel_active = false;
+        self.status = format!(
+            "Approval: {} → {} ({})",
+            old.display_name(),
+            mode.display_name(),
+            mode.description()
+        );
+        let thread = &self.agents[index];
+        let path = if thread.backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+            thread.acp_preference_path("approval-preferences")
+        } else {
+            Ok(None)
+        };
+        match path {
+            Ok(Some(path)) => {
+                self.agents[index].acp_approval = Some(mode);
+                if let Err(error) = teshi_engine::write_atomic(&path, &mode) {
+                    self.status = format!(
+                        "Approval set to {}, but saving its preference failed: {error}",
+                        mode.display_name()
+                    );
+                }
+            }
+            Ok(None) => self.approval_mode = mode,
+            Err(error) => {
+                self.agents[index].acp_approval = Some(mode);
+                self.status = format!(
+                    "Approval set to {}, but its preference location is unavailable: {error}",
+                    mode.display_name()
+                );
+            }
         }
     }
     pub(crate) fn connect_acp_controls(&mut self) {
@@ -670,16 +721,20 @@ impl App {
 
     pub(crate) fn sync_acp_policy(&mut self) {
         use teshi_agent::approval::ApprovalMode;
-        let policy = if std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto") {
-            teshi_acp::PermissionPolicy::Auto
-        } else {
-            match self.approval_mode {
-                ApprovalMode::Manual => teshi_acp::PermissionPolicy::Manual,
-                ApprovalMode::Auto => teshi_acp::PermissionPolicy::Auto,
-                ApprovalMode::Bypass => teshi_acp::PermissionPolicy::Bypass,
-            }
-        };
-        for thread in &mut self.agents {
+        let forced_auto = std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto");
+        for index in 0..self.agents.len() {
+            // Each conversation follows its own agent's mode, so threads of
+            // different agents can hold different policies at once.
+            let policy = if forced_auto {
+                teshi_acp::PermissionPolicy::Auto
+            } else {
+                match self.thread_approval_mode(index) {
+                    ApprovalMode::Manual => teshi_acp::PermissionPolicy::Manual,
+                    ApprovalMode::Auto => teshi_acp::PermissionPolicy::Auto,
+                    ApprovalMode::Bypass => teshi_acp::PermissionPolicy::Bypass,
+                }
+            };
+            let thread = &mut self.agents[index];
             if thread
                 .backend
                 .acp_controls()
@@ -1020,6 +1075,17 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 break;
             }
         }
+    }
+}
+
+/// Read an agent's remembered approval mode; a missing file means none is saved.
+pub(crate) fn read_approval_preference(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<teshi_agent::approval::ApprovalMode>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
