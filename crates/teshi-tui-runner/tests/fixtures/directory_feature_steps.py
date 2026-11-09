@@ -193,7 +193,7 @@ class World:
         self.op("key", "Enter")
         self.op("write", "/sessions")
         self.op("key", "Enter")
-        self.expect("Project sessions")
+        self.expect("Sessions · xxx")
         self.expect("DIRECTORY-SAVED-SESSION")
         self.op("key", "Escape")
         self.op("click", "Explore [1]")

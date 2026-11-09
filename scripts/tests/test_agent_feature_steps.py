@@ -34,7 +34,7 @@ class RestoringWorld(bindings.World):
         self.polls += 1
         if self.polls < 4:
             # The old transcript is visible while input is still modal-owned.
-            return "▌ saved history\nProject sessions\nWaiting for the previous Agent to exit"
+            return "▌ saved history\nSessions · project · 1\nWaiting for the previous Agent to exit"
         self.ready = True
         return "▌ saved history\n" + self.completion
 
