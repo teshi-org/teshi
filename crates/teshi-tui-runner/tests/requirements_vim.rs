@@ -93,7 +93,9 @@ impl Fixture {
         terminal.key("Ctrl+w").unwrap();
         terminal.key("Right").unwrap();
         terminal.key("e").unwrap();
-        terminal.expect_text("# Vim acceptance", true, 10000).unwrap();
+        terminal
+            .expect_text("# Vim acceptance", true, 10000)
+            .unwrap();
         terminal.expect_text("[BROWSE]", true, 10000).unwrap();
         terminal
     }
