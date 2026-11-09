@@ -5,7 +5,7 @@ mod requirement_project;
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use teshi_core::authoring::{DocumentRevision, RequirementDocumentIndex, RequirementDocumentMeta};
 use teshi_tui_runner::{Launch, Terminal};
@@ -136,6 +136,34 @@ fn tree_contains(screen: &str, text: &str) -> bool {
     })
 }
 
+/// Whether a pane right of the Requirements tree shows `text`.
+///
+/// The tree's right edge and the document's left border may draw as one or
+/// two `│` cells, so every segment after the tree's counts.
+fn editor_contains(screen: &str, text: &str) -> bool {
+    screen
+        .lines()
+        .any(|line| line.split('│').skip(2).any(|pane| pane.contains(text)))
+}
+
+/// Waits for the document pane to show (or stop showing) `text`. The tree
+/// lists the same titles, so a screen-wide match cannot tell which document
+/// the preview renders.
+fn expect_editor_text(terminal: &Terminal, text: &str, present: bool, timeout_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let screen = terminal.screen().unwrap();
+        if editor_contains(&screen, text) == present {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "document pane presence of {text:?} never became {present}:\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
@@ -174,16 +202,16 @@ fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
     prefix(&terminal, "Left");
 
     terminal.key("4").unwrap();
-    terminal.expect_text("# Req 01", true, 10000).unwrap();
+    expect_editor_text(&terminal, "Req 01", true, 10000);
     terminal.key("End").unwrap();
-    terminal.expect_text("# Req 35", true, 10000).unwrap();
+    expect_editor_text(&terminal, "Req 35", true, 10000);
     terminal.key("PageUp").unwrap();
-    terminal.expect_text("# Req 25", true, 10000).unwrap();
+    expect_editor_text(&terminal, "Req 25", true, 10000);
     prefix(&terminal, "Right");
     terminal.key("G").unwrap();
     terminal.expect_text("body 55", true, 10000).unwrap();
     terminal.write("gg").unwrap();
-    terminal.expect_text("# Req 25", true, 10000).unwrap();
+    expect_editor_text(&terminal, "Req 25", true, 10000);
     capture(&terminal, "vim-requirement-boundaries");
 
     terminal.key("3").unwrap();
@@ -263,7 +291,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
         ("1", "Explore [1]", "Scenario"),
         ("2", "MindMap [2]", "Preview"),
         ("3", "AI [3]", "AI Chat"),
-        ("4", "Requirements [4]", "# Req 01"),
+        ("4", "Requirements [4]", "body 01"),
         ("5", "Test Points [5]", "Intent & review"),
     ] {
         terminal.resize(150, 30).unwrap();
@@ -296,7 +324,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
         }
         if tab == "4" {
             prefix(&terminal, "Right");
-            terminal.expect_text("# Req 01", true, 3000).unwrap();
+            terminal.expect_text("body 01", true, 3000).unwrap();
             prefix(&terminal, "Left");
         }
     }
@@ -353,7 +381,7 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
     terminal.key("4").unwrap();
-    terminal.expect_text("# Req 01", true, 10000).unwrap();
+    expect_editor_text(&terminal, "Req 01", true, 10000);
     let screen = terminal.screen().unwrap();
     let (tree_top, tree_border) = screen
         .lines()
@@ -372,7 +400,7 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
     let after_tree = terminal.screen().unwrap();
     capture(&terminal, "requirements-tree-wheel");
     assert!(
-        after_tree.contains("# Req 01"),
+        editor_contains(&after_tree, "Req 01"),
         "tree wheel replaced editor: {after_tree}"
     );
     assert!(
@@ -388,7 +416,7 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
     );
     terminal.scroll_at(45, 5, false, false).unwrap();
     capture(&terminal, "requirements-editor-wheel");
-    terminal.expect_text("# Req 01", false, 1000).unwrap();
+    expect_editor_text(&terminal, "Req 01", false, 1000);
 
     // SGR press, motion with the left button held, and release on the current
     // tree border. These are PTY mouse events, rather than direct handler calls.
@@ -701,7 +729,7 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
     terminal.key("4").unwrap();
     // Opening the loaded store hands focus to the tree, so let the document
     // render before moving to the editor or the chord lands too early.
-    terminal.expect_text("# Req 01", true, 10000).unwrap();
+    terminal.expect_text("body 01", true, 10000).unwrap();
     // Footer controls follow the focused pane; the tree opens first.
     prefix(&terminal, "Right");
     terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();
@@ -878,7 +906,8 @@ fn narrow_requirements_panes_remain_reachable_with_selection_and_edit() {
     terminal.expect_text("Req 01", true, 10000).unwrap();
     terminal.key("j").unwrap();
     prefix(&terminal, "Right");
-    terminal.expect_text("# Req 02", true, 10000).unwrap();
+    // Only the focused pane is drawn, so the preview's heading names the document.
+    terminal.expect_text("Req 02", true, 10000).unwrap();
     terminal.key("i").unwrap();
     terminal.write("LOCAL_DRAFT").unwrap();
     terminal.key("Escape").unwrap();
