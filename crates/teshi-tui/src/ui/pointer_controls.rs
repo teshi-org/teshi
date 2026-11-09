@@ -67,7 +67,9 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
     let hint = if app.ai_input_focused {
         "Esc then j/k scroll"
     } else if app.ai_sidebar_focused {
-        "j/k chat · Enter open · Ctrl+W l back"
+        "j/k chat · Enter open · l back"
+    } else if app.ai_sidebar_visible {
+        "h chats · j/k/l/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
     } else {
         "hjkl/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
     };

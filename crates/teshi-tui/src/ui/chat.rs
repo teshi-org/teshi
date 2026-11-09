@@ -666,21 +666,7 @@ pub(super) fn render_chat_panel(
         return;
     }
 
-    let mut title = Line::from(Span::styled(
-        " AI Chat ",
-        fg(theme::FG).add_modifier(Modifier::BOLD),
-    ));
-    if !app.agent_registry.uses_builtin_fallback()
-        && (app.agent().backend_selected || app.agent().backend.is_connected())
-    {
-        title.push_span(Span::styled(
-            format!("· Agent: {} ", app.active_agent_profile().name),
-            muted(),
-        ));
-    }
-    if placement == ChatPlacement::Tab && app.ai_sidebar_collapsed {
-        title.push_span(Span::styled("· chats hidden [Ctrl+g] ", muted()));
-    }
+    let title = chat_panel_title(app, area, placement);
     // A focused pane owns the bright outline. The live composer draws its own,
     // so the enclosing frame stays quiet while the user is typing and only
     // lights up when the chat pane is focused without the caret.
@@ -798,6 +784,70 @@ pub(super) fn render_chat_panel(
         ),
         input_active,
     );
+}
+
+/// Builds the top-border title and registers the session ID as a copy target.
+///
+/// Segments are admitted in priority order and only when they fit before the
+/// approval badge, so the session ID outlives the agent name and sidebar hint
+/// on narrow panels instead of being clipped mid-ID.
+fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line<'static> {
+    // Block titles start after the left corner; the badge keeps a one-cell gap.
+    let title_x = area.x + 1;
+    let room = match approval_badge_label(app) {
+        Some(label) => area.width.saturating_sub(label.width() as u16 + 4),
+        None => area.width.saturating_sub(2),
+    } as usize;
+
+    let mut title = Line::from(Span::styled(
+        " AI Chat ",
+        fg(theme::FG).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(id) = app.agent().session_id().map(str::to_owned) {
+        let used = title.width();
+        let id_with_gap = id.width() + " ".width();
+        let prefix = ["· Session: ", "· "]
+            .into_iter()
+            .find(|prefix| used + prefix.width() + id_with_gap <= room);
+        if let Some(prefix) = prefix {
+            let rect = Rect::new(
+                title_x + (used + prefix.width()) as u16,
+                area.y,
+                id.width() as u16,
+                1,
+            );
+            let mut id_style = fg(theme::PRIMARY);
+            if app
+                .mouse_position
+                .is_some_and(|(x, y)| rect.contains(ratatui::layout::Position::new(x, y)))
+            {
+                id_style = id_style.add_modifier(Modifier::REVERSED);
+            }
+            app.clickable_regions.push(ClickableRegion::ActionButton {
+                rect,
+                action: crate::keymap::Action::AiCopySessionId,
+                modal: false,
+            });
+            title.push_span(Span::styled(prefix, muted()));
+            title.push_span(Span::styled(id, id_style));
+            title.push_span(Span::raw(" "));
+        }
+    }
+    let mut optional = Vec::new();
+    if !app.agent_registry.uses_builtin_fallback()
+        && (app.agent().backend_selected || app.agent().backend.is_connected())
+    {
+        optional.push(format!("· Agent: {} ", app.active_agent_profile().name));
+    }
+    if placement == ChatPlacement::Tab && app.ai_sidebar_collapsed {
+        optional.push("· chats hidden [Ctrl+g] ".to_string());
+    }
+    for segment in optional {
+        if title.width() + segment.width() <= room {
+            title.push_span(Span::styled(segment, muted()));
+        }
+    }
+    title
 }
 
 /// One chip per image attached to the draft; clicking a chip removes it.
@@ -993,14 +1043,19 @@ fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// ACP agents own their approval policy, so only built-in backends show the chip.
+fn approval_badge_label(app: &App) -> Option<String> {
+    (app.agent().backend.kind() != teshi_agent::backend::AgentBackendKind::Acp)
+        .then(|| format!(" {} ", app.effective_approval_mode().display_name()))
+}
+
 /// Draws the approval-mode chip on the panel's top border and registers it as
 /// a click target that opens the approval picker.
 fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if app.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+    let Some(label) = approval_badge_label(app) else {
         return;
-    }
+    };
     let mode = app.effective_approval_mode();
-    let label = format!(" {} ", mode.display_name());
     let chip_bg = if mode.requires_manual_approval() {
         theme::PRIMARY
     } else if mode.auto_accepts() {

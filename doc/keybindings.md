@@ -180,7 +180,7 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | Key | Action |
 |-----|--------|
 | `j/k`, Down/Up | Scroll vertically |
-| `h/l`, Left/Right | Scroll horizontally |
+| `h/l`, Left/Right | Scroll horizontally; on the AI tab `h` focuses the Chats sidebar when it is on screen |
 | Alt+arrows | Scroll in the corresponding direction |
 | Ctrl+U / Ctrl+D | Scroll half a viewport up / down |
 | `gg/G`, Home/End | History top/bottom |
@@ -193,11 +193,12 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
-**Ctrl+W h** moves focus from the chat to the Chats sidebar and **Ctrl+W l**
-moves back (the chord stops at the edges like other pane rows). A focused
-sidebar shows a highlighted border and `j/k` selects the previous/next
-conversation; Enter, `l`, or `i` returns to the composer and Esc returns to the
-chat without focusing input. Clicking a conversation focuses the sidebar too.
+**Ctrl+W h** (or plain `h` while the chat is in Normal mode) moves focus from
+the chat to the Chats sidebar and **Ctrl+W l** moves back (the chord stops at
+the edges like other pane rows). A focused sidebar shows a highlighted border
+and `j/k` selects the previous/next conversation; `l`, Right, or Esc returns to
+the chat without focusing input, and Enter or `i` returns to the composer.
+Clicking a conversation focuses the sidebar too.
 
 ### Input
 
@@ -206,7 +207,7 @@ chat without focusing input. Clicking a conversation focuses the sidebar too.
 | Printable characters | Insert text |
 | Enter | Send; empty input returns to Normal |
 | Ctrl+J / Shift+Enter | Insert a newline |
-| Left/Right, Up/Down | Move input cursor; Up/Down move between input lines |
+| Left/Right, Up/Down | Move input cursor; Up/Down move between input lines, then on the first/last line recall earlier/later prompts sent in this conversation (Down past the newest restores the draft) |
 | Home/End | Move to the start/end of the current input line |
 | Backspace/Delete | Delete text; an `[Image #N]` placeholder is deleted as a whole |
 | Ctrl+V / Alt+V | Paste clipboard text; with no text on the clipboard, attach its image or image files. In Windows Terminal, Ctrl+V reaches Teshi as the terminal's empty paste for an image-only clipboard; Alt+V reads the clipboard directly in any terminal |
@@ -492,7 +493,9 @@ The chat sidebar takes a quarter of the AI tab, clamped between 20 and 30
 columns, and a subdued selected-row fill. It disappears below 90 columns so the
 conversation keeps its reading width, and **Ctrl+G** (or the footer Chats
 control) hides it on wider terminals; the chat title then reads "chats hidden
-[Ctrl+g]". Agent selection, model selection and overflow settings remain
+[Ctrl+g]". Once a conversation is saved, the title also shows its local session ID;
+click the ID to copy it. On narrow panels the ID is kept while the agent name and
+sidebar hint are dropped. Agent selection, model selection and overflow settings remain
 available above the composer. The
 time, context and optional token totals use complete fields rather than clipped
 numbers. A compact context percentage preserves the warning in narrow layouts.
