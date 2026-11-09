@@ -1,5 +1,5 @@
 # language: zh-CN
-
+# Authored only; not bound, executed or accepted: `teshi workspace` is not implemented yet.
 @cli
 功能: 工作区级测试点
   同一工作区的成员共用一份测试点文件；未注册目录保持项目内路径。

@@ -1,5 +1,5 @@
 # language: zh-CN
-
+# Authored only; not bound, executed or accepted: `teshi workspace` is not implemented yet.
 @cli
 功能: 工作区初始化与资源分配
   workspace.toml 声明新成员的初始化步骤；每个工作区拥有独立的端口段和可共享的构建目录。

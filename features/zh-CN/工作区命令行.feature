@@ -1,5 +1,5 @@
 # language: zh-CN
-
+# Authored only; not bound, executed or accepted: `teshi workspace` is not implemented yet.
 @cli
 功能: 工作区命令行
   通过 teshi workspace 命令创建、附加、查看和归档工作区成员。
