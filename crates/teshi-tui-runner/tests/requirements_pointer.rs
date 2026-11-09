@@ -165,11 +165,16 @@ impl Fixture {
             return;
         }
         for _ in 0..3 {
-            if terminal.screen().unwrap().contains("╭Current project") {
+            // A focus change repaints asynchronously, so poll the tree title
+            // instead of sampling one frame after a fixed settle.
+            if terminal.expect_text("╭Current project", true, 500).is_ok() {
                 return;
             }
             self.focus(terminal, false);
         }
+        terminal
+            .expect_text("╭Current project", true, 1500)
+            .unwrap();
     }
 
     /// Clicks an editor command such as Save or Iteration.
@@ -205,12 +210,16 @@ impl Fixture {
             return;
         }
         self.focus_tree(terminal);
+        // Each pane paints only when it owns focus, and a focus change repaints
+        // asynchronously: poll the text per pane instead of sampling one frame
+        // per step, so a slow render cannot leave the walk a pane behind.
         for _ in 0..3 {
-            if terminal.screen().unwrap().contains(text) {
+            if terminal.expect_text(text, true, 1000).is_ok() {
                 return;
             }
             self.focus(terminal, true);
         }
+        terminal.expect_text(text, true, 1500).unwrap();
     }
 
     fn launch(&self) -> Terminal {
