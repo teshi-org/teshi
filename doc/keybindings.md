@@ -180,7 +180,7 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | Key | Action |
 |-----|--------|
 | `j/k`, Down/Up | Scroll vertically |
-| `h/l`, Left/Right | Scroll horizontally |
+| `h/l`, Left/Right | Scroll horizontally; on the AI tab `h` focuses the Chats sidebar when it is on screen |
 | Alt+arrows | Scroll in the corresponding direction |
 | Ctrl+U / Ctrl+D | Scroll half a viewport up / down |
 | `gg/G`, Home/End | History top/bottom |
@@ -193,11 +193,12 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
-**Ctrl+W h** moves focus from the chat to the Chats sidebar and **Ctrl+W l**
-moves back (the chord stops at the edges like other pane rows). A focused
-sidebar shows a highlighted border and `j/k` selects the previous/next
-conversation; Enter, `l`, or `i` returns to the composer and Esc returns to the
-chat without focusing input. Clicking a conversation focuses the sidebar too.
+**Ctrl+W h** (or plain `h` while the chat is in Normal mode) moves focus from
+the chat to the Chats sidebar and **Ctrl+W l** moves back (the chord stops at
+the edges like other pane rows). A focused sidebar shows a highlighted border
+and `j/k` selects the previous/next conversation; `l`, Right, or Esc returns to
+the chat without focusing input, and Enter or `i` returns to the composer.
+Clicking a conversation focuses the sidebar too.
 
 ### Input
 
