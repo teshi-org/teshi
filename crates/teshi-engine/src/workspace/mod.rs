@@ -296,6 +296,103 @@ pub fn attach_member(
     })
 }
 
+/// Outcome of [`create_worktree_member`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeMember {
+    /// Workspace that owns the new member.
+    pub workspace: Workspace,
+    /// The new member, with its branch already recorded.
+    pub member: WorkspaceMember,
+    /// Whether this call created the workspace because none owned `dir`.
+    pub workspace_created: bool,
+}
+
+/// Creates a linked git worktree and registers it as a workspace member.
+///
+/// `dir` may be any directory inside the repository. When no workspace owns
+/// `dir`, a workspace named after it is created with `dir` and the new worktree
+/// as its two members, so a caller that already runs inside a project does not
+/// have to register one first. A registration failure removes the worktree and
+/// its new branch again, leaving the repository as it was.
+///
+/// # Errors
+///
+/// Returns an error when `dir` is not inside a repository, `branch` is empty,
+/// `path` already exists, `git worktree add` fails, or the registry write fails.
+pub fn create_worktree_member(
+    workspaces_root: &Path,
+    dir: &Path,
+    branch: &str,
+    path: &Path,
+    base: Option<&str>,
+) -> Result<WorktreeMember> {
+    if branch.trim().is_empty() {
+        bail!("branch name must not be empty");
+    }
+    if path.exists() {
+        bail!("worktree path already exists: {}", path.display());
+    }
+    let repo = worktree::repo_root(dir)
+        .with_context(|| format!("{} is not inside a git repository", dir.display()))?;
+    let existing = workspace_for_path(&load_registry(workspaces_root)?, dir).cloned();
+
+    let created = worktree::add_worktree(&repo, branch, path, base)?;
+    let registered = match existing {
+        Some(workspace) => attach_member(workspaces_root, Some(&workspace.id), &created)
+            .map(|workspace| (workspace, false)),
+        None => create_workspace_around(workspaces_root, dir, &created)
+            .map(|workspace| (workspace, true)),
+    };
+    let (workspace, workspace_created) = match registered {
+        Ok(value) => value,
+        Err(error) => {
+            if let Err(cleanup) = worktree::discard_worktree(&repo, &created, branch) {
+                bail!(
+                    "{error:#}; removing the new worktree {} also failed: {cleanup:#}",
+                    created.display()
+                );
+            }
+            return Err(error);
+        }
+    };
+    let member = workspace
+        .member_for_path(&created)
+        .with_context(|| format!("{} was not registered as a member", created.display()))?
+        .clone();
+    Ok(WorktreeMember {
+        workspace,
+        member,
+        workspace_created,
+    })
+}
+
+/// Creates a workspace holding `dir` and the worktree just made from it.
+///
+/// The name follows `dir` because it is the directory the caller already works
+/// in; an existing name is suffixed instead of failing the request.
+fn create_workspace_around(
+    workspaces_root: &Path,
+    dir: &Path,
+    worktree: &Path,
+) -> Result<Workspace> {
+    let registry = load_registry(workspaces_root)?;
+    let base = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workspace".to_owned());
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while find_workspace(&registry, &name).is_some() {
+        name = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    create_workspace(
+        workspaces_root,
+        &name,
+        &[dir.to_path_buf(), worktree.to_path_buf()],
+    )
+}
+
 /// Finds a workspace containing `path`.
 #[must_use]
 pub fn workspace_for_path<'a>(

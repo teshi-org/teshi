@@ -45,6 +45,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("sessions", "Browse saved sessions"),
     ("project", "Open or switch the active project"),
     (
+        "worktree",
+        "Create a git worktree and work in it from this chat",
+    ),
+    (
         "approval",
         "Agent approval settings (/approval local for Teshi policy)",
     ),
@@ -845,6 +849,42 @@ fn agent_busy(agent: &AgentThread) -> bool {
                 | teshi_agent::backend::AgentBackendStatus::WaitingForPermission
                 | teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         )
+}
+
+/// Default location for a worktree made by `/worktree`.
+///
+/// Siblings the repository into `<repo>-worktrees/<branch>` so the checkout does
+/// not land inside the repository it was cut from, where `git status` in either
+/// directory would see the other one.
+fn default_worktree_path(dir: &Path, branch: &str) -> Option<PathBuf> {
+    let repo = teshi_engine::workspace::worktree::repo_root(dir)?;
+    let name = repo.file_name()?.to_string_lossy().into_owned();
+    let parent = repo.parent()?;
+    Some(
+        parent
+            .join(format!("{name}-worktrees"))
+            .join(branch_dir_name(branch)),
+    )
+}
+
+/// Turns a branch name into one path component (`dev/x` becomes `dev-x`).
+fn branch_dir_name(branch: &str) -> String {
+    let mapped: String = branch
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = mapped.trim_matches(['-', '.']);
+    if trimmed.is_empty() {
+        "worktree".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Application state shared by the terminal views and input handlers.
@@ -3494,19 +3534,10 @@ impl App {
         let project_member = workspace
             .member_for_path(&self.project.root_dir)
             .map(|member| member.path.clone());
-        let agent = &mut self.agents[idx];
         // The project root is the implicit default, so binding back to it
         // clears the override instead of pinning the path.
-        agent.member_dir = (project_member.as_ref() != Some(&next.path)).then(|| next.path.clone());
-        // A connected but unused backend was spawned in the old directory;
-        // restart it so the next prompt runs in the new member.
-        if agent.backend.is_connected() {
-            let kind = agent.backend.kind();
-            agent.replace_backend(kind);
-            if self.ai_input_focused {
-                self.focus_ai_input();
-            }
-        }
+        let member = (project_member.as_ref() != Some(&next.path)).then(|| next.path.clone());
+        self.bind_agent_member(idx, member);
         let label = match &next.branch {
             Some(branch) => format!("{} @ {branch}", next.name),
             None => next.name.clone(),
@@ -3514,6 +3545,92 @@ impl App {
         self.status = format!("{} now works in {label}", self.agents[idx].title);
         self.set_status_message(self.status.clone());
         Ok(())
+    }
+
+    /// Starts work on `/worktree`: creates a linked worktree and opens a chat in it.
+    ///
+    /// The draft goes to the current conversation when it is empty and idle — that
+    /// is the case where nothing already running would be moved — and to a new
+    /// one otherwise.
+    fn cmd_worktree(&mut self, argument: &str) -> Result<()> {
+        let mut parts = argument.split_whitespace();
+        let Some(branch) = parts.next() else {
+            self.status = "Usage: /worktree <branch> [path]".to_string();
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        };
+        let explicit = parts.next().map(PathBuf::from);
+        if parts.next().is_some() {
+            self.status = "Usage: /worktree <branch> [path]".to_string();
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        }
+        let project_dir = self.project.root_dir.clone();
+        let path = match explicit.or_else(|| default_worktree_path(&project_dir, branch)) {
+            Some(path) => path,
+            None => {
+                self.status = format!(
+                    "Cannot derive a worktree path for {}; pass one explicitly",
+                    project_dir.display()
+                );
+                self.set_status_message(self.status.clone());
+                return Ok(());
+            }
+        };
+
+        let root = teshi_engine::workspace::workspaces_dir(None)?;
+        let created = match teshi_engine::workspace::create_worktree_member(
+            &root,
+            &project_dir,
+            branch,
+            &path,
+            None,
+        ) {
+            Ok(created) => created,
+            Err(error) => {
+                self.status = format!("Worktree not created: {error:#}");
+                self.set_status_message(self.status.clone());
+                return Ok(());
+            }
+        };
+
+        let idx = self.selected_agent;
+        let agent = &self.agents[idx];
+        let movable =
+            !agent_busy(agent) && agent.messages().is_empty() && agent.chat.queue.is_empty();
+        if !movable {
+            self.handle_action(Action::AgentNew)?;
+        }
+        let idx = self.selected_agent;
+        self.bind_agent_member(idx, Some(created.member.path.clone()));
+        let label = match &created.member.branch {
+            Some(branch) => format!("{} @ {branch}", created.member.name),
+            None => created.member.name.clone(),
+        };
+        self.status = if created.workspace_created {
+            format!(
+                "{} now works in {label}; workspace {} created for it",
+                self.agents[idx].title, created.workspace.name
+            )
+        } else {
+            format!("{} now works in {label}", self.agents[idx].title)
+        };
+        self.set_status_message(self.status.clone());
+        self.focus_ai_input();
+        Ok(())
+    }
+
+    /// Points one agent at `member` (or the project root) and restarts a
+    /// connected backend, which was spawned in the previous directory.
+    fn bind_agent_member(&mut self, idx: usize, member: Option<PathBuf>) {
+        self.agents[idx].member_dir = member;
+        if self.agents[idx].backend.is_connected() {
+            let kind = self.agents[idx].backend.kind();
+            self.agents[idx].replace_backend(kind);
+            if self.ai_input_focused {
+                self.focus_ai_input();
+            }
+        }
     }
 
     /// Try to find a sensible project root directory.
@@ -13265,6 +13382,12 @@ impl App {
         }
         if let Some(argument) = command.strip_prefix("project ") {
             return self.cmd_project(Some(argument));
+        }
+        if command == "worktree" || command == "worktrees" {
+            return self.cmd_worktree("");
+        }
+        if let Some(argument) = command.strip_prefix("worktree ") {
+            return self.cmd_worktree(argument);
         }
         if command == "approval" || command == "approve" || command == "app" {
             if self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
