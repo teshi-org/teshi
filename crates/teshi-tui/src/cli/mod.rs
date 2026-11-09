@@ -19,6 +19,7 @@ pub mod testpoints;
 pub mod trace;
 pub mod update;
 pub mod winapp;
+pub mod workspace;
 
 use std::path::PathBuf;
 
@@ -138,6 +139,11 @@ pub enum Command {
     Testpoints {
         #[command(subcommand)]
         action: TestpointsCommand,
+    },
+    /// Register and inspect workspaces that group several project directories
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceCommand,
     },
     /// Run BDD features headlessly (CI / scripts; streams NDJSON runner events)
     Run {
@@ -575,6 +581,101 @@ pub enum TestpointLinkCommand {
         /// New `START:END` Unicode scalar range inside the target document
         #[arg(long)]
         to_range: String,
+    },
+}
+
+/// Subcommands for `teshi workspace`.
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Create a workspace owning one or more existing directories
+    New {
+        /// Display name, unique among workspaces
+        #[arg(long)]
+        name: String,
+        /// Member directory; repeat for several directories
+        #[arg(long = "dir", value_name = "PATH", num_args = 1..)]
+        dirs: Vec<PathBuf>,
+        /// Repository to create a linked worktree from; added as the first member
+        #[arg(long, value_name = "REPO")]
+        from: Option<PathBuf>,
+        /// New branch for the worktree created by --from
+        #[arg(long)]
+        branch: Option<String>,
+        /// Directory for the worktree created by --from
+        #[arg(long, value_name = "PATH")]
+        worktree: Option<PathBuf>,
+        /// Base revision for the worktree created by --from (default: repository HEAD)
+        #[arg(long)]
+        base: Option<String>,
+        /// Shared build directory for every member (default for Cargo projects: <first member>/target)
+        #[arg(long, value_name = "PATH")]
+        target_dir: Option<PathBuf>,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a directory to a workspace, optionally creating it as a linked worktree
+    Attach {
+        /// Directory to register; with --from, the new worktree's location
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Workspace id or name; optional when exactly one workspace exists
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Repository to create PATH from as a linked worktree
+        #[arg(long, value_name = "REPO")]
+        from: Option<PathBuf>,
+        /// New branch for the worktree created by --from
+        #[arg(long)]
+        branch: Option<String>,
+        /// Base revision for the worktree created by --from (default: repository HEAD)
+        #[arg(long)]
+        base: Option<String>,
+        /// Skip workspace.toml initialization for the new member
+        #[arg(long)]
+        no_init: bool,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply workspace.toml to members (copy declared files, run setup commands)
+    Init {
+        /// Workspace id or name; optional when exactly one workspace exists
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a member; linked git worktrees are deleted, branches are kept
+    Archive {
+        /// Member name or directory path
+        #[arg(value_name = "MEMBER")]
+        member: String,
+        /// Workspace id or name; optional when exactly one workspace exists
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Delete a worktree that has uncommitted changes or holds the shared build directory
+        #[arg(long)]
+        force: bool,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// List registered workspaces and their members
+    List {
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one workspace; defaults to the workspace owning the current directory
+    Show {
+        /// Workspace id or name
+        #[arg(value_name = "WORKSPACE")]
+        workspace: Option<String>,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
     },
 }
 

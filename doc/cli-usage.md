@@ -228,6 +228,45 @@ Ranges are `START:END` half-open **Unicode scalar** offsets into the target docu
 
 `--json` failures print `{ "code": "...", "error": "..." }` to stdout and exit `1`. Codes: `unknown_test_point`, `unknown_document`, `invalid_range`, `link_not_found`, `ambiguous_link`, `requirement_store_uninitialized`, `testpoints_io`.
 
+When the project directory belongs to a workspace (see below), every member reads and writes one shared file, `<app_data>/workspaces/<workspace-id>/testpoints/testpoints.json`, instead of the per-project path.
+
+### Workspaces (`teshi workspace`)
+
+A workspace groups several directories, such as a repository and its linked git worktrees, so they share test points and generated state. The registry lives at `<app_data>/workspaces/index.json`; each workspace also has a state directory `<app_data>/workspaces/<workspace-id>/`.
+
+```bash
+# Group existing directories
+teshi workspace new --name teshi --dir D:/src/teshi --dir D:/src/teshi-wt
+
+# Create a linked worktree on a new branch; the repository becomes the first member
+teshi workspace new --name teshi --from D:/src/teshi --branch dev/x --worktree D:/src/teshi-x
+
+# Add another worktree (or an existing directory) to the workspace
+teshi workspace attach D:/src/teshi-y --from D:/src/teshi --branch dev/y --base origin/main
+teshi workspace attach D:/src/other-checkout
+
+teshi workspace list --json
+teshi workspace show             # the workspace owning the current directory
+teshi workspace init             # re-apply workspace.toml to every member
+teshi workspace archive teshi-y  # removes a linked worktree, keeps its branch
+```
+
+All requests are validated before `--from` creates anything, and a worktree whose registration then fails is removed together with its new branch. `archive` refuses a worktree with uncommitted changes, or one whose state git cannot report, unless `--force` is given. It also refuses a worktree that contains the shared build directory, because removing the worktree deletes it; with `--force` the worktree is removed and the workspace stops sharing a build directory. It never deletes a plain directory and never archives the last member.
+
+`<workspace-id>/workspace.toml` declares how a new member is prepared. `attach` and `init` apply it; `attach --no-init` skips it:
+
+```toml
+include = ["teshi.toml", ".env.local"]  # copied from the first member; existing files are kept
+setup = ["npm ci"]                       # run inside the member (cmd /C on Windows, sh -c elsewhere)
+
+[env]
+NODE_ENV = "development"                 # extra environment for setup commands
+```
+
+Each workspace owns a block of 100 ports starting at 20300 (the next workspace gets 20400, and so on), and each member gets `port_base + slot`. For a Cargo project, `--target-dir` defaults to `<first member>/target`, so members can reuse one dependency build.
+
+Agents started from a member receive `TESHI_WORKSPACE_ID`, `TESHI_WORKSPACE_NAME`, `TESHI_WORKSPACE_ROOT`, `TESHI_WORKSPACE_STATE_DIR`, `TESHI_WORKSPACE_PORT`, `TESHI_WORKSPACE_MEMBERS` (JSON), `TESHI_WORKTREE_NAME`, `TESHI_WORKTREE_BRANCH`, and, when a shared build directory is set, `TESHI_WORKSPACE_TARGET_DIR` and `CARGO_TARGET_DIR`. A `CARGO_TARGET_DIR` already set in Teshi's own environment takes precedence. In the TUI AI tab, each agent conversation runs in one workspace member, so several agents can work in different worktrees at the same time from one `teshi` window. The composer border shows the selected agent's `member @ branch`; when the workspace has several members, clicking it moves that agent to the next member. Only a conversation without history can move: press `a` to start a new agent, click the border until it shows the target member, then send the prompt. The Chats sidebar shows the directory name next to agents bound to another member. Teshi's own feature and requirement tools still act on the project the TUI opened; the member only sets the agent's working directory and `TESHI_WORKSPACE_*` environment, and is restored with the saved session.
+
 ### Browser GUI (`teshi web`)
 
 Latest GPUI WASM workspace UI hosted at `https://teshi-org.github.io/app/`; the local
@@ -515,6 +554,7 @@ Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are
 |----------|---------|--------|
 | `TESHI_APP_DATA_DIR` | OS data dir + `teshi` | Override shared app-data root (profiles, settings, recent, default requirements store) |
 | `TESHI_REQUIREMENTS_DIR` | `<app_data>/requirements` | Override the user-level requirement library path |
+| `TESHI_WORKSPACES_DIR` | `<app_data>/workspaces` | Override the workspace registry and state directory |
 | `TESHI_LLM_API_KEY` | — | Fallback LLM API key when no active profile has a key |
 | `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | Fallback LLM API base URL |
 | `TESHI_LLM_MODEL` | `gpt-4o-mini` | Fallback LLM model name |

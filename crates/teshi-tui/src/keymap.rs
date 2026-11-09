@@ -77,6 +77,8 @@ pub struct KeyContext {
 pub enum Action {
     /// Open the session Agent selector from the chat configuration row.
     AiOpenAgentSelector,
+    /// Switch to the next member of the workspace shown on the composer border.
+    WorkspaceNextMember,
     /// Toggle the completed process of a user turn without moving input focus.
     AiToggleTurn(usize),
     /// Toggle one reasoning body; `usize::MAX` identifies live native reasoning.

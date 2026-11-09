@@ -22,6 +22,21 @@ fn get_all_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "get_workspace_info".into(),
+            description: "Describe the Teshi workspace that owns the current project \
+                          directory: its name, which member directory is active, sibling \
+                          members with their branches, the shared state directory, and the \
+                          shared build directory. Use it before assuming other checkouts \
+                          exist. Reports that the directory belongs to no workspace when \
+                          none is registered."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
             name: "highlight_mindmap_nodes".into(),
             description: "Highlight MindMap tree nodes whose step text matches a \
                           condition. Use this to visually mark nodes for the user. \
@@ -685,6 +700,23 @@ mod tests {
         assert!(names.contains(&"browser_type"));
         assert!(names.contains(&"browser_assert"));
         assert!(names.contains(&"browser_go_back"));
+    }
+
+    #[test]
+    fn workspace_info_tool_takes_no_arguments() {
+        let tools = get_all_tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "get_workspace_info")
+            .expect("workspace tool");
+
+        assert!(
+            tool.parameters["properties"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(tool.parameters["required"].as_array().unwrap().is_empty());
     }
 
     #[test]

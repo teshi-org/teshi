@@ -650,7 +650,7 @@ mod tests {
         }
 
         fn load(&self) -> TestPointsFile {
-            let path = teshi_core::authoring::testpoints_file(self.project());
+            let path = teshi_engine::workspace::testpoints_path(self.project()).unwrap();
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
         }
 

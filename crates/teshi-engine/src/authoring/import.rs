@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use teshi_core::authoring::{
-    legacy_project_requirements_dir, resolve_requirement_store_path, testpoints_file,
-    validate_requirement_path, DocumentRevision, RequirementDocumentIndex, RequirementDocumentMeta,
-    RequirementStoreId, TestPointsFile,
+    legacy_project_requirements_dir, resolve_requirement_store_path, validate_requirement_path,
+    DocumentRevision, RequirementDocumentIndex, RequirementDocumentMeta, RequirementStoreId,
+    TestPointsFile,
 };
 
 use super::store::{
@@ -558,7 +558,9 @@ fn prepare_rewritten_test_points(
     mappings: &[ImportMapping],
     store_id: &RequirementStoreId,
 ) -> Result<Option<TestPointsFile>> {
-    let path = testpoints_file(project_root);
+    // Must match the file `save_test_points` writes, or a workspace member would
+    // rewrite the shared file from a stale per-directory copy.
+    let path = crate::workspace::testpoints_path(project_root)?;
     if !path.is_file() {
         return Ok(None);
     }
@@ -599,8 +601,8 @@ fn cleanup_copied(requirements_root: &Path, copied: &[PathBuf], previous_paths: 
 mod tests {
     use super::*;
     use teshi_core::authoring::{
-        HierarchyPath, QuoteSelector, RequirementLink, ResolutionState, ReviewState, TestPoint,
-        TextRange,
+        testpoints_file, HierarchyPath, QuoteSelector, RequirementLink, ResolutionState,
+        ReviewState, TestPoint, TextRange,
     };
 
     fn write_legacy_project(project: &Path, docs: &[(&str, &str, &str)]) {

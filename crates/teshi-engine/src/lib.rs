@@ -27,6 +27,7 @@ mod terminal;
 pub mod validation;
 mod venv;
 mod watcher;
+pub mod workspace;
 
 /// Project Python venv resolution and import preflight (used by sidecar; exposed for tests).
 pub mod python_env {

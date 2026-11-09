@@ -2369,6 +2369,33 @@ fn composer_text_width(outer_width: u16) -> u16 {
         .max(1)
 }
 
+/// Draws `member @ branch` on the composer's top border.
+///
+/// The label is display-only: it tells the user which workspace member this chat
+/// is anchored to without consuming a toolbar slot.
+fn render_workspace_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let Some((badge, member_count)) = app
+        .workspace_context()
+        .map(|context| (context.badge(), context.member_count))
+    else {
+        return;
+    };
+    let label = format!(" {badge} ");
+    let width = label.width() as u16;
+    if width + 3 > area.width {
+        return;
+    }
+    let rect = Rect::new(area.x + 2, area.y, width, 1);
+    frame.render_widget(Paragraph::new(label).style(muted()), rect);
+    if member_count > 1 {
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect,
+            action: crate::keymap::Action::WorkspaceNextMember,
+            modal: false,
+        });
+    }
+}
+
 fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2383,6 +2410,7 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    render_workspace_badge(frame, app, area);
     let button_width = composer_button_width(inner.width);
     let text_width = composer_text_width(area.width).min(inner.width.saturating_sub(2));
     let text_x = inner.x + 2.min(inner.width);

@@ -131,6 +131,7 @@ fn execute_tool_impl(
     }
     match name {
         "get_project_info" => execute_get_project_info(app),
+        "get_workspace_info" => execute_get_workspace_info(app, agent_idx),
         "highlight_mindmap_nodes" => execute_highlight_mindmap_nodes(app, args_json),
         "apply_mindmap_filter" => execute_apply_mindmap_filter(app, args_json),
         "get_feature_content" => execute_get_feature_content(app, args_json),
@@ -238,6 +239,66 @@ fn execute_apply_mindmap_filter(app: &mut crate::app::App, args_json: &str) -> R
         }
         other => anyhow::bail!("unknown filter_type: {other}"),
     }
+}
+
+/// Describes the workspace owning the calling agent's directory.
+///
+/// Each agent runs with one member as its cwd, so this is how it learns that
+/// sibling checkouts exist and where shared state lives. Teshi's feature tools
+/// still act on the open project, which may be a different member.
+fn execute_get_workspace_info(app: &crate::app::App, agent_idx: usize) -> Result<String> {
+    let dir = app.agent_dir(agent_idx);
+    let root = teshi_engine::workspace::workspaces_dir(None)?;
+    let registry = teshi_engine::workspace::load_registry(&root)?;
+    let Some(workspace) = teshi_engine::workspace::workspace_for_path(&registry, dir) else {
+        return Ok(format!(
+            "{} belongs to no Teshi workspace. Use `teshi workspace new/attach` to register it.",
+            dir.display()
+        ));
+    };
+    let current = workspace
+        .member_for_path(dir)
+        .map(|member| member.name.as_str())
+        .unwrap_or("(unknown)");
+    let mut lines = vec![
+        format!("Workspace: {} ({})", workspace.name, workspace.id),
+        format!("Current member: {current}"),
+        format!(
+            "Teshi feature tools act on: {}",
+            app.find_project_dir().display()
+        ),
+        format!("State directory: {}", root.join(&workspace.id).display()),
+        format!(
+            "Shared build directory: {}",
+            workspace
+                .target_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(none)".into())
+        ),
+    ];
+    if let Some(member) = workspace.member_for_path(dir) {
+        lines.push(format!(
+            "Port: {}",
+            u32::from(workspace.port_base) + u32::from(member.slot)
+        ));
+    }
+    lines.push("Members:".to_owned());
+    for member in &workspace.members {
+        lines.push(format!(
+            "- {} @ {} (slot {}, {}){}",
+            member.name,
+            member.branch.as_deref().unwrap_or("detached"),
+            member.slot,
+            member.path.display(),
+            if member.name == current {
+                "  ← current"
+            } else {
+                ""
+            }
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
