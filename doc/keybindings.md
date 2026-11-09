@@ -492,7 +492,9 @@ The chat sidebar takes a quarter of the AI tab, clamped between 20 and 30
 columns, and a subdued selected-row fill. It disappears below 90 columns so the
 conversation keeps its reading width, and **Ctrl+G** (or the footer Chats
 control) hides it on wider terminals; the chat title then reads "chats hidden
-[Ctrl+g]". Agent selection, model selection and overflow settings remain
+[Ctrl+g]". Once a conversation is saved, the title also shows its local session ID;
+click the ID to copy it. On narrow panels the ID is kept while the agent name and
+sidebar hint are dropped. Agent selection, model selection and overflow settings remain
 available above the composer. The
 time, context and optional token totals use complete fields rather than clipped
 numbers. A compact context percentage preserves the warning in narrow layouts.

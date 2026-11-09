@@ -509,6 +509,15 @@ impl AgentThread {
         Ok(())
     }
 
+    /// Local saved-session ID, which names the session file on disk.
+    ///
+    /// Absent until the conversation's first checkpoint is written.
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.saved_session
+            .as_ref()
+            .map(|session| session.id.as_str())
+    }
+
     pub fn backend_kind(&self) -> teshi_agent::backend::AgentBackendKind {
         self.backend.kind()
     }
@@ -10116,6 +10125,15 @@ impl App {
                 self.agent_mut().input = input;
                 self.quit_pending_confirm = false;
             }
+            Action::AiCopySessionId => {
+                if let Some(id) = self.agent().session_id().map(str::to_owned)
+                    && self.try_copy_to_clipboard(&id)
+                {
+                    self.status = format!("Copied session ID {id}");
+                    self.set_status_message(self.status.clone());
+                }
+                self.quit_pending_confirm = false;
+            }
             Action::OpenImageExternally(path) => {
                 self.status = match crate::image_view::open_path_externally(&path) {
                     Ok(()) => format!("Opened {}", crate::chat_images::display_name(&path)),
@@ -16719,6 +16737,93 @@ mod tests {
         app.handle_action(Action::AiPaste("plain text".into()))
             .unwrap();
         assert_eq!(app.agent().input, "compare plain text");
+    }
+
+    fn session_id_title_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let (mut app, project, store) = slash_test_app();
+        let mut session = crate::session::Session::from_messages(Vec::new(), None);
+        session.id = "18a3f2c9b1d04e5f".to_string();
+        app.agent_mut().saved_session = Some(session);
+        app.active_tab = MainTab::Ai;
+        app.ai_sidebar_collapsed = true;
+        (app, project, store)
+    }
+
+    fn render_rows(app: &mut App, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn session_id_rect(app: &App) -> Option<Rect> {
+        app.clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: Action::AiCopySessionId,
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn test_chat_title_keeps_session_id_before_optional_segments() {
+        for (width, label, hint) in [(120, true, true), (64, true, false), (40, false, false)] {
+            let (mut app, _project, _store) = session_id_title_app();
+            let rows = render_rows(&mut app, width);
+            let rect = session_id_rect(&app)
+                .unwrap_or_else(|| panic!("width {width}: session ID should be clickable"));
+            let row = &rows[rect.y as usize];
+            let shown: String = row
+                .chars()
+                .skip(rect.x as usize)
+                .take(rect.width as usize)
+                .collect();
+            assert_eq!(shown, "18a3f2c9b1d04e5f", "width {width}: {row}");
+            assert_eq!(row.contains("Session:"), label, "width {width}: {row}");
+            assert_eq!(row.contains("chats hidden"), hint, "width {width}: {row}");
+        }
+    }
+
+    #[test]
+    fn test_chat_title_omits_session_id_before_first_checkpoint() {
+        let (mut app, _project, _store) = session_id_title_app();
+        app.agent_mut().saved_session = None;
+        let rows = render_rows(&mut app, 120);
+        assert!(session_id_rect(&app).is_none());
+        assert!(rows.iter().all(|row| !row.contains("Session:")));
+    }
+
+    #[test]
+    fn test_clicking_session_id_copies_it() {
+        let (mut app, _project, _store) = session_id_title_app();
+        render_rows(&mut app, 120);
+        let rect = session_id_rect(&app).expect("session ID should be clickable");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        // Headless CI may lack a clipboard; either outcome proves the click dispatched.
+        assert!(
+            app.status == "Copied session ID 18a3f2c9b1d04e5f"
+                || app.status.starts_with("Could not copy to clipboard"),
+            "{}",
+            app.status
+        );
     }
 
     #[test]
