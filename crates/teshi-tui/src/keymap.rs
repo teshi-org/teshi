@@ -3289,6 +3289,26 @@ mod tests {
     }
 
     #[test]
+    fn test_focused_ai_input_routes_up_down_to_the_composer() {
+        let context = KeyContext {
+            active_tab: MainTab::Ai,
+            ai_input_focused: true,
+            ai_sidebar_focused: false,
+            ..requirements_tree_context()
+        };
+        for (code, expected) in [
+            (KeyCode::Up, Action::AiCursorUp),
+            (KeyCode::Down, Action::AiCursorDown),
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, KeyModifiers::NONE), context),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
     fn pane_prefix_is_global_but_text_modes_keep_precedence() {
         let base = requirements_tree_context();
         for active_tab in [

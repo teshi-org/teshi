@@ -206,7 +206,7 @@ chat without focusing input. Clicking a conversation focuses the sidebar too.
 | Printable characters | Insert text |
 | Enter | Send; empty input returns to Normal |
 | Ctrl+J / Shift+Enter | Insert a newline |
-| Left/Right, Up/Down | Move input cursor; Up/Down move between input lines |
+| Left/Right, Up/Down | Move input cursor; Up/Down move between input lines, then on the first/last line recall earlier/later prompts sent in this conversation (Down past the newest restores the draft) |
 | Home/End | Move to the start/end of the current input line |
 | Backspace/Delete | Delete text; an `[Image #N]` placeholder is deleted as a whole |
 | Ctrl+V / Alt+V | Paste clipboard text; with no text on the clipboard, attach its image or image files. In Windows Terminal, Ctrl+V reaches Teshi as the terminal's empty paste for an image-only clipboard; Alt+V reads the clipboard directly in any terminal |

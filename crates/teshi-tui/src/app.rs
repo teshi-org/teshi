@@ -3889,7 +3889,45 @@ impl App {
         let text = std::mem::take(&mut agent.input);
         let images = std::mem::take(&mut agent.input_images);
         agent.input_cursor = 0;
+        agent.chat.recall = None;
         crate::chat_images::expand_placeholders(&text, &images)
+    }
+
+    /// Steps the composer through this conversation's sent prompts like shell
+    /// history; stepping past the newest prompt restores the interrupted draft.
+    ///
+    /// Returns `false` when nothing lies further in that direction.
+    fn recall_sent_prompt(&mut self, older: bool) -> bool {
+        let prompts: Vec<String> = crate::chat_state::sent_prompts(self.agent().messages())
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let current = self.agent().chat.recall.as_ref().map(|recall| recall.index);
+        let next = match (current, older) {
+            (None, true) => prompts.len().checked_sub(1),
+            (Some(index), true) => index.checked_sub(1),
+            (Some(index), false) => Some(index + 1),
+            (None, false) => None,
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        let agent_idx = self.selected_agent;
+        if let Some(prompt) = prompts.get(next) {
+            let agent = self.agent_mut();
+            match &mut agent.chat.recall {
+                Some(recall) => recall.index = next,
+                None => {
+                    let draft =
+                        crate::chat_images::expand_placeholders(&agent.input, &agent.input_images);
+                    agent.chat.recall = Some(crate::chat_state::Recall { index: next, draft });
+                }
+            }
+            self.restore_ai_draft(agent_idx, prompt);
+        } else if let Some(recall) = self.agent_mut().chat.recall.take() {
+            self.restore_ai_draft(agent_idx, &recall.draft);
+        }
+        true
     }
 
     /// Puts message text back into an agent's composer, showing its image
@@ -10288,28 +10326,34 @@ impl App {
                     .rposition(|c| *c == '\n')
                     .map_or(0, |i| i + 1);
                 let column = cursor - start;
-                let target = if matches!(action, Action::AiCursorUp) {
-                    if start == 0 {
-                        cursor
-                    } else {
+                let up = matches!(action, Action::AiCursorUp);
+                let target = if up {
+                    (start > 0).then(|| {
                         let end = start - 1;
                         let previous = chars[..end]
                             .iter()
                             .rposition(|c| *c == '\n')
                             .map_or(0, |i| i + 1);
                         previous + column.min(end - previous)
-                    }
-                } else if let Some(end) = chars[cursor..].iter().position(|c| *c == '\n') {
-                    let next = cursor + end + 1;
-                    let length = chars[next..]
-                        .iter()
-                        .position(|c| *c == '\n')
-                        .unwrap_or(chars.len() - next);
-                    next + column.min(length)
+                    })
                 } else {
-                    cursor
+                    chars[cursor..].iter().position(|c| *c == '\n').map(|end| {
+                        let next = cursor + end + 1;
+                        let length = chars[next..]
+                            .iter()
+                            .position(|c| *c == '\n')
+                            .unwrap_or(chars.len() - next);
+                        next + column.min(length)
+                    })
                 };
-                self.agent_mut().input_cursor = target;
+                // Multi-line drafts move the caret first; only the first or
+                // last line hands Up/Down over to sent-prompt recall.
+                match target {
+                    Some(target) => self.agent_mut().input_cursor = target,
+                    None => {
+                        self.recall_sent_prompt(up);
+                    }
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorHome => {
@@ -16737,6 +16781,90 @@ mod tests {
         app.handle_action(Action::AiPaste("plain text".into()))
             .unwrap();
         assert_eq!(app.agent().input, "compare plain text");
+    }
+
+    fn recall_test_app(
+        sent: &[(&str, Option<&str>)],
+    ) -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let (mut app, project, store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        for (content, source) in sent {
+            app.agent_mut().messages_mut().push(AiChatMessage {
+                role: AiRole::User,
+                content: (*content).to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: source.map(str::to_string),
+                activity: None,
+            });
+        }
+        (app, project, store)
+    }
+
+    fn set_draft(app: &mut App, text: &str) {
+        app.agent_mut().input = text.to_string();
+        app.agent_mut().input_cursor = text.chars().count();
+    }
+
+    #[test]
+    fn test_up_down_recall_sent_prompts_and_restore_draft() {
+        let (mut app, _project, _store) = recall_test_app(&[
+            ("first", None),
+            ("second", None),
+            ("second", None),
+            ("summary of earlier turns", Some("compacted")),
+        ]);
+        set_draft(&mut app, "wip");
+        let steps = [
+            (Action::AiCursorUp, "second"),
+            (Action::AiCursorUp, "first"),
+            (Action::AiCursorUp, "first"),
+            (Action::AiCursorDown, "second"),
+            (Action::AiCursorDown, "wip"),
+            (Action::AiCursorDown, "wip"),
+        ];
+        for (step, (action, expected)) in steps.into_iter().enumerate() {
+            app.handle_action(action).unwrap();
+            assert_eq!(app.agent().input, expected, "step {step}");
+            assert_eq!(
+                app.agent().input_cursor,
+                expected.chars().count(),
+                "step {step}: caret should sit at the end of the recalled text"
+            );
+        }
+    }
+
+    #[test]
+    fn test_up_moves_within_multiline_draft_before_recalling() {
+        let (mut app, _project, _store) = recall_test_app(&[("earlier", None)]);
+        set_draft(&mut app, "line one\nline two");
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input, "line one\nline two");
+        assert_eq!(app.agent().input_cursor, "line one".len());
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input, "earlier");
+        app.handle_action(Action::AiCursorDown).unwrap();
+        assert_eq!(app.agent().input, "line one\nline two");
+    }
+
+    #[test]
+    fn test_up_without_sent_prompts_keeps_draft() {
+        let (mut app, _project, _store) = recall_test_app(&[]);
+        set_draft(&mut app, "draft");
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input, "draft");
+        assert!(app.agent().chat.recall.is_none());
+    }
+
+    #[test]
+    fn test_taking_draft_ends_recall() {
+        let (mut app, _project, _store) = recall_test_app(&[("earlier", None)]);
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert!(app.agent().chat.recall.is_some());
+        assert_eq!(app.take_ai_draft(), "earlier");
+        assert!(app.agent().chat.recall.is_none());
     }
 
     fn session_id_title_app() -> (App, tempfile::TempDir, tempfile::TempDir) {

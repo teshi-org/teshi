@@ -25,6 +25,35 @@ pub(crate) struct ChatState {
     pub last_activity: Option<Instant>,
     /// Bounded recent estimates; provider billing usage remains separate.
     pub rate: OutputRate,
+    /// Sent-prompt recall position; `None` while the live draft is shown.
+    pub recall: Option<Recall>,
+}
+
+/// Up/Down position in [`sent_prompts`], plus the draft to return to.
+#[derive(Debug, Clone)]
+pub(crate) struct Recall {
+    /// Index into the list returned by [`sent_prompts`].
+    pub index: usize,
+    /// The interrupted draft with image placeholders expanded to mentions.
+    pub draft: String,
+}
+
+/// Prompts sent in this conversation, oldest first, for composer recall.
+///
+/// Compaction digests carry a source and are skipped; consecutive repeats
+/// collapse so holding Up never stalls on one prompt.
+pub(crate) fn sent_prompts(messages: &[AiChatMessage]) -> Vec<&str> {
+    let mut prompts: Vec<&str> = Vec::new();
+    for message in messages
+        .iter()
+        .filter(|m| m.role == AiRole::User && m.source.is_none())
+    {
+        let text = message.content.as_str();
+        if !text.trim().is_empty() && prompts.last() != Some(&text) {
+            prompts.push(text);
+        }
+    }
+    prompts
 }
 
 /// A rolling estimate based on visible text, never reported as provider usage.
