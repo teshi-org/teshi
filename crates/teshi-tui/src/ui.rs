@@ -1064,9 +1064,9 @@ fn render_explore_viewport<'a>(
     render_rows: impl FnOnce(&App, std::ops::Range<usize>) -> Vec<Line<'a>>,
 ) -> Rect {
     let viewport_width = inner.width as usize;
-    let overflow = content_width > viewport_width && inner.height >= 3;
+    let overflow = content_width > viewport_width && inner.height >= 2;
     let content_area = if overflow {
-        Rect::new(inner.x, inner.y, inner.width, inner.height - 2)
+        Rect::new(inner.x, inner.y, inner.width, inner.height - 1)
     } else {
         inner
     };
@@ -1126,12 +1126,27 @@ fn render_explore_viewport<'a>(
     );
 
     if overflow {
-        let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2);
-        let scrollbar_line = theme::horizontal_scrollbar(content_width, viewport_width, offset);
-        frame.render_widget(
-            Paragraph::new(vec![scrollbar_line.clone(), scrollbar_line]),
-            scrollbar,
-        );
+        let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+        let bar = crate::app::ScrollbarBar {
+            rect: scrollbar,
+            axis: theme::ScrollAxis::Horizontal,
+            total: content_width,
+        };
+        let grabbed = app
+            .explore_horizontal_scroll_grab
+            .is_some_and(|(dragged, _)| dragged == column);
+        let state = crate::app::scrollbar_state(app.mouse_position, &bar, grabbed);
+        let line = theme::scrollbar_lines(
+            content_width,
+            viewport_width,
+            offset,
+            theme::ScrollAxis::Horizontal,
+            state,
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+        frame.render_widget(Paragraph::new(vec![line]), scrollbar);
         app.clickable_regions
             .push(ClickableRegion::ExploreHorizontalScrollbar {
                 column,
@@ -4976,6 +4991,10 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
 }
 
 /// Draw overflow indicators on panel borders, preserving the content viewport.
+///
+/// Every pane shares the chat scrollbar paint: solid cells instead of glyphs, a
+/// lifted thumb under the pointer, and a brighter thumb while it is dragged.
+/// The drawn rectangles are recorded so the pointer can grab what it sees.
 fn render_requirement_scrollbars(
     frame: &mut Frame<'_>,
     ui: &mut crate::authoring_tab::AuthoringUiState,
@@ -4993,22 +5012,51 @@ fn render_requirement_scrollbars(
         width.saturating_sub(inner.width as usize),
         height.saturating_sub(inner.height as usize),
     ];
+    ui.pane_bars[pane] = [None; 2];
+
+    let grab = ui.scrollbar_grab;
+    let grabbed = |axis: usize| {
+        grab.is_some_and(|(dragged, dragged_axis, _)| dragged == pane && dragged_axis == axis)
+    };
     if width > inner.width as usize && inner.width > 0 {
-        let line = theme::horizontal_scrollbar(width, inner.width as usize, offset.0);
+        let rect = Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1);
+        let bar = crate::app::ScrollbarBar {
+            rect,
+            axis: theme::ScrollAxis::Horizontal,
+            total: width,
+        };
+        let state = crate::app::scrollbar_state(ui.pointer, &bar, grabbed(0));
         frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+            Paragraph::new(theme::scrollbar_lines(
+                width,
+                inner.width as usize,
+                offset.0,
+                theme::ScrollAxis::Horizontal,
+                state,
+            )),
+            rect,
         );
+        ui.pane_bars[pane][0] = Some(bar);
     }
     if height > inner.height as usize && inner.height > 0 {
+        let rect = Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height);
+        let bar = crate::app::ScrollbarBar {
+            rect,
+            axis: theme::ScrollAxis::Vertical,
+            total: height,
+        };
+        let state = crate::app::scrollbar_state(ui.pointer, &bar, grabbed(1));
         frame.render_widget(
             Paragraph::new(theme::scrollbar_lines(
                 height,
                 inner.height as usize,
                 offset.1,
+                theme::ScrollAxis::Vertical,
+                state,
             )),
-            Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
+            rect,
         );
+        ui.pane_bars[pane][1] = Some(bar);
     }
 }
 
@@ -5076,6 +5124,8 @@ fn requirements_footer_controls(
 fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.authoring_ui.pane_areas = [Rect::default(); 3];
     app.authoring_ui.scroll_limits = [[0; 2]; 3];
+    app.authoring_ui.pane_bars = [[None; 2]; 3];
+    app.authoring_ui.pointer = app.mouse_position;
     if area.width < 20 || area.height < 3 {
         return;
     }
@@ -7403,7 +7453,10 @@ Feature: Rule only
         assert_eq!(ui.scroll_limits[1], [0, 56]);
         assert_eq!(ui.scroll_row, 54);
         assert_eq!(terminal.backend().buffer()[(1, 1)].symbol(), "a");
-        assert!((1..5).any(|y| terminal.backend().buffer()[(11, y)].symbol() == "┃"));
+        assert!(
+            (1..5).any(|y| terminal.backend().buffer()[(11, y)].bg == crate::theme::SCROLL_THUMB),
+            "the vertical bar paints a solid thumb"
+        );
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string("short".into());
         ui.cursor_row = 0;
         terminal
@@ -7414,6 +7467,58 @@ Feature: Rule only
         assert_eq!(ui.scroll_limits[1], [0, 0]);
         assert_eq!(ui.horizontal_scroll[1], 0);
         assert_eq!(ui.scroll_row, 0);
+        assert_eq!(
+            ui.pane_bars[1],
+            [None, None],
+            "a pane that fits leaves no stale hitbox"
+        );
+    }
+
+    #[test]
+    fn requirement_bars_highlight_on_hover_and_while_grabbed() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            (0..40)
+                .map(|_| "abcdefghijklmnopqrstuvwxyz")
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
+            .expect("render");
+        let bar = ui.pane_bars[1][1].expect("overflowing editor draws a bar");
+        let cell = (bar.rect.x, bar.rect.y);
+        assert_eq!(
+            terminal.backend().buffer()[cell].bg,
+            crate::theme::SCROLL_THUMB
+        );
+
+        ui.pointer = Some(cell);
+        terminal
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
+            .expect("render");
+        assert_eq!(
+            terminal.backend().buffer()[cell].bg,
+            crate::theme::SCROLL_THUMB_HOVER,
+            "hovering the bar lifts its thumb"
+        );
+
+        ui.scrollbar_grab = Some((1, 1, 0));
+        terminal
+            .draw(|frame| {
+                super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+            })
+            .expect("render");
+        assert_eq!(
+            terminal.backend().buffer()[cell].bg,
+            crate::theme::SCROLL_THUMB_ACTIVE,
+            "a grabbed thumb is brighter than a hovered one"
+        );
     }
 
     #[test]
@@ -7509,7 +7614,7 @@ Feature: Rule only
     }
 
     #[test]
-    fn explore_feature_overflow_gets_thick_horizontal_scrollbar() {
+    fn explore_feature_overflow_gets_thin_horizontal_scrollbar() {
         let mut app = App::from_args().expect("app init");
         let path = PathBuf::from("a-very-long-feature-file-name-for-horizontal-scrolling.feature");
         app.project.features = vec![gherkin::parse_feature(
@@ -7538,7 +7643,7 @@ Feature: Rule only
                 _ => None,
             });
         let (rect, content_width, viewport_width) = scrollbar.expect("feature scrollbar");
-        assert_eq!(rect.height, 2);
+        assert_eq!(rect.height, 1);
         assert!(content_width > viewport_width);
         assert_eq!(
             app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()],

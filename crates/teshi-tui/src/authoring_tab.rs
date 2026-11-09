@@ -228,8 +228,13 @@ pub struct AuthoringUiState {
     pub rendered_linked_selection: Option<usize>,
     /// Last rendered overflow limits, indexed by pane and axis (horizontal, vertical).
     pub scroll_limits: [[usize; 2]; 3],
-    /// Scrollbar being dragged (pane, axis).
-    pub scrollbar_drag: Option<(usize, usize)>,
+    /// Scrollbars drawn last frame, indexed by pane and axis (horizontal, vertical).
+    /// `None` when that pane does not overflow, so no stale bar keeps a hitbox.
+    pub pane_bars: [[Option<crate::app::ScrollbarBar>; 2]; 3],
+    /// Bar being dragged: pane, axis, and the pointer offset inside the thumb.
+    pub scrollbar_grab: Option<(usize, usize, u16)>,
+    /// Pointer position from the last render, used to highlight a hovered bar.
+    pub pointer: Option<(u16, u16)>,
     pub selection_anchor: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
     pub iteration_filter: RequirementIterationFilter,
@@ -322,6 +327,18 @@ impl AuthoringUiState {
         )?;
         self.reload_from_disk()?;
         Ok(linked)
+    }
+
+    /// First visible index of one pane's axis, matching [`Self::set_pane_scroll`].
+    pub fn pane_scroll(&self, pane: usize, axis: usize) -> usize {
+        if axis == 0 {
+            return self.horizontal_scroll[pane];
+        }
+        match pane {
+            0 => self.tree_state.get_offset(),
+            1 => self.scroll_row,
+            _ => self.linked_scroll,
+        }
     }
 
     /// Moves a pane viewport, clamping to the last rendered overflow limits.
@@ -712,7 +729,9 @@ impl AuthoringUiState {
             linked_scroll: 0,
             rendered_linked_selection: None,
             scroll_limits: [[0; 2]; 3],
-            scrollbar_drag: None,
+            pane_bars: [[None; 2]; 3],
+            scrollbar_grab: None,
+            pointer: None,
             selection_anchor: None,
             selection_end: None,
             iteration_filter: RequirementIterationFilter::All,

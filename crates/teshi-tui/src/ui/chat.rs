@@ -1201,21 +1201,21 @@ fn render_scrollbar(
         app.chat_scrollbar = None;
         return;
     }
-    app.chat_scrollbar = Some(crate::app::ChatScrollbar {
+    let bar = crate::app::ScrollbarBar {
         rect: area,
-        rows: total,
-    });
-    let state = if app.chat_scrollbar_grab.is_some() {
-        theme::ThumbState::Grabbed
-    } else if app
-        .mouse_position
-        .is_some_and(|(x, y)| area.contains(ratatui::layout::Position::new(x, y)))
-    {
-        theme::ThumbState::Hovered
-    } else {
-        theme::ThumbState::Idle
+        axis: crate::theme::ScrollAxis::Vertical,
+        total,
     };
-    let lines = theme::chat_scrollbar_lines(total, height, start, state);
+    app.chat_scrollbar = Some(bar);
+    let state =
+        crate::app::scrollbar_state(app.mouse_position, &bar, app.chat_scrollbar_grab.is_some());
+    let lines = theme::scrollbar_lines(
+        total,
+        height,
+        start,
+        crate::theme::ScrollAxis::Vertical,
+        state,
+    );
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -3078,6 +3078,17 @@ mod tests {
         let label_width = crate::markdown::CODE_COPY_LABEL.width() as u16;
         assert!(hits.iter().all(|hit| hit.2.width == label_width));
         assert_ne!(hits[0].2.y, hits[1].2.y);
+        let history = app.chat_history_rect.expect("chat renders");
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ActionButton { rect, action, .. } = region
+                && history.contains(ratatui::layout::Position::new(rect.x, rect.y))
+            {
+                assert!(
+                    crate::app::is_chat_inline_control(action),
+                    "a chat row hitbox must run its action instead of starting a selection: {action:?}"
+                );
+            }
+        }
         let label = hits[0].2;
         let before = terminal.backend().buffer()[(label.x, label.y)].fg;
         assert_eq!(before, theme::MUTED);
@@ -3176,7 +3187,7 @@ mod tests {
         draw(&mut app);
         let bar = app.chat_scrollbar.expect("overflowing history draws a bar");
         let height = bar.rect.height as usize;
-        let max_start = bar.rows - height;
+        let max_start = bar.total - height;
         let x = bar.rect.x;
         assert_eq!(app.agent().scroll_offset, 0);
 
@@ -3200,7 +3211,13 @@ mod tests {
         // Grabbing the thumb moves the transcript with the pointer.
         draw(&mut app);
         let start = max_start - app.agent().scroll_offset;
-        let (thumb_pos, _) = crate::theme::scrollbar_thumb(bar.rows, height, start).unwrap();
+        let (thumb_pos, _) = crate::theme::scrollbar_thumb(
+            bar.total,
+            height,
+            start,
+            crate::theme::ScrollAxis::Vertical,
+        )
+        .unwrap();
         let grab_y = bar.rect.y + thumb_pos as u16;
         app.handle_mouse_event(
             MouseEventKind::Down(MouseButton::Left),

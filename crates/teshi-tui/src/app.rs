@@ -107,13 +107,107 @@ pub struct ChatSelection {
     pub focus: ChatAnchor,
 }
 
-/// The chat transcript scrollbar as drawn last frame, so the pointer can grab
-/// the same rows the user sees.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ChatScrollbar {
+/// A scrollbar as drawn last frame, so the pointer can grab the cells the user
+/// sees. Vertical bars carry one row per extent cell; horizontal bars carry one
+/// cell per column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScrollbarBar {
     pub rect: ratatui::layout::Rect,
-    /// Total rendered transcript rows, including the ones scrolled out.
-    pub rows: usize,
+    pub axis: crate::theme::ScrollAxis,
+    /// Total content extent: rows when vertical, cells when horizontal.
+    pub total: usize,
+}
+
+impl ScrollbarBar {
+    /// Visible extent, which is also the bar's length along its axis.
+    pub(crate) fn view(&self) -> usize {
+        match self.axis {
+            crate::theme::ScrollAxis::Vertical => self.rect.height as usize,
+            crate::theme::ScrollAxis::Horizontal => self.rect.width as usize,
+        }
+    }
+
+    /// First visible index at which the content ends.
+    pub(crate) fn max_start(&self) -> usize {
+        self.total.saturating_sub(self.view())
+    }
+
+    pub(crate) fn thumb(&self, start: usize) -> Option<(usize, usize)> {
+        crate::theme::scrollbar_thumb(self.total, self.view(), start, self.axis)
+    }
+
+    /// Pointer position measured in cells along the bar's axis.
+    pub(crate) fn track_pos(&self, pos: ratatui::layout::Position) -> u16 {
+        match self.axis {
+            crate::theme::ScrollAxis::Vertical => pos.y.saturating_sub(self.rect.y),
+            crate::theme::ScrollAxis::Horizontal => pos.x.saturating_sub(self.rect.x),
+        }
+    }
+}
+
+/// What a pointer event asks a scrollbar to do. Each surface applies the
+/// result to its own offset model, because chat counts rows up from the bottom
+/// while panes and columns count from the top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScrollbarAction {
+    /// The thumb was pressed; the value is the offset inside it.
+    Grab(u16),
+    PageBack,
+    PageForward,
+    /// The grabbed thumb moved to this track cell.
+    DragTo(u16),
+}
+
+/// Classifies a press or drag against the bar drawn at `start`.
+pub(crate) fn scrollbar_mouse(
+    kind: MouseEventKind,
+    pos: ratatui::layout::Position,
+    bar: &ScrollbarBar,
+    start: usize,
+) -> Option<ScrollbarAction> {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) if bar.rect.contains(pos) => {
+            let (thumb_pos, thumb_len) = bar.thumb(start).unwrap_or((0, bar.view()));
+            let at = bar.track_pos(pos);
+            if (thumb_pos as u16..(thumb_pos + thumb_len) as u16).contains(&at) {
+                Some(ScrollbarAction::Grab(at - thumb_pos as u16))
+            } else if at < thumb_pos as u16 {
+                Some(ScrollbarAction::PageBack)
+            } else {
+                Some(ScrollbarAction::PageForward)
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            Some(ScrollbarAction::DragTo(bar.track_pos(pos)))
+        }
+        _ => None,
+    }
+}
+
+/// New first-visible index for a thumb dragged to `pointer` while the press
+/// landed `grab` cells into it, so the thumb never jumps to the pointer.
+pub(crate) fn scrollbar_drag_offset(bar: &ScrollbarBar, pointer: u16, grab: u16) -> usize {
+    let (_, thumb_len) = bar.thumb(0).unwrap_or((0, bar.view()));
+    let track = bar.view().saturating_sub(thumb_len);
+    let top = (pointer.saturating_sub(grab) as usize).min(track);
+    top.saturating_mul(bar.max_start())
+        .checked_div(track)
+        .unwrap_or(0)
+}
+
+/// Pointer state for painting a bar: dragging wins over hover.
+pub(crate) fn scrollbar_state(
+    mouse: Option<(u16, u16)>,
+    bar: &ScrollbarBar,
+    grabbed: bool,
+) -> crate::theme::ThumbState {
+    if grabbed {
+        crate::theme::ThumbState::Grabbed
+    } else if mouse.is_some_and(|(x, y)| bar.rect.contains(ratatui::layout::Position::new(x, y))) {
+        crate::theme::ThumbState::Hovered
+    } else {
+        crate::theme::ThumbState::Idle
+    }
 }
 
 /// A pending ACP `session/request_permission` prompt for one agent.
@@ -916,7 +1010,7 @@ pub struct App {
     pub(crate) chat_layout_cache: std::cell::RefCell<crate::ui::chat::ChatLayoutCache>,
     pub chat_history_rect: Option<ratatui::layout::Rect>,
     /// Chat scrollbar from the last frame; `None` when the history fits.
-    pub(crate) chat_scrollbar: Option<ChatScrollbar>,
+    pub(crate) chat_scrollbar: Option<ScrollbarBar>,
     /// Pointer offset below the thumb top while the scrollbar is being dragged.
     pub(crate) chat_scrollbar_grab: Option<u16>,
     /// Current chat text selection, if any.
@@ -977,8 +1071,9 @@ pub struct App {
     /// Independent horizontal offsets for the three Explore columns.
     pub explore_horizontal_scroll: [usize; 3],
     pub(crate) explore_viewports: [ExploreColumnViewport; 3],
-    /// Explore scrollbar currently controlled by a left-button drag.
-    pub explore_horizontal_scroll_drag: Option<ColumnFocus>,
+    /// Explore column scrollbar held by the pointer: the column and the offset
+    /// inside its thumb, so a drag never jumps the thumb to the pointer.
+    pub explore_horizontal_scroll_grab: Option<(ColumnFocus, u16)>,
     pub explore_edit_mode: bool,
     /// When set, the editor dims steps in non-focused scenarios.
     /// Stores the buffer row of the focused scenario's header line.
@@ -1171,6 +1266,19 @@ fn set_system_clipboard(text: &str) -> Result<arboard::Clipboard> {
         .set_text(text)
         .map_err(|error| anyhow::anyhow!("failed to set clipboard: {error}"))?;
     Ok(clipboard)
+}
+
+/// Chat history rows register hitboxes for inline controls; a left click on one
+/// runs the control instead of starting a text selection. Keep this in sync with
+/// the actions the chat projection assigns to rows.
+pub(crate) fn is_chat_inline_control(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::AiToggleTurn(_)
+            | Action::AiToggleThought(_)
+            | Action::AiToggleTools(_)
+            | Action::AiCopyCodeBlock { .. }
+    )
 }
 
 /// ACP workers may report a closed write channel while shutting down a turn
@@ -1615,7 +1723,7 @@ impl App {
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
         self.explore_horizontal_scroll = [0; 3];
-        self.explore_horizontal_scroll_drag = None;
+        self.explore_horizontal_scroll_grab = None;
         self.explore_edit_mode = false;
         self.editor_focus_scenario_row = None;
         self.scenario_dropdown_open = false;
@@ -2286,7 +2394,7 @@ impl App {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -2504,7 +2612,7 @@ impl App {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -2700,7 +2808,7 @@ impl App {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -10849,40 +10957,31 @@ impl App {
         let Some(bar) = self.chat_scrollbar else {
             return Ok(false);
         };
-        let height = bar.rect.height as usize;
-        let max_start = bar.rows.saturating_sub(height);
-        let offset = self.agent().scroll_offset.min(max_start);
-        let start = max_start - offset;
-        let (thumb_pos, thumb_len) =
-            crate::theme::scrollbar_thumb(bar.rows, height, start).unwrap_or((0, height));
-        let thumb_top = bar.rect.y + thumb_pos as u16;
-        let thumb_bottom = thumb_top + thumb_len as u16;
-        let track = height - thumb_len;
-        match kind {
-            MouseEventKind::Down(MouseButton::Left) if bar.rect.contains(pos) => {
-                if (thumb_top..thumb_bottom).contains(&pos.y) {
-                    self.chat_scrollbar_grab = Some(pos.y - thumb_top);
-                } else if pos.y < thumb_top {
-                    self.set_chat_scroll_start(start.saturating_sub(height), max_start);
-                } else {
-                    self.set_chat_scroll_start(start.saturating_add(height), max_start);
-                }
+        let height = bar.view();
+        let max_start = bar.max_start();
+        let start = max_start.saturating_sub(self.agent().scroll_offset.min(max_start));
+        match scrollbar_mouse(kind, pos, &bar, start) {
+            Some(ScrollbarAction::Grab(offset)) => {
+                self.chat_scrollbar_grab = Some(offset);
                 Ok(true)
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            Some(ScrollbarAction::PageBack) => {
+                self.set_chat_scroll_start(start.saturating_sub(height), max_start);
+                Ok(true)
+            }
+            Some(ScrollbarAction::PageForward) => {
+                self.set_chat_scroll_start(start.saturating_add(height), max_start);
+                Ok(true)
+            }
+            Some(ScrollbarAction::DragTo(pointer)) => {
                 let Some(grab) = self.chat_scrollbar_grab else {
                     return Ok(false);
                 };
-                let top = pos
-                    .y
-                    .saturating_sub(bar.rect.y)
-                    .saturating_sub(grab)
-                    .min(track as u16) as usize;
-                let start = (top * max_start).checked_div(track).unwrap_or(0);
+                let start = scrollbar_drag_offset(&bar, pointer, grab);
                 self.set_chat_scroll_start(start, max_start);
                 Ok(true)
             }
-            _ => Ok(false),
+            None => Ok(false),
         }
     }
 
@@ -10890,6 +10989,25 @@ impl App {
     /// counts rows up from the bottom, so new output still pins to the end.
     fn set_chat_scroll_start(&mut self, start: usize, max_start: usize) {
         self.agent_mut().scroll_offset = max_start.saturating_sub(start);
+    }
+
+    /// The Explore column's scrollbar as drawn last frame.
+    fn explore_scrollbar(&self, column: ColumnFocus) -> Option<ScrollbarBar> {
+        self.clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ExploreHorizontalScrollbar {
+                    column: candidate,
+                    rect,
+                    content_width,
+                    ..
+                } if *candidate == column => Some(ScrollbarBar {
+                    rect: *rect,
+                    axis: crate::theme::ScrollAxis::Horizontal,
+                    total: *content_width,
+                }),
+                _ => None,
+            })
     }
 
     /// Move the chat by half of the last rendered viewport, mirroring Ctrl+D/U.
@@ -11690,47 +11808,41 @@ impl App {
             let pane = ui.pane_areas.iter().position(|area| area.contains(pos));
             if matches!(kind, MouseEventKind::Up(MouseButton::Left)) {
                 ui.selection_dragging = false;
-                ui.scrollbar_drag = None;
+                if ui.scrollbar_grab.take().is_some() {
+                    return Ok(());
+                }
             }
-            let dragging = matches!(kind, MouseEventKind::Drag(MouseButton::Left));
-            if dragging && let Some((pane, axis)) = ui.scrollbar_drag {
-                let area = ui.pane_areas[pane];
-                let (position, start, length) = if axis == 0 {
-                    (col, area.x + 1, area.width.saturating_sub(2))
-                } else {
-                    (row, area.y + 1, area.height.saturating_sub(2))
-                };
-                let value = position.saturating_sub(start).min(length.saturating_sub(1)) as usize
-                    * ui.scroll_limits[pane][axis]
-                    / length.saturating_sub(1).max(1) as usize;
+            if matches!(kind, MouseEventKind::Drag(MouseButton::Left))
+                && let Some((pane, axis, grab)) = ui.scrollbar_grab
+                && let Some(bar) = ui.pane_bars[pane][axis]
+            {
+                let pointer = bar.track_pos(pos);
+                let value = scrollbar_drag_offset(&bar, pointer, grab);
                 ui.set_pane_scroll(pane, axis, value);
                 return Ok(());
             }
             if let Some(pane) = pane {
-                let area = ui.pane_areas[pane];
                 if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
-                    let axis = if row == area.bottom().saturating_sub(1)
-                        && ui.scroll_limits[pane][0] > 0
-                    {
-                        Some(0)
-                    } else if col == area.right().saturating_sub(1) && ui.scroll_limits[pane][1] > 0
-                    {
-                        Some(1)
-                    } else {
-                        None
-                    };
-                    if let Some(axis) = axis {
-                        let (position, start, length) = if axis == 0 {
-                            (col, area.x + 1, area.width.saturating_sub(2))
-                        } else {
-                            (row, area.y + 1, area.height.saturating_sub(2))
+                    for axis in [0, 1] {
+                        let Some(bar) = ui.pane_bars[pane][axis] else {
+                            continue;
                         };
-                        let value = position.saturating_sub(start).min(length.saturating_sub(1))
-                            as usize
-                            * ui.scroll_limits[pane][axis]
-                            / length.saturating_sub(1).max(1) as usize;
-                        ui.set_pane_scroll(pane, axis, value);
-                        ui.scrollbar_drag = Some((pane, axis));
+                        let start = ui.pane_scroll(pane, axis);
+                        let Some(action) = scrollbar_mouse(kind, pos, &bar, start) else {
+                            continue;
+                        };
+                        match action {
+                            ScrollbarAction::Grab(offset) => {
+                                ui.scrollbar_grab = Some((pane, axis, offset));
+                            }
+                            ScrollbarAction::PageBack => {
+                                ui.set_pane_scroll(pane, axis, start.saturating_sub(bar.view()));
+                            }
+                            ScrollbarAction::PageForward => {
+                                ui.set_pane_scroll(pane, axis, start.saturating_add(bar.view()));
+                            }
+                            ScrollbarAction::DragTo(_) => {}
+                        }
                         return Ok(());
                     }
                 }
@@ -11748,15 +11860,7 @@ impl App {
                                 MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
                             ),
                     );
-                    let old = if axis == 0 {
-                        ui.horizontal_scroll[pane]
-                    } else {
-                        match pane {
-                            0 => ui.tree_state.get_offset(),
-                            1 => ui.scroll_row,
-                            _ => ui.linked_scroll,
-                        }
-                    };
+                    let old = ui.pane_scroll(pane, axis);
                     let value =
                         if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) {
                             old.saturating_sub(3)
@@ -11866,12 +11970,7 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) if in_chat_history => {
                     if let Some(ClickableRegion::ActionButton { action, .. }) =
                         self.hit_test(&pos).cloned()
-                        && matches!(
-                            action,
-                            Action::AiToggleTurn(_)
-                                | Action::AiToggleThought(_)
-                                | Action::AiToggleTools(_)
-                        )
+                        && is_chat_inline_control(&action)
                     {
                         return self.handle_action(action);
                     }
@@ -11989,16 +12088,13 @@ impl App {
             }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left
-                    && let Some(column) = self.explore_horizontal_scroll_drag
+                    && let Some((column, grab)) = self.explore_horizontal_scroll_grab
+                    && let Some(bar) = self.explore_scrollbar(column)
                 {
-                    if let Some(region) = self
-                        .clickable_regions
-                        .iter()
-                        .find(|region| matches!(region, ClickableRegion::ExploreHorizontalScrollbar { column: candidate, .. } if *candidate == column))
-                        .cloned()
-                    {
-                        self.handle_region_click(&region, &pos)?;
-                    }
+                    let pointer = bar.track_pos(pos);
+                    self.explore_horizontal_scroll[column.index()] =
+                        scrollbar_drag_offset(&bar, pointer, grab);
+                    self.explore_focus = column;
                 } else if button == MouseButton::Left
                     && let Some((buf_row, buf_col)) = self.screen_to_buffer_pos(col, row)
                 {
@@ -12006,7 +12102,7 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.explore_horizontal_scroll_drag = None;
+                self.explore_horizontal_scroll_grab = None;
             }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Try clickable regions first (e.g. right-click on a tab/item)
@@ -12411,20 +12507,28 @@ impl App {
                 content_width,
                 viewport_width,
             } => {
-                let max_scroll = content_width.saturating_sub(*viewport_width);
-                let track_width = rect.width as usize;
-                if track_width > 0 && max_scroll > 0 {
-                    let thumb_width = ((*viewport_width * track_width) / *content_width)
-                        .clamp(4.min(track_width), track_width);
-                    let travel = track_width.saturating_sub(thumb_width);
-                    let pointer = pos.x.saturating_sub(rect.x) as usize;
-                    let thumb_start = pointer.saturating_sub(thumb_width / 2).min(travel);
-                    self.explore_horizontal_scroll[column.index()] = thumb_start
-                        .saturating_mul(max_scroll)
-                        .checked_div(travel)
-                        .unwrap_or(0);
-                    self.explore_horizontal_scroll_drag = Some(*column);
-                    self.explore_focus = *column;
+                let bar = ScrollbarBar {
+                    rect: *rect,
+                    axis: crate::theme::ScrollAxis::Horizontal,
+                    total: *content_width,
+                };
+                let start = self.explore_horizontal_scroll[column.index()];
+                match scrollbar_mouse(MouseEventKind::Down(MouseButton::Left), *pos, &bar, start) {
+                    Some(ScrollbarAction::Grab(offset)) => {
+                        self.explore_horizontal_scroll_grab = Some((*column, offset));
+                        self.explore_focus = *column;
+                    }
+                    Some(ScrollbarAction::PageBack) => {
+                        self.explore_horizontal_scroll[column.index()] =
+                            start.saturating_sub(*viewport_width);
+                        self.explore_focus = *column;
+                    }
+                    Some(ScrollbarAction::PageForward) => {
+                        let step = start.saturating_add(*viewport_width);
+                        self.explore_horizontal_scroll[column.index()] = step.min(bar.max_start());
+                        self.explore_focus = *column;
+                    }
+                    _ => {}
                 }
             }
             ClickableRegion::ApprovalBadge { .. } => {
@@ -14897,7 +15001,7 @@ mod tests {
         });
         app.pending_char = Some('d');
         app.explore_horizontal_scroll = [80, 90, 100];
-        app.explore_horizontal_scroll_drag = Some(ColumnFocus::Step);
+        app.explore_horizontal_scroll_grab = Some((ColumnFocus::Step, 0));
         app.explore_edit_mode = true;
         app.editor_focus_scenario_row = Some(99);
         app.scenario_dropdown_open = true;
@@ -14915,7 +15019,7 @@ mod tests {
         assert!(app.step_keyword_picker.is_none());
         assert!(app.pending_char.is_none());
         assert_eq!(app.explore_horizontal_scroll, [0; 3]);
-        assert!(app.explore_horizontal_scroll_drag.is_none());
+        assert!(app.explore_horizontal_scroll_grab.is_none());
         assert!(!app.explore_edit_mode);
         assert!(app.editor_focus_scenario_row.is_none());
         assert!(!app.scenario_dropdown_open);
@@ -18586,31 +18690,51 @@ mod tests {
         let pane = app.authoring_ui.pane_areas[1];
         let original = app.authoring_ui.buffer.as_string();
         assert_eq!(app.authoring_ui.scroll_limits[1][0], 0);
+        let bar = app.authoring_ui.pane_bars[1][1].expect("overflowing editor draws a bar");
+        // A press on the track below the thumb pages forward without selecting.
+        let (thumb_pos, thumb_len) = bar.thumb(0).expect("editor overflow");
+        let page_y = bar.rect.y + (thumb_pos + thumb_len) as u16;
         app.handle_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
-            pane.right() - 1,
-            pane.y + 3,
+            bar.rect.x,
+            page_y,
             KeyModifiers::NONE,
         )
         .unwrap();
-        assert!(app.authoring_ui.scroll_row > 0);
+        assert_eq!(
+            app.authoring_ui.scroll_row,
+            bar.view().min(app.authoring_ui.scroll_limits[1][1]),
+            "a track click pages by exactly one viewport"
+        );
         assert!(!app.authoring_ui.selection_dragging);
+        // Grabbing the thumb and dragging it to the top scrolls back to the start.
+        let (thumb_pos, _) = bar
+            .thumb(app.authoring_ui.scroll_row)
+            .expect("editor overflow");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            bar.rect.x,
+            bar.rect.y + thumb_pos as u16,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.authoring_ui.scrollbar_grab.is_some());
         app.handle_mouse_event(
             MouseEventKind::Drag(MouseButton::Left),
-            pane.right() - 1,
-            pane.y + 1,
+            bar.rect.x,
+            bar.rect.y,
             KeyModifiers::NONE,
         )
         .unwrap();
         assert_eq!(app.authoring_ui.scroll_row, 0);
         app.handle_mouse_event(
             MouseEventKind::Up(MouseButton::Left),
-            pane.right() - 1,
-            pane.y + 1,
+            bar.rect.x,
+            bar.rect.y,
             KeyModifiers::NONE,
         )
         .unwrap();
-        assert!(app.authoring_ui.scrollbar_drag.is_none());
+        assert!(app.authoring_ui.scrollbar_grab.is_none());
         app.handle_mouse_event(
             MouseEventKind::ScrollDown,
             pane.x + 2,
@@ -18728,27 +18852,46 @@ mod tests {
     }
 
     #[test]
-    fn explore_horizontal_scrollbar_click_moves_and_starts_drag() {
+    fn explore_horizontal_scrollbar_pages_on_track_and_grabs_the_thumb() {
         let mut app = App::from_args().expect("app init");
+        let rect = ratatui::layout::Rect::new(10, 5, 20, 2);
         let region = ClickableRegion::ExploreHorizontalScrollbar {
             column: ColumnFocus::Scenario,
-            rect: ratatui::layout::Rect::new(10, 5, 20, 2),
+            rect,
             content_width: 100,
             viewport_width: 20,
         };
 
+        // Clicking the track right of the thumb pages forward by one viewport.
         app.handle_region_click(&region, &ratatui::layout::Position::new(29, 5))
             .expect("scrollbar click");
-
         assert_eq!(
             app.explore_horizontal_scroll[ColumnFocus::Scenario.index()],
-            80
-        );
-        assert_eq!(
-            app.explore_horizontal_scroll_drag,
-            Some(ColumnFocus::Scenario)
+            20
         );
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+        assert!(app.explore_horizontal_scroll_grab.is_none());
+
+        // Pressing the thumb starts a grab at the row inside it, without paging.
+        app.handle_region_click(&region, &ratatui::layout::Position::new(15, 5))
+            .expect("thumb press");
+        assert_eq!(
+            app.explore_horizontal_scroll[ColumnFocus::Scenario.index()],
+            20
+        );
+        assert_eq!(
+            app.explore_horizontal_scroll_grab,
+            Some((ColumnFocus::Scenario, 1))
+        );
+
+        // A dragged thumb follows the pointer through the grab offset.
+        let bar = super::ScrollbarBar {
+            rect,
+            axis: crate::theme::ScrollAxis::Horizontal,
+            total: 100,
+        };
+        assert_eq!(super::scrollbar_drag_offset(&bar, 11, 1), 50);
+        assert_eq!(super::scrollbar_drag_offset(&bar, 19, 1), 80);
     }
 
     fn en() -> &'static teshi_core::gherkin_lang::GherkinLanguage {
@@ -19985,7 +20128,7 @@ mod tests {
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -20193,7 +20336,7 @@ Feature: B
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
             explore_viewports: Default::default(),
-            explore_horizontal_scroll_drag: None,
+            explore_horizontal_scroll_grab: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),

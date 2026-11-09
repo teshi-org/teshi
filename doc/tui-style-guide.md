@@ -13,7 +13,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
-9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Horizontal scrollbars use `─` tracks and `━` thumbs; vertical scrollbars use `│` and `┃`, with the existing theme colors.
+9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Every scrollbar, on either axis, is a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Never draw a bar with `─`, `━`, `│`, or `┃`.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips.
 
 Never paint the terminal background globally. Fill only selections, chips, active
@@ -67,7 +67,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | `muted()` | Metadata foreground |
 | `status_style(status)` | Idle muted, running warning, passed success, failed error, skipped border |
 | `diff_style(kind)` | Semantic diff foreground for `+`/`-`/`~` gutter markers; changed rows keep Gherkin syntax colours and paint no background |
-| `scrollbar_lines(total, height, start)` | Vertical track/thumb with clamped position |
+| `scrollbar_lines(total, extent, start, axis, state)` | Solid track/thumb cells for either axis, with clamped position and pointer state |
 | `highlight_color(color)` | Map existing named MindMap highlights onto theme roles |
 
 Gherkin: Header FG bold; Tag ACCENT; Given PRIMARY; When WARNING; Then SUCCESS;
