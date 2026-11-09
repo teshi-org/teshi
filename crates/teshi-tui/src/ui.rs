@@ -3772,6 +3772,9 @@ fn footer_hints(app: &App) -> Line<'static> {
         (MainTab::Ai, _) if app.ai_input_focused => {
             Line::raw("[INPUT] Enter send · Shift+Enter newline · Esc normal · Ctrl+v paste")
         }
+        (MainTab::Ai, _) if app.ai_sidebar_visible => Line::raw(
+            "[NORMAL] i/Enter input · h chats · j/k/l/Arrows scroll · [/] agent · a new · x close",
+        ),
         (MainTab::Ai, _) => {
             Line::raw("[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close")
         }

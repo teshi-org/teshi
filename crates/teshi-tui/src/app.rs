@@ -532,6 +532,15 @@ impl AgentThread {
         Ok(())
     }
 
+    /// Local saved-session ID, which names the session file on disk.
+    ///
+    /// Absent until the conversation's first checkpoint is written.
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.saved_session
+            .as_ref()
+            .map(|session| session.id.as_str())
+    }
+
     pub fn backend_kind(&self) -> teshi_agent::backend::AgentBackendKind {
         self.backend.kind()
     }
@@ -3906,7 +3915,45 @@ impl App {
         let text = std::mem::take(&mut agent.input);
         let images = std::mem::take(&mut agent.input_images);
         agent.input_cursor = 0;
+        agent.chat.recall = None;
         crate::chat_images::expand_placeholders(&text, &images)
+    }
+
+    /// Steps the composer through this conversation's sent prompts like shell
+    /// history; stepping past the newest prompt restores the interrupted draft.
+    ///
+    /// Returns `false` when nothing lies further in that direction.
+    fn recall_sent_prompt(&mut self, older: bool) -> bool {
+        let prompts: Vec<String> = crate::chat_state::sent_prompts(self.agent().messages())
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let current = self.agent().chat.recall.as_ref().map(|recall| recall.index);
+        let next = match (current, older) {
+            (None, true) => prompts.len().checked_sub(1),
+            (Some(index), true) => index.checked_sub(1),
+            (Some(index), false) => Some(index + 1),
+            (None, false) => None,
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        let agent_idx = self.selected_agent;
+        if let Some(prompt) = prompts.get(next) {
+            let agent = self.agent_mut();
+            match &mut agent.chat.recall {
+                Some(recall) => recall.index = next,
+                None => {
+                    let draft =
+                        crate::chat_images::expand_placeholders(&agent.input, &agent.input_images);
+                    agent.chat.recall = Some(crate::chat_state::Recall { index: next, draft });
+                }
+            }
+            self.restore_ai_draft(agent_idx, prompt);
+        } else if let Some(recall) = self.agent_mut().chat.recall.take() {
+            self.restore_ai_draft(agent_idx, &recall.draft);
+        }
+        true
     }
 
     /// Puts message text back into an agent's composer, showing its image
@@ -10160,6 +10207,15 @@ impl App {
                 self.agent_mut().input = input;
                 self.quit_pending_confirm = false;
             }
+            Action::AiCopySessionId => {
+                if let Some(id) = self.agent().session_id().map(str::to_owned)
+                    && self.try_copy_to_clipboard(&id)
+                {
+                    self.status = format!("Copied session ID {id}");
+                    self.set_status_message(self.status.clone());
+                }
+                self.quit_pending_confirm = false;
+            }
             Action::OpenImageExternally(path) => {
                 self.status = match crate::image_view::open_path_externally(&path) {
                     Ok(()) => format!("Opened {}", crate::chat_images::display_name(&path)),
@@ -10314,28 +10370,34 @@ impl App {
                     .rposition(|c| *c == '\n')
                     .map_or(0, |i| i + 1);
                 let column = cursor - start;
-                let target = if matches!(action, Action::AiCursorUp) {
-                    if start == 0 {
-                        cursor
-                    } else {
+                let up = matches!(action, Action::AiCursorUp);
+                let target = if up {
+                    (start > 0).then(|| {
                         let end = start - 1;
                         let previous = chars[..end]
                             .iter()
                             .rposition(|c| *c == '\n')
                             .map_or(0, |i| i + 1);
                         previous + column.min(end - previous)
-                    }
-                } else if let Some(end) = chars[cursor..].iter().position(|c| *c == '\n') {
-                    let next = cursor + end + 1;
-                    let length = chars[next..]
-                        .iter()
-                        .position(|c| *c == '\n')
-                        .unwrap_or(chars.len() - next);
-                    next + column.min(length)
+                    })
                 } else {
-                    cursor
+                    chars[cursor..].iter().position(|c| *c == '\n').map(|end| {
+                        let next = cursor + end + 1;
+                        let length = chars[next..]
+                            .iter()
+                            .position(|c| *c == '\n')
+                            .unwrap_or(chars.len() - next);
+                        next + column.min(length)
+                    })
                 };
-                self.agent_mut().input_cursor = target;
+                // Multi-line drafts move the caret first; only the first or
+                // last line hands Up/Down over to sent-prompt recall.
+                match target {
+                    Some(target) => self.agent_mut().input_cursor = target,
+                    None => {
+                        self.recall_sent_prompt(up);
+                    }
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorHome => {
@@ -16956,6 +17018,177 @@ mod tests {
         app.handle_action(Action::AiPaste("plain text".into()))
             .unwrap();
         assert_eq!(app.agent().input, "compare plain text");
+    }
+
+    fn recall_test_app(
+        sent: &[(&str, Option<&str>)],
+    ) -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let (mut app, project, store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        for (content, source) in sent {
+            app.agent_mut().messages_mut().push(AiChatMessage {
+                role: AiRole::User,
+                content: (*content).to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: source.map(str::to_string),
+                activity: None,
+            });
+        }
+        (app, project, store)
+    }
+
+    fn set_draft(app: &mut App, text: &str) {
+        app.agent_mut().input = text.to_string();
+        app.agent_mut().input_cursor = text.chars().count();
+    }
+
+    #[test]
+    fn test_up_down_recall_sent_prompts_and_restore_draft() {
+        let (mut app, _project, _store) = recall_test_app(&[
+            ("first", None),
+            ("second", None),
+            ("second", None),
+            ("summary of earlier turns", Some("compacted")),
+        ]);
+        set_draft(&mut app, "wip");
+        let steps = [
+            (Action::AiCursorUp, "second"),
+            (Action::AiCursorUp, "first"),
+            (Action::AiCursorUp, "first"),
+            (Action::AiCursorDown, "second"),
+            (Action::AiCursorDown, "wip"),
+            (Action::AiCursorDown, "wip"),
+        ];
+        for (step, (action, expected)) in steps.into_iter().enumerate() {
+            app.handle_action(action).unwrap();
+            assert_eq!(app.agent().input, expected, "step {step}");
+            assert_eq!(
+                app.agent().input_cursor,
+                expected.chars().count(),
+                "step {step}: caret should sit at the end of the recalled text"
+            );
+        }
+    }
+
+    #[test]
+    fn test_up_moves_within_multiline_draft_before_recalling() {
+        let (mut app, _project, _store) = recall_test_app(&[("earlier", None)]);
+        set_draft(&mut app, "line one\nline two");
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input, "line one\nline two");
+        assert_eq!(app.agent().input_cursor, "line one".len());
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input, "earlier");
+        app.handle_action(Action::AiCursorDown).unwrap();
+        assert_eq!(app.agent().input, "line one\nline two");
+    }
+
+    #[test]
+    fn test_up_without_sent_prompts_keeps_draft() {
+        let (mut app, _project, _store) = recall_test_app(&[]);
+        set_draft(&mut app, "draft");
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input, "draft");
+        assert!(app.agent().chat.recall.is_none());
+    }
+
+    #[test]
+    fn test_taking_draft_ends_recall() {
+        let (mut app, _project, _store) = recall_test_app(&[("earlier", None)]);
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert!(app.agent().chat.recall.is_some());
+        assert_eq!(app.take_ai_draft(), "earlier");
+        assert!(app.agent().chat.recall.is_none());
+    }
+
+    fn session_id_title_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let (mut app, project, store) = slash_test_app();
+        let mut session = crate::session::Session::from_messages(Vec::new(), None);
+        session.id = "18a3f2c9b1d04e5f".to_string();
+        app.agent_mut().saved_session = Some(session);
+        app.active_tab = MainTab::Ai;
+        app.ai_sidebar_collapsed = true;
+        (app, project, store)
+    }
+
+    fn render_rows(app: &mut App, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn session_id_rect(app: &App) -> Option<Rect> {
+        app.clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: Action::AiCopySessionId,
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn test_chat_title_keeps_session_id_before_optional_segments() {
+        for (width, label, hint) in [(120, true, true), (64, true, false), (40, false, false)] {
+            let (mut app, _project, _store) = session_id_title_app();
+            let rows = render_rows(&mut app, width);
+            let rect = session_id_rect(&app)
+                .unwrap_or_else(|| panic!("width {width}: session ID should be clickable"));
+            let row = &rows[rect.y as usize];
+            let shown: String = row
+                .chars()
+                .skip(rect.x as usize)
+                .take(rect.width as usize)
+                .collect();
+            assert_eq!(shown, "18a3f2c9b1d04e5f", "width {width}: {row}");
+            assert_eq!(row.contains("Session:"), label, "width {width}: {row}");
+            assert_eq!(row.contains("chats hidden"), hint, "width {width}: {row}");
+        }
+    }
+
+    #[test]
+    fn test_chat_title_omits_session_id_before_first_checkpoint() {
+        let (mut app, _project, _store) = session_id_title_app();
+        app.agent_mut().saved_session = None;
+        let rows = render_rows(&mut app, 120);
+        assert!(session_id_rect(&app).is_none());
+        assert!(rows.iter().all(|row| !row.contains("Session:")));
+    }
+
+    #[test]
+    fn test_clicking_session_id_copies_it() {
+        let (mut app, _project, _store) = session_id_title_app();
+        render_rows(&mut app, 120);
+        let rect = session_id_rect(&app).expect("session ID should be clickable");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        // Headless CI may lack a clipboard; either outcome proves the click dispatched.
+        assert!(
+            app.status == "Copied session ID 18a3f2c9b1d04e5f"
+                || app.status.starts_with("Could not copy to clipboard"),
+            "{}",
+            app.status
+        );
     }
 
     #[test]

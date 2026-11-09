@@ -20,6 +20,8 @@ pub struct KeyContext {
     pub ai_input_focused: bool,
     /// Whether the AI tab's Chat sidebar owns list navigation.
     pub ai_sidebar_focused: bool,
+    /// Whether the AI tab's Chat sidebar is on screen and can take focus.
+    pub ai_sidebar_visible: bool,
     pub slash_suggestion_active: bool,
     /// Whether the auth management panel is currently open (as an overlay).
     pub auth_panel_active: bool,
@@ -331,6 +333,8 @@ pub enum Action {
     AiClipboardPaste,
     /// Remove the n-th image attachment from the AI input.
     AiRemoveAttachment(usize),
+    /// Copy the current conversation's local session ID to the clipboard.
+    AiCopySessionId,
     /// Open an image from the chat or a requirement in the system viewer.
     OpenImageExternally(std::path::PathBuf),
     /// Cancel the current AI request / tool-call loop.
@@ -1090,8 +1094,8 @@ impl Action {
             }
         }
 
-        // A focused Chat sidebar is a conversation list: j/k switch threads and
-        // Enter/l/i hand the keyboard back to the conversation.
+        // A focused Chat sidebar is a conversation list: j/k switch threads,
+        // l returns to the transcript, and Enter/i go straight to the composer.
         if context.ai_sidebar_focused
             && !context.ai_input_focused
             && context.active_tab == MainTab::Ai
@@ -1105,10 +1109,12 @@ impl Action {
                 }
                 (KeyCode::Char('['), KeyModifiers::NONE) => Some(Self::AgentPrev),
                 (KeyCode::Char(']'), KeyModifiers::NONE) => Some(Self::AgentNext),
-                (KeyCode::Enter, _)
+                (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                    Some(Self::AiFocusInput)
+                }
+                (KeyCode::Right, _)
                 | (KeyCode::Char('l'), KeyModifiers::NONE)
-                | (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::AiFocusInput),
-                (KeyCode::Esc, _) => Some(Self::FocusNextColumn),
+                | (KeyCode::Esc, _) => Some(Self::FocusNextColumn),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentNew),
                 (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Self::AgentClose),
                 // Raw-mode terminals deliver Ctrl+G as BEL with no modifiers.
@@ -1140,6 +1146,13 @@ impl Action {
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::AiScrollDown)
+                }
+                // h steps into the Chat sidebar when it is on screen; otherwise
+                // it keeps pairing with l for horizontal transcript scrolling.
+                (KeyCode::Char('h'), KeyModifiers::NONE)
+                    if context.active_tab == MainTab::Ai && context.ai_sidebar_visible =>
+                {
+                    Some(Self::FocusPrevColumn)
                 }
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::AiScrollLeft)
@@ -2025,6 +2038,7 @@ mod tests {
     fn focused_chat_sidebar_navigates_conversations_instead_of_scrolling() {
         let context = KeyContext {
             ai_sidebar_focused: true,
+            ai_sidebar_visible: true,
             ..chat_context(MainTab::Ai, MindMapFocus::Main, false)
         };
         for (key, expected) in [
@@ -2038,16 +2052,21 @@ mod tests {
                 Some(expected)
             );
         }
-        for key in [KeyCode::Enter, KeyCode::Char('l'), KeyCode::Char('i')] {
+        for key in [KeyCode::Enter, KeyCode::Char('i')] {
             assert_eq!(
                 Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), context),
-                Some(Action::AiFocusInput)
+                Some(Action::AiFocusInput),
+                "{key:?}"
             );
         }
-        assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
-            Some(Action::FocusNextColumn)
-        );
+        // l mirrors h: it returns to the transcript without arming the composer.
+        for key in [KeyCode::Char('l'), KeyCode::Right, KeyCode::Esc] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, KeyModifiers::NONE), context),
+                Some(Action::FocusNextColumn),
+                "{key:?}"
+            );
+        }
         assert_eq!(
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
@@ -2055,6 +2074,32 @@ mod tests {
             ),
             Some(Action::AiToggleSidebar)
         );
+    }
+
+    #[test]
+    fn test_blurred_chat_h_enters_visible_sidebar_or_scrolls_left() {
+        let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        for (tab, visible, h_action) in [
+            (MainTab::Ai, true, Action::FocusPrevColumn),
+            (MainTab::Ai, false, Action::AiScrollLeft),
+            (MainTab::MindMap, true, Action::AiScrollLeft),
+        ] {
+            let context = KeyContext {
+                ai_sidebar_visible: visible,
+                ..chat_context(tab, MindMapFocus::AiPanel, false)
+            };
+            assert_eq!(
+                Action::from_key_event(h, context),
+                Some(h_action),
+                "{tab:?} sidebar visible={visible}"
+            );
+            assert_eq!(
+                Action::from_key_event(left, context),
+                Some(Action::AiScrollLeft),
+                "{tab:?}: Left keeps scrolling the transcript"
+            );
+        }
     }
 
     #[test]
@@ -2112,6 +2157,7 @@ mod tests {
             mindmap_ai_panel_visible: true,
             ai_input_focused,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2362,6 +2408,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2409,6 +2456,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2456,6 +2504,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: true,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2542,6 +2591,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2599,6 +2649,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2656,6 +2707,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2721,6 +2773,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2768,6 +2821,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2815,6 +2869,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2886,6 +2941,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -2917,6 +2973,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             ..delete_context
         };
@@ -2951,6 +3008,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -3182,6 +3240,7 @@ mod tests {
             mindmap_ai_panel_visible: false,
             ai_input_focused: false,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             slash_suggestion_active: false,
             auth_panel_active: false,
             model_panel_active: false,
@@ -3383,6 +3442,7 @@ mod tests {
             active_tab: MainTab::Ai,
             ai_input_focused: true,
             ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
             ..requirements_tree_context()
         };
         for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
@@ -3390,6 +3450,27 @@ mod tests {
                 Action::from_key_event(KeyEvent::new(KeyCode::Char('v'), modifiers), context),
                 Some(Action::AiClipboardPaste),
                 "{modifiers:?}+V"
+            );
+        }
+    }
+
+    #[test]
+    fn test_focused_ai_input_routes_up_down_to_the_composer() {
+        let context = KeyContext {
+            active_tab: MainTab::Ai,
+            ai_input_focused: true,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
+            ..requirements_tree_context()
+        };
+        for (code, expected) in [
+            (KeyCode::Up, Action::AiCursorUp),
+            (KeyCode::Down, Action::AiCursorDown),
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, KeyModifiers::NONE), context),
+                Some(expected),
+                "{code:?}"
             );
         }
     }
@@ -3457,6 +3538,7 @@ mod tests {
                 active_tab: MainTab::Ai,
                 ai_input_focused: true,
                 ai_sidebar_focused: false,
+                ai_sidebar_visible: false,
                 ..base
             },
             KeyContext {
@@ -3471,6 +3553,7 @@ mod tests {
                 mindmap_ai_panel_visible: true,
                 ai_input_focused: true,
                 ai_sidebar_focused: false,
+                ai_sidebar_visible: false,
                 ..base
             },
             KeyContext {
