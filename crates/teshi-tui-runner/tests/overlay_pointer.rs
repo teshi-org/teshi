@@ -190,18 +190,14 @@ fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
     capture(&terminal, &format!("{stage}-session-loaded-beta"));
     focus_composer(&terminal);
     command(&terminal, "/sessions");
-    terminal
-        .expect_text("Session Alpha", true, 5000)
-        .unwrap();
+    terminal.expect_text("Session Alpha", true, 5000).unwrap();
     terminal.click_text("Session Alpha", 5000).unwrap();
     click_footer(&terminal, "Delete");
     terminal
         .expect_text("Confirm deletion", true, 5000)
         .unwrap();
     click_footer(&terminal, "Delete [Enter/y]");
-    terminal
-        .expect_text("Session Alpha", false, 5000)
-        .unwrap();
+    terminal.expect_text("Session Alpha", false, 5000).unwrap();
     assert!(
         !fixture.session_path("Alpha").exists(),
         "inactive session was not deleted"

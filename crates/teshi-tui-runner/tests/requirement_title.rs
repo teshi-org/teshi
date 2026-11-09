@@ -63,10 +63,10 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
     terminal.expect_text("Requirements", true, 10000).unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("# Document 1", true, 10000).unwrap();
-    // Ctrl+n focuses the editor below the H1; climb back to the title line to rename it.
+    // Ctrl+n focuses the editor below the H1 in insert mode; climb back to the
+    // title line to rename it.
     terminal.key("Up").unwrap();
     terminal.key("Up").unwrap();
-    terminal.key("i").unwrap();
     terminal.expect_text("[INSERT]", true, 10000).unwrap();
     terminal.key("End").unwrap();
     for _ in "Document 1".chars() {
