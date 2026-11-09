@@ -1210,6 +1210,9 @@ impl Action {
                     return match (event.code, event.modifiers) {
                         (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
                         (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                        // The footer advertises Ctrl+n in every editor mode, and a
+                        // draft created from a draft must not require an Esc first.
+                        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
                         // Ctrl+P mirrors the tree's priority shortcut without
                         // colliding with vim paste in browse mode.
                         (KeyCode::Char('p' | 'P'), KeyModifiers::CONTROL) => {

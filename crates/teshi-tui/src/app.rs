@@ -13288,7 +13288,13 @@ impl App {
             return Ok(());
         }
         if command == "sendqueued" {
+            // A failed turn parks the queue in the error state, which the
+            // dispatcher never drains; resuming has to leave it first.
+            let failed = self.agent().status == AiStatus::Error;
             self.agent_mut().chat.queue_ready = true;
+            if failed {
+                self.agent_mut().status = AiStatus::Idle;
+            }
             self.status = "Queued messages will send when this turn is ready".into();
             return Ok(());
         }

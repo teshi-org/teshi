@@ -754,6 +754,28 @@ impl AuthoringUiState {
         state
     }
 
+    /// Records the store fingerprint after a write from this process so the next
+    /// poll does not mistake our own save for an external change.
+    fn note_store_write(&mut self) {
+        self.store_signature = requirement_store_signature(&self.requirements_root);
+        self.last_store_check = Some(Instant::now());
+    }
+
+    /// The draft document that exists only in memory, with its unpersisted body.
+    fn preserved_draft_document(
+        &self,
+    ) -> Option<(teshi_core::authoring::RequirementDocumentMeta, String)> {
+        let id = self.draft_document_id.as_ref()?;
+        let artifacts = self.artifacts.as_ref()?;
+        let meta = artifacts
+            .index
+            .documents
+            .iter()
+            .find(|doc| doc.id == *id)?
+            .clone();
+        Some((meta, self.buffer.as_string()))
+    }
+
     /// Reloads the requirement store from disk, preserving view state.
     ///
     /// Filter, group mode, overlay, and a dirty editor buffer are kept so an
@@ -771,6 +793,7 @@ impl AuthoringUiState {
         let group_mode = self.group_mode;
         let overlay = self.overlay.clone();
         let editor_mode = self.editor_mode;
+        let focus = self.focus;
         let dirty = self.buffer_dirty;
         let preserved_buffer = dirty.then(|| self.buffer.clone());
         let cursor_row = self.cursor_row;
@@ -790,12 +813,28 @@ impl AuthoringUiState {
         // Requirement Markdown/`_teshi.json` can change on disk; keep in-memory test
         // points so unsaved review-state edits are not discarded at an agent boundary.
         let preserved_test_points = self.artifacts.as_ref().map(|a| a.test_points.clone());
+        // An unsaved draft exists only in memory, so a reload from disk would
+        // leave the editor on a document id the index no longer contains.
+        let preserved_draft = self.preserved_draft_document();
         self.discovered = loaded.discovered;
         self.artifacts = loaded.artifacts;
         if let (Some(artifacts), Some(test_points)) =
             (self.artifacts.as_mut(), preserved_test_points)
         {
             artifacts.test_points = test_points;
+        }
+        if let Some(artifacts) = self.artifacts.as_mut()
+            && let Some((meta, body)) = preserved_draft
+            && !artifacts
+                .index
+                .documents
+                .iter()
+                .any(|doc| doc.id == meta.id)
+        {
+            artifacts.index.documents.push(meta.clone());
+            artifacts
+                .documents
+                .push(teshi_core::authoring::RequirementDocumentContent { meta, body });
         }
         self.iteration_filter = filter;
         self.group_mode = group_mode;
@@ -824,6 +863,7 @@ impl AuthoringUiState {
             self.selection_end = selection_end;
         }
         self.editor_mode = editor_mode;
+        self.focus = focus;
         self.store_signature = requirement_store_signature(&self.requirements_root);
         self.last_store_check = Some(Instant::now());
         Ok(())
@@ -1073,6 +1113,7 @@ impl AuthoringUiState {
             self.scroll_row = 0;
         }
         self.rebuild_tree();
+        self.note_store_write();
 
         if let Some(result) = test_points_result {
             result?;
@@ -1261,6 +1302,7 @@ impl AuthoringUiState {
         }
         self.overlay = RequirementsOverlay::None;
         self.rebuild_tree();
+        self.note_store_write();
         Ok(())
     }
 
@@ -1303,6 +1345,7 @@ impl AuthoringUiState {
         }
         self.overlay = RequirementsOverlay::None;
         self.rebuild_tree();
+        self.note_store_write();
         Ok(())
     }
 
@@ -1769,6 +1812,7 @@ impl AuthoringUiState {
         test_points_result?;
         self.buffer_dirty = false;
         self.draft_document_id = None;
+        self.note_store_write();
         filing_result
     }
 
