@@ -17,16 +17,21 @@ def trace(value):
 
 
 def commands(turn):
+    # Writers either append events or rewrite the file with a longer prefix of
+    # the same events. A rewrite truncates first, so a read can land on an empty
+    # or half-written file: only consume newline-terminated content and never
+    # move the offset backwards, or earlier events would be replayed.
     path = root / (turn + ".jsonl")
     offset = 0
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         if path.exists():
-            lines = path.read_text(encoding="utf-8").splitlines()
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines() if text.endswith("\n") else []
             for line in lines[offset:]:
                 if line:
                     yield json.loads(line)
-            offset = len(lines)
+            offset = max(offset, len(lines))
         time.sleep(0.01)
     raise TimeoutError("fixture command deadline exceeded")
 
