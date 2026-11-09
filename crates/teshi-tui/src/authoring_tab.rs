@@ -34,14 +34,38 @@ pub const TREE_DOC_PREFIX: &str = "req-doc:";
 /// Tree node id prefix for iteration group nodes.
 pub const TREE_ITER_PREFIX: &str = "req-iter:";
 
-/// Independent input mode for the Markdown editor.
+/// Input mode for the Markdown pane, independent of Explore.
+///
+/// `Esc` steps back one level: Insert or Visual returns to Browse, and Browse
+/// returns to Preview. Only Preview renders the Markdown; every other mode
+/// shows the source text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequirementsEditorMode {
+    /// Read-only rendered Markdown, entered whenever a document is opened.
     #[default]
+    Preview,
+    /// Vim Normal mode over the Markdown source.
     Browse,
+    /// Text insertion into the Markdown source.
     Insert,
+    /// Characterwise Vim selection.
     VisualChar,
+    /// Linewise Vim selection.
     VisualLine,
+}
+
+/// Rendered preview of one document body, cached until its inputs change.
+#[derive(Debug, Clone, Default)]
+pub struct RequirementPreview {
+    /// Relative image paths resolve against the document's folder.
+    document_id: Option<String>,
+    body: String,
+    width: usize,
+    image_rows: u16,
+    /// Display rows, already wrapped to the pane width.
+    pub lines: Vec<Line<'static>>,
+    /// What each image display row shows, by display row index.
+    pub images: HashMap<usize, EditorImageRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +189,31 @@ fn requirement_store_signature(root: &Path) -> Option<(SystemTime, u64)> {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
+/// Appends `markdown` rendered as in AI Chat, wrapped to `width` cells.
+///
+/// `separate` adds one blank row first, as the renderer itself puts between
+/// blocks; it is lost when a document is rendered in pieces around images.
+fn push_preview_markdown(
+    lines: &mut Vec<Line<'static>>,
+    markdown: &str,
+    width: usize,
+    separate: bool,
+) {
+    if markdown.trim().is_empty() {
+        return;
+    }
+    if separate {
+        lines.push(Line::default());
+    }
+    let rendered =
+        crate::markdown::render_markdown_width(markdown, width.min(u16::MAX as usize) as u16);
+    lines.extend(
+        rendered
+            .into_iter()
+            .flat_map(|line| crate::ui::chat::wrap_line_to_width(line, width)),
+    );
+}
+
 /// UI state for requirement documents and linked test points.
 pub struct AuthoringUiState {
     pub artifacts: Option<AuthoringArtifacts>,
@@ -206,16 +255,10 @@ pub struct AuthoringUiState {
     /// First visible soft-wrapped display row in the Markdown editor.
     pub scroll_row: usize,
     /// Display rows mapped to document row and character range, including an end cursor cell.
-    ///
-    /// Image rows follow the line that references them as empty ranges
-    /// `(row, end, end)`, so no cursor position ever falls inside one.
     pub editor_display_rows: Vec<(usize, usize, usize)>,
-    /// Rows each `![alt](path)` image takes below its line: `None` while
-    /// inserting, so the source text is all that is on screen; `Some(1)` for
-    /// a one-row text stand-in when the terminal has no pixel protocol.
-    pub editor_image_rows: Option<u16>,
-    /// What each image display row shows, by display row index.
-    pub editor_images: HashMap<usize, EditorImageRow>,
+    /// First visible row of the rendered preview.
+    pub preview_scroll: usize,
+    preview: RequirementPreview,
     /// Width used by the most recent editor wrap map.
     pub editor_wrap_width: usize,
     /// Horizontal offsets for the tree, editor, and linked test points.
@@ -336,6 +379,7 @@ impl AuthoringUiState {
         }
         match pane {
             0 => self.tree_state.get_offset(),
+            1 if self.is_previewing() => self.preview_scroll,
             1 => self.scroll_row,
             _ => self.linked_scroll,
         }
@@ -356,6 +400,7 @@ impl AuthoringUiState {
                         self.tree_state.scroll_down(value - old);
                     }
                 }
+                1 if self.is_previewing() => self.preview_scroll = value,
                 1 => {
                     self.scroll_row = value;
                     self.rendered_cursor = Some((self.cursor_row, self.cursor_col));
@@ -371,10 +416,8 @@ impl AuthoringUiState {
     /// Rebuilds soft-wrap coordinates without changing the document or its source ranges.
     pub fn wrap_editor_rows(&mut self, width: usize) {
         self.editor_display_rows.clear();
-        self.editor_images.clear();
         let width = width.max(1);
         self.editor_wrap_width = width;
-        let document_dir = self.current_document_dir();
         for row in 0..self.buffer.line_count() {
             let text = self.buffer.line(row);
             let mut start = 0;
@@ -392,50 +435,137 @@ impl AuthoringUiState {
                 end = col + 1;
             }
             self.editor_display_rows.push((row, start, end));
-            if let Some(box_rows) = self.editor_image_rows {
-                self.push_image_rows(row, end, &text, box_rows, document_dir.as_deref());
-            }
         }
     }
 
-    /// Appends the image rows for the references on line `row`.
-    fn push_image_rows(
-        &mut self,
-        row: usize,
-        end: usize,
-        text: &str,
+    /// Renders the buffer as Markdown for the preview pane.
+    ///
+    /// The result is reused while the body, `width`, and `image_rows` are
+    /// unchanged, so unsaved edits appear as soon as the preview is shown.
+    /// `image_rows` is the height of a pixel image box; `1` draws each image
+    /// as a one-row text stand-in for terminals without a pixel protocol.
+    pub fn refresh_preview(&mut self, width: usize, image_rows: u16) -> &RequirementPreview {
+        let width = width.max(1);
+        let body = self.buffer.as_string();
+        if self.preview.width == width
+            && self.preview.image_rows == image_rows
+            && self.preview.document_id == self.selected_document_id
+            && self.preview.body == body
+        {
+            return &self.preview;
+        }
+        let document_dir = self.current_document_dir();
+        let mut lines = Vec::new();
+        let mut images = HashMap::new();
+        let mut chunk = String::new();
+        let mut in_fence = false;
+        let mut after_image = false;
+        for line in body.lines() {
+            let marker = line.trim_start();
+            if marker.starts_with("```") || marker.starts_with("~~~") {
+                in_fence = !in_fence;
+            }
+            chunk.push_str(line);
+            chunk.push('\n');
+            // Code samples show image syntax literally.
+            let refs = if in_fence {
+                Vec::new()
+            } else {
+                crate::doc_images::image_refs(line)
+            };
+            if refs.is_empty() {
+                continue;
+            }
+            // Markdown renders whole blocks, so the text up to the image line is
+            // flushed first and the image boxes land directly below that line.
+            push_preview_markdown(&mut lines, &std::mem::take(&mut chunk), width, after_image);
+            for image in self.image_rows(refs, width, image_rows, document_dir.as_deref()) {
+                images.insert(lines.len(), image);
+                lines.push(Line::default());
+            }
+            after_image = true;
+        }
+        push_preview_markdown(&mut lines, &chunk, width, after_image);
+        self.preview = RequirementPreview {
+            document_id: self.selected_document_id.clone(),
+            body,
+            width,
+            image_rows,
+            lines,
+            images,
+        };
+        &self.preview
+    }
+
+    /// The preview rendered by the last [`Self::refresh_preview`].
+    pub fn preview(&self) -> &RequirementPreview {
+        &self.preview
+    }
+
+    /// Display rows for the local images referenced on one line.
+    fn image_rows(
+        &self,
+        refs: Vec<crate::doc_images::ImageRef>,
+        width: usize,
         box_rows: u16,
         document_dir: Option<&Path>,
-    ) {
-        let size = (
-            self.editor_wrap_width.min(EDITOR_IMAGE_COLS) as u16,
-            box_rows,
-        );
-        for reference in crate::doc_images::image_refs(text) {
-            let resolved =
-                crate::doc_images::resolve(&reference.target, document_dir, &self.project_root);
-            let rows = match resolved {
-                Some(path) if box_rows > 1 => (0..box_rows)
-                    .map(|row| EditorImageRow::Pixels {
-                        path: path.clone(),
-                        row,
-                        size,
-                    })
-                    .collect(),
-                Some(path) => vec![EditorImageRow::Label {
-                    path,
-                    alt: reference.alt,
-                }],
-                None => vec![EditorImageRow::Missing {
-                    target: reference.target,
-                }],
-            };
-            for image in rows {
-                self.editor_images
-                    .insert(self.editor_display_rows.len(), image);
-                self.editor_display_rows.push((row, end, end));
-            }
+    ) -> Vec<EditorImageRow> {
+        let size = (width.min(EDITOR_IMAGE_COLS) as u16, box_rows);
+        refs.into_iter()
+            .flat_map(|reference| {
+                match crate::doc_images::resolve(
+                    &reference.target,
+                    document_dir,
+                    &self.project_root,
+                ) {
+                    Some(path) if box_rows > 1 => (0..box_rows)
+                        .map(|row| EditorImageRow::Pixels {
+                            path: path.clone(),
+                            row,
+                            size,
+                        })
+                        .collect(),
+                    Some(path) => vec![EditorImageRow::Label {
+                        path,
+                        alt: reference.alt,
+                    }],
+                    None => vec![EditorImageRow::Missing {
+                        target: reference.target,
+                    }],
+                }
+            })
+            .collect()
+    }
+
+    /// Whether the Markdown pane shows the rendered preview.
+    pub fn is_previewing(&self) -> bool {
+        self.editor_mode == RequirementsEditorMode::Preview
+    }
+
+    /// Leaves the preview for Vim Normal mode over the source without starting an edit.
+    pub fn enter_edit_view(&mut self) {
+        if self.is_previewing() && self.selected_document_id.is_some() {
+            self.editor_mode = RequirementsEditorMode::Browse;
+            // Bring the cursor back into view, wherever the preview was scrolled.
+            self.rendered_cursor = None;
         }
+    }
+
+    /// Returns from the source view to the rendered preview.
+    ///
+    /// The buffer is kept as is: unsaved edits show in the preview and stay
+    /// pending until they are saved or discarded.
+    pub fn enter_preview(&mut self) {
+        self.insert_session_undo = false;
+        self.vertical_motion = None;
+        self.selection_anchor = None;
+        self.selection_end = None;
+        self.editor_mode = RequirementsEditorMode::Preview;
+    }
+
+    /// Scrolls the preview by `delta` rows within the last rendered limit.
+    pub fn scroll_preview(&mut self, delta: isize) {
+        self.set_pane_scroll(1, 1, self.preview_scroll.saturating_add_signed(delta));
     }
 
     /// Folder of the open document, which relative image paths start from.
@@ -477,10 +607,12 @@ impl AuthoringUiState {
         }
     }
 
-    /// Returns to command navigation.
+    /// Returns to command navigation; the preview stays as it is.
     pub fn exit_insert_mode(&mut self) {
         self.insert_session_undo = false;
-        self.editor_mode = RequirementsEditorMode::Browse;
+        if !self.is_previewing() {
+            self.editor_mode = RequirementsEditorMode::Browse;
+        }
     }
 
     fn snapshot(&self) -> RequirementsEditSnapshot {
@@ -503,7 +635,12 @@ impl AuthoringUiState {
         self.desired_col = snapshot.desired_col;
         self.selection_anchor = snapshot.selection_anchor;
         self.selection_end = snapshot.selection_end;
-        self.editor_mode = snapshot.mode;
+        // Undo runs in the source view. A snapshot taken by an `i` pressed in
+        // the preview must not hide the restored text behind the preview again.
+        self.editor_mode = match snapshot.mode {
+            RequirementsEditorMode::Preview => RequirementsEditorMode::Browse,
+            mode => mode,
+        };
         // A save can occur after the snapshot was taken. Its old dirty bit is
         // no longer evidence that this restored body matches persisted text.
         self.buffer_dirty = self.draft_document_id.is_some()
@@ -673,7 +810,7 @@ impl AuthoringUiState {
             }
             self.selected_document_id = None;
             self.buffer = EditorBuffer::from_string(String::new());
-            self.exit_insert_mode();
+            self.enter_preview();
             self.rebuild_tree();
         } else if let Some(id) = self.selected_document_id.clone() {
             self.select_document_by_id(&id);
@@ -707,7 +844,7 @@ impl AuthoringUiState {
             tree_items: Vec::new(),
             tree_state: TreeState::default(),
             focus: RequirementsFocus::Tree,
-            editor_mode: RequirementsEditorMode::Browse,
+            editor_mode: RequirementsEditorMode::Preview,
             pane_areas: [ratatui::layout::Rect::default(); 3],
             selection_dragging: false,
             selected_document_id: None,
@@ -721,8 +858,8 @@ impl AuthoringUiState {
             desired_col: 0,
             scroll_row: 0,
             editor_display_rows: Vec::new(),
-            editor_image_rows: None,
-            editor_images: HashMap::new(),
+            preview_scroll: 0,
+            preview: RequirementPreview::default(),
             editor_wrap_width: 0,
             horizontal_scroll: [0; 3],
             rendered_cursor: None,
@@ -1125,7 +1262,8 @@ impl AuthoringUiState {
         } else {
             self.selected_document_id = None;
             self.buffer = EditorBuffer::from_string(String::new());
-            self.editor_mode = RequirementsEditorMode::Browse;
+            self.editor_mode = RequirementsEditorMode::Preview;
+            self.preview_scroll = 0;
             self.cursor_row = 0;
             self.cursor_col = 0;
             self.desired_col = 0;
@@ -1458,7 +1596,10 @@ impl AuthoringUiState {
         // document must never apply another document's text to this buffer.
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.exit_insert_mode();
+        // Every opened document starts in the rendered preview.
+        self.insert_session_undo = false;
+        self.editor_mode = RequirementsEditorMode::Preview;
+        self.preview_scroll = 0;
         self.selected_document_id = Some(doc_id.to_string());
         self.selected_linked_index = 0;
         self.highlight_test_point_id = None;
@@ -2079,19 +2220,11 @@ impl AuthoringUiState {
                         .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
                         .sum()
                 });
-            // Step over image rows; with only image rows left in that
-            // direction, stay put rather than jump to the line's end.
-            let is_text = |index: &usize| {
-                self.editor_display_rows
-                    .get(*index)
-                    .is_some_and(|&(_, start, end)| start < end)
-            };
             let target = if delta < 0 {
-                (0..current).rev().find(is_text)
+                current.saturating_sub(1)
             } else {
-                (current + 1..self.editor_display_rows.len()).find(is_text)
-            }
-            .unwrap_or(current);
+                (current + 1).min(self.editor_display_rows.len() - 1)
+            };
             let (row, start, end) = self.editor_display_rows[target];
             let mut column = start;
             let mut consumed = 0;
@@ -2576,55 +2709,128 @@ mod tests {
     use tempfile::tempdir;
     use teshi_core::authoring::{AuthoringArtifacts, RequirementDocumentIndex};
 
+    fn preview_text(state: &AuthoringUiState) -> Vec<String> {
+        state
+            .preview()
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
-    fn test_image_rows_follow_their_line_and_are_skipped_by_the_cursor() {
+    fn test_preview_places_image_rows_below_their_line() {
         let project = tempdir().unwrap();
         fs::write(project.path().join("shot.png"), b"png").unwrap();
         let mut state = AuthoringUiState::empty();
         state.project_root = project.path().to_path_buf();
         state.buffer =
-            EditorBuffer::from_string("intro\n![ui](shot.png) ![x](gone.png)\nafter".into());
-        state.editor_image_rows = Some(3);
-        state.wrap_editor_rows(80);
-        let line = "![ui](shot.png) ![x](gone.png)".chars().count() + 1;
+            EditorBuffer::from_string("# Title\n![ui](shot.png) ![x](gone.png)\n\nafter".into());
+        state.refresh_preview(80, 3);
+        let text = preview_text(&state);
+        assert_eq!(text[0], "Title", "headings render without their marker");
+        let image_line = text
+            .iter()
+            .position(|line| line.contains("🖼 ui"))
+            .expect("image line keeps its caption");
+        let images = &state.preview().images;
+        for row in 0..3 {
+            assert!(
+                matches!(
+                    images.get(&(image_line + 1 + row as usize)),
+                    Some(EditorImageRow::Pixels { row: r, .. }) if *r == row
+                ),
+                "pixel row {row} follows the image line: {images:?}"
+            );
+        }
         assert_eq!(
-            state.editor_display_rows,
-            vec![
-                (0, 0, 6),
-                (1, 0, line),
-                (1, line, line),
-                (1, line, line),
-                (1, line, line),
-                (1, line, line),
-                (2, 0, 6),
-            ],
-            "three pixel rows for the found image, one note for the missing one"
-        );
-        assert!(matches!(
-            state.editor_images.get(&2),
-            Some(EditorImageRow::Pixels { row: 0, .. })
-        ));
-        assert_eq!(
-            state.editor_images.get(&5),
+            images.get(&(image_line + 4)),
             Some(&EditorImageRow::Missing {
                 target: "gone.png".into()
             })
         );
-        assert_eq!(state.editor_position_at(0, 3), Some((1, line - 1)));
-        state.cursor_row = 1;
-        state.cursor_col = 2;
-        state.move_cursor_vertical(1);
-        assert_eq!((state.cursor_row, state.cursor_col), (2, 2));
-        state.move_cursor_vertical(-1);
-        assert_eq!((state.cursor_row, state.cursor_col), (1, 2));
+        assert_eq!(images.len(), 4, "three pixel rows and one missing note");
+        assert_eq!(text.last().map(String::as_str), Some("after"));
 
-        state.editor_image_rows = None;
         state.wrap_editor_rows(80);
         assert_eq!(
             state.editor_display_rows.len(),
-            3,
-            "inserting shows source only"
+            4,
+            "the source view shows only source lines"
         );
+    }
+
+    #[test]
+    fn test_preview_keeps_image_syntax_inside_code_fences() {
+        let mut state = AuthoringUiState::empty();
+        state.buffer = EditorBuffer::from_string("```\n![ui](shot.png)\n```".into());
+        state.refresh_preview(80, 3);
+        assert!(state.preview().images.is_empty());
+        assert!(
+            preview_text(&state)
+                .iter()
+                .any(|line| line.contains("![ui](shot.png)")),
+            "{:?}",
+            preview_text(&state)
+        );
+    }
+
+    #[test]
+    fn test_preview_follows_unsaved_buffer_edits() {
+        let mut state = AuthoringUiState::empty();
+        state.buffer = EditorBuffer::from_string("# Title\nfirst".into());
+        state.refresh_preview(40, 1);
+        assert!(preview_text(&state).contains(&"first".to_string()));
+        state.buffer = EditorBuffer::from_string("# Title\n**second**".into());
+        state.buffer_dirty = true;
+        state.refresh_preview(40, 1);
+        let text = preview_text(&state);
+        assert!(text.contains(&"second".to_string()), "{text:?}");
+        assert!(!text.iter().any(|line| line.contains("**")), "{text:?}");
+    }
+
+    #[test]
+    fn test_view_transitions_step_through_preview_normal_and_insert() {
+        let mut state = AuthoringUiState::empty();
+        state.selected_document_id = Some("doc-1".into());
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Preview);
+        state.exit_insert_mode();
+        assert_eq!(
+            state.editor_mode,
+            RequirementsEditorMode::Preview,
+            "leaving insert never opens the source view"
+        );
+        state.enter_edit_view();
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Browse);
+        state.enter_insert_mode();
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Insert);
+        state.insert_char('x');
+        state.exit_insert_mode();
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Browse);
+        state.enter_preview();
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Preview);
+        assert!(state.buffer_dirty, "switching views keeps unsaved edits");
+        assert_eq!(state.buffer.as_string(), "x");
+        state.enter_insert_mode();
+        state.exit_insert_mode();
+        state.undo_edit();
+        assert_eq!(
+            state.editor_mode,
+            RequirementsEditorMode::Browse,
+            "undo stays in the source view"
+        );
+    }
+
+    #[test]
+    fn test_edit_view_needs_an_open_document() {
+        let mut state = AuthoringUiState::empty();
+        state.enter_edit_view();
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Preview);
     }
 
     #[test]

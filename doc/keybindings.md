@@ -275,6 +275,25 @@ existing documents remain unset. The tree title lists scope, view, iteration, an
 (in Current project) the completed filter. See `doc/requirement-organization.md` for
 the action menu.
 
+### Markdown Preview
+
+Opening a document shows its Markdown rendered read-only, with the same
+renderer as AI Chat. `Esc` steps back one level: Insert or Visual returns to
+Browse, and Browse returns to Preview. Switching views never prompts; unsaved
+edits show in the preview and the usual save/discard prompt appears only when
+leaving the document. A new document opens directly in Insert.
+
+| Key | Action |
+|-----|--------|
+| `j/k`, Down/Up | Scroll one row |
+| `gg/G`, Home/End | Scroll to top/bottom |
+| PageUp/PageDown, Ctrl+B/Ctrl+F | Page through rows |
+| `e` | Open the source in Browse without starting an edit |
+| `i` | Open the source in Insert at the cursor |
+| Ctrl+N | New requirement document |
+| `I` / Ctrl+P | Edit iteration / priority |
+| `s` / Ctrl+S | Save |
+
 ### Markdown Browse
 
 | Key | Action |
@@ -294,7 +313,7 @@ the action menu.
 | Ctrl+N | New requirement document |
 | `I` | Edit iteration |
 | `s` / Ctrl+S | Save |
-| Esc | Return to Browse / clear visual state |
+| Esc | Cancel a pending `d`/`y`/`g`; otherwise return to Preview |
 
 Visual mode supports arrows/hjkl, w/b/e, 0/^/$ and End to extend the selection,
 `y` to yank, `d` to delete, and Esc to return to Browse. This is a bounded Vim
@@ -308,10 +327,10 @@ Enter inserts a newline, Tab inserts four spaces, Backspace/Delete edit, and
 Ctrl+S saves without leaving Insert. Esc returns to Browse. Bracketed paste is
 accepted. Long lines soft-wrap; the editor and adjacent panes expose scrollbars.
 
-Outside Insert, a line with `![alt](path)` is followed by the image. Relative
+In Preview, a line with `![alt](path)` is followed by the image. Relative
 paths resolve from the document's folder, then from the project root; a missing
-file shows a `▣ Image not found` row. The cursor skips image rows, and Insert
-shows only the Markdown source.
+file shows a `▣ Image not found` row. Browse, Visual, and Insert show only the
+Markdown source.
 
 ## Test Points
 

@@ -138,6 +138,10 @@ pub enum Action {
     ReqEnterInsert,
     /// Return to Requirements navigation.
     ReqExitInsert,
+    /// Leave the rendered preview for Vim Normal mode over the source (`e`).
+    ReqEnterEditView,
+    /// Return from Vim Normal mode to the rendered preview (`Esc`).
+    ReqEnterPreview,
     ReqNewDocument,
     /// Open confirmation to remove the selected document from the global library.
     ReqDeleteDocument,
@@ -1017,7 +1021,10 @@ impl Action {
                 && context.ai_input_focused)
             || (context.active_tab == MainTab::Requirements
                 && context.requirements_focus == RequirementsFocus::Editor
-                && context.requirements_editor_mode != RequirementsEditorMode::Browse)
+                && !matches!(
+                    context.requirements_editor_mode,
+                    RequirementsEditorMode::Browse | RequirementsEditorMode::Preview
+                ))
             || (context.active_tab == MainTab::TestPoints && context.test_points_editing);
         // `:` opens the prompt only where printable keys are commands. Text
         // surfaces keep it literal, so typing a colon never leaves the buffer.
@@ -1208,6 +1215,49 @@ impl Action {
             // character while retaining CONTROL. Normalize both spellings
             // before entering the two-key pane-navigation chord.
             if context.requirements_focus == RequirementsFocus::Editor {
+                // The preview is read-only: printable keys scroll or switch views,
+                // and `e` stays free for Vim's word-end motion in the source view.
+                if context.requirements_editor_mode == RequirementsEditorMode::Preview {
+                    return match (event.code, event.modifiers) {
+                        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                            Some(Self::MoveUp)
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                            Some(Self::MoveDown)
+                        }
+                        (KeyCode::Home, _) => Some(Self::NavigateFirst),
+                        (KeyCode::End, _) => Some(Self::NavigateLast),
+                        (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ReqEnterEditView),
+                        (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqEnterInsert),
+                        (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                            Some(Self::ReqEditIteration)
+                        }
+                        (KeyCode::Char('p' | 'P'), KeyModifiers::CONTROL) => {
+                            Some(Self::ReqEditPriority)
+                        }
+                        (KeyCode::Char('s'), KeyModifiers::CONTROL | KeyModifiers::NONE) => {
+                            Some(Self::Save)
+                        }
+                        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                        (KeyCode::Char('1'), KeyModifiers::NONE) => {
+                            Some(Self::SelectTab(MainTab::Explore))
+                        }
+                        (KeyCode::Char('2'), KeyModifiers::NONE) => {
+                            Some(Self::SelectTab(MainTab::MindMap))
+                        }
+                        (KeyCode::Char('3'), KeyModifiers::NONE) => {
+                            Some(Self::SelectTab(MainTab::Ai))
+                        }
+                        (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                            Some(Self::SelectTab(MainTab::Requirements))
+                        }
+                        (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                            Some(Self::SelectTab(MainTab::TestPoints))
+                        }
+                        (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
+                        _ => None,
+                    };
+                }
                 if context.requirements_editor_mode == RequirementsEditorMode::Insert {
                     return match (event.code, event.modifiers) {
                         (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
@@ -1341,7 +1391,12 @@ impl Action {
                     }
                     (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                     (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
-                    (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
+                    // Esc first cancels a pending operator, as in Vim; only a
+                    // bare Esc steps back to the preview.
+                    (KeyCode::Esc, _) if context.pending_char.is_some() => {
+                        Some(Self::ReqExitInsert)
+                    }
+                    (KeyCode::Esc, _) => Some(Self::ReqEnterPreview),
                     _ => None,
                 };
             }
@@ -2929,6 +2984,59 @@ mod tests {
             Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
             Some(Action::ExternalChangeKeepLocal)
         );
+    }
+
+    #[test]
+    fn requirements_preview_and_normal_mode_switch_views_without_stealing_vim_keys() {
+        use crate::authoring_tab::RequirementsEditorMode;
+        let key = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let preview = KeyContext {
+            requirements_focus: RequirementsFocus::Editor,
+            requirements_editor_mode: RequirementsEditorMode::Preview,
+            ..requirements_tree_context()
+        };
+        let normal = KeyContext {
+            requirements_editor_mode: RequirementsEditorMode::Browse,
+            ..preview
+        };
+        for (event, context, expected) in [
+            (key('e'), preview, Some(Action::ReqEnterEditView)),
+            (key('i'), preview, Some(Action::ReqEnterInsert)),
+            (key('j'), preview, Some(Action::MoveDown)),
+            (key('k'), preview, Some(Action::MoveUp)),
+            (key('G'), preview, Some(Action::NavigateLast)),
+            (key('x'), preview, None),
+            (key('p'), preview, None),
+            (esc, preview, None),
+            (key('e'), normal, Some(Action::ReqVimWordEnd)),
+            (key('p'), normal, Some(Action::ReqVimPasteAfter)),
+            (esc, normal, Some(Action::ReqEnterPreview)),
+            (
+                esc,
+                KeyContext {
+                    pending_char: Some('d'),
+                    ..normal
+                },
+                Some(Action::ReqExitInsert),
+            ),
+        ] {
+            assert_eq!(
+                Action::from_key_event(event, context),
+                expected,
+                "{event:?} in {:?}",
+                context.requirements_editor_mode
+            );
+        }
+        for ch in (32u8..=126).map(char::from) {
+            assert!(
+                !matches!(
+                    Action::from_key_event(key(ch), preview),
+                    Some(Action::Insert(_))
+                ),
+                "{ch:?} must not edit the preview"
+            );
+        }
     }
 
     #[test]
