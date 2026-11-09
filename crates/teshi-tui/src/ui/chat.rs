@@ -1128,7 +1128,7 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
     }
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
     place_history_images(frame, app, &projection.lines, body, start);
-    render_scrollbar(frame, scrollbar, total, height, start);
+    render_scrollbar(frame, app, scrollbar, total, height, start);
 }
 
 /// Places the visible rows of each image box, and notes boxes whose pixels
@@ -1189,11 +1189,33 @@ fn place_history_images(
     }
 }
 
-fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, height: usize, start: usize) {
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    total: usize,
+    height: usize,
+    start: usize,
+) {
     if total <= height || area.width == 0 || height == 0 {
+        app.chat_scrollbar = None;
         return;
     }
-    let lines = theme::scrollbar_lines(total, height, start);
+    app.chat_scrollbar = Some(crate::app::ChatScrollbar {
+        rect: area,
+        rows: total,
+    });
+    let state = if app.chat_scrollbar_grab.is_some() {
+        theme::ThumbState::Grabbed
+    } else if app
+        .mouse_position
+        .is_some_and(|(x, y)| area.contains(ratatui::layout::Position::new(x, y)))
+    {
+        theme::ThumbState::Hovered
+    } else {
+        theme::ThumbState::Idle
+    };
+    let lines = theme::chat_scrollbar_lines(total, height, start, state);
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -3066,6 +3088,137 @@ mod tests {
             theme::PRIMARY,
             "hovering the copy label highlights it"
         );
+    }
+
+    #[test]
+    fn chat_scrollbar_paints_one_solid_cell_and_highlights_on_hover() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        for index in 0..40 {
+            app.agents[0].messages_mut().push(message(
+                AiRole::Assistant,
+                &format!("scrollable line {index}"),
+                None,
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width;
+        let thumb: Vec<(u16, u16)> = buffer
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.bg == theme::SCROLL_THUMB)
+            .map(|(index, _)| ((index as u16) % width, (index as u16) / width))
+            .collect();
+        let (thumb_x, thumb_y) = *thumb.first().expect("a scrollbar thumb");
+        assert!(
+            !thumb
+                .iter()
+                .any(|(x, y)| *x == thumb_x + 1 && *y == thumb_y),
+            "the thumb is one cell wide"
+        );
+
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Moved,
+            thumb_x,
+            thumb_y,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(thumb_x, thumb_y)].bg,
+            theme::SCROLL_THUMB_HOVER,
+            "hovering the bar lifts its thumb"
+        );
+    }
+
+    #[test]
+    fn chat_scrollbar_pages_on_track_click_and_drags_the_thumb() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        for index in 0..40 {
+            app.agents[0].messages_mut().push(message(
+                AiRole::Assistant,
+                &format!("scrollable line {index}"),
+                None,
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut draw = |app: &mut crate::app::App| {
+            terminal
+                .draw(|frame| render_chat_panel(frame, app, frame.area(), true, ChatPlacement::Tab))
+                .unwrap();
+        };
+        draw(&mut app);
+        let bar = app.chat_scrollbar.expect("overflowing history draws a bar");
+        let height = bar.rect.height as usize;
+        let max_start = bar.rows - height;
+        let x = bar.rect.x;
+        assert_eq!(app.agent().scroll_offset, 0);
+
+        // Clicking the track above the thumb pages up by one viewport.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.agent().scroll_offset, height);
+
+        // Grabbing the thumb moves the transcript with the pointer.
+        draw(&mut app);
+        let start = max_start - app.agent().scroll_offset;
+        let (thumb_pos, _) = crate::theme::scrollbar_thumb(bar.rows, height, start).unwrap();
+        let grab_y = bar.rect.y + thumb_pos as u16;
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            grab_y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            bar.rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent().scroll_offset,
+            max_start,
+            "dragging the thumb to the top shows the first row"
+        );
+        assert!(app.chat_scrollbar_grab.is_none());
     }
 
     #[test]

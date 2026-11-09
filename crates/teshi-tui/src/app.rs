@@ -107,6 +107,15 @@ pub struct ChatSelection {
     pub focus: ChatAnchor,
 }
 
+/// The chat transcript scrollbar as drawn last frame, so the pointer can grab
+/// the same rows the user sees.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChatScrollbar {
+    pub rect: ratatui::layout::Rect,
+    /// Total rendered transcript rows, including the ones scrolled out.
+    pub rows: usize,
+}
+
 /// A pending ACP `session/request_permission` prompt for one agent.
 #[derive(Debug, Clone)]
 pub struct AcpPermissionPrompt {
@@ -903,6 +912,10 @@ pub struct App {
     /// Reusable message layouts for chat rendering and selection.
     pub(crate) chat_layout_cache: std::cell::RefCell<crate::ui::chat::ChatLayoutCache>,
     pub chat_history_rect: Option<ratatui::layout::Rect>,
+    /// Chat scrollbar from the last frame; `None` when the history fits.
+    pub(crate) chat_scrollbar: Option<ChatScrollbar>,
+    /// Pointer offset below the thumb top while the scrollbar is being dragged.
+    pub(crate) chat_scrollbar_grab: Option<u16>,
     /// Current chat text selection, if any.
     pub chat_selection: Option<ChatSelection>,
     // X11 serves selection data from the owning process. Retain the handle
@@ -2233,6 +2246,8 @@ impl App {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -2449,6 +2464,8 @@ impl App {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -2643,6 +2660,8 @@ impl App {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -10812,6 +10831,64 @@ impl App {
                     && self.mindmap_focus == MindMapFocus::AiPanel))
     }
 
+    /// Pointer handling for the chat transcript scrollbar: grabbing the thumb
+    /// follows the pointer, and a click on the track pages toward the click.
+    fn handle_chat_scrollbar_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        pos: ratatui::layout::Position,
+    ) -> Result<bool> {
+        if matches!(kind, MouseEventKind::Up(MouseButton::Left))
+            && self.chat_scrollbar_grab.take().is_some()
+        {
+            return Ok(true);
+        }
+        let Some(bar) = self.chat_scrollbar else {
+            return Ok(false);
+        };
+        let height = bar.rect.height as usize;
+        let max_start = bar.rows.saturating_sub(height);
+        let offset = self.agent().scroll_offset.min(max_start);
+        let start = max_start - offset;
+        let (thumb_pos, thumb_len) =
+            crate::theme::scrollbar_thumb(bar.rows, height, start).unwrap_or((0, height));
+        let thumb_top = bar.rect.y + thumb_pos as u16;
+        let thumb_bottom = thumb_top + thumb_len as u16;
+        let track = height - thumb_len;
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) if bar.rect.contains(pos) => {
+                if (thumb_top..thumb_bottom).contains(&pos.y) {
+                    self.chat_scrollbar_grab = Some(pos.y - thumb_top);
+                } else if pos.y < thumb_top {
+                    self.set_chat_scroll_start(start.saturating_sub(height), max_start);
+                } else {
+                    self.set_chat_scroll_start(start.saturating_add(height), max_start);
+                }
+                Ok(true)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(grab) = self.chat_scrollbar_grab else {
+                    return Ok(false);
+                };
+                let top = pos
+                    .y
+                    .saturating_sub(bar.rect.y)
+                    .saturating_sub(grab)
+                    .min(track as u16) as usize;
+                let start = (top * max_start).checked_div(track).unwrap_or(0);
+                self.set_chat_scroll_start(start, max_start);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Positions the transcript by its first visible row. The stored offset
+    /// counts rows up from the bottom, so new output still pins to the end.
+    fn set_chat_scroll_start(&mut self, start: usize, max_start: usize) {
+        self.agent_mut().scroll_offset = max_start.saturating_sub(start);
+    }
+
     /// Move the chat by half of the last rendered viewport, mirroring Ctrl+D/U.
     fn scroll_chat_half_page(&mut self, up: bool) {
         let rows = self
@@ -11778,6 +11855,9 @@ impl App {
             && self
                 .chat_history_rect
                 .is_some_and(|rect| rect.contains(pos));
+        if chat_context && self.handle_chat_scrollbar_mouse(kind, pos)? {
+            return Ok(());
+        }
         if chat_context && (in_chat_history || self.chat_selection_dragging) {
             match kind {
                 MouseEventKind::Down(MouseButton::Left) if in_chat_history => {
@@ -19807,6 +19887,8 @@ mod tests {
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -20013,6 +20095,8 @@ Feature: B
             editor_panel_rect: None,
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
+            chat_scrollbar: None,
+            chat_scrollbar_grab: None,
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,

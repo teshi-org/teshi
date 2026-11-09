@@ -56,6 +56,14 @@ pub(crate) const CHAT_CHIP_BG: Color = Color::Rgb(0x33, 0x2C, 0x41);
 pub(crate) const SCROLL_THUMB: Color = Color::Rgb(0x58, 0x58, 0x58);
 /// Scrollbar track color.
 pub(crate) const SCROLL_TRACK: Color = Color::Rgb(0x3A, 0x3A, 0x3A);
+/// Fill behind the chat scrollbar, matching iCode's `scrollbar-background` so
+/// the bar reads as a dark strip beside the transcript.
+pub(crate) const SCROLL_TRACK_BG: Color = Color::Rgb(0x1C, 0x1C, 0x1C);
+/// Scrollbar thumb under the pointer. Lifted by the same headroom as
+/// [`hover_fill`], because a glyph-only bar has no background to tint.
+pub(crate) const SCROLL_THUMB_HOVER: Color = Color::Rgb(0x76, 0x76, 0x76);
+/// Scrollbar thumb while it is being dragged.
+pub(crate) const SCROLL_THUMB_ACTIVE: Color = Color::Rgb(0x80, 0x80, 0x80);
 /// Background of the selected row in lists and option pickers.
 pub(crate) const CURSOR_BG: Color = Color::Rgb(0x87, 0x87, 0xD7);
 /// Foreground of the selected row in lists and option pickers.
@@ -258,6 +266,46 @@ pub(crate) fn scrollbar_lines(total: usize, height: usize, start: usize) -> Vec<
     scrollbar_lines_with_min(total, height, start, MIN_SCROLLBAR_THUMB)
 }
 
+/// Pointer state of a scrollbar thumb, which carries no fill to tint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThumbState {
+    Idle,
+    Hovered,
+    Grabbed,
+}
+
+/// Chat transcript scrollbar: one solid cell per row, the way iCode's Textual
+/// bar paints reverse-video blocks.
+///
+/// The thumb and track are filled with a background instead of a glyph so the
+/// bar stays solid whatever font the terminal uses. The state lifts the thumb
+/// fill, so pointing at the bar never washes out the transcript beside it.
+pub(crate) fn chat_scrollbar_lines(
+    total: usize,
+    height: usize,
+    start: usize,
+    state: ThumbState,
+) -> Vec<Line<'static>> {
+    let Some((thumb_pos, thumb_len)) = scrollbar_thumb(total, height, start) else {
+        return Vec::new();
+    };
+    let thumb = Style::default().bg(match state {
+        ThumbState::Idle => SCROLL_THUMB,
+        ThumbState::Hovered => SCROLL_THUMB_HOVER,
+        ThumbState::Grabbed => SCROLL_THUMB_ACTIVE,
+    });
+    let track = Style::default().bg(SCROLL_TRACK_BG);
+    (0..height)
+        .map(|i| {
+            if (thumb_pos..thumb_pos + thumb_len).contains(&i) {
+                Line::styled(" ", thumb)
+            } else {
+                Line::styled(" ", track)
+            }
+        })
+        .collect()
+}
+
 /// Shared geometry for both axes. The vertical bar applies a minimum thumb
 /// length; the horizontal bar keeps its existing proportions.
 fn scrollbar_lines_with_min(
@@ -266,8 +314,36 @@ fn scrollbar_lines_with_min(
     start: usize,
     min_thumb: usize,
 ) -> Vec<Line<'static>> {
-    if height == 0 || total <= height {
+    let Some((thumb_pos, thumb_len)) = scrollbar_geometry(total, height, start, min_thumb) else {
         return Vec::new();
+    };
+    (0..height)
+        .map(|i| {
+            if (thumb_pos..thumb_pos + thumb_len).contains(&i) {
+                Line::styled("┃", Style::default().fg(SCROLL_THUMB))
+            } else {
+                Line::styled("│", Style::default().fg(SCROLL_TRACK))
+            }
+        })
+        .collect()
+}
+
+/// Thumb geometry for pointer hit-testing. Shares one implementation with the
+/// drawn bar so a grab lands on the rows the user sees.
+pub(crate) fn scrollbar_thumb(total: usize, height: usize, start: usize) -> Option<(usize, usize)> {
+    scrollbar_geometry(total, height, start, MIN_SCROLLBAR_THUMB)
+}
+
+/// Resolves the thumb position and length for a viewport, or `None` when the
+/// content fits and no bar is needed.
+fn scrollbar_geometry(
+    total: usize,
+    height: usize,
+    start: usize,
+    min_thumb: usize,
+) -> Option<(usize, usize)> {
+    if height == 0 || total <= height {
+        return None;
     }
     // Keep at least one track row visible when the viewport allows it, so a
     // short panel does not render a full-height thumb.
@@ -280,15 +356,7 @@ fn scrollbar_lines_with_min(
     let track = height - thumb_len;
     let scrollable = total - height;
     let thumb_pos = start.min(scrollable).saturating_mul(track) / scrollable;
-    (0..height)
-        .map(|i| {
-            if (thumb_pos..thumb_pos + thumb_len).contains(&i) {
-                Line::styled("┃", Style::default().fg(SCROLL_THUMB))
-            } else {
-                Line::styled("│", Style::default().fg(SCROLL_TRACK))
-            }
-        })
-        .collect()
+    Some((thumb_pos, thumb_len))
 }
 
 /// Horizontal track using the same bounded geometry as the vertical bar.
@@ -379,6 +447,36 @@ mod tests {
         assert_eq!(
             line.spans.iter().filter(|span| span.content == "━").count(),
             1
+        );
+    }
+
+    #[test]
+    fn chat_scrollbar_paints_solid_cells_with_pointer_state() {
+        let lines = chat_scrollbar_lines(1000, 20, 0, ThumbState::Idle);
+        assert_eq!(lines.len(), 20);
+        assert_eq!(lines[0].spans[0].content, " ");
+        assert_eq!(lines[0].style.bg, Some(SCROLL_THUMB));
+        assert_eq!(lines[19].style.bg, Some(SCROLL_TRACK_BG));
+
+        // Only the thumb answers the pointer; the track stays quiet.
+        let hovered = chat_scrollbar_lines(1000, 20, 0, ThumbState::Hovered);
+        assert_eq!(hovered[0].style.bg, Some(SCROLL_THUMB_HOVER));
+        assert_eq!(hovered[19].style.bg, Some(SCROLL_TRACK_BG));
+        let grabbed = chat_scrollbar_lines(1000, 20, 0, ThumbState::Grabbed);
+        assert_eq!(grabbed[0].style.bg, Some(SCROLL_THUMB_ACTIVE));
+    }
+
+    #[test]
+    fn chat_scrollbar_shares_the_border_bar_geometry() {
+        assert!(chat_scrollbar_lines(4, 4, 0, ThumbState::Idle).is_empty());
+        assert!(chat_scrollbar_lines(10, 0, 0, ThumbState::Idle).is_empty());
+        let lines = chat_scrollbar_lines(1000, 20, 0, ThumbState::Idle);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.style.bg == Some(SCROLL_THUMB))
+                .count(),
+            MIN_SCROLLBAR_THUMB
         );
     }
 
