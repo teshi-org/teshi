@@ -81,8 +81,11 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
         terminal.expect_text("Saved requirement document", true, 10000)?;
     }
 
-    // The third document is selected after creation. Ctrl-W h moves back to
-    // the tree, then Up selects the middle document for the delete flow.
+    // The third document is selected after creation. A new draft opens in
+    // insert mode, which owns Ctrl+w for text editing, so leave it first; then
+    // Ctrl-W h moves back to the tree and Up selects the middle document.
+    terminal.key("Escape")?;
+    terminal.expect_text("[INSERT]", false, 5000)?;
     terminal.key("Ctrl+w")?;
     terminal.key("h")?;
     terminal.key("Up")?;
