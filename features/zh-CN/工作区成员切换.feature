@@ -1,0 +1,75 @@
+@tui @workspace
+Feature: 工作区成员切换
+  AI 输入框上边框显示当前成员与分支，点击即可切换到下一个成员。
+
+  Background:
+    Given 隔离的工作区注册表目录
+
+  @teshi-tp:tp-23
+  Scenario Outline: 输入框边框显示成员标签
+    Given 工作区 demo 的成员 beta <分支情形>
+    And Teshi 打开成员 beta
+    When 操作者切到 AI 标签页
+    Then 输入框上边框显示“<标签>”
+
+    Examples:
+      | 分支情形             | 标签         |
+      | 检出了分支 dev/b     | beta @ dev/b |
+      | 处于分离 HEAD 状态   | beta         |
+
+  @teshi-tp:tp-23
+  Scenario: 未注册目录不显示成员标签
+    Given Teshi 打开一个未注册的项目目录
+    When 操作者切到 AI 标签页
+    Then 输入框上边框没有成员标签
+
+  @teshi-tp:tp-23
+  Scenario: 终端过窄时不绘制成员标签
+    Given Teshi 打开工作区 demo 的成员 beta 并切到 AI 标签页
+    When 操作者把终端缩窄到放不下成员标签
+    Then 输入框上边框不显示成员标签
+    And 输入框边框保持完整
+
+  @teshi-tp:tp-24
+  Scenario: 点击成员标签按注册顺序循环切换
+    Given 工作区 demo 按顺序有成员 alpha、beta、gamma
+    And Teshi 打开成员 alpha 并切到 AI 标签页
+    When 操作者点击成员标签
+    Then 项目切换到 beta 且 Explore、Requirements 和 AI 都使用 beta 的目录
+    When 操作者再点击成员标签两次
+    Then 项目回到 alpha
+
+  @teshi-tp:tp-24
+  Scenario: 单成员工作区的标签不可点击
+    Given 工作区 demo 只有成员 alpha
+    And Teshi 打开成员 alpha 并切到 AI 标签页
+    When 操作者点击成员标签
+    Then 项目仍为 alpha
+    And 没有出现项目切换提示
+
+  @teshi-tp:tp-25
+  Scenario Outline: 成员切换遵循项目切换的保护提示
+    Given 工作区 demo 有成员 alpha 和 beta
+    And Teshi 打开成员 alpha 且<保护情形>
+    When 操作者点击成员标签
+    Then 可以看到<保护提示>且提示未被其他状态信息覆盖
+    When 操作者<选择>
+    Then <结果>
+
+    Examples:
+      | 保护情形                 | 保护提示                 | 选择               | 结果                                 |
+      | 有未保存的 Feature 编辑  | 未保存修改的保护提示     | 取消切换           | 项目仍为 alpha 且未保存的编辑仍在    |
+      | 有未保存的 Feature 编辑  | 未保存修改的保护提示     | 选择放弃并切换     | 项目切换到 beta                      |
+      | 有正在运行的外部任务     | 正在运行任务的保护提示   | 取消切换           | 项目仍为 alpha 且任务仍在运行        |
+      | 有正在运行的外部任务     | 正在运行任务的保护提示   | 选择停止任务并切换 | 项目切换到 beta                      |
+
+  @teshi-tp:tp-26
+  Scenario Outline: 外部修改注册表后成员标签自动刷新
+    Given 工作区 demo 有 <初始数量> 个成员且 Teshi 打开其中的成员 alpha
+    When 另一个终端用同一注册表对工作区 demo <CLI 操作>
+    Then 不切换项目的情况下成员标签<状态>
+
+    Examples:
+      | 初始数量 | CLI 操作           | 状态           |
+      | 2        | 归档另一个成员     | 变为不可点击   |
+      | 1        | 附加一个新目录     | 变为可点击     |
