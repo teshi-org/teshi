@@ -128,9 +128,9 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
     let reopened = Terminal::launch(config).unwrap();
     reopened.expect_text("sample", true, 10000).unwrap();
     reopened.key("4").unwrap();
-    reopened
-        .expect_text(&format!("# {title}"), true, 10000)
-        .unwrap();
+    // A reopened document starts in the rendered preview, which drops the H1 marker.
+    reopened.expect_text("[PREVIEW]", true, 10000).unwrap();
+    reopened.expect_text(title, true, 10000).unwrap();
     assert_tree_title(&reopened, title);
     reopened.key("ctrl+q").unwrap();
     reopened.expect_exit(0, 10000).unwrap();

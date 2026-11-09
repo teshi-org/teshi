@@ -8488,7 +8488,11 @@ impl App {
             return self.command_line_action(action);
         }
         if self.is_requirements_editor_active()
-            && self.authoring_ui.editor_mode == crate::authoring_tab::RequirementsEditorMode::Browse
+            && matches!(
+                self.authoring_ui.editor_mode,
+                crate::authoring_tab::RequirementsEditorMode::Browse
+                    | crate::authoring_tab::RequirementsEditorMode::Preview
+            )
             && matches!(
                 action,
                 Action::Insert(_)
@@ -9391,6 +9395,11 @@ impl App {
                         crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
                             self.authoring_ui.move_linked_selection(-1);
                         }
+                        crate::authoring_tab::RequirementsFocus::Editor
+                            if self.authoring_ui.is_previewing() =>
+                        {
+                            self.authoring_ui.scroll_preview(-1);
+                        }
                         crate::authoring_tab::RequirementsFocus::Editor => {
                             self.authoring_ui.move_cursor_vertical(-1);
                             self.authoring_ui.extend_visual_selection();
@@ -9433,6 +9442,11 @@ impl App {
                         }
                         crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
                             self.authoring_ui.move_linked_selection(1);
+                        }
+                        crate::authoring_tab::RequirementsFocus::Editor
+                            if self.authoring_ui.is_previewing() =>
+                        {
+                            self.authoring_ui.scroll_preview(1);
                         }
                         crate::authoring_tab::RequirementsFocus::Editor => {
                             self.authoring_ui.move_cursor_vertical(1);
@@ -9759,6 +9773,16 @@ impl App {
                     self.authoring_ui.exit_insert_mode();
                 }
                 self.pending_char = None;
+            }
+            Action::ReqEnterEditView => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.enter_edit_view();
+                }
+            }
+            Action::ReqEnterPreview => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.enter_preview();
+                }
             }
             Action::ReqVimAppend => {
                 if self.is_requirements_editor_active() {
@@ -11377,6 +11401,11 @@ impl App {
                 crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
                     self.authoring_ui.move_linked_selection(delta)
                 }
+                crate::authoring_tab::RequirementsFocus::Editor
+                    if self.authoring_ui.is_previewing() =>
+                {
+                    self.authoring_ui.scroll_preview(delta);
+                }
                 crate::authoring_tab::RequirementsFocus::Editor => {
                     if end {
                         self.authoring_ui.vim_go_bottom();
@@ -11479,6 +11508,8 @@ impl App {
             .select_document_by_id(&excerpt.document_id);
         self.authoring_ui.highlight_test_point_id = Some(tp_id);
         self.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+        // The excerpt highlight marks source ranges, which only the source view shows.
+        self.authoring_ui.enter_edit_view();
 
         if let Some(artifacts) = self.authoring_ui.artifacts.as_ref()
             && let Some(doc) = artifacts
@@ -12251,7 +12282,9 @@ impl App {
                         }
                     }
                 }
+                // The preview has no source cursor to place or select from.
                 if pane == 1
+                    && !ui.is_previewing()
                     && (matches!(kind, MouseEventKind::Down(MouseButton::Left))
                         || (ui.selection_dragging
                             && matches!(kind, MouseEventKind::Drag(MouseButton::Left))))
@@ -14234,7 +14267,95 @@ mod tests {
             .save_current_document(project.path())
             .unwrap();
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+        // These tests drive the source editor; preview tests switch back explicitly.
+        app.authoring_ui.enter_edit_view();
         (app, project, store)
+    }
+
+    #[test]
+    fn test_requirements_preview_scrolls_without_touching_the_source() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.authoring_ui.enter_preview();
+        app.authoring_ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            std::iter::once("# Req".to_string())
+                .chain((0..80).map(|row| format!("- item {row}")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let original = app.authoring_ui.buffer.as_string();
+        let cursor = (app.authoring_ui.cursor_row, app.authoring_ui.cursor_col);
+        render_test_app(&mut app, 120);
+        assert!(
+            app.authoring_ui.scroll_limits[1][1] > 0,
+            "preview overflows"
+        );
+
+        app.handle_action(Action::MoveDown).unwrap();
+        assert_eq!(app.authoring_ui.preview_scroll, 1);
+        assert_eq!(
+            (app.authoring_ui.cursor_row, app.authoring_ui.cursor_col),
+            cursor,
+            "the source cursor stays"
+        );
+        app.handle_action(Action::NavigateLast).unwrap();
+        assert_eq!(
+            app.authoring_ui.preview_scroll,
+            app.authoring_ui.scroll_limits[1][1]
+        );
+        app.handle_action(Action::NavigateFirst).unwrap();
+        assert_eq!(app.authoring_ui.preview_scroll, 0);
+
+        let pane = app.authoring_ui.pane_areas[1];
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            pane.x + 2,
+            pane.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.authoring_ui.preview_scroll, 3);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x + 2,
+            pane.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.authoring_ui.selection_anchor.is_none());
+        assert!(!app.authoring_ui.selection_dragging);
+
+        app.handle_action(Action::Insert('x')).unwrap();
+        app.handle_action(Action::Backspace).unwrap();
+        assert_eq!(app.authoring_ui.buffer.as_string(), original);
+        assert!(!app.authoring_ui.buffer_dirty);
+    }
+
+    #[test]
+    fn test_requirements_view_switch_keeps_unsaved_edits_without_prompting() {
+        use crate::authoring_tab::{RequirementsEditorMode, RequirementsOverlay};
+        let (mut app, _project, _store) = requirements_test_app();
+        app.authoring_ui.enter_preview();
+        app.handle_action(Action::ReqEnterEditView).unwrap();
+        assert_eq!(app.authoring_ui.editor_mode, RequirementsEditorMode::Browse);
+        app.handle_action(Action::ReqEnterInsert).unwrap();
+        app.handle_action(Action::Insert('!')).unwrap();
+        app.handle_action(Action::ReqExitInsert).unwrap();
+        assert_eq!(app.authoring_ui.editor_mode, RequirementsEditorMode::Browse);
+        let edited = app.authoring_ui.buffer.as_string();
+
+        app.handle_action(Action::ReqEnterPreview).unwrap();
+        assert_eq!(
+            app.authoring_ui.editor_mode,
+            RequirementsEditorMode::Preview
+        );
+        assert_eq!(app.authoring_ui.overlay, RequirementsOverlay::None);
+        assert!(app.authoring_ui.buffer_dirty);
+        render_test_app(&mut app, 120);
+        assert_eq!(app.authoring_ui.buffer.as_string(), edited);
+
+        app.handle_action(Action::ReqEnterEditView).unwrap();
+        assert_eq!(app.authoring_ui.buffer.as_string(), edited);
+        assert!(app.authoring_ui.buffer_dirty);
     }
 
     #[test]

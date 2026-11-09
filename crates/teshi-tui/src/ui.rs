@@ -394,8 +394,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::Ai {
         render_ai_footer(frame, app, footer);
     } else if app.active_tab == MainTab::Requirements {
-        use crate::authoring_tab::RequirementsEditorMode;
+        use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
+        // The mode belongs to the document pane; other panes keep the room for
+        // their own controls.
         let mode = match app.authoring_ui.editor_mode {
+            _ if app.authoring_ui.focus != RequirementsFocus::Editor => "",
+            RequirementsEditorMode::Preview => "[PREVIEW]",
             RequirementsEditorMode::Browse => "[BROWSE]",
             RequirementsEditorMode::Insert => "[INSERT]",
             RequirementsEditorMode::VisualChar => "[VISUAL]",
@@ -5074,8 +5078,22 @@ fn requirements_footer_controls(
     ui: &crate::authoring_tab::AuthoringUiState,
     width: u16,
 ) -> Vec<(&'static str, Action)> {
+    use crate::authoring_tab::RequirementsEditorMode;
     let tree = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
     let label = |full: &'static str, short: &'static str| if width < 100 { short } else { full };
+    // The view switch leads the editor controls; Insert and Visual leave
+    // through Normal mode, so they offer none.
+    let view = match ui.editor_mode {
+        RequirementsEditorMode::Preview => {
+            Some((label(" Edit [e]", " Edit"), Action::ReqEnterEditView))
+        }
+        RequirementsEditorMode::Browse => {
+            Some((label(" Preview [Esc]", " Preview"), Action::ReqEnterPreview))
+        }
+        _ => None,
+    };
+    // A test point is created from selected source text, which the preview lacks.
+    let point = !ui.is_previewing();
     if width < 55 {
         return if tree {
             vec![
@@ -5083,28 +5101,37 @@ fn requirements_footer_controls(
                 (" New", Action::ReqNewDocument),
                 (" Filter", Action::ReqFilterOverlay),
             ]
-        } else {
+        } else if point {
             vec![
                 (" Save", Action::Save),
                 (" New", Action::ReqNewDocument),
                 (" Point", Action::ReqNewTestPoint),
             ]
+        } else {
+            vec![
+                (" Edit", Action::ReqEnterEditView),
+                (" Save", Action::Save),
+                (" New", Action::ReqNewDocument),
+            ]
         };
     }
     if !tree {
-        return vec![
-            (label(" Save [Ctrl+s]", " Save"), Action::Save),
-            (label(" Point [n]", " Point"), Action::ReqNewTestPoint),
-            (
-                label(" Iteration [I]", " Iteration"),
-                Action::ReqEditIteration,
-            ),
-            (
-                label(" Priority [Ctrl+p]", " Priority"),
-                Action::ReqEditPriority,
-            ),
-            (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
-        ];
+        return view
+            .into_iter()
+            .chain([(label(" Save [Ctrl+s]", " Save"), Action::Save)])
+            .chain(point.then_some((label(" Point [n]", " Point"), Action::ReqNewTestPoint)))
+            .chain([
+                (
+                    label(" Iteration [I]", " Iteration"),
+                    Action::ReqEditIteration,
+                ),
+                (
+                    label(" Priority [Ctrl+p]", " Priority"),
+                    Action::ReqEditPriority,
+                ),
+                (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+            ])
+            .collect();
     }
     let mut controls = vec![
         (label(" Scope [o]", " Scope"), Action::ReqProjectScope),
@@ -5319,6 +5346,7 @@ fn render_requirements_editor(
         title
     };
     let (mode, mode_color) = match ui.editor_mode {
+        crate::authoring_tab::RequirementsEditorMode::Preview => ("[PREVIEW]", theme::SUCCESS),
         crate::authoring_tab::RequirementsEditorMode::Browse => ("[BROWSE]", theme::PRIMARY),
         crate::authoring_tab::RequirementsEditorMode::Insert => ("[INSERT]", theme::ACCENT),
         crate::authoring_tab::RequirementsEditorMode::VisualChar => ("[VISUAL]", theme::WARNING),
@@ -5382,19 +5410,11 @@ fn render_requirements_editor(
     }
 
     ui.horizontal_scroll[1] = 0;
-    let image_rows =
-        (ui.editor_mode != crate::authoring_tab::RequirementsEditorMode::Insert).then(|| {
-            if images.as_ref().is_some_and(|images| images.has_pixels()) {
-                REQUIREMENT_IMAGE_ROWS
-            } else {
-                1
-            }
-        });
-    // Adding or removing image rows moves every later line, so follow the
-    // cursor as after a resize.
-    let resized =
-        ui.editor_wrap_width != inner.width as usize || ui.editor_image_rows != image_rows;
-    ui.editor_image_rows = image_rows;
+    if ui.is_previewing() {
+        render_requirement_preview(frame, ui, area, inner, images);
+        return;
+    }
+    let resized = ui.editor_wrap_width != inner.width as usize;
     ui.wrap_editor_rows(inner.width as usize);
     let cursor = (ui.cursor_row, ui.cursor_col);
     let cursor_display_row = ui
@@ -5426,17 +5446,12 @@ fn render_requirements_editor(
         .unwrap_or_default();
 
     let mut lines = Vec::with_capacity(visible_lines);
-    for (index, &(row, start, end)) in ui
+    for &(row, start, end) in ui
         .editor_display_rows
         .iter()
-        .enumerate()
         .skip(scroll_row)
         .take(visible_lines)
     {
-        if let Some(image) = ui.editor_images.get(&index) {
-            lines.push(requirement_image_label(image, inner.width as usize));
-            continue;
-        }
         let line_text = buffer.line(row);
         let mut styled = Line::from(line_text.clone());
 
@@ -5521,9 +5536,6 @@ fn render_requirements_editor(
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-    if let Some(images) = images {
-        place_requirement_images(frame, ui, images, inner, scroll_row);
-    }
     render_requirement_scrollbars(
         frame,
         ui,
@@ -5531,6 +5543,52 @@ fn render_requirements_editor(
         area,
         (inner.width as usize, line_count),
         (0, scroll_row),
+    );
+}
+
+/// Draws the read-only Markdown preview, with images below the lines that reference them.
+fn render_requirement_preview(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::authoring_tab::AuthoringUiState,
+    area: Rect,
+    inner: Rect,
+    images: Option<&mut crate::image_view::InlineImages>,
+) {
+    let image_rows = if images.as_ref().is_some_and(|images| images.has_pixels()) {
+        REQUIREMENT_IMAGE_ROWS
+    } else {
+        1
+    };
+    let total = ui
+        .refresh_preview(inner.width as usize, image_rows)
+        .lines
+        .len();
+    let visible = inner.height as usize;
+    ui.preview_scroll = ui.preview_scroll.min(total.saturating_sub(visible));
+    let scroll = ui.preview_scroll;
+    let preview = ui.preview();
+    let lines: Vec<Line<'static>> = preview
+        .lines
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(index, line)| match preview.images.get(&index) {
+            Some(image) => requirement_image_label(image, inner.width as usize),
+            None => line.clone(),
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    if let Some(images) = images {
+        place_requirement_images(frame, &preview.images, total, images, inner, scroll);
+    }
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        1,
+        area,
+        (inner.width as usize, total),
+        (0, scroll),
     );
 }
 
@@ -5564,21 +5622,22 @@ fn requirement_image_label(
     )
 }
 
-/// Places the visible rows of each image box in the requirement editor.
+/// Places the visible rows of each image box in the requirement preview.
+///
+/// `rows` maps display rows to image rows; `total` is the preview's row count.
 fn place_requirement_images(
     frame: &mut Frame<'_>,
-    ui: &crate::authoring_tab::AuthoringUiState,
+    rows: &std::collections::HashMap<usize, crate::authoring_tab::EditorImageRow>,
+    total: usize,
     images: &mut crate::image_view::InlineImages,
     inner: Rect,
     scroll_row: usize,
 ) {
     use crate::authoring_tab::EditorImageRow;
-    let end = scroll_row
-        .saturating_add(inner.height as usize)
-        .min(ui.editor_display_rows.len());
+    let end = scroll_row.saturating_add(inner.height as usize).min(total);
     let mut index = scroll_row;
     while index < end {
-        let Some(EditorImageRow::Pixels { path, row, size }) = ui.editor_images.get(&index) else {
+        let Some(EditorImageRow::Pixels { path, row, size }) = rows.get(&index) else {
             index += 1;
             continue;
         };
@@ -5586,7 +5645,7 @@ fn place_requirement_images(
         // A run is the visible, consecutive rows of one box.
         while index < end
             && matches!(
-                ui.editor_images.get(&index),
+                rows.get(&index),
                 Some(EditorImageRow::Pixels { path: next, row: next_row, .. })
                     if next == path && usize::from(*next_row) == usize::from(*row) + (index - first)
             )
@@ -7001,9 +7060,15 @@ mod truncate_tests {
         for (focus, mode, expected, first_key) in [
             (
                 RequirementsFocus::Editor,
+                RequirementsEditorMode::Preview,
+                "[PREVIEW] Edit [e] Save [Ctrl+s] Iteration [I] Priority [Ctrl+p] New doc [Ctrl+n]",
+                "[e]",
+            ),
+            (
+                RequirementsFocus::Editor,
                 RequirementsEditorMode::Browse,
-                "[BROWSE] Save [Ctrl+s] Point [n] Iteration [I] Priority [Ctrl+p] New doc [Ctrl+n]",
-                "[Ctrl+s]",
+                "[BROWSE] Preview [Esc] Save [Ctrl+s] Point [n] Iteration [I] Priority [Ctrl+p] New doc [Ctrl+n]",
+                "[Esc]",
             ),
             (
                 RequirementsFocus::Editor,
@@ -7014,7 +7079,7 @@ mod truncate_tests {
             (
                 RequirementsFocus::Tree,
                 RequirementsEditorMode::Browse,
-                "[BROWSE] Scope [o] View [g] Filter [i]",
+                " Scope [o] View [g] Filter [i]",
                 "[Space]",
             ),
         ] {
@@ -7440,6 +7505,7 @@ Feature: Rule only
     #[test]
     fn requirements_editor_scrollbars_reveal_overflow_and_disappear_when_content_fits() {
         let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.editor_mode = crate::authoring_tab::RequirementsEditorMode::Browse;
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
             (0..20)
                 .map(|_| "abcdefghijklmnopqrstuvwxyz")
@@ -7475,6 +7541,49 @@ Feature: Rule only
             ui.pane_bars[1],
             [None, None],
             "a pane that fits leaves no stale hitbox"
+        );
+    }
+
+    #[test]
+    fn requirements_preview_renders_markdown_and_source_view_shows_raw_text() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            "# Title\n\nSome **bold** text\n\n![shot](missing.png)".into(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("terminal");
+        let mut screen = |ui: &mut crate::authoring_tab::AuthoringUiState| {
+            terminal
+                .draw(|frame| {
+                    super::render_requirements_editor(frame, ui, frame.area(), true, None)
+                })
+                .expect("render");
+            let buffer = terminal.backend().buffer();
+            (0..12)
+                .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let preview = screen(&mut ui);
+        assert!(preview.contains("[PREVIEW]"), "{preview}");
+        assert!(
+            preview.contains("Title") && !preview.contains("# Title"),
+            "{preview}"
+        );
+        assert!(preview.contains("Some bold text"), "{preview}");
+        assert!(!preview.contains("**"), "{preview}");
+        assert!(
+            preview.contains("Image not found: missing.png"),
+            "{preview}"
+        );
+
+        ui.editor_mode = crate::authoring_tab::RequirementsEditorMode::Browse;
+        let source = screen(&mut ui);
+        assert!(source.contains("[BROWSE]"), "{source}");
+        assert!(source.contains("# Title"), "{source}");
+        assert!(source.contains("Some **bold** text"), "{source}");
+        assert!(
+            !source.contains("Image not found"),
+            "the source view does not render images: {source}"
         );
     }
 
@@ -7528,6 +7637,7 @@ Feature: Rule only
     #[test]
     fn requirements_editor_wraps_unicode_and_tracks_cursor_after_resize() {
         let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.editor_mode = crate::authoring_tab::RequirementsEditorMode::Browse;
         let original = "ab中文cdefghijklmnop";
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string(original.into());
         ui.cursor_col = original.chars().count();

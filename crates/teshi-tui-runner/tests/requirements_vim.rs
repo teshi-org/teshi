@@ -85,12 +85,18 @@ impl Fixture {
         let terminal = Terminal::launch(self.config.clone()).unwrap();
         terminal.expect_text("sample", true, 10000).unwrap();
         terminal.key("4").unwrap();
+        // Documents open in the rendered preview, which drops the H1 marker.
+        terminal.expect_text("[PREVIEW]", true, 10000).unwrap();
+        terminal.expect_text("Vim acceptance", true, 10000).unwrap();
+        // The tree owns the tab on open; Ctrl+w Right hands the keys to the
+        // editor, and `e` leaves the preview for the source in Normal mode.
+        terminal.key("Ctrl+w").unwrap();
+        terminal.key("Right").unwrap();
+        terminal.key("e").unwrap();
         terminal
             .expect_text("# Vim acceptance", true, 10000)
             .unwrap();
-        // The tree owns the tab on open; Ctrl+w Right hands the keys to the editor.
-        terminal.key("Ctrl+w").unwrap();
-        terminal.key("Right").unwrap();
+        terminal.expect_text("[BROWSE]", true, 10000).unwrap();
         terminal
     }
 
@@ -247,15 +253,15 @@ fn vim_undo_history_does_not_cross_requirement_documents() {
     keys(&terminal, &["j", "0", "x"]);
     fixture.save_exact(&terminal, "first-edited", "# Vim acceptance\n乙🙂尾\n");
     terminal.click_text("Second requirement", 10000).unwrap();
+    terminal.expect_text("second body", true, 10000).unwrap();
+    // Undo must not reach across documents, so `u` in the second document's
+    // source view leaves its body untouched.
+    keys(&terminal, &["Ctrl+w", "Right", "e", "u"]);
     terminal
         .expect_text("# Second requirement", true, 10000)
         .unwrap();
-    keys(&terminal, &["Right", "u"]);
     std::thread::sleep(Duration::from_millis(150));
     fixture.capture(&terminal, "second-undo");
-    terminal
-        .expect_text("# Second requirement", true, 1000)
-        .unwrap();
     terminal.expect_text("second body", true, 1000).unwrap();
     terminal.key("Ctrl+s").unwrap();
     assert_eq!(fs::read_to_string(&second_path).unwrap(), second_body);

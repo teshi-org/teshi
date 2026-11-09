@@ -2633,7 +2633,7 @@ fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u
 /// split. The line's own style is folded into each span, and lines whose style
 /// sets a background are padded to `width` so block surfaces stay rectangular.
 /// A `width` of `0` returns the line unchanged.
-pub(super) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![line];
     }

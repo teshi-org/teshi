@@ -112,7 +112,8 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
 
     open_delete_confirmation(&terminal)?;
     terminal.key("Enter")?;
-    terminal.expect_text("# Document 3", true, 5000)?;
+    // The next document opens in the rendered preview, without the H1 marker.
+    terminal.expect_text("Document 3", true, 5000)?;
     terminal.expect_text("Document 2", false, 5000)?;
     let after = terminal.screen()?;
     assert!(

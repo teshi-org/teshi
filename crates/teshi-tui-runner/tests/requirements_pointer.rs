@@ -165,11 +165,16 @@ impl Fixture {
             return;
         }
         for _ in 0..3 {
-            if terminal.screen().unwrap().contains("╭Current project") {
+            // A focus change repaints asynchronously, so poll the tree title
+            // instead of sampling one frame after a fixed settle.
+            if terminal.expect_text("╭Current project", true, 500).is_ok() {
                 return;
             }
             self.focus(terminal, false);
         }
+        terminal
+            .expect_text("╭Current project", true, 1500)
+            .unwrap();
     }
 
     /// Clicks an editor command such as Save or Iteration.
@@ -205,12 +210,16 @@ impl Fixture {
             return;
         }
         self.focus_tree(terminal);
+        // Each pane paints only when it owns focus, and a focus change repaints
+        // asynchronously: poll the text per pane instead of sampling one frame
+        // per step, so a slow render cannot leave the walk a pane behind.
         for _ in 0..3 {
-            if terminal.screen().unwrap().contains(text) {
+            if terminal.expect_text(text, true, 1000).is_ok() {
                 return;
             }
             self.focus(terminal, true);
         }
+        terminal.expect_text(text, true, 1500).unwrap();
     }
 
     fn launch(&self) -> Terminal {
@@ -219,14 +228,25 @@ impl Fixture {
         terminal.key("4").unwrap();
         // Narrow panes show one column at a time and the tab may open on either
         // the list or the document, so walk forward until the document is drawn.
-        self.reveal(&terminal, "# Alpha requirement");
-        terminal
-            .expect_text("# Alpha requirement", true, 10000)
-            .unwrap();
+        // The document opens in the preview, so its body identifies the editor.
+        self.reveal(&terminal, "alpha first");
+        terminal.expect_text("alpha first", true, 10000).unwrap();
         // The tree owns the tab's shortcuts; tests walk into the editor explicitly.
         self.focus_tree(&terminal);
         self.capture(&terminal, "initial");
         terminal
+    }
+
+    /// Opens the Alpha source in Vim Normal mode with the cursor on its first
+    /// body line, so pointer selection and `i` act on source text.
+    fn edit_alpha_source(&self, terminal: &Terminal) {
+        self.reveal(terminal, "alpha first");
+        terminal.click_text("alpha first", 1500).unwrap();
+        terminal.key("e").unwrap();
+        terminal
+            .expect_text("# Alpha requirement", true, 1500)
+            .unwrap();
+        terminal.click_text("alpha first", 1500).unwrap();
     }
 
     fn capture(&self, terminal: &Terminal, name: &str) -> PathBuf {
@@ -332,24 +352,18 @@ fn filter_and_group(narrow: bool) {
         .expect_text("Filter iteration", true, 1500)
         .unwrap();
     fixture.click(&terminal, "Sprint B", "choose-filter");
-    fixture.reveal(&terminal, "# Beta requirement");
-    terminal
-        .expect_text("# Beta requirement", true, 1500)
-        .unwrap();
+    fixture.reveal(&terminal, "beta body");
+    terminal.expect_text("beta body", true, 1500).unwrap();
     terminal
         .expect_text("Filter iteration", false, 1500)
         .unwrap();
-    terminal
-        .expect_text("# Alpha requirement", false, 1500)
-        .unwrap();
+    terminal.expect_text("alpha first", false, 1500).unwrap();
     // Filter and View are tree commands, so narrow terminals return to the tree.
     fixture.focus_tree(&terminal);
     fixture.click(&terminal, "Filter", "reset-filter");
     fixture.click(&terminal, "All", "choose-all");
-    fixture.reveal(&terminal, "# Beta requirement");
-    terminal
-        .expect_text("# Beta requirement", true, 1500)
-        .unwrap();
+    fixture.reveal(&terminal, "beta body");
+    terminal.expect_text("beta body", true, 1500).unwrap();
     fixture.focus_tree(&terminal);
     fixture.click(&terminal, "View", "group-iterations");
     fixture.reveal(&terminal, "Sprint A");
@@ -359,19 +373,13 @@ fn filter_and_group(narrow: bool) {
     terminal.expect_text("Sprint B", false, 1500).unwrap();
     fixture.click(&terminal, "Filter", "filter-unassigned");
     fixture.click(&terminal, "Unassigned", "choose-unassigned");
-    terminal
-        .expect_text("# Alpha requirement", false, 1500)
-        .unwrap();
-    terminal
-        .expect_text("# Beta requirement", false, 1500)
-        .unwrap();
+    terminal.expect_text("alpha first", false, 1500).unwrap();
+    terminal.expect_text("beta body", false, 1500).unwrap();
     fixture.capture(&terminal, "unassigned-empty-view");
     fixture.click(&terminal, "Filter", "filter-from-empty");
     fixture.click(&terminal, "All", "restore-all-from-empty");
-    fixture.reveal(&terminal, "# Alpha requirement");
-    terminal
-        .expect_text("# Alpha requirement", true, 1500)
-        .unwrap();
+    fixture.reveal(&terminal, "alpha first");
+    terminal.expect_text("alpha first", true, 1500).unwrap();
     assert_eq!(fixture.index().documents.len(), 2);
     fixture.finish(terminal);
 }
@@ -379,13 +387,7 @@ fn filter_and_group(narrow: bool) {
 fn iteration(narrow: bool) {
     let fixture = Fixture::new("iteration-modal", narrow);
     let terminal = fixture.launch();
-    fixture.click_editor_action(
-        &terminal,
-        "# Alpha requirement",
-        "Iteration",
-        "I",
-        "open-iteration",
-    );
+    fixture.click_editor_action(&terminal, "alpha first", "Iteration", "I", "open-iteration");
     terminal.expect_text("Set iteration", true, 1500).unwrap();
     // An underlying tab and row remain visible while the modal owns input.
     terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
@@ -403,7 +405,7 @@ fn iteration(narrow: bool) {
     );
     fixture.click_editor_action(
         &terminal,
-        "# Alpha requirement",
+        "alpha first",
         "Iteration",
         "I",
         "reopen-iteration",
@@ -451,10 +453,8 @@ fn deletion(narrow: bool) {
             .any(|document| document.id == "alpha")
     });
     assert!(!fixture.store.join("alpha.md").exists());
-    fixture.reveal(&terminal, "# Beta requirement");
-    terminal
-        .expect_text("# Beta requirement", true, 1500)
-        .unwrap();
+    fixture.reveal(&terminal, "beta body");
+    terminal.expect_text("beta body", true, 1500).unwrap();
     let points = fixture.points();
     assert_eq!(points.test_points.len(), 2);
     assert!(
@@ -471,7 +471,8 @@ fn deletion(narrow: bool) {
 fn create_point(narrow: bool) {
     let fixture = Fixture::new("selection-point", narrow);
     let terminal = fixture.launch();
-    fixture.reveal(&terminal, "alpha first");
+    // Test points quote source text, which only the source view can select.
+    fixture.edit_alpha_source(&terminal);
     terminal.drag_text("alpha first", 1500).unwrap();
     fixture.capture(&terminal, "source-selection");
     // The compact Points tab shares the button's prefix. Resolve the actual
@@ -504,8 +505,7 @@ fn create_point(narrow: bool) {
 fn dirty_modal(narrow: bool, save: bool) {
     let fixture = Fixture::new(if save { "dirty-save" } else { "dirty-discard" }, narrow);
     let terminal = fixture.launch();
-    fixture.reveal(&terminal, "alpha first");
-    terminal.click_text("alpha first", 1500).unwrap();
+    fixture.edit_alpha_source(&terminal);
     terminal.key("i").unwrap();
     terminal.write("draft ").unwrap();
     terminal.key("Escape").unwrap();
@@ -578,8 +578,7 @@ fn priority_roundtrip(narrow: bool) {
     fixture.click(&terminal, "Cancel", "priority-cancel");
     assert_eq!(fixture.index().documents[0].priority, None);
     // Metadata edits must neither save nor discard the dirty Markdown buffer.
-    fixture.reveal(&terminal, "alpha first");
-    terminal.click_text("alpha first", 1500).unwrap();
+    fixture.edit_alpha_source(&terminal);
     terminal.key("i").unwrap();
     terminal.write("draft ").unwrap();
     terminal.key("Escape").unwrap();

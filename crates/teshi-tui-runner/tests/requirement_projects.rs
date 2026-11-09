@@ -130,9 +130,7 @@ fn project_views_link_existing_sources_and_create_project_owned_documents() {
     assert!(!project.join(".teshi/project.json").exists());
     terminal.key("o").unwrap();
     terminal.expect_text("All projects", true, 10000).unwrap();
-    terminal
-        .expect_text("# Legacy source", true, 10000)
-        .unwrap();
+    terminal.expect_text("Legacy source", true, 10000).unwrap();
     terminal.key("b").unwrap();
     wait_for_project_link(&project, &store, "legacy", true);
     terminal.key("o").unwrap();
@@ -142,9 +140,7 @@ fn project_views_link_existing_sources_and_create_project_owned_documents() {
     terminal
         .expect_text("Current project", true, 10000)
         .unwrap();
-    terminal
-        .expect_text("# Legacy source", true, 10000)
-        .unwrap();
+    terminal.expect_text("Legacy source", true, 10000).unwrap();
     terminal.key("b").unwrap();
     wait_for_project_link(&project, &store, "legacy", false);
     terminal.expect_text("Legacy source", false, 10000).unwrap();
