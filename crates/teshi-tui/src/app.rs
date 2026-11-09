@@ -260,6 +260,10 @@ pub struct AgentThread {
     pub selected_acp_id: Option<String>,
     /// A remembered choice is a preselection, not permission to connect on display.
     pub(crate) backend_selected: bool,
+    /// Approval mode remembered for this conversation's installed ACP agent,
+    /// loaded when the backend is configured. `None` follows the
+    /// application-wide [`App::approval_mode`].
+    pub(crate) acp_approval: Option<teshi_agent::approval::ApprovalMode>,
     selection_root: Option<std::path::PathBuf>,
     selection_warning: Option<String>,
     /// Permission prompt from the external ACP agent, if one is pending.
@@ -319,6 +323,24 @@ impl AgentThread {
     /// Startup backend fallback notice, retained until an explicit selection.
     pub fn selection_warning(&self) -> Option<&str> {
         self.selection_warning.as_deref()
+    }
+
+    /// Per-agent preference file in `kind` beneath the ACP store.
+    ///
+    /// Returns `None` for environment-only launches, which have no installed
+    /// agent identity to key preferences by.
+    pub(crate) fn acp_preference_path(&self, kind: &str) -> Result<Option<std::path::PathBuf>> {
+        let Some(id) = self.selected_acp_id.as_ref() else {
+            return Ok(None);
+        };
+        let root = self
+            .selection_root
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(crate::acp_agents::store_dir)?;
+        // Hex keeps arbitrary agent ids valid as file names on every platform.
+        let key: String = id.bytes().map(|byte| format!("{byte:02x}")).collect();
+        Ok(Some(root.join(kind).join(format!("{key}.json"))))
     }
 
     fn retain_partial_response(&mut self) {
@@ -417,6 +439,7 @@ impl AgentThread {
             profile_id: None,
             selected_acp_id: None,
             backend_selected: false,
+            acp_approval: None,
             selection_root: None,
             selection_warning: None,
             acp_controls_ui: Default::default(),
@@ -3511,25 +3534,28 @@ impl App {
                     executable: std::env::current_exe()?,
                     tools: self.agent_tools(agent_idx),
                 });
-                if let Some(id) = self.agents[agent_idx].selected_acp_id.as_ref() {
-                    let root = self.agents[agent_idx]
-                        .selection_root
-                        .clone()
-                        .map(Ok)
-                        .unwrap_or_else(crate::acp_agents::store_dir)?;
-                    let key: String = id
-                        .as_bytes()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect();
-                    config.model_preference_path =
-                        Some(root.join("model-preferences").join(format!("{key}.json")));
+                let thread = &self.agents[agent_idx];
+                config.model_preference_path = thread.acp_preference_path("model-preferences")?;
+                config.option_preferences_path = thread.acp_preference_path("session-options")?;
+                let approval_path = thread.acp_preference_path("approval-preferences")?;
+                // Reload on every configuration so a conversation that switched
+                // agents never keeps the previous agent's approval mode.
+                self.agents[agent_idx].acp_approval = None;
+                if let Some(path) = approval_path {
+                    match crate::acp_controls::read_approval_preference(&path) {
+                        Ok(mode) => self.agents[agent_idx].acp_approval = mode,
+                        // A corrupt file falls back visibly and is kept for repair.
+                        Err(error) => {
+                            self.status =
+                                format!("ACP approval preference could not be restored: {error}")
+                        }
+                    }
                 }
                 config.auth_method = std::env::var("TESHI_ACP_AUTH_METHOD").ok();
                 // The approval badge drives the ACP permission policy: Manual
                 // prompts through a PermissionHost (Zed-style allow/reject
                 // list), Auto and Bypass answer inside the ACP client.
-                match self.approval_mode {
+                match self.thread_approval_mode(agent_idx) {
                     teshi_agent::approval::ApprovalMode::Manual => {
                         config.permission_policy = teshi_acp::PermissionPolicy::Manual;
                         config.permission_host =
@@ -4385,7 +4411,10 @@ impl App {
             .map_err(|error| error.to_string());
             if result.is_ok() && self.pending_agent_changes.len() > pending_before {
                 self.agents[agent_idx].backend.defer_host_tool(request);
-                if self.approval_mode.requires_manual_approval() {
+                if self
+                    .thread_approval_mode(agent_idx)
+                    .requires_manual_approval()
+                {
                     self.agents[agent_idx].status = AiStatus::AwaitingApproval;
                 } else {
                     while self.has_agent_change_prompt() {
@@ -8752,17 +8781,8 @@ impl App {
                 }
                 Action::ApprovalPanelSelect => {
                     use teshi_agent::approval::ApprovalMode;
-                    let modes = ApprovalMode::ALL;
-                    if let Some(&mode) = modes.get(self.approval_panel_selection) {
-                        let old = self.approval_mode;
-                        self.approval_mode = mode;
-                        self.approval_panel_active = false;
-                        self.status = format!(
-                            "Approval: {} → {} ({})",
-                            old.display_name(),
-                            mode.display_name(),
-                            mode.description()
-                        );
+                    if let Some(&mode) = ApprovalMode::ALL.get(self.approval_panel_selection) {
+                        self.select_approval_mode(mode);
                     }
                     Ok(())
                 }
@@ -12790,25 +12810,17 @@ impl App {
             ClickableRegion::ApprovalBadge { .. } => {
                 // Click opens the approval mode picker panel
                 self.approval_panel_active = true;
+                let current = self.thread_approval_mode(self.selected_agent);
                 self.approval_panel_selection = teshi_agent::approval::ApprovalMode::ALL
                     .iter()
-                    .position(|m| *m == self.approval_mode)
+                    .position(|m| *m == current)
                     .unwrap_or(0);
             }
             ClickableRegion::ApprovalOption { option_idx, .. } => {
                 // Click selects and confirms the option
                 use teshi_agent::approval::ApprovalMode;
-                let modes = ApprovalMode::ALL;
-                if let Some(&mode) = modes.get(*option_idx) {
-                    let old = self.approval_mode;
-                    self.approval_mode = mode;
-                    self.approval_panel_active = false;
-                    self.status = format!(
-                        "Approval: {} → {} ({})",
-                        old.display_name(),
-                        mode.display_name(),
-                        mode.description()
-                    );
+                if let Some(&mode) = ApprovalMode::ALL.get(*option_idx) {
+                    self.select_approval_mode(mode);
                 }
             }
             ClickableRegion::EditorPanel | ClickableRegion::PreviewPanel => {}
@@ -13720,9 +13732,10 @@ impl App {
         }
         if command == "approval local" {
             self.approval_panel_active = true;
+            let current = self.thread_approval_mode(self.selected_agent);
             self.approval_panel_selection = teshi_agent::approval::ApprovalMode::ALL
                 .iter()
-                .position(|m| *m == self.approval_mode)
+                .position(|m| *m == current)
                 .unwrap_or(0);
             self.status = "Approval mode".to_string();
             return Ok(());
@@ -16250,6 +16263,80 @@ mod tests {
         assert!(app.status.contains("unavailable"));
         app.select_backend(None);
         assert!(app.agent().selection_warning().is_none());
+    }
+
+    #[test]
+    fn approval_mode_is_remembered_per_agent_without_rewriting_open_conversations() {
+        use teshi_agent::approval::ApprovalMode;
+        let (mut app, _project, _store) = slash_test_app();
+        let root = tempdir().unwrap();
+        for id in ["alpha", "beta"] {
+            teshi_acp::profile::upsert(
+                root.path(),
+                crate::acp_agents::InstalledAgent {
+                    id: id.into(),
+                    name: id.into(),
+                    program: if cfg!(windows) { "python" } else { "python3" }.into(),
+                    args: vec![],
+                    env: Default::default(),
+                    env_from: Default::default(),
+                },
+            )
+            .unwrap();
+        }
+        let open = |app: &mut App, id: &str| {
+            let mut thread = AgentThread::new_with_backend(
+                app.agents.len(),
+                id,
+                teshi_agent::backend::AgentBackendKind::Acp,
+            );
+            thread.selection_root = Some(root.path().into());
+            thread.selected_acp_id = Some(id.into());
+            app.agents.push(thread);
+            let index = app.agents.len() - 1;
+            assert!(app.ensure_agent_backend(index), "{}", app.status);
+            index
+        };
+        app.agents.clear();
+        let first = open(&mut app, "alpha");
+        assert_eq!(app.thread_approval_mode(first), ApprovalMode::Manual);
+        app.selected_agent = first;
+        app.select_approval_mode(ApprovalMode::Auto);
+        assert_eq!(
+            app.approval_mode,
+            ApprovalMode::Manual,
+            "global mode unchanged"
+        );
+        assert!(
+            root.path()
+                .join("approval-preferences/616c706861.json")
+                .exists()
+        );
+        let second = open(&mut app, "alpha");
+        assert_eq!(app.thread_approval_mode(second), ApprovalMode::Auto);
+        let other = open(&mut app, "beta");
+        assert_eq!(app.thread_approval_mode(other), ApprovalMode::Manual);
+        app.selected_agent = second;
+        app.select_approval_mode(ApprovalMode::Bypass);
+        assert_eq!(
+            app.thread_approval_mode(first),
+            ApprovalMode::Auto,
+            "an open conversation keeps its current mode"
+        );
+        let later = open(&mut app, "alpha");
+        assert_eq!(app.thread_approval_mode(later), ApprovalMode::Bypass);
+        std::fs::write(
+            root.path().join("approval-preferences/62657461.json"),
+            "not json",
+        )
+        .unwrap();
+        let corrupt = open(&mut app, "beta");
+        assert_eq!(app.thread_approval_mode(corrupt), ApprovalMode::Manual);
+        assert!(
+            app.status.contains("could not be restored"),
+            "{}",
+            app.status
+        );
     }
 
     #[test]
