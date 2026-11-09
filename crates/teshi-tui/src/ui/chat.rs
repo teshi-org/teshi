@@ -123,7 +123,7 @@ type CachedActivity = (
 /// Cached immutable message layouts, shared by drawing and pointer projection.
 #[derive(Default)]
 pub(crate) struct ChatLayoutCache {
-    context: (usize, usize, bool, u64, Option<usize>),
+    context: (usize, usize, bool, u64, Vec<usize>),
     activities: std::collections::HashMap<usize, CachedActivity>,
     entries: std::collections::HashMap<usize, (AiChatMessage, ChatProjection)>,
 }
@@ -1289,18 +1289,25 @@ fn build_chat_projection(
     }
 
     let messages = agent.messages();
-    let completed = agent.completed_answer.filter(|index| {
-        messages
-            .get(*index)
-            .is_some_and(|message| message.role == AiRole::Assistant)
-    });
+    let completed: Vec<usize> = agent
+        .completed_answers
+        .iter()
+        .copied()
+        .filter(|index| {
+            messages
+                .get(*index)
+                .is_some_and(|message| message.role == AiRole::Assistant)
+        })
+        .collect();
+    // Every finished answer keeps its green rail for good: the mark records the
+    // turn that ended, so later turns must not repaint it as a quiet guide.
     let mut cache = app.chat_layout_cache.borrow_mut();
     let context = (
         app.selected_agent,
         width,
         agent.activity_details_expanded,
         agent.chat.revision,
-        completed,
+        completed.clone(),
     );
     if cache.context != context {
         cache.entries.clear();
@@ -1498,7 +1505,7 @@ fn build_chat_projection(
                         || agent.chat.thoughts.contains(&message_index),
                     show_reasoning: folded_answer != Some(message_index),
                     live: live_thought,
-                    completed: completed == Some(message_index),
+                    completed: completed.contains(&message_index),
                 },
             ),
         };
@@ -1715,12 +1722,12 @@ fn role_header(role: AiRole, source: Option<&str>, completed: bool) -> Line<'sta
 ///
 /// The rail marks the column, not the block state: every row of a block shares one rail
 /// so a turn reads as one column. Only two boundaries change it — the accent bar opens a
-/// user turn, and the green bar marks the newest answer that finished.
+/// user turn, and the green bar marks every answer that finished.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RailKind {
     /// Accent bar that opens a user turn.
     User,
-    /// Green bar on the newest finished answer.
+    /// Green bar on a finished answer.
     Answer,
     /// Quiet thin guide for thinking, tools and unfinished replies.
     Guide,
@@ -1769,7 +1776,7 @@ fn push_railed(
 }
 
 /// How one message is drawn: its thinking open or folded, its reasoning shown, its
-/// stream still running, and whether it is the newest answer that finished.
+/// stream still running, and whether it finished a turn.
 #[derive(Clone, Copy)]
 struct MessageDisplay {
     expanded: bool,
@@ -2848,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_finished_answer_carries_one_green_check() {
+    fn every_finished_answer_keeps_its_green_rail() {
         let (mut app, _project, _store) = activity_test_app();
         app.agents[0].messages_mut().extend([
             message(AiRole::User, "QUESTION_ONE", None),
@@ -2878,6 +2885,9 @@ mod tests {
                         .find(|span| span.content.contains('✓'))
                         .unwrap();
                     assert_eq!(mark.style.fg, Some(theme::SUCCESS), "completion mark");
+                    let rail = &projection.lines[index].line.spans[0];
+                    assert_eq!(rail.content, RAIL, "finished answers keep the green bar");
+                    assert_eq!(rail.style.fg, Some(theme::SUCCESS), "green bar colour");
                     rows[index + 1..]
                         .iter()
                         .find(|row| !row.is_empty())
@@ -2885,33 +2895,33 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        app.agents[0].completed_answer = Some(3);
+        app.agents[0].completed_answers = [1, 3].into_iter().collect();
         let marked = marks(&app);
         assert_eq!(
             marked.len(),
-            1,
-            "only the newest answer is marked: {marked:?}"
+            2,
+            "each finished answer is marked: {marked:?}"
         );
-        assert!(marked[0].contains("ANSWER_TWO"), "{marked:?}");
+        assert!(marked[0].contains("ANSWER_ONE"), "{marked:?}");
+        assert!(marked[1].contains("ANSWER_TWO"), "{marked:?}");
 
         app.agents[0].status = AiStatus::Waiting;
         let running = marks(&app);
         assert_eq!(
             running.len(),
-            1,
-            "the previous answer keeps its cue during the next turn: {running:?}"
+            2,
+            "finished answers keep their cues during the next turn: {running:?}"
         );
-        assert!(running[0].contains("ANSWER_TWO"), "{running:?}");
 
         app.agents[0].messages_mut().extend([
             message(AiRole::User, "QUESTION_THREE", None),
             message(AiRole::Assistant, "ANSWER_THREE", None),
         ]);
-        app.agents[0].completed_answer = Some(5);
+        app.agents[0].completed_answers.insert(5);
         app.agents[0].status = AiStatus::Idle;
         let newest = marks(&app);
-        assert_eq!(newest.len(), 1, "{newest:?}");
-        assert!(newest[0].contains("ANSWER_THREE"), "{newest:?}");
+        assert_eq!(newest.len(), 3, "{newest:?}");
+        assert!(newest[2].contains("ANSWER_THREE"), "{newest:?}");
 
         app.agents[0].messages_mut().extend([
             message(AiRole::User, "QUESTION_FOUR", None),
@@ -2919,10 +2929,10 @@ mod tests {
         ]);
         app.agents[0].last_finish_reason = Some("cancelled".into());
         let cancelled = marks(&app);
-        assert_eq!(cancelled.len(), 1, "{cancelled:?}");
+        assert_eq!(cancelled.len(), 3, "{cancelled:?}");
         assert!(
-            cancelled[0].contains("ANSWER_THREE"),
-            "a cancelled turn keeps the previous marker: {cancelled:?}"
+            !cancelled.iter().any(|row| row.contains("CANCELLED_ANSWER")),
+            "a cancelled turn earns no marker: {cancelled:?}"
         );
     }
 
@@ -2982,7 +2992,7 @@ mod tests {
         app.agents[0]
             .messages_mut()
             .push(message(AiRole::Assistant, "first answer", None));
-        app.agents[0].completed_answer = Some(0);
+        app.agents[0].completed_answers.insert(0);
         app.agents[0].status = AiStatus::Waiting;
         app.agents[0]
             .partial_response_mut()
@@ -3307,7 +3317,7 @@ mod tests {
             ),
             message(AiRole::Assistant, "ANSWER_BODY", None),
         ]);
-        app.agents[0].completed_answer = Some(1);
+        app.agents[0].completed_answers.insert(1);
         for width in [24, 48, 80] {
             let projection = build_chat_projection(&app, width, 40, ChatPlacement::Tab);
             let rows: Vec<_> = projection
@@ -4034,7 +4044,7 @@ mod tests {
             call,
             message(AiRole::Assistant, "ANSWER", None),
         ]);
-        app.agents[0].completed_answer = Some(3);
+        app.agents[0].completed_answers.insert(3);
 
         let lines = build_chat_lines(&app, 72, 40, ChatPlacement::Tab);
         let rows = row_texts(&lines);

@@ -28,9 +28,33 @@ pub struct Session {
     /// Unsent drafts survive restart, but are never automatically sent on restore.
     #[serde(default)]
     pub pending_messages: std::collections::VecDeque<String>,
-    /// Latest assistant answer that completed a normal turn.
-    #[serde(default)]
-    pub completed_answer: Option<usize>,
+    /// Assistant answers that completed a normal turn.
+    ///
+    /// Sessions written before this list existed stored one `completed_answer`
+    /// (an index or `null`); accepting that shape keeps their green bar alive
+    /// when an old conversation is loaded.
+    #[serde(
+        default,
+        alias = "completed_answer",
+        deserialize_with = "completed_answers_compat"
+    )]
+    pub completed_answers: Vec<usize>,
+}
+
+fn completed_answers_compat<'de, D>(deserializer: D) -> Result<Vec<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Shape {
+        One(Option<usize>),
+        Many(Vec<usize>),
+    }
+    Ok(match Shape::deserialize(deserializer)? {
+        Shape::One(index) => index.into_iter().collect(),
+        Shape::Many(indices) => indices,
+    })
 }
 
 impl Session {
@@ -91,7 +115,7 @@ impl Session {
             backend_kind: None,
             acp_agent_id: None,
             pending_messages: Default::default(),
-            completed_answer: None,
+            completed_answers: Vec::new(),
         }
     }
 
@@ -150,6 +174,35 @@ mod tests {
         assert!(session.project_root.is_none());
         assert!(session.backend_kind.is_none());
         assert!(session.acp_agent_id.is_none());
+    }
+
+    #[test]
+    fn single_answer_marker_from_older_sessions_still_loads() {
+        let session: super::Session = serde_json::from_value(serde_json::json!({
+            "id": "old", "created_at": "1", "updated_at": "1", "model_label": null,
+            "message_count": 0, "messages": [], "completed_answer": 16
+        }))
+        .unwrap();
+        assert_eq!(session.completed_answers, vec![16]);
+
+        let idle: super::Session = serde_json::from_value(serde_json::json!({
+            "id": "old", "created_at": "1", "updated_at": "1", "model_label": null,
+            "message_count": 0, "messages": [], "completed_answer": null
+        }))
+        .unwrap();
+        assert!(idle.completed_answers.is_empty());
+    }
+
+    #[test]
+    fn answer_marker_list_round_trips() {
+        let session: super::Session = serde_json::from_value(serde_json::json!({
+            "id": "new", "created_at": "1", "updated_at": "1", "model_label": null,
+            "message_count": 0, "messages": [], "completed_answers": [1, 3]
+        }))
+        .unwrap();
+        assert_eq!(session.completed_answers, vec![1, 3]);
+        let json = serde_json::to_value(&session).unwrap();
+        assert_eq!(json["completed_answers"], serde_json::json!([1, 3]));
     }
 
     #[test]

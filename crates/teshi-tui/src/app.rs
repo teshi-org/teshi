@@ -172,11 +172,11 @@ pub struct AgentThread {
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
     /// Finish reason from the most recent production model response.
     pub last_finish_reason: Option<String>,
-    /// Index of the latest assistant message that completed a normal turn.
+    /// Indices of assistant messages that finished a normal turn.
     ///
-    /// Kept on the thread rather than derived from the live status so the
-    /// completion cue survives into the next running turn.
-    pub completed_answer: Option<usize>,
+    /// Kept on the thread rather than derived from the live status so every
+    /// finished answer keeps its completion cue as the conversation continues.
+    pub completed_answers: std::collections::BTreeSet<usize>,
     saved_session: Option<crate::session::Session>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
@@ -321,7 +321,7 @@ impl AgentThread {
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
-            completed_answer: None,
+            completed_answers: Default::default(),
             saved_session: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
@@ -371,6 +371,9 @@ impl AgentThread {
             &self.selected_acp_id,
             &model,
             project,
+            // A turn can finish without touching the transcript: the final
+            // answer is already streamed in, only its mark is new.
+            &self.completed_answers,
         ))?;
         if snapshot == self.last_session_snapshot {
             return Ok(());
@@ -390,7 +393,7 @@ impl AgentThread {
         }
         session.backend_kind = Some(self.backend_kind());
         session.acp_agent_id = self.selected_acp_id.clone();
-        session.completed_answer = self.completed_answer;
+        session.completed_answers = self.completed_answers.iter().copied().collect();
         session.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -3655,9 +3658,10 @@ impl App {
                             )
                         );
                         self.agents[i].last_finish_reason = finish_reason;
-                        if completed_normally {
-                            self.agents[i].completed_answer =
-                                latest_answer_index(self.agents[i].messages());
+                        if completed_normally
+                            && let Some(index) = latest_answer_index(self.agents[i].messages())
+                        {
+                            self.agents[i].completed_answers.insert(index);
                         }
                         let interrupted = matches!(
                             self.agents[i].last_finish_reason.as_deref(),
@@ -5632,15 +5636,14 @@ impl App {
             chat.thoughts.clear();
             chat.groups.clear();
             chat.revision += 1;
-            // Draining removed messages shifts every later index; a marker on
-            // a removed turn disappears, later ones move with the summary slot.
-            if let Some(index) = self.agents[agent_idx].completed_answer {
-                self.agents[agent_idx].completed_answer = if index < compact_end {
-                    None
-                } else {
-                    Some(index - compact_end + 1)
-                };
-            }
+            // Draining removed messages shifts every later index; a mark on a
+            // removed turn disappears, later ones move with the summary slot.
+            let marks = &mut self.agents[agent_idx].completed_answers;
+            *marks = marks
+                .iter()
+                .filter(|index| **index >= compact_end)
+                .map(|index| *index - compact_end + 1)
+                .collect();
             self.agents[agent_idx].last_input_tokens = None;
             self.status_message = Some(format!(
                 "Context compacted: {removed_count} message(s) → summary ({} token window)",
@@ -13707,7 +13710,7 @@ impl App {
             queue: session.pending_messages.clone(),
             ..Default::default()
         };
-        agent.completed_answer = session.completed_answer;
+        agent.completed_answers = session.completed_answers.iter().copied().collect();
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
         agent.tool_status = None;
@@ -15392,6 +15395,9 @@ mod tests {
             activity: None,
         });
         agent.partial_response_mut().push_str("unfinished");
+        // The partial reply becomes assistant message 1; the mark must survive
+        // the checkpoint round trip.
+        agent.completed_answers = [1].into_iter().collect();
         agent
             .save_session_to(root.path(), project.path(), None)
             .unwrap();
@@ -15399,6 +15405,7 @@ mod tests {
         let path = root.path().join(format!("{id}.json"));
         let first = crate::session::Session::load_from_file(&path).unwrap();
         assert_eq!(first.messages.last().unwrap().content, "unfinished");
+        assert_eq!(first.completed_answers, vec![1]);
         assert_eq!(first.acp_agent_id.as_deref(), Some("example"));
         assert_eq!(first.project_root.as_deref(), Some(project.path()));
         agent.partial_response_mut().push_str(" reply");
@@ -15448,6 +15455,54 @@ mod tests {
         );
         assert_eq!(app.agent().selected_acp_id.as_deref(), Some("example"));
         assert_eq!(app.agent().saved_session.as_ref().unwrap().id, id);
+        assert_eq!(app.agent().completed_answers, [1].into_iter().collect());
+    }
+
+    #[test]
+    fn a_new_completion_mark_is_checkpointed_without_a_new_message() {
+        let root = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let mut agent = AgentThread::new_with_backend(
+            1,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        for (role, content) in [(AiRole::User, "question"), (AiRole::Assistant, "answer")] {
+            agent.messages_mut().push(super::AiChatMessage {
+                role,
+                content: content.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            });
+        }
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        let id = agent.saved_session.as_ref().unwrap().id.clone();
+        let path = root.path().join(format!("{id}.json"));
+        assert!(
+            crate::session::Session::load_from_file(&path)
+                .unwrap()
+                .completed_answers
+                .is_empty(),
+            "the transcript checkpoint carries no mark yet"
+        );
+
+        // The turn ends after the answer was already checkpointed, so the mark
+        // is the only thing that changed.
+        agent.completed_answers.insert(1);
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        assert_eq!(
+            crate::session::Session::load_from_file(&path)
+                .unwrap()
+                .completed_answers,
+            vec![1]
+        );
     }
 
     #[test]
