@@ -35,6 +35,7 @@ Each rule has a unique `name` and exactly one executor:
 | `builtin = "tui"` | The packaged `teshi-tui-runner` for `.tui.json` sidecars (`TESHI_TUI_RUNNER` overrides its path) |
 | `builtin = "browser"` | `teshi browser replay` of confirmed web bindings, one process per scenario |
 | `builtin = "winapp"` | `teshi winapp replay` of confirmed Windows UI bindings, one process per scenario |
+| `builtin = "manual"` | Nothing runs; each scenario is reported as `case_skipped` with reason `manual verification required`, so manual scenarios have an owner without counting as passed or failed |
 | `cmd` (+ `args`, `cwd`, `env`) | An external process that speaks protocol v1 |
 
 A relative `cmd` that contains a path separator (`target/debug/my-runner`) is

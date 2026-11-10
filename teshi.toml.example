@@ -2,7 +2,7 @@
 # must match exactly one [[runners]] rule; otherwise the run is rejected before
 # anything starts. Check routing with `teshi run --explain`.
 #
-# A rule declares either `builtin` (dispatch | tui | browser | winapp) or an
+# A rule declares either `builtin` (dispatch | tui | browser | winapp | manual) or an
 # external `cmd` that speaks runner protocol v1 (see doc/runner-protocol.md).
 # Matching uses the effective tags (Feature + Scenario) and/or `/`-separated
 # path globs relative to this file's directory; `exclude_tags` and

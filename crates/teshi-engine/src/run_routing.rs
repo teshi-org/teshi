@@ -32,10 +32,18 @@ pub enum BuiltinExecutor {
     Browser,
     /// `teshi winapp replay` of confirmed Windows UI bindings, one scenario at a time.
     Winapp,
+    /// Scenarios verified by a person; reported as skipped, never executed.
+    Manual,
 }
 
 impl BuiltinExecutor {
-    const ALL: [Self; 4] = [Self::Dispatch, Self::Tui, Self::Browser, Self::Winapp];
+    const ALL: [Self; 5] = [
+        Self::Dispatch,
+        Self::Tui,
+        Self::Browser,
+        Self::Winapp,
+        Self::Manual,
+    ];
 
     fn parse(name: &str) -> Option<Self> {
         Self::ALL
@@ -51,6 +59,7 @@ impl BuiltinExecutor {
             Self::Tui => "tui",
             Self::Browser => "browser",
             Self::Winapp => "winapp",
+            Self::Manual => "manual",
         }
     }
 }
@@ -348,7 +357,7 @@ fn build_rule(project_root: &Path, rule: RuleToml) -> Result<RunnerRule, RouteCo
                 invalid(
                     &name,
                     format!(
-                        "unknown builtin `{builtin}` (expected dispatch, tui, browser or winapp)"
+                        "unknown builtin `{builtin}` (expected dispatch, tui, browser, winapp or manual)"
                     ),
                 )
             })?;

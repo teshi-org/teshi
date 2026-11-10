@@ -33,6 +33,8 @@ pub enum Executor {
     Dispatch,
     /// An external protocol process, including the built-in TUI runner.
     Process(RunnerConfig),
+    /// Manually verified scenarios, reported as skipped without running.
+    Manual,
     /// `teshi browser|winapp replay`, started once per scenario.
     Replay {
         /// Replay family (`browser` or `winapp` subcommand).
@@ -309,6 +311,7 @@ pub fn executor_for(kind: &RunnerKind) -> Executor {
         RunnerKind::Builtin(BuiltinExecutor::Tui) => Executor::Process(tui_runner_config(None)),
         RunnerKind::Builtin(BuiltinExecutor::Browser) => replay_executor(ReplayTarget::Browser),
         RunnerKind::Builtin(BuiltinExecutor::Winapp) => replay_executor(ReplayTarget::Winapp),
+        RunnerKind::Builtin(BuiltinExecutor::Manual) => Executor::Manual,
         RunnerKind::External {
             cmd,
             args,
@@ -1727,6 +1730,7 @@ fn spawn_batch(
             meta.insert("runner_name".into(), batch.name.clone());
             spawn_runner_with_control(config.clone(), RunRequest::run(batch.cases.clone(), meta))
         }
+        Executor::Manual => Ok(spawn_manual_batch(batch.cases.clone())),
         Executor::Replay { target, program } => Ok(spawn_replay_batch(
             *target,
             program.clone(),
@@ -1734,6 +1738,31 @@ fn spawn_batch(
             batch.cases.clone(),
         )),
     }
+}
+
+/// Reason reported for every scenario routed to `builtin = "manual"`.
+pub const MANUAL_SKIP_REASON: &str = "manual verification required";
+
+/// Reports each manual case as skipped: it has an owner, so the run is not
+/// rejected as unrouted, but nothing claims it was verified.
+fn spawn_manual_batch(cases: Vec<RunCase>) -> (Receiver<RunEvent>, Sender<()>) {
+    let (tx, rx) = mpsc::channel();
+    let (cancel_tx, _cancel_rx) = mpsc::channel();
+    for case in cases {
+        let _ = tx.send(RunEvent::StartCase {
+            case_id: case.id.clone(),
+            name: Some(case.scenario),
+        });
+        let _ = tx.send(RunEvent::CaseSkipped {
+            case_id: case.id,
+            reason: Some(MANUAL_SKIP_REASON.into()),
+        });
+    }
+    let _ = tx.send(RunEvent::RunnerExit {
+        code: None,
+        success: true,
+    });
+    (rx, cancel_tx)
 }
 
 fn replay_executor(target: ReplayTarget) -> Executor {
@@ -2512,6 +2541,28 @@ mod protocol_tests {
             matches!(
                 events.last(),
                 Some(RunEvent::RunnerExit { success: false, .. })
+            ),
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_manual_cases_are_skipped_without_failing_the_run() {
+        let mut manual = child_batch("manual", "unused", "m");
+        manual.executor = Executor::Manual;
+        let events = run_batches(vec![manual]);
+        assert!(
+            events.iter().any(
+                |event| matches!(event, RunEvent::CaseSkipped { case_id, reason }
+                if case_id == "m" && reason.as_deref() == Some(MANUAL_SKIP_REASON))
+            ),
+            "events: {events:?}"
+        );
+        assert_eq!(end_run(&events), (0, 0, 1, 0), "events: {events:?}");
+        assert!(
+            matches!(
+                events.last(),
+                Some(RunEvent::RunnerExit { success: true, .. })
             ),
             "events: {events:?}"
         );
