@@ -109,8 +109,15 @@ fn run_locale(locale: &str) {
         output.status.success(),
         "{locale}: teshi run exited unsuccessfully.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(
-        combined.contains("end_run passed=17 failed=0 skipped=0"),
+    let summary = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "end_run");
+    assert_eq!(
+        summary
+            .as_ref()
+            .map(|s| (&s["passed"], &s["failed"], &s["skipped"])),
+        Some((&17.into(), &0.into(), &0.into())),
         "{locale}: validation E2E failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(

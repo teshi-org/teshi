@@ -1438,6 +1438,40 @@ fn heal_execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
 }
 
 fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
+    let Some(case_id) = args.emit_runner_protocol.as_deref() else {
+        return replay_steps(project_root, args, None);
+    };
+    let emitter = super::replay_protocol::CaseEmitter::new(case_id);
+    // An unreachable browser is classified before any step runs, so it is
+    // reported as blocked rather than as a failing assertion.
+    match doctor_endpoint(project_root) {
+        Err(error) => {
+            emitter.blocked(
+                super::replay_protocol::TARGET_UNCONFIGURED,
+                &format!("no browser endpoint for this project: {error:#}"),
+            );
+            return Ok(());
+        }
+        Ok(report) if !report.ok => {
+            let reason = report
+                .error
+                .unwrap_or_else(|| format!("browser target unreachable at {}", report.ws_url));
+            emitter.blocked(super::replay_protocol::TARGET_UNAVAILABLE, &reason);
+            return Ok(());
+        }
+        Ok(_) => {}
+    }
+    let result = replay_steps(project_root, args, Some(&emitter));
+    emitter.finish(&result);
+    Ok(())
+}
+
+fn replay_steps(
+    project_root: &Path,
+    args: &BrowserReplayArgs,
+    emitter: Option<&super::replay_protocol::CaseEmitter>,
+) -> Result<()> {
+    let protocol = emitter.is_some();
     let feature = match args.feature.as_deref() {
         Some(feature) => feature.replace('\\', "/"),
         None => {
@@ -1477,14 +1511,14 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
 
     let capture_replay_screenshots = replay_screenshots_supported(project_root, args)?;
     if !args.dry_run && !capture_replay_screenshots {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
+        super::replay_protocol::progress(
+            protocol,
+            &serde_json::to_string(&json!({
                 "event": "replay_screenshots_skipped",
                 "reason": "broker_capability_unavailable",
                 "required_feature": "p1.observability_artifacts",
                 "message": "Capture unavailable; replay will retain test results but cannot pass evidence acceptance"
-            }))?
+            }))?,
         );
     }
 
@@ -1514,9 +1548,9 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     let non_interactive = args.non_interactive || args.yes;
     for (idx, planned) in steps.iter().enumerate() {
         let step = &planned.binding;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
+        super::replay_protocol::progress(
+            protocol,
+            &serde_json::to_string_pretty(&json!({
                 "index": idx + 1,
                 "total": steps.len(),
                 "step_line": step.step_line,
@@ -1524,10 +1558,16 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 "action": step.primary.action,
                 "target": step.primary.value,
                 "value_arg": step.primary.value_arg
-            }))?
+            }))?,
         );
         if args.dry_run {
             continue;
+        }
+        if let Some(emitter) = emitter {
+            emitter.start_step(
+                step.step_line,
+                &format!("{} {}", step.step_keyword, step.step_text),
+            );
         }
         if !non_interactive {
             prompt_continue(step)?;
@@ -1673,14 +1713,14 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if !args.dry_run && capture_replay_screenshots {
             match before_capture.unwrap_or_else(capture_frame) {
                 Ok(entry) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&json!({
+                    super::replay_protocol::progress(
+                        protocol,
+                        &serde_json::to_string(&json!({
                             "event": "replay_screenshot",
                             "step_line": entry.step_line,
                             "screenshot_file": entry.screenshot_file,
                             "screenshots_dir": screenshot_dir.to_string_lossy(),
-                        }))?
+                        }))?,
                     );
                     screenshot_entries.push(entry);
                 }
@@ -1712,6 +1752,11 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                     .filter(|entry| entry.step_line == step.step_line),
             )?;
         }
+        if let Some(emitter) = emitter {
+            let outcome = ensure_ok(&response);
+            let message = outcome.as_ref().err().map(ToString::to_string);
+            emitter.end_step(step.step_line, outcome.is_ok(), message.as_deref());
+        }
         ensure_ok(&response).with_context(|| {
             format!(
                 "replay failed at line {}: {} {}",
@@ -1738,16 +1783,16 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     }
 
     if !args.dry_run {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
+        super::replay_protocol::progress(
+            protocol,
+            &serde_json::to_string(&json!({
                 "event": "replay_complete", "steps_replayed": steps.len(),
                 "status":evidence.as_ref().map(|run|&run.snapshot().status),
                 "test_status":evidence.as_ref().map(|run|&run.snapshot().test_status),
                 "evidence":evidence.as_ref().map(|run|&run.snapshot().evidence),
                 "scenario": args.scenario,
                 "screenshots_dir": screenshot_dir.to_string_lossy(),
-            }))?
+            }))?,
         );
     }
 
@@ -2414,6 +2459,7 @@ mod tests {
                 tab: Some(2),
                 lease_token: Some("lease".into()),
             },
+            emit_runner_protocol: None,
         };
         assert!(!replay_screenshots_supported(temp.path(), &args).unwrap());
     }
@@ -2470,6 +2516,7 @@ mod tests {
                 tab: None,
                 lease_token: None,
             },
+            emit_runner_protocol: None,
         };
         assert!(
             replay(temp.path(), &args)
@@ -2502,6 +2549,7 @@ mod tests {
                 tab: Some(2),
                 lease_token: Some("lease".into()),
             },
+            emit_runner_protocol: None,
         };
         assert!(replay_screenshots_supported(temp.path(), &args).unwrap());
     }

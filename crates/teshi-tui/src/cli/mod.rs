@@ -11,6 +11,7 @@ pub mod install_skill;
 pub mod locator_verify;
 pub mod mcp;
 pub(crate) mod replay_plan;
+pub(crate) mod replay_protocol;
 pub mod replay_screenshots;
 pub mod requirements;
 pub mod steps;
@@ -1429,6 +1430,10 @@ pub struct BrowserReplayArgs {
     pub yes: bool,
     #[command(flatten)]
     pub target: BrowserTargetArgs,
+    /// Report this replay as runner protocol case events for CASE_ID on
+    /// stdout (used by the `builtin = "browser"` runner); progress goes to stderr
+    #[arg(long, value_name = "CASE_ID", hide = true)]
+    pub emit_runner_protocol: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2058,6 +2063,9 @@ pub struct WinAppReplayArgs {
     /// Feature path relative to project root; defaults to active step feature
     #[arg(long)]
     pub feature: Option<String>,
+    /// Replay one named scenario, including its background and all source steps
+    #[arg(long)]
+    pub scenario: Option<String>,
     /// Only replay bindings up to this source line
     #[arg(long)]
     pub until_line: Option<usize>,
@@ -2083,6 +2091,10 @@ pub struct WinAppReplayArgs {
     /// Explicitly permit physical input and focus changes in foreground mode
     #[arg(long)]
     pub allow_interactive_input: bool,
+    /// Report this replay as runner protocol case events for CASE_ID on
+    /// stdout (used by the `builtin = "winapp"` runner); progress goes to stderr
+    #[arg(long, value_name = "CASE_ID", hide = true)]
+    pub emit_runner_protocol: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

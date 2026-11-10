@@ -339,12 +339,53 @@ fn wait_window(project_root: &Path, args: &WinAppWaitWindowArgs) -> Result<()> {
 }
 
 fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
+    use super::replay_protocol::{PLATFORM_UNSUPPORTED, TARGET_UNAVAILABLE};
+    let Some(case_id) = args.emit_runner_protocol.as_deref() else {
+        return replay_steps(project_root, args, None);
+    };
+    let emitter = super::replay_protocol::CaseEmitter::new(case_id);
+    // Target availability is settled before any step runs: a missing
+    // platform, service or window blocks the scenario instead of failing it.
+    if !cfg!(windows) {
+        emitter.blocked(
+            PLATFORM_UNSUPPORTED,
+            "WinApp replay drives Windows UI Automation and is Windows-only",
+        );
+        return Ok(());
+    }
+    let target = ensure_winapp_sidecar(project_root, false)
+        .context("start the Teshi WinApp service")
+        .and_then(|()| ensure_winapp_attached(project_root, args.launch.as_deref()));
+    if let Err(error) = target {
+        emitter.blocked(TARGET_UNAVAILABLE, &format!("{error:#}"));
+        return Ok(());
+    }
+    let result = replay_steps(project_root, args, Some(&emitter));
+    emitter.finish(&result);
+    Ok(())
+}
+
+fn replay_steps(
+    project_root: &Path,
+    args: &WinAppReplayArgs,
+    emitter: Option<&super::replay_protocol::CaseEmitter>,
+) -> Result<()> {
+    let protocol = emitter.is_some();
+    let print_json_response = |value: serde_json::Value| -> Result<()> {
+        super::replay_protocol::progress(protocol, &serde_json::to_string_pretty(&value)?);
+        Ok(())
+    };
     let feature = match args.feature.as_deref() {
         Some(feature) => feature.replace('\\', "/"),
         None => read_active_step(project_root)?.feature_relative_path,
     };
     preflight_feature(project_root, &feature)?;
-    let plan = super::replay_plan::build(project_root, &feature, args.until_line)?;
+    let plan = super::replay_plan::build_selected(
+        project_root,
+        &feature,
+        args.until_line,
+        args.scenario.as_deref(),
+    )?;
     let scope = if plan.omitted > 0 { "partial" } else { "full" };
     let coverage = json!({"scope":scope,"until_line":args.until_line,
         "executable_steps":plan.steps.len(),"omitted_steps":plan.omitted,"gaps":plan.gaps});
@@ -375,7 +416,11 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let mut run = super::replay_screenshots::create_cli_replay(project_root, &feature, None)?;
+    let mut run = super::replay_screenshots::create_cli_replay(
+        project_root,
+        &feature,
+        args.scenario.as_deref(),
+    )?;
     if let Some(program) = args.launch.as_deref() {
         run.record(teshi_engine::replay_evidence::target_executable_identity(
             Path::new(program),
@@ -416,6 +461,12 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
             }
             run.record(json!({"type":"start_step","step_id":planned.step_id,
                 "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,"text":step.step_text}))?;
+            if let Some(emitter) = emitter {
+                emitter.start_step(
+                    step.step_line,
+                    &format!("{} {}", step.step_keyword, step.step_text),
+                );
+            }
             let capture_frame = || {
                 read_cdp_endpoint(project_root).and_then(|endpoint| {
                     capture_and_save_screenshot(
@@ -478,6 +529,10 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                 }
             }
             run.record(event)?;
+            if let Some(emitter) = emitter {
+                let message = ensure_ok(&response).err().map(|error| error.to_string());
+                emitter.end_step(step.step_line, passed, message.as_deref());
+            }
             if !passed {
                 failed_line = Some(step.step_line);
                 return Err(anyhow!(

@@ -28,15 +28,19 @@ pub enum BuiltinExecutor {
     Dispatch,
     /// `teshi-tui-runner` replaying `.tui.json` terminal bindings.
     Tui,
+    /// `teshi browser replay` of confirmed web bindings, one scenario at a time.
+    Browser,
+    /// `teshi winapp replay` of confirmed Windows UI bindings, one scenario at a time.
+    Winapp,
 }
 
 impl BuiltinExecutor {
+    const ALL: [Self; 4] = [Self::Dispatch, Self::Tui, Self::Browser, Self::Winapp];
+
     fn parse(name: &str) -> Option<Self> {
-        match name {
-            "dispatch" => Some(Self::Dispatch),
-            "tui" => Some(Self::Tui),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|executor| executor.as_str() == name)
     }
 
     /// Configuration name of the executor.
@@ -45,6 +49,8 @@ impl BuiltinExecutor {
         match self {
             Self::Dispatch => "dispatch",
             Self::Tui => "tui",
+            Self::Browser => "browser",
+            Self::Winapp => "winapp",
         }
     }
 }
@@ -87,24 +93,34 @@ pub struct RunnerRule {
     tags: Vec<String>,
     /// Feature path globs relative to the project root; any one must match.
     paths: Vec<glob::Pattern>,
+    /// Normalized tags that disqualify a scenario.
+    exclude_tags: Vec<String>,
+    /// Feature path globs that disqualify a scenario.
+    exclude_paths: Vec<glob::Pattern>,
 }
 
 impl RunnerRule {
-    /// A rule matches when every declared criterion (tags, paths) has a hit.
+    /// A rule matches when every declared criterion (tags, paths) has a hit
+    /// and no exclusion applies. Exclusions let one broad rule step aside for
+    /// narrower ones, so every scenario still has exactly one owner.
     fn matches(&self, relative_path: Option<&str>, tags: &BTreeSet<String>) -> bool {
         let options = glob::MatchOptions {
             case_sensitive: true,
             require_literal_separator: true,
             require_literal_leading_dot: false,
         };
-        let tags_hit = self.tags.is_empty() || self.tags.iter().any(|tag| tags.contains(tag));
-        let paths_hit = self.paths.is_empty()
-            || relative_path.is_some_and(|path| {
-                self.paths
+        let path_matches = |patterns: &[glob::Pattern]| {
+            relative_path.is_some_and(|path| {
+                patterns
                     .iter()
                     .any(|pattern| pattern.matches_with(path, options))
-            });
-        tags_hit && paths_hit
+            })
+        };
+        let tags_hit = self.tags.is_empty() || self.tags.iter().any(|tag| tags.contains(tag));
+        let paths_hit = self.paths.is_empty() || path_matches(&self.paths);
+        let excluded = self.exclude_tags.iter().any(|tag| tags.contains(tag))
+            || path_matches(&self.exclude_paths);
+        tags_hit && paths_hit && !excluded
     }
 }
 
@@ -178,12 +194,48 @@ struct MatchToml {
     tags: Vec<String>,
     #[serde(default)]
     paths: Vec<String>,
+    #[serde(default)]
+    exclude_tags: Vec<String>,
+    #[serde(default)]
+    exclude_paths: Vec<String>,
 }
 
 /// Validated routing rules of one project.
 #[derive(Debug, Clone, Default)]
 pub struct RunRoutes {
     rules: Vec<RunnerRule>,
+}
+
+/// Finds the project that owns `start` (a Feature file or directory).
+///
+/// Walks up to the nearest directory containing `teshi.toml` or a `.teshi`
+/// directory, stopping at the user's home directory: neither home nor its
+/// ancestors qualify, so a stray `~/.teshi` left by an earlier run cannot
+/// claim every Feature below it and redirect the `[[runners]]` lookup.
+#[must_use]
+pub fn find_routing_root(start: &Path) -> Option<PathBuf> {
+    find_routing_root_below_home(start, dirs::home_dir().as_deref())
+}
+
+fn find_routing_root_below_home(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let home = home.map(|home| dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()));
+    let start = dunce::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start
+    };
+    loop {
+        if home.as_deref() == Some(dir.as_path()) {
+            return None;
+        }
+        if dir.join(RUNNER_CONFIG_FILE).is_file() || dir.join(".teshi").is_dir() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
 /// Loads `[[runners]]` from `<project_root>/teshi.toml`.
@@ -261,19 +313,25 @@ fn build_rule(project_root: &Path, rule: RuleToml) -> Result<RunnerRule, RouteCo
             "[runners.match] needs `tags` or `paths` (use paths = [\"**\"] to match everything)",
         ));
     }
-    let paths = matcher
-        .paths
-        .iter()
-        .map(|source| {
-            glob::Pattern::new(source)
-                .map_err(|error| invalid(&name, format!("invalid path glob `{source}`: {error}")))
-        })
-        .collect::<Result<_, _>>()?;
-    let tags = matcher
-        .tags
-        .iter()
-        .map(|tag| teshi_core::normalize_tag(tag))
-        .collect();
+    let globs = |sources: &[String]| -> Result<Vec<glob::Pattern>, RouteConfigError> {
+        sources
+            .iter()
+            .map(|source| {
+                glob::Pattern::new(source).map_err(|error| {
+                    invalid(&name, format!("invalid path glob `{source}`: {error}"))
+                })
+            })
+            .collect()
+    };
+    let normalized = |tags: &[String]| -> Vec<String> {
+        tags.iter()
+            .map(|tag| teshi_core::normalize_tag(tag))
+            .collect()
+    };
+    let paths = globs(&matcher.paths)?;
+    let exclude_paths = globs(&matcher.exclude_paths)?;
+    let tags = normalized(&matcher.tags);
+    let exclude_tags = normalized(&matcher.exclude_tags);
     let kind = match (rule.builtin, rule.cmd) {
         (Some(_), Some(_)) => {
             return Err(invalid(&name, "set either `builtin` or `cmd`, not both"))
@@ -289,7 +347,9 @@ fn build_rule(project_root: &Path, rule: RuleToml) -> Result<RunnerRule, RouteCo
             let builtin = BuiltinExecutor::parse(&builtin).ok_or_else(|| {
                 invalid(
                     &name,
-                    format!("unknown builtin `{builtin}` (expected dispatch or tui)"),
+                    format!(
+                        "unknown builtin `{builtin}` (expected dispatch, tui, browser or winapp)"
+                    ),
                 )
             })?;
             RunnerKind::Builtin(builtin)
@@ -298,6 +358,13 @@ fn build_rule(project_root: &Path, rule: RuleToml) -> Result<RunnerRule, RouteCo
             if cmd.trim().is_empty() {
                 return Err(invalid(&name, "`cmd` must not be empty"));
             }
+            // A relative path (as opposed to a bare program name looked up on
+            // PATH) belongs to the project, wherever Teshi was started from.
+            let cmd = if Path::new(&cmd).is_relative() && cmd.contains(['/', '\\']) {
+                project_root.join(&cmd).to_string_lossy().into_owned()
+            } else {
+                cmd
+            };
             RunnerKind::External {
                 cmd,
                 args: rule.args.unwrap_or_default(),
@@ -311,6 +378,8 @@ fn build_rule(project_root: &Path, rule: RuleToml) -> Result<RunnerRule, RouteCo
         kind,
         tags,
         paths,
+        exclude_tags,
+        exclude_paths,
     })
 }
 
@@ -542,6 +611,17 @@ impl RunRoutes {
 }
 
 /// `/`-separated path relative to the project root, or `None` outside it.
+/// `/`-separated path of `path` relative to `project_root`, as matched by
+/// `[runners.match] paths`. Relative inputs are taken as already rooted.
+#[must_use]
+pub fn relative_feature_path(project_root: &Path, path: &Path) -> Option<String> {
+    if path.is_absolute() {
+        relative_to_root(project_root, path)
+    } else {
+        relative_to_root(project_root, &project_root.join(path))
+    }
+}
+
 fn relative_to_root(project_root: &Path, path: &Path) -> Option<String> {
     let relative = path
         .strip_prefix(project_root)
@@ -625,6 +705,108 @@ tags = ["@API"]
             "Feature: C\n  @cli\n  Scenario: four\n    Given w\n",
         ),
     ];
+
+    #[test]
+    fn test_find_routing_root_prefers_nearest_project_and_skips_home() {
+        let home = tempfile::tempdir().expect("home");
+        let home_path = dunce::canonicalize(home.path()).expect("canonical home");
+        std::fs::create_dir(home_path.join(".teshi")).expect("stray home marker");
+        let project = home_path.join("work/app");
+        std::fs::create_dir_all(project.join("features/deep")).expect("project dirs");
+        let feature = project.join("features/deep/a.feature");
+        std::fs::write(&feature, "Feature: A\n").expect("feature");
+
+        assert_eq!(
+            find_routing_root_below_home(&feature, Some(&home_path)),
+            None,
+            "a home-level .teshi must not become the project root"
+        );
+
+        std::fs::write(project.join(RUNNER_CONFIG_FILE), "").expect("config");
+        assert_eq!(
+            find_routing_root_below_home(&feature, Some(&home_path)),
+            Some(project.clone())
+        );
+
+        let nested = project.join("features");
+        std::fs::create_dir(nested.join(".teshi")).expect("nested marker");
+        assert_eq!(
+            find_routing_root_below_home(&feature, Some(&home_path)),
+            Some(nested),
+            "the nearest project wins"
+        );
+    }
+
+    #[test]
+    fn test_exclusions_let_a_broad_rule_yield_to_a_narrow_one() {
+        let config = r#"
+[[runners]]
+name = "validation"
+cmd = "validation-runner"
+[runners.match]
+tags = ["@validation-e2e"]
+
+[[runners]]
+name = "cli"
+cmd = "cli-runner"
+[runners.match]
+tags = ["@cli"]
+exclude_tags = ["@validation-e2e"]
+
+[[runners]]
+name = "special"
+cmd = "special-runner"
+[runners.match]
+paths = ["features/*/special.feature"]
+
+[[runners]]
+name = "tui"
+builtin = "tui"
+[runners.match]
+tags = ["@tui"]
+exclude_paths = ["features/*/special.feature"]
+"#;
+        let scenario = "  Scenario: s\n    Given x\n";
+        let dir = project(
+            config,
+            &[
+                (
+                    "features/en/check.feature",
+                    &format!("@cli @validation-e2e\nFeature: V\n{scenario}"),
+                ),
+                (
+                    "features/en/req.feature",
+                    &format!("@cli\nFeature: R\n{scenario}"),
+                ),
+                (
+                    "features/en/special.feature",
+                    &format!("@tui\nFeature: S\n{scenario}"),
+                ),
+                (
+                    "features/en/plain.feature",
+                    &format!("@tui\nFeature: P\n{scenario}"),
+                ),
+            ],
+        );
+        let routes = load_run_routes_with_env(dir.path(), no_env).expect("routes");
+        let resolved = routes.resolve(
+            dir.path(),
+            &[
+                request("v", "features/en/check.feature", "s"),
+                request("r", "features/en/req.feature", "s"),
+                request("s", "features/en/special.feature", "s"),
+                request("p", "features/en/plain.feature", "s"),
+            ],
+        );
+        let owners: Vec<_> = resolved
+            .iter()
+            .map(|route| match &route.decision {
+                RouteDecision::Routed { runner } => runner.as_str(),
+                other => panic!("{} not routed: {other:?}", route.id),
+            })
+            .collect();
+        assert_eq!(owners, ["validation", "cli", "special", "tui"]);
+    }
 
     #[test]
     fn test_path_globs_match_root_level_and_nested_features() {
@@ -738,6 +920,30 @@ tags = ["@API"]
         assert_eq!(cmd, "cli-runner");
         assert_eq!(args, &vec!["--quiet".to_string()]);
         assert_eq!(cwd.as_deref(), Some(dir.path().join("work").as_path()));
+    }
+
+    #[test]
+    fn test_relative_cmd_paths_resolve_against_the_project_root() {
+        let cases = [
+            ("python", "python".to_string()),
+            ("target/debug/runner", "target/debug/runner".to_string()),
+        ];
+        for (configured, relative) in cases {
+            let config = format!(
+                "[[runners]]\nname = \"r\"\ncmd = \"{configured}\"\n[runners.match]\npaths = [\"**\"]\n"
+            );
+            let dir = project(&config, &[]);
+            let routes = load_run_routes_with_env(dir.path(), no_env).expect("routes");
+            let RunnerKind::External { cmd, .. } = &routes.rules()[0].kind else {
+                panic!("external rule");
+            };
+            let expected = if relative.contains('/') {
+                dir.path().join(&relative).to_string_lossy().into_owned()
+            } else {
+                relative
+            };
+            assert_eq!(cmd, &expected, "cmd `{configured}`");
+        }
     }
 
     #[test]

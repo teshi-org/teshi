@@ -65,12 +65,19 @@ fn route_to_builtin_tui(root: &Path) {
     .unwrap();
 }
 
-/// Raw runner protocol events printed by `teshi tui`.
-fn events(output: &Output) -> Vec<Value> {
+/// Runner protocol v1 events printed by `teshi tui` and `teshi run`.
+fn parse_events(output: &Output) -> Vec<Value> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn end_run(events: &[Value]) -> &Value {
+    events
+        .iter()
+        .find(|e| e["type"] == "end_run")
+        .expect("end_run event")
 }
 
 #[test]
@@ -91,7 +98,7 @@ fn outline_rows_reach_the_public_cli_with_parent_failure_and_row_totals() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    let events = events(&output);
+    let events = parse_events(&output);
     let rows: Vec<_> = events
         .iter()
         .filter(|e| e["type"] == "end_example")
@@ -109,7 +116,16 @@ fn outline_rows_reach_the_public_cli_with_parent_failure_and_row_totals() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("end_run passed=0 failed=1"));
+    let events = parse_events(&output);
+    let summary = end_run(&events);
+    assert_eq!(
+        (summary["passed"].clone(), summary["failed"].clone()),
+        (json!(0), json!(1))
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "end_example"),
+        "runner-specific events are forwarded unchanged"
+    );
 }
 
 #[test]
@@ -125,7 +141,7 @@ fn selected_scenario_uses_relative_feature_path_and_excludes_failure() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let events = events(&output);
+    let events = parse_events(&output);
     assert_eq!(events.first().unwrap()["total"], 1);
     assert_eq!(events.last().unwrap()["passed"], 1);
     assert!(!events.iter().any(|event| event["name"] == "Fail"));
@@ -135,14 +151,18 @@ fn selected_scenario_uses_relative_feature_path_and_excludes_failure() {
         .args(["run", "sample.feature", "--scenario", "Pass"])
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "{stdout}\n{}",
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("start_run total=1"), "{stdout}");
-    assert!(stdout.contains("end_run passed=1 failed=0"), "{stdout}");
+    let events = parse_events(&output);
+    assert_eq!(events[0]["type"], "start_run");
+    assert_eq!(events[0]["protocol_version"], 1);
+    assert_eq!(events[0]["total"], 1);
+    assert_eq!(end_run(&events)["passed"], 1);
+    assert_eq!(events.last().unwrap()["type"], "runner_exit");
+    assert!(!events.iter().any(|event| event["name"] == "Fail"));
 }
 
 #[test]
@@ -154,7 +174,7 @@ fn failed_case_produces_nonzero_cli_exit_and_readable_screen_attachment() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    let events = events(&output);
+    let events = parse_events(&output);
     let failure = events
         .iter()
         .find(|event| event["type"] == "case_failed")
@@ -173,7 +193,11 @@ fn failed_case_produces_nonzero_cli_exit_and_readable_screen_attachment() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("case_failed"));
+    assert!(
+        parse_events(&output)
+            .iter()
+            .any(|e| e["type"] == "case_failed")
+    );
 }
 
 #[test]
@@ -267,4 +291,37 @@ fn unknown_scenario_and_malformed_runner_configuration_fail_before_launch() {
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn builtin_browser_without_endpoint_is_blocked_with_exit_code_three() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("login.feature"),
+        "@web-ui\nFeature: Login\n  Scenario: Open page\n    Given the login page is open\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("teshi.toml"),
+        "[[runners]]\nname = \"web\"\nbuiltin = \"browser\"\n[runners.match]\ntags = [\"@web-ui\"]\n",
+    )
+    .unwrap();
+    let output = cli(root.path())
+        .args(["run", "login.feature"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output);
+    let blocked = events
+        .iter()
+        .find(|event| event["type"] == "case_blocked")
+        .expect("case_blocked event");
+    assert_eq!(blocked["category"], "target_unconfigured");
+    assert_eq!(end_run(&events)["blocked"], 1);
 }

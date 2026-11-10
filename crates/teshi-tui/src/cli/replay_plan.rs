@@ -18,10 +18,6 @@ pub(crate) struct ReplayPlan {
     pub omitted: usize,
 }
 
-pub(crate) fn build(project: &Path, feature: &str, until: Option<usize>) -> Result<ReplayPlan> {
-    build_selected(project, feature, until, None)
-}
-
 pub(crate) fn build_selected(
     project: &Path,
     feature: &str,

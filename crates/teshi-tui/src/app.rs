@@ -7645,6 +7645,9 @@ impl App {
                 self.status = format!("Runner error: {message}");
                 self.runner_rx = None;
             }
+            // Runner-specific events (for example Examples rows) are not
+            // rendered by Explore.
+            RunEvent::Other(_) => {}
         }
         self.quit_pending_confirm = false;
     }

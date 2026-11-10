@@ -611,9 +611,6 @@ fn verify(source: &str, command: &str) {
         "[[runners]]\nname = \"tui\"\nbuiltin = \"tui\"\n[runners.match]\npaths = [\"**\"]\n";
     std::fs::write(project.join("teshi.toml"), tui_route).unwrap();
     std::fs::write(root.path().join("teshi.toml"), tui_route).unwrap();
-    // Anchor the outer project root here; an absolute path otherwise resolves
-    // to any ancestor `.teshi` marker, such as one in the user's home.
-    std::fs::create_dir(root.path().join(".teshi")).unwrap();
     let launch_actions = vec![
         json!({"action":"launch","config":{
             "program":binary,"args":[project,"--recursive","--requirements-root",root.path().join("requirements")],"cwd":root.path(),
@@ -693,16 +690,17 @@ fn verify(source: &str, command: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    if command == "tui" {
-        let events: Vec<serde_json::Value> = stdout
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(events.last().unwrap()["passed"], 2);
-    } else {
-        assert!(stdout.contains("end_run passed=2 failed=0"), "{stdout}");
-    }
+    // `tui` and `run` both print protocol v1 NDJSON; `run` closes with runner_exit.
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let summary = events
+        .iter()
+        .find(|event| event["type"] == "end_run")
+        .expect("end_run event");
+    assert_eq!(summary["passed"], 2);
     assert_eq!(
         std::fs::read_to_string(project.join("sample.feature")).unwrap(),
         "Feature: Terminal fixture\n  Scenario: Sample scenario\n    Given a sample step updated\n"
