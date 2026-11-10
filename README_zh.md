@@ -93,21 +93,23 @@ cargo run -- run path/to/file.feature   # 运行 BDD 测试（基于 NDJSON 的�
 
 ## 外部测试运行器
 
-`teshi run` 子命令通过可配置的 NDJSON 运行器执行 BDD feature 文件。
+`teshi run` 子命令按 `teshi.toml` 中的 `[[runners]]` 路由规则执行 BDD feature 文件。每个场景必须恰好匹配一条规则，否则运行在启动前即被拒绝。
 
 ```bash
 teshi run tests/features/editor.feature
+teshi run --explain tests/features/     # 查看每个场景会路由到哪个运行器
 ```
-
-在 `teshi.toml` 中配置运行器命令：
 
 ```toml
-[runner]
-command = "cargo"
+[[runners]]
+name = "editor"
+cmd = "cargo"
 args = ["run", "--bin", "teshi-runner"]
+[runners.match]
+paths = ["tests/features/**/*.feature"]
 ```
 
-测试结果以 NDJSON 格式流式返回，在 Explore 标签页中以内联方式显示，场景和步骤带有状态颜色。
+外部运行器使用 NDJSON 协议 v1，首个事件必须是带 `protocol_version` 与 `capabilities` 的 `start_run` 握手。结果在 Explore 标签页中以内联方式显示；目标不可用的场景显示为 **Blocked**，不计为失败。详见 [doc/runner-protocol.md](doc/runner-protocol.md)。
 
 ## 语法高亮
 
@@ -134,13 +136,7 @@ args = ["run", "--bin", "teshi-runner"]
 
 ### Runner（测试运行器）
 
-| 变量 | 必填 | 默认值 | 描述 |
-|---|---|---|---|
-| `TESHI_RUNNER_CMD` | 是（无 `teshi.toml` 时） | — | 测试运行器可执行文件 |
-| `TESHI_RUNNER_ARGS` | 否 | — | 运行器的参数（空格分隔） |
-| `TESHI_RUNNER_CWD` | 否 | 当前目录 | 运行器的工作目录 |
-
-环境变量优先级高于 `teshi.toml` 中的值。
+运行器只通过 `teshi.toml` 的 `[[runners]]` 配置。已移除的 `TESHI_RUNNER_CMD`、`TESHI_RUNNER_ARGS`、`TESHI_RUNNER_CWD` 一旦设置，`teshi run` 会报错并给出迁移提示；临时运行可使用 `teshi run --runner-cmd`。
 
 ### 诊断
 
@@ -152,13 +148,16 @@ args = ["run", "--bin", "teshi-runner"]
 
 ## 配置文件
 
-工作目录中的 `teshi.toml` 配置文件支持：
+项目根目录中的 `teshi.toml` 配置文件支持：
 
 ```toml
-[runner]
-command = "cargo"
+[[runners]]
+name = "editor"
+cmd = "cargo"
 args = ["run", "--bin", "teshi-runner"]
-cwd = "."          # 可选的工作目录
+cwd = "."          # 可选，相对项目根目录
+[runners.match]
+paths = ["**"]     # 或 tags = ["@tui"]
 
 [llm]
 # 暂不支持 toml 配置；请使用上述环境变量。

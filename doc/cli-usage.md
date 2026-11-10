@@ -317,17 +317,24 @@ Development: `cargo run -p teshi-desktop`.
 
 ### Run tests (headless)
 
-For CI and scripts; streams NDJSON runner events to stdout:
+For CI and scripts; prints one line per runner event to stdout:
 
 ```bash
 teshi run                              # all scenarios under current directory
 teshi run path/to/file.feature         # all scenarios in one file
 teshi run path/to/project/             # all scenarios in a directory tree
 teshi run --scenario "Successful login" path/to/file.feature
-teshi run --runner-cmd "behat" --runner-cwd /app path/
+teshi run --explain path/              # show which runner each scenario routes to
+teshi run --explain --json path/       # the same, as JSON
+teshi run --runner-cmd "behat" --runner-cwd app path/   # ad-hoc: one runner for everything
 ```
 
-Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings. `--runner-cmd` and `teshi.toml [runner]` take precedence over a live daemon and Python engine auto-detect.
+Scenarios are routed by `[[runners]]` in `teshi.toml`; each selected scenario
+must match exactly one rule or the run is rejected before it starts.
+`--runner-cmd` bypasses routing for one run. Exit codes: `0` all passed, `1`
+failure or runner error, `3` blocked only (no failures). The removed `[runner]`
+section and `TESHI_RUNNER_*` variables fail with a migration hint. See
+[runner-protocol.md](runner-protocol.md).
 
 Requirement-library CLI E2E lives in `features/en-US/` and `features/zh-CN/` as `@cli` files and uses `teshi-requirement-cli-runner`. English CLI files are `requirement_*.feature`; Chinese CLI files use titles such as `需求列表.feature`. Run one locale's CLI files, not the whole language directory (that also contains `@web-ui` scenarios):
 
@@ -375,7 +382,7 @@ teshi api exchange <id> --plaintext
 teshi api stop
 ```
 
-Layout: `api/*.json.j2` (one file per HTTP call), `features/steps/*.py` importing `teshi_api.call` / `@when`. Gherkin steps use `[API]` after the keyword. Mixed `@api @ui` scenarios are walked by Teshi; pure `@api` `teshi run` uses the configured `[runner]` (typically behave).
+Layout: `api/*.json.j2` (one file per HTTP call), `features/steps/*.py` importing `teshi_api.call` / `@when`. Gherkin steps use `[API]` after the keyword. Route the scenarios Teshi should walk itself to `builtin = "dispatch"`, and any scenarios your own adapter runs (for example behave) to an external rule:
 
 ```toml
 [api]
@@ -383,9 +390,11 @@ templates = "api"
 base_url = "https://api.example.test"
 redact_keys = ["x-trace-id"]
 
-[runner]
-cmd = "behave"
-args = ["features"]
+[[runners]]
+name = "api"
+builtin = "dispatch"
+[runners.match]
+tags = ["@api"]
 ```
 
 `TESHI_API_*` env vars become scenario vars (`TESHI_API_TOKEN` → `token`). GPUI **Run** lists scenarios and inspects exchanges; Gherkin editing stays in the TUI.
@@ -542,15 +551,24 @@ In the TUI, press `m` to open the model panel (same store). `/auth` shows a read
 | LLM profiles (shared) | `<app_data>/teshi/model-profiles/*.json` + `active` pointer |
 | Global (legacy / non-LLM) | `<config_dir>/teshi/config.toml` |
 | Project | `./.teshi/config.toml` |
-| Runner | `./teshi.toml` (working directory) |
+| Runner routing | `<project root>/teshi.toml` |
 
 ### Runner format (`teshi.toml`)
 
 ```toml
-[runner]
+[[runners]]
+name = "terminal"
+builtin = "tui"
+[runners.match]
+tags = ["@tui"]
+
+[[runners]]
+name = "backend"
 cmd = "teshi-runner"
 args = ["--bin", "runner"]
 cwd = "."
+[runners.match]
+paths = ["features/backend/**/*.feature"]
 
 [api]
 templates = "api"
@@ -574,9 +592,7 @@ Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are
 | `TESHI_LLM_MODEL` | `gpt-4o-mini` | Fallback LLM model name |
 | `TESHI_LLM_MAX_TOKENS` | `1024` | Max tokens per completion (env fallback) |
 | `TESHI_LLM_TEMPERATURE` | `0.7` | Sampling temperature (env fallback) |
-| `TESHI_RUNNER_CMD` | — | Override runner command |
-| `TESHI_RUNNER_ARGS` | — | Override runner args (space-separated) |
-| `TESHI_RUNNER_CWD` | current dir | Override runner working directory |
+| `TESHI_TUI_RUNNER` | sibling `teshi-tui-runner` | Path of the `builtin = "tui"` runner |
 | `TESHI_API_SERVICE` | bundled `api_service.py` | Override API sidecar script path |
 | `TESHI_API_NDJSON` | — | When set (not `0`), API helper prints `http_exchange` NDJSON to stdout |
 | `TESHI_API_*` | — | Seeded into scenario `vars` (`TESHI_API_TOKEN` → `token`) |

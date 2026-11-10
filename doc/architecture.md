@@ -114,22 +114,28 @@ This ensures the LLM cannot modify files without explicit user consent.
 
 ## Runner protocol
 
-The test runner is an **external subprocess** communicating via NDJSON:
+Scenarios are routed by `[[runners]]` rules in `teshi.toml`: each selected
+scenario must match exactly one rule, which names a built-in executor
+(`dispatch`, `tui`) or an external process. External runners communicate via
+NDJSON and must open with a protocol v1 handshake:
 
 **Request** (one line on stdin):
 ```json
-{"command":"run","cases":[{"id":"f0:s1","feature_path":"login.feature","scenario":"Successful login","line_number":12}],"meta":{}}
+{"command":"run","protocol_version":1,"cases":[{"id":"f0:s1","feature_path":"login.feature","scenario":"Successful login","line_number":12}],"meta":{}}
 ```
 
 **Events** (one per line on stdout):
 ```json
-{"type":"start_run","total":3}
+{"type":"start_run","total":3,"protocol_version":1,"capabilities":["blocked"]}
 {"type":"start_case","case_id":"f0:s1","name":"Successful login"}
 {"type":"case_passed","case_id":"f0:s1","duration_ms":1234}
 {"type":"case_failed","case_id":"f0:s2","duration_ms":567,"error":{"message":"Assertion failed","stack":"..."}}
-{"type":"case_skipped","case_id":"f0:s3","reason":"Not implemented"}
-{"type":"end_run","passed":1,"failed":1,"skipped":1}
+{"type":"case_blocked","case_id":"f0:s3","reason":"browser session unavailable","category":"target_unavailable"}
+{"type":"end_run","passed":1,"failed":1,"skipped":0,"blocked":1}
 ```
+
+See [runner-protocol.md](runner-protocol.md) for routing rules, capabilities,
+protocol violations and exit codes.
 
 ## Configuration layering
 
@@ -141,9 +147,7 @@ The test runner is an **external subprocess** communicating via NDJSON:
 
 The default app-data directory is the OS data dir joined with `teshi` (for example `%APPDATA%\teshi`). A one-time migration copies legacy `teshi-desktop` app data and, when the profile store is empty, imports older TUI `config.toml` / `auth.json` / `models/*.toml`.
 
-**Runner and other non-LLM settings** still layer as:
-
-1. CLI flags (`--runner-cmd`, `--runner-cwd`)
-2. Environment variables (`TESHI_RUNNER_CMD`, …)
-3. Project-level `.teshi/config.toml` / `teshi.toml`
-4. Hardcoded defaults
+**Runner routing** comes only from the project's `teshi.toml` `[[runners]]`.
+`teshi run --runner-cmd` replaces routing for a single ad-hoc run. The removed
+`[runner]` section and `TESHI_RUNNER_*` variables are rejected with a migration
+message.
