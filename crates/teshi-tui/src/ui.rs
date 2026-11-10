@@ -3863,6 +3863,7 @@ fn status_label(status: RunStatus) -> &'static str {
         RunStatus::Passed => "Passed",
         RunStatus::Failed => "Failed",
         RunStatus::Skipped => "Skipped",
+        RunStatus::Blocked => "Blocked",
     }
 }
 
@@ -3892,10 +3893,14 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .map(|f| f.scenario_count())
         .unwrap_or(0);
     let right = if let Some(summary) = &app.explore_run_summary {
-        format!(
+        let mut text = format!(
             "{}/{} passed, {} failed",
             summary.passed, summary.total, summary.failed
-        )
+        );
+        if summary.blocked > 0 {
+            text.push_str(&format!(", {} blocked", summary.blocked));
+        }
+        text
     } else {
         format!("0/{total} 通过")
     };

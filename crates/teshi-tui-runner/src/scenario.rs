@@ -718,7 +718,11 @@ fn run_inner(request: Request, out: &mut impl Write, run_directory: &Path) -> Re
         .get("artifacts_dir")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(".teshi/tui-results"));
-    emit(out, json!({"type":"start_run","total":request.cases.len()}))?;
+    // Runner protocol v1 handshake: step events are the only optional family emitted.
+    emit(
+        out,
+        json!({"type":"start_run","total":request.cases.len(),"protocol_version":1,"capabilities":["steps"]}),
+    )?;
     let mut failed = 0;
     let mut examples_passed = 0;
     let mut examples_failed = 0;

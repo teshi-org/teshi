@@ -6,6 +6,7 @@ import sys
 
 request = json.loads(sys.stdin.readline())
 Path(sys.argv[1]).write_text(json.dumps({"request": request, "cwd": os.getcwd()}), encoding="utf-8")
+print(json.dumps({"type": "start_run", "total": len(request["cases"]), "protocol_version": 1, "capabilities": []}), flush=True)
 for case in request["cases"]:
     print(json.dumps({"type": "case_failed", "case_id": case["id"], "duration_ms": 1,
                       "error": {"message": "POINTER_FAILURE_EVIDENCE"}}), flush=True)

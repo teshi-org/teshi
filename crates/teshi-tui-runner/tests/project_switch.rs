@@ -49,7 +49,9 @@ fn write_project(root: &Path, name: &str, title: &str, runner_cmd: &str) -> Path
     .unwrap();
     fs::write(
         project.join("teshi.toml"),
-        format!("[runner]\ncmd = \"{runner_cmd}\"\n"),
+        format!(
+            "[[runners]]\nname = \"{name}\"\ncmd = \"{runner_cmd}\"\n[runners.match]\npaths = [\"**\"]\n"
+        ),
     )
     .unwrap();
     project

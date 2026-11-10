@@ -153,18 +153,24 @@ pub enum Command {
         /// Specific scenario name to run
         #[arg(long)]
         scenario: Option<String>,
-        /// Runner binary / command
+        /// Ad-hoc protocol v1 runner for every selected scenario, bypassing [[runners]]
         #[arg(long)]
         runner_cmd: Option<String>,
         /// Runner additional arguments (repeatable)
         #[arg(long, allow_hyphen_values = true)]
         runner_arg: Option<Vec<String>>,
-        /// Runner working directory
+        /// Runner working directory, relative to the project root
         #[arg(long)]
         runner_cwd: Option<String>,
         /// Write a persistent Feature/Scenario result report as JSON
         #[arg(long, value_name = "PATH")]
         report: Option<String>,
+        /// Show which [[runners]] rule each scenario routes to, without running
+        #[arg(long)]
+        explain: bool,
+        /// Print --explain output as JSON
+        #[arg(long, requires = "explain")]
+        json: bool,
         /// Deprecated alias for positional `PATH`
         #[arg(long, hide = true)]
         feature: Option<String>,
@@ -2212,6 +2218,7 @@ impl Command {
             runner_args: runner_arg.unwrap_or_default(),
             runner_cwd: runner_cwd.map(PathBuf::from),
             report_path: report.map(PathBuf::from),
+            ..Default::default()
         }
     }
 }

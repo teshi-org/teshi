@@ -7,7 +7,7 @@ import time
 root = Path(sys.argv[1])
 request = json.loads(sys.stdin.readline())
 (root / "run-request.json").write_text(json.dumps(request), encoding="utf-8")
-print(json.dumps({"type": "start_run", "total": len(request["cases"])}), flush=True)
+print(json.dumps({"type": "start_run", "total": len(request["cases"]), "protocol_version": 1, "capabilities": []}), flush=True)
 (root / "runner-ready").write_text("ready", encoding="utf-8")
 deadline = time.monotonic() + 30
 while not (root / "runner-release").exists():

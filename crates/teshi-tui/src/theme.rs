@@ -360,6 +360,8 @@ pub(crate) fn status_style(status: RunStatus) -> Style {
         RunStatus::Passed => SUCCESS,
         RunStatus::Failed => ERROR,
         RunStatus::Skipped => BORDER,
+        // Distinct from both a failure and an intentional skip.
+        RunStatus::Blocked => SECONDARY,
     })
 }
 

@@ -21,6 +21,8 @@ mod project;
 pub mod project_identity;
 mod project_settings;
 pub mod replay_evidence;
+pub mod run_routing;
+pub mod runner_protocol;
 mod screen;
 mod sidecar;
 mod terminal;

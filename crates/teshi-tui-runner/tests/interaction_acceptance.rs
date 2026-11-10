@@ -663,7 +663,9 @@ fn external_changes_wait_until_real_feature_run_finishes() {
         serde_json::to_string(&[runner.to_string_lossy(), evidence.to_string_lossy()]).unwrap();
     fs::write(
         fixture.source.parent().unwrap().join("teshi.toml"),
-        format!("[runner]\ncmd = \"{python}\"\nargs = {args}\n"),
+        format!(
+            "[[runners]]\nname = \"sync\"\ncmd = \"{python}\"\nargs = {args}\n[runners.match]\npaths = [\"**\"]\n"
+        ),
     )
     .unwrap();
     let terminal = fixture.launch();

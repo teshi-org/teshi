@@ -303,7 +303,9 @@ class World:
         elif text == "项目 xxx 的配置指定隔离的测试运行工作目录":
             (self.project / "work").mkdir()
             script = str(Path(__file__).resolve())
-            config = "[runner]\ncmd = " + json.dumps(sys.executable) + "\nargs = " + json.dumps([script, "--probe-runner", str(self.root / "probe.json")]) + '\ncwd = "work"\n'
+            config = ('[[runners]]\nname = "probe"\ncmd = ' + json.dumps(sys.executable)
+                      + "\nargs = " + json.dumps([script, "--probe-runner", str(self.root / "probe.json")])
+                      + '\ncwd = "work"\n[runners.match]\npaths = ["**"]\n')
             (self.project / "teshi.toml").write_text(config, encoding="utf-8")
         elif text == "项目 xxx 已有保存的项目会话":
             folder = self.root / "teshi_session_dir"
@@ -348,7 +350,7 @@ class World:
 def probe_runner(path):
     request = json.loads(sys.stdin.readline())
     Path(path).write_text(json.dumps(dict(cwd=os.getcwd(), request=request)), encoding="utf-8")
-    emit("start_run", total=len(request["cases"]))
+    emit("start_run", total=len(request["cases"]), protocol_version=1, capabilities=["steps"])
     for case in request["cases"]:
         emit("start_case", case_id=case["id"], name=case["scenario"])
         emit("case_passed", case_id=case["id"])
@@ -363,7 +365,7 @@ def main():
     EVENT_LOG = artifact_root / "binding-events.ndjson"
     captures = Path(request["meta"].get("evidence_run_directory", str(artifact_root / "captures")))
     (artifact_root / "request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
-    emit("start_run", total=len(request["cases"]))
+    emit("start_run", total=len(request["cases"]), protocol_version=1, capabilities=["steps"])
     failed = examples_failed = examples_passed = 0
     measurements = []
     slow_steps = []

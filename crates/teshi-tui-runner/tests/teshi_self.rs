@@ -605,6 +605,15 @@ fn verify(source: &str, command: &str) {
             "env":[["TESHI_SELF_RUNNER_FIXTURE","1"]],"cols":80,"rows":24
         }},text("self-runner-ready")]
     }]})).unwrap()).unwrap();
+    // Both the driven project and the outer `teshi run` route through
+    // [[runners]]; no runner is selected implicitly from sidecars.
+    let tui_route =
+        "[[runners]]\nname = \"tui\"\nbuiltin = \"tui\"\n[runners.match]\npaths = [\"**\"]\n";
+    std::fs::write(project.join("teshi.toml"), tui_route).unwrap();
+    std::fs::write(root.path().join("teshi.toml"), tui_route).unwrap();
+    // Anchor the outer project root here; an absolute path otherwise resolves
+    // to any ancestor `.teshi` marker, such as one in the user's home.
+    std::fs::create_dir(root.path().join(".teshi")).unwrap();
     let launch_actions = vec![
         json!({"action":"launch","config":{
             "program":binary,"args":[project,"--recursive","--requirements-root",root.path().join("requirements")],"cwd":root.path(),
@@ -684,12 +693,16 @@ fn verify(source: &str, command: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(events.last().unwrap()["passed"], 2);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    if command == "tui" {
+        let events: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.last().unwrap()["passed"], 2);
+    } else {
+        assert!(stdout.contains("end_run passed=2 failed=0"), "{stdout}");
+    }
     assert_eq!(
         std::fs::read_to_string(project.join("sample.feature")).unwrap(),
         "Feature: Terminal fixture\n  Scenario: Sample scenario\n    Given a sample step updated\n"

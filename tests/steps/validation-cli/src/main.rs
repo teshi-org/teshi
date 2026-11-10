@@ -37,6 +37,10 @@ struct Event<'a, T> {
 #[derive(Debug, Serialize)]
 struct StartRun {
     total: usize,
+    /// Runner protocol version this runner speaks.
+    protocol_version: u64,
+    /// Optional event families; this runner emits case-level events only.
+    capabilities: &'static [&'static str],
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +112,8 @@ fn run() -> Result<ExitCode> {
             kind: "start_run",
             payload: StartRun {
                 total: request.cases.len(),
+                protocol_version: 1,
+                capabilities: &[],
             },
         },
     )?;

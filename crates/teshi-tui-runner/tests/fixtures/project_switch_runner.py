@@ -30,6 +30,8 @@ def main():
     }), encoding="utf-8")
     if role == "runner":
         request = json.loads(sys.stdin.readline())
+        print(json.dumps({"type": "start_run", "total": len(request["cases"]),
+                          "protocol_version": 1, "capabilities": []}), flush=True)
         if project_name == "project-b":
             for case in request["cases"]:
                 print(json.dumps({"type": "case_passed", "case_id": case["id"]}), flush=True)

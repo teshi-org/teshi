@@ -19,6 +19,7 @@ use teshi_core::{
 };
 
 use crate::locator::resolve_step_bindings;
+use crate::runner_protocol::RunnerCapability;
 use crate::sidecar::send_sidecar_command_with_timeout;
 use crate::validation::validate_feature_scope;
 use crate::venv::{build_import_check_command, resolve_project_venv};
@@ -372,10 +373,14 @@ where
     }
 
     let cases = expand_dispatch_cases(cases)?;
-    emit(json!({
-        "type": "start_run",
-        "total": cases.len(),
-    }));
+    emit(crate::runner_protocol::start_run_event(
+        cases.len(),
+        &[
+            RunnerCapability::Steps,
+            RunnerCapability::Artifacts,
+            RunnerCapability::HttpExchange,
+        ],
+    ));
     for case in &cases {
         let feature = parse_feature(
             &fs::read_to_string(&case.feature_path)?,
@@ -588,7 +593,8 @@ fn dispatch_tui_case<F: FnMut(Value)>(
             (result, String::from_utf8_lossy(&bytes).into_owned())
         })
     });
-    let request = json!({"command":"run","cases":[{"id":case.id,"feature_path":case.feature_path,"scenario":case.scenario}],
+    let request = json!({"command":"run","protocol_version":crate::runner_protocol::RUNNER_PROTOCOL_VERSION,
+        "cases":[{"id":case.id,"feature_path":case.feature_path,"scenario":case.scenario}],
         "meta":{"project_root":project,"evidence_run_directory":directory}});
     if let Some(mut input) = child.0.stdin.take() {
         writeln!(input, "{request}")?;
