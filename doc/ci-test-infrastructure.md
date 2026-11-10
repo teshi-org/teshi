@@ -128,9 +128,11 @@ until new full-run measurements show a material remaining bottleneck.
 `Terminal::expect_screen` waits for an explicit viewport predicate. Management
 pointer operations wait for their actual visible/closed modal or selected row
 before their after-action capture. Field clicks wait for the focus marker.
-Management fixtures also opt into an atomic completed-frame receipt published
-after the product's real draw/flush. Clicks require the owned process's completed
-frame and the PTY viewport to agree on the target coordinate and dimensions.
+Management and overlay fixtures also opt into an atomic completed-frame receipt
+published after the product's real draw/flush. Clicks (`click_text`, or
+`click_where` for targets such as the last footer label) require the owned
+process's completed frame and the PTY viewport to agree on the target coordinate
+and dimensions.
 This closes the partial-frame/layout race without sleeping or repeating input;
 it is a render receipt, not a claim that unrelated background work has finished.
 Receipts are retained alongside management screenshots, including failed waits.

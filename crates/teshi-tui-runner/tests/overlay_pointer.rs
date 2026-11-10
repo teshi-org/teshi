@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 
 use teshi_tui_runner::{Launch, Terminal};
 
+/// Deadline for one UI or disk postcondition. Hosted Windows ConPTY runners
+/// occasionally stall a frame for seconds, so this bounds a wait rather than
+/// pacing the test; passing runs return as soon as the condition holds.
+const WAIT_MS: u64 = 15_000;
+
 struct Fixture {
     root: tempfile::TempDir,
     config: Launch,
@@ -60,6 +65,15 @@ impl Fixture {
         })
         .collect::<Vec<_>>();
         env.extend([
+            // Pointer clicks wait for the completed frame to agree with the
+            // PTY viewport, so a press never targets a half-drawn layout.
+            (
+                "TESHI_TEST_FRAME_PATH".into(),
+                root.path()
+                    .join("completed-frame.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             ("TESHI_AGENT_BACKEND".into(), "native".into()),
             ("TESHI_LLM_API_KEY".into(), String::new()),
             ("TESHI_LLM_BASE_URL".into(), "http://127.0.0.1:1/v1".into()),
@@ -130,39 +144,61 @@ fn capture(terminal: &Terminal, stage: &str) {
 /// new agent).
 fn focus_composer(terminal: &Terminal) {
     terminal.key("Enter").unwrap();
-    terminal.expect_text("[INPUT]", true, 5000).unwrap();
+    terminal.expect_text("[INPUT]", true, WAIT_MS).unwrap();
 }
 
 fn command(terminal: &Terminal, input: &str) {
     terminal.write(input).unwrap();
-    terminal.expect_text(input, true, 5000).unwrap();
+    terminal.expect_text(input, true, WAIT_MS).unwrap();
     terminal.key("Enter").unwrap();
     terminal
-        .expect_text(&format!("│{input}"), false, 5000)
+        .expect_text(&format!("│{input}"), false, WAIT_MS)
         .unwrap();
 }
 
-fn click_footer(terminal: &Terminal, label: &str) {
-    terminal.expect_text(label, true, 5000).unwrap();
-    let screen = terminal.screen().unwrap();
-    // Distinguish a modal Close action from the still-visible background agent toolbar.
-    let label = if label == "Close" && screen.contains("Close [Esc]") {
-        "Close [Esc]"
-    } else {
-        label
-    };
-    let (col, row) = screen
+/// Resolves the last 1-based `(row, column)` cell rendering `text`.
+fn last_cell(screen: &str, text: &str) -> Option<(usize, usize)> {
+    screen
         .lines()
         .enumerate()
         .filter_map(|(row, line)| {
-            line.find(label)
-                .map(|byte| (line[..byte].chars().count() + 1, row + 1))
+            line.find(text)
+                .map(|byte| (row + 1, line[..byte].chars().count() + 1))
         })
         .last()
-        .unwrap_or_else(|| panic!("footer {label:?} was not visible\n{screen}"));
+}
+
+fn click_footer(terminal: &Terminal, label: &str) {
     terminal
-        .write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))
+        .click_where(&format!("footer {label:?}"), WAIT_MS, |screen| {
+            // Distinguish a modal Close action from the still-visible background agent toolbar.
+            let label = if label == "Close" && screen.contains("Close [Esc]") {
+                "Close [Esc]"
+            } else {
+                label
+            };
+            // Footers render below the content, which may repeat the label.
+            last_cell(screen, label)
+        })
         .unwrap();
+}
+
+/// Waits until `path` exists (or is gone) on disk.
+///
+/// Windows defers deleting a file while another handle (for example an
+/// antivirus scan) has it open, so the UI can drop a row before the path does.
+fn wait_for_path(terminal: &Terminal, path: &Path, exists: bool) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    while path.exists() != exists {
+        assert!(
+            Instant::now() < deadline,
+            "{} exists={} did not become exists={exists}\n{}",
+            path.display(),
+            !exists,
+            terminal.screen().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn close_app(terminal: &Terminal) {
@@ -176,41 +212,46 @@ fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
     let fixture = Fixture::new(cols, rows);
     let terminal = fixture.launch();
     terminal.key("3").unwrap();
-    terminal.expect_text("AI Chat", true, 5000).unwrap();
+    terminal.expect_text("AI Chat", true, WAIT_MS).unwrap();
     terminal.key("Enter").unwrap();
     command(&terminal, "/sessions");
-    terminal.expect_text("Load [Enter]", true, 5000).unwrap();
+    terminal.expect_text("Load [Enter]", true, WAIT_MS).unwrap();
     capture(&terminal, &format!("{stage}-session-open"));
-    terminal.click_text("Session Beta", 5000).unwrap();
+    terminal.click_text("Session Beta", WAIT_MS).unwrap();
     click_footer(&terminal, "Load");
-    terminal.expect_text("Load [Enter]", false, 5000).unwrap();
     terminal
-        .expect_text("SESSION_Beta_BODY", true, 5000)
+        .expect_text("Load [Enter]", false, WAIT_MS)
+        .unwrap();
+    terminal
+        .expect_text("SESSION_Beta_BODY", true, WAIT_MS)
         .unwrap();
     capture(&terminal, &format!("{stage}-session-loaded-beta"));
     focus_composer(&terminal);
     command(&terminal, "/sessions");
-    terminal.expect_text("Session Alpha", true, 5000).unwrap();
-    terminal.click_text("Session Alpha", 5000).unwrap();
+    terminal
+        .expect_text("Session Alpha", true, WAIT_MS)
+        .unwrap();
+    terminal.click_text("Session Alpha", WAIT_MS).unwrap();
     click_footer(&terminal, "Delete");
     terminal
-        .expect_text("Confirm deletion", true, 5000)
+        .expect_text("Confirm deletion", true, WAIT_MS)
         .unwrap();
     click_footer(&terminal, "Delete [Enter/y]");
-    terminal.expect_text("Session Alpha", false, 5000).unwrap();
-    assert!(
-        !fixture.session_path("Alpha").exists(),
-        "inactive session was not deleted"
-    );
+    terminal
+        .expect_text("Session Alpha", false, WAIT_MS)
+        .unwrap();
+    wait_for_path(&terminal, &fixture.session_path("Alpha"), false);
     assert!(
         fixture.session_path("Beta").exists(),
         "deleting Alpha removed Beta"
     );
     capture(&terminal, &format!("{stage}-session-deleted-alpha"));
     click_footer(&terminal, "Close");
-    terminal.expect_text("Load [Enter]", false, 5000).unwrap();
     terminal
-        .expect_text("SESSION_Beta_BODY", true, 5000)
+        .expect_text("Load [Enter]", false, WAIT_MS)
+        .unwrap();
+    terminal
+        .expect_text("SESSION_Beta_BODY", true, WAIT_MS)
         .unwrap();
     capture(
         &terminal,
@@ -243,20 +284,24 @@ fn approval_close_footer_returns_to_unchanged_chat() {
         let fixture = Fixture::new(cols, rows);
         let terminal = fixture.launch();
         terminal.key("3").unwrap();
-        terminal.expect_text("AI Chat", true, 5000).unwrap();
+        terminal.expect_text("AI Chat", true, WAIT_MS).unwrap();
         terminal.key("Enter").unwrap();
         command(&terminal, "/resume");
         terminal
-            .expect_text("SESSION_Alpha_BODY", true, 5000)
+            .expect_text("SESSION_Alpha_BODY", true, WAIT_MS)
             .unwrap();
         focus_composer(&terminal);
         command(&terminal, "/approval");
-        terminal.expect_text("Approval Mode", true, 5000).unwrap();
+        terminal
+            .expect_text("Approval Mode", true, WAIT_MS)
+            .unwrap();
         capture(&terminal, &format!("{stage}-approval-open"));
         click_footer(&terminal, "Close");
-        terminal.expect_text("Approval Mode", false, 5000).unwrap();
         terminal
-            .expect_text("SESSION_Alpha_BODY", true, 5000)
+            .expect_text("Approval Mode", false, WAIT_MS)
+            .unwrap();
+        terminal
+            .expect_text("SESSION_Alpha_BODY", true, WAIT_MS)
             .unwrap();
         capture(
             &terminal,
@@ -274,28 +319,42 @@ fn mindmap_location_open_and_close_footer_actions() {
         let fixture = Fixture::new(cols, rows);
         let terminal = fixture.launch();
         terminal.key("2").unwrap();
-        terminal.expect_text("MindMap", true, 5000).unwrap();
-        terminal.click_text("▶ overlay-project", 5000).unwrap();
-        terminal.expect_text("SHARED", true, 5000).unwrap();
-        terminal.click_text("SHARED", 5000).unwrap();
-        terminal.expect_text("Scenario: Alpha", true, 5000).unwrap();
+        terminal.expect_text("MindMap", true, WAIT_MS).unwrap();
+        terminal.click_text("▶ overlay-project", WAIT_MS).unwrap();
+        terminal.expect_text("SHARED", true, WAIT_MS).unwrap();
+        terminal.click_text("SHARED", WAIT_MS).unwrap();
+        terminal
+            .expect_text("Scenario: Alpha", true, WAIT_MS)
+            .unwrap();
         terminal.key("o").unwrap();
-        terminal.expect_text("Open Scenario", true, 5000).unwrap();
+        terminal
+            .expect_text("Open Scenario", true, WAIT_MS)
+            .unwrap();
         capture(&terminal, &format!("{stage}-location-open"));
         terminal.key("Down").unwrap();
         click_footer(&terminal, "Close");
-        terminal.expect_text("Open Scenario", false, 5000).unwrap();
-        terminal.expect_text("Scenario: Alpha", true, 5000).unwrap();
+        terminal
+            .expect_text("Open Scenario", false, WAIT_MS)
+            .unwrap();
+        terminal
+            .expect_text("Scenario: Alpha", true, WAIT_MS)
+            .unwrap();
         capture(
             &terminal,
             &format!("{stage}-location-close-preserved-alpha"),
         );
         terminal.key("o").unwrap();
-        terminal.expect_text("Open Scenario", true, 5000).unwrap();
+        terminal
+            .expect_text("Open Scenario", true, WAIT_MS)
+            .unwrap();
         terminal.key("Down").unwrap();
         click_footer(&terminal, "Open");
-        terminal.expect_text("Open Scenario", false, 5000).unwrap();
-        terminal.expect_text("Scenario: Beta", true, 5000).unwrap();
+        terminal
+            .expect_text("Open Scenario", false, WAIT_MS)
+            .unwrap();
+        terminal
+            .expect_text("Scenario: Beta", true, WAIT_MS)
+            .unwrap();
         capture(&terminal, &format!("{stage}-location-open-committed-beta"));
         fixture.unchanged();
         close_app(&terminal);
@@ -306,7 +365,7 @@ fn assert_background_owned(terminal: &Terminal, title: &str, cols: u16) {
     // A tab click and wheel event outside the modal must leave its active draft intact.
     terminal.write("\x1b[<0;2;1M\x1b[<0;2;1m").unwrap();
     terminal.scroll_at(cols - 2, 2, false, false).unwrap();
-    terminal.expect_text(title, true, 5000).unwrap();
+    terminal.expect_text(title, true, WAIT_MS).unwrap();
 }
 
 fn save_evidence(name: &str, bytes: &[u8]) {
@@ -317,7 +376,7 @@ fn save_evidence(name: &str, bytes: &[u8]) {
 
 fn wait_for_saved_source(terminal: &Terminal, path: &Path, expected: &str) -> String {
     // PTY key submission returns before the application processes the save.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
     loop {
         let actual = fs::read_to_string(path);
         if let Ok(body) = &actual
@@ -365,18 +424,18 @@ fn generation_scope_iteration_cancel_and_confirm_preserve_sources() {
             .join(".teshi/generation-state.json");
         let terminal = fixture.launch();
         terminal.key("3").unwrap();
-        terminal.expect_text("AI Chat", true, 5000).unwrap();
+        terminal.expect_text("AI Chat", true, WAIT_MS).unwrap();
         terminal.key("Enter").unwrap();
         // Keep the command visible on one row even in the narrow input pane.
         command(&terminal, "/generate scope");
         terminal
-            .expect_text("Confirm generation source scope", true, 5000)
+            .expect_text("Confirm generation source scope", true, WAIT_MS)
             .unwrap();
         assert_background_owned(&terminal, "Confirm generation source scope", cols);
         capture(&terminal, &format!("{stage}-scope-open-owned"));
         click_footer(&terminal, "Cancel");
         terminal
-            .expect_text("Confirm generation source scope", false, 5000)
+            .expect_text("Confirm generation source scope", false, WAIT_MS)
             .unwrap();
         assert!(
             !state_path.exists(),
@@ -384,19 +443,20 @@ fn generation_scope_iteration_cancel_and_confirm_preserve_sources() {
         );
         command(&terminal, "/generate scope");
         terminal
-            .expect_text("Confirm generation source scope", true, 5000)
+            .expect_text("Confirm generation source scope", true, WAIT_MS)
             .unwrap();
         click_footer(&terminal, "Iteration");
-        terminal.expect_text("Sprint Scope", true, 5000).unwrap();
-        terminal.click_text("Sprint Scope", 5000).unwrap();
+        terminal.expect_text("Sprint Scope", true, WAIT_MS).unwrap();
+        terminal.click_text("Sprint Scope", WAIT_MS).unwrap();
         terminal
-            .expect_text("Iteration scope: Sprint Scope", true, 5000)
+            .expect_text("Iteration scope: Sprint Scope", true, WAIT_MS)
             .unwrap();
         capture(&terminal, &format!("{stage}-scope-selected-iteration"));
         click_footer(&terminal, "Confirm");
         terminal
-            .expect_text("Confirm generation source scope", false, 5000)
+            .expect_text("Confirm generation source scope", false, WAIT_MS)
             .unwrap();
+        wait_for_path(&terminal, &state_path, true);
         let state_bytes = fs::read(&state_path).unwrap();
         let state: serde_json::Value = serde_json::from_slice(&state_bytes).unwrap();
         assert_eq!(state["stage"], "Gathering");
@@ -423,22 +483,26 @@ fn step_keyword_pointer_cancel_and_confirm_save_only_selected_step() {
         click_footer(&terminal, "Edit");
         terminal.key("Ctrl+g").unwrap();
         terminal.key("Enter").unwrap();
-        terminal.expect_text("Step keyword", true, 5000).unwrap();
+        terminal.expect_text("Step keyword", true, WAIT_MS).unwrap();
         assert_background_owned(&terminal, "Step keyword", cols);
-        terminal.click_text("When", 5000).unwrap();
+        terminal.click_text("When", WAIT_MS).unwrap();
         capture(
             &terminal,
             &format!("{stage}-keyword-selected-before-cancel"),
         );
         click_footer(&terminal, "Cancel");
-        terminal.expect_text("Step keyword", false, 5000).unwrap();
+        terminal
+            .expect_text("Step keyword", false, WAIT_MS)
+            .unwrap();
         terminal.key("s").unwrap();
         fixture.unchanged();
         terminal.key("Enter").unwrap();
-        terminal.expect_text("Step keyword", true, 5000).unwrap();
-        terminal.click_text("When", 5000).unwrap();
+        terminal.expect_text("Step keyword", true, WAIT_MS).unwrap();
+        terminal.click_text("When", WAIT_MS).unwrap();
         click_footer(&terminal, "Confirm");
-        terminal.expect_text("Step keyword", false, 5000).unwrap();
+        terminal
+            .expect_text("Step keyword", false, WAIT_MS)
+            .unwrap();
         terminal.key("s").unwrap();
         let expected = String::from_utf8(fixture.original.clone())
             .unwrap()
@@ -478,9 +542,11 @@ fn external_change_pointer_keep_then_reload_resolves_dirty_feature() {
         capture(&terminal, &format!("{stage}-external-change-owned"));
         click_footer(&terminal, "Keep");
         terminal
-            .expect_text("Feature changed on disk", false, 5000)
+            .expect_text("Feature changed on disk", false, WAIT_MS)
             .unwrap();
-        terminal.expect_text("LOCAL_ONLY_EDIT", true, 5000).unwrap();
+        terminal
+            .expect_text("LOCAL_ONLY_EDIT", true, WAIT_MS)
+            .unwrap();
         assert_eq!(fs::read_to_string(&fixture.source).unwrap(), external);
         capture(&terminal, &format!("{stage}-external-kept-local"));
         let next_external = external.replace("DISK_FIRST", "DISK_RELOAD_SENTINEL");
@@ -490,16 +556,16 @@ fn external_change_pointer_keep_then_reload_resolves_dirty_feature() {
             .unwrap();
         click_footer(&terminal, "Reload");
         terminal
-            .expect_text("Feature changed on disk", false, 5000)
+            .expect_text("Feature changed on disk", false, WAIT_MS)
             .unwrap();
         terminal
-            .expect_text("DISK_RELOAD_SENTINEL", true, 5000)
+            .expect_text("DISK_RELOAD_SENTINEL", true, WAIT_MS)
             .unwrap();
         terminal
-            .expect_text("LOCAL_ONLY_EDIT", false, 5000)
+            .expect_text("LOCAL_ONLY_EDIT", false, WAIT_MS)
             .unwrap();
         terminal.key("s").unwrap();
-        assert_eq!(fs::read_to_string(&fixture.source).unwrap(), next_external);
+        wait_for_saved_source(&terminal, &fixture.source, &next_external);
         save_evidence(
             &format!("{stage}-external-reloaded.feature"),
             next_external.as_bytes(),
@@ -558,7 +624,7 @@ fn change_summary_pointer_select_jump_and_close_preserve_pending_source() {
             .push(("NO_PROXY".into(), "127.0.0.1,localhost,::1".into()));
         let terminal = fixture.launch();
         terminal.key("3").unwrap();
-        terminal.expect_text("AI Chat", true, 5000).unwrap();
+        terminal.expect_text("AI Chat", true, WAIT_MS).unwrap();
         terminal.key("Enter").unwrap();
         terminal
             .write("Propose a Beta step change for human review.")
@@ -568,32 +634,34 @@ fn change_summary_pointer_select_jump_and_close_preserve_pending_source() {
         assert_background_owned(&terminal, "Change Summary", cols);
         capture(&terminal, &format!("{stage}-summary-open-owned"));
         terminal
-            .expect_text("2 change(s) pending", true, 5000)
+            .expect_text("2 change(s) pending", true, WAIT_MS)
             .unwrap();
-        let screen = terminal.screen().unwrap();
-        let (row, line) = screen
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains("[~]") && line.contains("Beta"))
-            .unwrap();
-        let col = line[..line.find("Beta").unwrap()].chars().count() + 1;
         terminal
-            .write(&format!(
-                "\x1b[<0;{col};{}M\x1b[<0;{col};{}m",
-                row + 1,
-                row + 1
-            ))
+            .click_where("modified Beta change row", WAIT_MS, |screen| {
+                screen.lines().enumerate().find_map(|(row, line)| {
+                    let byte = line.find("Beta").filter(|_| line.contains("[~]"))?;
+                    Some((row + 1, line[..byte].chars().count() + 1))
+                })
+            })
             .unwrap();
         capture(&terminal, &format!("{stage}-summary-selected-beta"));
         click_footer(&terminal, "Jump");
-        terminal.expect_text("Change Summary", false, 5000).unwrap();
-        terminal.expect_text("Scenario: Beta", true, 5000).unwrap();
+        terminal
+            .expect_text("Change Summary", false, WAIT_MS)
+            .unwrap();
+        terminal
+            .expect_text("Scenario: Beta", true, WAIT_MS)
+            .unwrap();
         fixture.unchanged();
         capture(&terminal, &format!("{stage}-summary-jumped-beta"));
         terminal.key("s").unwrap();
-        terminal.expect_text("Change Summary", true, 5000).unwrap();
+        terminal
+            .expect_text("Change Summary", true, WAIT_MS)
+            .unwrap();
         click_footer(&terminal, "Close");
-        terminal.expect_text("Change Summary", false, 5000).unwrap();
+        terminal
+            .expect_text("Change Summary", false, WAIT_MS)
+            .unwrap();
         fixture.unchanged();
         terminal.key("n").unwrap();
         terminal.key("n").unwrap();
