@@ -1,0 +1,114 @@
+# Self-hosting runner routing for Teshi's own Features (see doc/runner-protocol.md).
+#
+# Every scenario under features/ routes to exactly one rule; check with
+# `teshi run --explain features/`. Build the runners first:
+#   cargo build -p teshi-cli -p teshi-requirement-cli-runner -p teshi-validation-cli-runner
+#   cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml
+# `teshi run` exports TESHI_BIN (its own executable) to these runners, so the
+# binary that runs the suite is the binary under test.
+#
+# This mirrors the routes in scripts/run-feature-matrix.py; keep both in sync.
+
+[[runners]]
+name = "validation-cli"
+cmd = "target/debug/teshi-validation-cli-runner"
+[runners.match]
+tags = ["@validation-e2e"]
+
+[[runners]]
+name = "requirement-cli"
+cmd = "target/debug/teshi-requirement-cli-runner"
+[runners.match]
+tags = ["@cli"]
+exclude_tags = ["@validation-e2e"]
+
+[[runners]]
+name = "web-ui"
+builtin = "browser"
+[runners.match]
+tags = ["@web-ui"]
+
+[[runners]]
+name = "winapp"
+builtin = "winapp"
+[runners.match]
+tags = ["@winapp"]
+
+# Source-pinned PTY acceptance. These scenarios also need the per-Feature
+# TESHI_*_TEST_BIN harness binaries that scripts/ci_suite.py provides.
+[[runners]]
+name = "tui-pinned-pty"
+cmd = "python"
+args = ["scripts/run-tui-acceptance-feature.py"]
+cwd = "."
+[runners.match]
+tags = ["@tui"]
+paths = [
+    "features/*/external_feature_sync.feature", "features/*/外部功能文件同步.feature",
+    "features/*/footer_actions.feature", "features/*/底部操作.feature",
+    "features/*/chat_profile_title.feature", "features/*/聊天配置标题.feature",
+    "features/*/chat_focus_hint.feature", "features/*/聊天聚焦提示.feature",
+    "features/*/chat_runtime_context.feature", "features/*/聊天耗时与上下文.feature",
+    "features/*/explore_horizontal_navigation.feature", "features/*/步骤横向导航.feature",
+    "features/*/combined_detail_layout.feature", "features/*/合并细节布局.feature",
+    "features/*/compact_terminal_layout.feature", "features/*/小屏终端布局.feature",
+    "features/*/pointer_feedback.feature", "features/*/点击悬停反馈.feature",
+    "features/*/chat_acp_status_row.feature", "features/*/聊天ACP状态行.feature",
+]
+
+[[runners]]
+name = "tui-acp-model"
+cmd = "crates/teshi-tui-runner/target/debug/teshi-acp-model-feature-runner"
+[runners.match]
+tags = ["@tui"]
+paths = ["features/*/tui_acp_model_persistence.feature", "features/*/ACP模型选择持久化.feature"]
+
+[[runners]]
+name = "tui-acp-authoring"
+cmd = "crates/teshi-tui-runner/target/debug/teshi-acp-authoring-feature-runner"
+[runners.match]
+tags = ["@tui"]
+paths = ["features/*/tui_acp_authoring.feature", "features/*/ACP功能生成.feature"]
+
+[[runners]]
+name = "tui-agent"
+cmd = "crates/teshi-tui-runner/target/debug/teshi-agent-feature-runner"
+[runners.match]
+tags = ["@tui"]
+paths = [
+    "features/*/tui_agent_activity.feature", "features/*/Agent运行过程展示.feature",
+    "features/*/tui_conversation_history.feature", "features/*/Agent对话持久化.feature",
+    "features/*/tui_agent_selection_memory.feature", "features/*/记住上次选择的Agent.feature",
+    "features/*/tui_project_switch_failures.feature", "features/*/项目切换失败边界.feature",
+    "features/*/tui_project_switch_boundaries.feature", "features/*/项目切换持久化边界.feature",
+]
+
+# Every other terminal Feature: generated sidecar bindings driven by
+# teshi-tui-runner. Exclusions hand the Features above to their own rules.
+[[runners]]
+name = "tui-sidecar"
+cmd = "python"
+args = ["scripts/run-tui-sidecar-feature.py"]
+cwd = "."
+env = { TESHI_GENERIC_TUI_RUNNER = "crates/teshi-tui-runner/target/debug/teshi-tui-runner" }
+[runners.match]
+tags = ["@tui"]
+exclude_paths = [
+    "features/*/external_feature_sync.feature", "features/*/外部功能文件同步.feature",
+    "features/*/footer_actions.feature", "features/*/底部操作.feature",
+    "features/*/chat_profile_title.feature", "features/*/聊天配置标题.feature",
+    "features/*/chat_focus_hint.feature", "features/*/聊天聚焦提示.feature",
+    "features/*/chat_runtime_context.feature", "features/*/聊天耗时与上下文.feature",
+    "features/*/explore_horizontal_navigation.feature", "features/*/步骤横向导航.feature",
+    "features/*/combined_detail_layout.feature", "features/*/合并细节布局.feature",
+    "features/*/compact_terminal_layout.feature", "features/*/小屏终端布局.feature",
+    "features/*/pointer_feedback.feature", "features/*/点击悬停反馈.feature",
+    "features/*/chat_acp_status_row.feature", "features/*/聊天ACP状态行.feature",
+    "features/*/tui_acp_model_persistence.feature", "features/*/ACP模型选择持久化.feature",
+    "features/*/tui_acp_authoring.feature", "features/*/ACP功能生成.feature",
+    "features/*/tui_agent_activity.feature", "features/*/Agent运行过程展示.feature",
+    "features/*/tui_conversation_history.feature", "features/*/Agent对话持久化.feature",
+    "features/*/tui_agent_selection_memory.feature", "features/*/记住上次选择的Agent.feature",
+    "features/*/tui_project_switch_failures.feature", "features/*/项目切换失败边界.feature",
+    "features/*/tui_project_switch_boundaries.feature", "features/*/项目切换持久化边界.feature",
+]

@@ -928,11 +928,12 @@ def main() -> int:
         emit({"type": "end_run", "passed": 0, "failed": 0, "skipped": 0, "blocked": len(cases)})
         return 0
 
-    teshi = os.environ.get("TESHI_SELF_TEST_BIN")
+    # `teshi run` exports TESHI_BIN (the binary that started this runner).
+    teshi = os.environ.get("TESHI_SELF_TEST_BIN") or os.environ.get("TESHI_BIN")
     if not teshi:
-        print("TESHI_SELF_TEST_BIN is required", file=sys.stderr)
+        print("TESHI_SELF_TEST_BIN or TESHI_BIN is required", file=sys.stderr)
         return 2
-    generic = os.environ.get("TESHI_GENERIC_TUI_RUNNER")
+    generic = os.environ.get("TESHI_GENERIC_TUI_RUNNER") or os.environ.get("TESHI_TUI_RUNNER")
     if not generic:
         candidate = Path(teshi).with_name("teshi-tui-runner" + (".exe" if os.name == "nt" else ""))
         generic = str(candidate)
