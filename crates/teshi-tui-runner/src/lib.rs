@@ -320,28 +320,57 @@ impl Terminal {
     /// Returns errors for timeouts outside 1–120000ms, empty text, expiry
     /// without a match, or PTY write failure.
     pub fn click_text(&self, text: &str, timeout_ms: u64) -> Result<()> {
-        validate_timeout(timeout_ms)?;
         if text.is_empty() {
             bail!("click target requires nonempty text");
         }
+        self.click_where(&format!("{text:?}"), timeout_ms, |screen| {
+            locate(screen, text)
+        })
+    }
+
+    /// Left-clicks the cell chosen by `target` from the live viewport.
+    ///
+    /// `target` maps a viewport to a 1-based `(row, column)` cell, letting a
+    /// caller pick a cell `click_text` cannot express, such as the last copy of
+    /// a footer label or a row identified by several markers. When the launch
+    /// opts into a completed-frame receipt, the click waits until `target`
+    /// resolves to the same cell in both the PTY viewport and the application's
+    /// last completed frame, so a press never lands on a partially drawn layout.
+    ///
+    /// # Errors
+    /// Returns errors for timeouts outside 1–120000ms, expiry without an
+    /// agreeing target, observation failure, or PTY write failure.
+    pub fn click_where(
+        &self,
+        description: &str,
+        timeout_ms: u64,
+        target: impl Fn(&str) -> Option<(usize, usize)>,
+    ) -> Result<()> {
+        validate_timeout(timeout_ms)?;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             let screen = self.screen()?;
-            if let Some((row, col)) = self.completed_click_location(&screen, text)? {
+            if let Some((row, col)) = self.completed_click_location(&screen, &target)? {
                 // SGR 1006 encodes 1-based row/column. Crossterm's mouse
                 // parser needs a press and release pair for one click.
                 self.write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))?;
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                bail!("timed out after {timeout_ms}ms waiting for {text:?} to click\n{screen}");
+                bail!(
+                    "timed out after {timeout_ms}ms waiting for {description} to click\n{screen}"
+                );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    fn completed_click_location(&self, screen: &str, text: &str) -> Result<Option<(usize, usize)>> {
-        let observed = locate(screen, text);
+    fn completed_click_location(
+        &self,
+        screen: &str,
+        target: &impl Fn(&str) -> Option<(usize, usize)>,
+    ) -> Result<Option<(usize, usize)>> {
+        let observed = target(screen);
         let Some(path) = &self.frame_receipt else {
             return Ok(observed);
         };
@@ -384,8 +413,7 @@ impl Terminal {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let target = locate(&completed, text);
-        Ok(target.filter(|position| Some(*position) == observed))
+        Ok(target(&completed).filter(|position| Some(*position) == observed))
     }
 
     /// Drags the left mouse button over the first viewport occurrence of `text`.
