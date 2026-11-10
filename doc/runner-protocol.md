@@ -33,7 +33,16 @@ Each rule has a unique `name` and exactly one executor:
 |-------|---------|
 | `builtin = "dispatch"` | In-process API/mixed dispatch (`[API]` steps and Jinja templates) |
 | `builtin = "tui"` | The packaged `teshi-tui-runner` for `.tui.json` sidecars (`TESHI_TUI_RUNNER` overrides its path) |
+| `builtin = "browser"` | `teshi browser replay` of confirmed web bindings, one process per scenario |
+| `builtin = "winapp"` | `teshi winapp replay` of confirmed Windows UI bindings, one process per scenario |
 | `cmd` (+ `args`, `cwd`, `env`) | An external process that speaks protocol v1 |
+
+A relative `cmd` that contains a path separator (`target/debug/my-runner`) is
+resolved against the project root; a bare name (`python`) is looked up on
+`PATH`. On Windows `.exe` is implied. `cwd` is relative to the project root.
+Teshi exports `TESHI_BIN` (its own executable) to external runners unless the
+environment or the rule's `env` already sets it, so runners that drive Teshi
+test the binary that started them.
 
 `[runners.match]` must declare `tags`, `paths`, or both; when both are set a
 scenario must satisfy both. Use `paths = ["**"]` to match everything.
@@ -44,6 +53,33 @@ scenario must satisfy both. Use `paths = ["**"]` to match everything.
 - **Paths** are glob patterns with `/` separators, relative to the project
   root. `*` never crosses a `/`; `**` matches any number of directories,
   including none (`**/*.feature` matches `sample.feature`).
+- **`exclude_tags` / `exclude_paths`** disqualify a scenario that would
+  otherwise match. They let a broad rule (`tags = ["@cli"]`) step aside for a
+  narrower one (`tags = ["@validation-e2e"]`) so each scenario keeps exactly
+  one owner. There is no rule priority.
+
+### Browser and WinApp executors
+
+The `browser` and `winapp` builtins replay confirmed bindings scenario by
+scenario and report step events and one result per scenario. Target
+availability is checked before any step runs, and an unavailable target is
+reported as **blocked**, never as a failure:
+
+| Category | Browser | WinApp |
+|----------|---------|--------|
+| `target_unconfigured` | No `.teshi/cdp-endpoint.json` for the project | — |
+| `target_unavailable` | Endpoint unreachable or page snapshot fails (`teshi browser doctor`) | WinApp service cannot start, or no window is attached |
+| `platform_unsupported` | — | Not running on Windows |
+
+Once steps run, any error is a failure. Each scenario keeps its own replay
+evidence run under `.teshi/logs/replay-screenshots/`.
+
+### Project root
+
+Relative paths given to `teshi run` are rooted at the working directory. For an
+absolute path, the project is the nearest ancestor containing `teshi.toml` or
+a `.teshi` directory; the search stops at the user's home directory, so a
+stray `~/.teshi` never captures Features below it.
 
 ### Every scenario routes to exactly one runner
 
@@ -145,7 +181,22 @@ unavailable (no browser session, no window, missing credentials). It is not a
 pass and not an assertion failure. `category` is a short machine-readable
 reason such as `target_unavailable` or `credentials_unavailable`.
 
-`teshi run` exits with:
+## `teshi run` output
+
+`teshi run` prints the merged stream of all batches as protocol v1 NDJSON on
+stdout, so its output can itself be consumed as a v1 runner stream:
+
+- it opens with one `start_run` declaring every capability,
+- runner events are forwarded, including runner-specific events Teshi does not
+  interpret (for example `end_example`),
+- it closes with one aggregated `end_run`, then `runner_exit`
+  (`{"type":"runner_exit","success":false}`) or `runner_error`
+  (`{"type":"runner_error","message":"..."}`) when a runner failed to run or
+  violated the protocol.
+
+Runner stderr is forwarded as `log` events. Teshi's own errors go to stderr.
+
+Exit codes:
 
 | Exit code | Meaning |
 |-----------|---------|

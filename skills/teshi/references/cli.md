@@ -56,7 +56,7 @@ teshi steps list --feature path/to/file.feature
 teshi steps unbound --feature path/to/file.feature
 ```
 
-`run` prints one line per runner event. Inspect scenario/step outcomes and process status; do not treat the first event as completion. Scenarios are routed by `teshi.toml` `[[runners]]` and each must match exactly one rule; run `--explain` first when a run is rejected as unrouted or ambiguous. `--runner-cmd` sends every scenario to one ad-hoc runner. Exit code `3` means blocked targets with no failures. The removed `[runner]` section and `TESHI_RUNNER_*` variables are errors, not fallbacks. A feature file alone does not provide executable step implementations.
+`run` streams protocol v1 NDJSON events and ends with `runner_exit` or `runner_error`. Inspect scenario/step outcomes and process status; do not treat the first event as completion. Scenarios are routed by `teshi.toml` `[[runners]]` and each must match exactly one rule; run `--explain` first when a run is rejected as unrouted or ambiguous. `--runner-cmd` sends every scenario to one ad-hoc runner. Exit code `3` means blocked targets with no failures. The removed `[runner]` section and `TESHI_RUNNER_*` variables are errors, not fallbacks. A feature file alone does not provide executable step implementations.
 
 For bindings, follow [Gherkin bindings and replay](bindings.md): select the step, inspect/verify the requested target, propose the binding, honor the applicable confirmation mode, then replay and inspect results.
 

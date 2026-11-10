@@ -2,10 +2,11 @@
 # must match exactly one [[runners]] rule; otherwise the run is rejected before
 # anything starts. Check routing with `teshi run --explain`.
 #
-# A rule declares either `builtin` (dispatch | tui) or an external `cmd` that
-# speaks runner protocol v1 (see doc/runner-protocol.md). Matching uses the
-# effective tags (Feature + Scenario) and/or `/`-separated path globs relative
-# to this file's directory.
+# A rule declares either `builtin` (dispatch | tui | browser | winapp) or an
+# external `cmd` that speaks runner protocol v1 (see doc/runner-protocol.md).
+# Matching uses the effective tags (Feature + Scenario) and/or `/`-separated
+# path globs relative to this file's directory; `exclude_tags` and
+# `exclude_paths` let a broad rule yield to a narrower one.
 
 [[runners]]
 name = "api"
@@ -18,6 +19,12 @@ name = "terminal"
 builtin = "tui"
 [runners.match]
 tags = ["@tui"]
+
+[[runners]]
+name = "web"
+builtin = "browser"
+[runners.match]
+tags = ["@web-ui"]
 
 [[runners]]
 name = "pytest"

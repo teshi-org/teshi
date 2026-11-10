@@ -317,7 +317,7 @@ Development: `cargo run -p teshi-desktop`.
 
 ### Run tests (headless)
 
-For CI and scripts; prints one line per runner event to stdout:
+For CI and scripts; streams runner protocol v1 events as NDJSON to stdout:
 
 ```bash
 teshi run                              # all scenarios under current directory
@@ -649,7 +649,7 @@ teshi winapp highlight 'uia:automation_id=LoginButton'
 teshi winapp execute --selector 'uia:automation_id=LoginButton' --action click
 teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click --mode foreground --allow-interactive-input
 teshi winapp launch --elevated 'C:\path\to\Enhook.exe'
-teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes] [--dry-run] \
+teshi winapp replay --feature test/feature/login.feature [--scenario NAME] [--until-line N] [--yes] [--dry-run] \
   [--launch 'C:\path\to\App.exe']
 ```
 
