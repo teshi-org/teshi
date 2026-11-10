@@ -4,6 +4,7 @@ use std::{
     fs,
     path::Path,
     process::Command,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use teshi_core::version::{BUILD_TARGET, BuildIdentity, ReleaseChannel};
@@ -14,6 +15,17 @@ use teshi_update::{
     storage::write_json,
     transaction::{Preparation, last_result, participate},
 };
+
+// Serialize these cases: they spawn real helper processes, mutate process-wide
+// env, and enumerate /proc, so parallel cargo test cases contend on the
+// non-blocking install locks.
+static HELPER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn serialize_helper_tests() -> std::sync::MutexGuard<'static, ()> {
+    HELPER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn fixture(root: &Path, sequence: u64, bad_identity: bool) -> BundleManifest {
     fs::create_dir_all(root).unwrap();
@@ -148,16 +160,19 @@ fn run_case(bad_identity: bool) {
 
 #[test]
 fn real_helper_waits_for_exit_and_updates_complete_bundle() {
+    let _serial = serialize_helper_tests();
     run_case(false);
 }
 
 #[test]
 fn real_helper_rolls_back_failed_new_binary_smoke_check() {
+    let _serial = serialize_helper_tests();
     run_case(true);
 }
 
 #[test]
 fn real_helper_rolls_back_when_a_managed_file_is_locked() {
+    let _serial = serialize_helper_tests();
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("teshi-old-version-directory");
     let old = fixture(&root, 1, false);
@@ -223,6 +238,7 @@ fn real_helper_rolls_back_when_a_managed_file_is_locked() {
 
 #[test]
 fn competing_cli_cannot_stage_while_desktop_holds_preparation() {
+    let _serial = serialize_helper_tests();
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("teshi-old-version-directory");
     let _old = fixture(&root, 1, false);
@@ -237,6 +253,7 @@ fn competing_cli_cannot_stage_while_desktop_holds_preparation() {
 
 #[test]
 fn helper_handoff_is_pending_not_installed_until_processes_exit() {
+    let _serial = serialize_helper_tests();
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("teshi-old-version-directory");
     let old = fixture(&root, 1, false);
@@ -280,6 +297,7 @@ fn helper_handoff_is_pending_not_installed_until_processes_exit() {
 
 #[test]
 fn active_daemon_blocks_replacement_without_false_installed_status() {
+    let _serial = serialize_helper_tests();
     // Isolated helper test process; no concurrent env writers in this file besides this test.
     unsafe {
         std::env::set_var("TESHI_UPDATE_QUIESCE_SECS", "1");
