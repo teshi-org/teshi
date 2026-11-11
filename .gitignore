@@ -89,3 +89,10 @@ features/*/testpoints/
 
 # Lock file held while a test points store is open
 testpoints/*.lock
+
+# Local Test Points store of this checkout (machine-specific review state)
+/testpoints/testpoints.json
+
+# Local Chrys agent state and runtime logs
+/.chrys/
+/logs/
