@@ -160,14 +160,15 @@ usable address. Each activation supersedes the previous hosted session.
 Windows Terminal 1.22+ supports Sixel. On Windows, Teshi queries device
 attributes through the console before starting its input reader. Sixel does
 not require a font-size reply; Windows Terminal uses a 10 by 20 virtual pixel
-grid per cell. `WT_SESSION` alone does not establish graphics support.
-`NO_COLOR`, `TERM=dumb`, `TESHI_NO_IMAGE`, and the BDD harness disable automatic
-graphics detection. The viewer displays the reason. For troubleshooting on a
-terminal with known support, set `TESHI_IMAGE_PROTOCOL=sixel` (or `kitty` or
-`iterm2`) before launching; `none` disables images explicitly.
-Forcing a protocol does not bypass a multiplexer or console backend that
-filters images. Native Windows Zellij launches show an explicit compatibility
-hint; a direct Windows Terminal session is a separate acceptance target.
+grid per cell. The attribute alone does not establish graphics support, because
+an older ConPTY answers that query itself: pixels are drawn only in a Windows
+Terminal session (`WT_SESSION` set and no `TERM_PROGRAM`). `NO_COLOR`,
+`TERM=dumb`, `TESHI_NO_IMAGE`, the BDD harness, and a multiplexer (`TMUX`,
+`STY`, `ZELLIJ`) disable automatic graphics detection, and the viewer displays
+the reason. For troubleshooting on a terminal with known support, set
+`TESHI_IMAGE_PROTOCOL=sixel` (or `kitty` or `iterm2`) before launching; `none`
+disables images explicitly. Forcing a protocol does not bypass a multiplexer or
+console backend that filters images.
 
 Tree nodes whose scenario has captures end with `●N`, where N is the number of
 step images in the newest run. The Explore Scenarios and Steps panes use the

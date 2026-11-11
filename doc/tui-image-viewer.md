@@ -103,12 +103,27 @@ Idle frames do not resend an image. Replacing or closing a capture, or resizing 
 pixel output before repainting. Transport throughput can still limit a single
 bounded write; this is not a hard real-time latency guarantee.
 
+Images inside the chat transcript and the Requirements preview keep the panel's
+own cells underneath. A placement records the cells it was drawn over, and its
+tiles are sent again from the first row once a later frame prints into one of
+them, which is what such a terminal erases an image with. A row on the last
+screen line keeps its text: a Sixel row's last band reaches into the row below
+it, and a terminal that moves below a payload scrolls to make room. Tiles are
+positioned absolutely, without saving and restoring the cursor, because a
+payload leaves the cursor wherever the terminal puts it.
+
 ## Terminal compatibility
 
 Automatic detection requires actual protocol support. `TESHI_IMAGE_PROTOCOL`
 is a diagnostic override, not a way to make a terminal support images. If no
 protocol is available, the viewer shows the reason and the path to the capture.
 It does not silently substitute a low-resolution half-block preview.
+
+On Windows the console's device attributes alone are not enough: a ConPTY older
+than Windows Terminal 1.22's answers them itself. Images are drawn only in a
+Windows Terminal session (`WT_SESSION` set, no `TERM_PROGRAM`), and
+`TMUX`, `STY` and `ZELLIJ` disable detection before it queries anything, since a
+multiplexer decides what reaches the terminal that draws.
 
 The Windows Zellij/system-ConPTY path must be tested separately from a direct
 Windows Terminal session or a PTY using packaged `conpty.dll` / `OpenConsole.exe`.
