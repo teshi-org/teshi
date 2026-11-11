@@ -17445,7 +17445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_image_viewer_covers_the_terminal_and_only_its_close_button_responds() {
+    fn test_image_viewer_floats_inside_the_content_area_and_only_its_close_button_responds() {
         let (mut app, _project, _store) = slash_test_app();
         let path = app.project.root_dir.join("drop.png");
         image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]))
@@ -17497,18 +17497,28 @@ mod tests {
         assert_eq!(app.agent().input, draft, "opening keeps the draft");
 
         let (buffer, text) = draw(&mut app);
+        // 100x30 terminal: the 28-row content area loses one row top and
+        // bottom, and every row loses three columns on each side.
         assert_eq!(
-            buffer[(0, 0)].symbol(),
+            buffer[(3, 2)].symbol(),
             "╭",
-            "the viewer starts at the corner"
+            "the viewer starts after the top gutter"
         );
-        assert_eq!(buffer[(99, 29)].symbol(), "╯", "and ends at the far corner");
-        assert!(!text.contains("Explore"), "tabs are covered: {text}");
+        assert_eq!(
+            buffer[(96, 27)].symbol(),
+            "╯",
+            "and ends before the bottom gutter"
+        );
+        assert!(
+            text.contains("Explore"),
+            "the tab row stays visible: {text}"
+        );
+        assert!(text.contains("^q"), "the footer stays visible: {text}");
         assert!(text.contains("drop.png"), "{text}");
         assert!(text.contains("no image protocol"), "{text}");
         let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
             .expect("the close button is registered");
-        assert_eq!(close.y, 0, "the close button sits on the top border");
+        assert_eq!(close.y, 2, "the close button sits on the top border");
         assert!(text.contains("Close [Esc]"), "{text}");
 
         // Neither the composer below nor typed keys react while it is open.

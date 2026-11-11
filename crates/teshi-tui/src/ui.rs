@@ -602,7 +602,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     {
         render_requirements_overlay(frame, app, frame.area());
     }
-    render_screenshot_overlay(frame, app, frame.area());
+    render_screenshot_overlay(frame, app, content_row);
     crate::acp_controls::render_picker(frame, app);
     pointer_controls::render_pending_review(frame, app, content_row);
     if app.pending_delete.is_some() {
@@ -2701,10 +2701,58 @@ const IMAGE_VIEWER_WEB: &str = " Web [w] ";
 /// Web label for terminals too narrow to show [`IMAGE_VIEWER_WEB`] whole.
 const IMAGE_VIEWER_WEB_SHORT: &str = " w ";
 
-/// Renders the image viewer over the whole terminal.
+/// Close and Web labels that fit `popup_width`, preferring the full wording.
 ///
-/// Every tab, sidebar, and status row is covered so the image gets the
-/// largest box the terminal allows. The close control sits on the border,
+/// Close stays whenever any columns remain. Web is omitted when even the short
+/// pair would consume the whole border, so the title is not covered.
+fn viewer_border_controls(popup_width: u16) -> (&'static str, u16, &'static str, u16) {
+    let close_full = IMAGE_VIEWER_CLOSE.width() as u16;
+    let web_full = IMAGE_VIEWER_WEB.width() as u16;
+    let close_short = IMAGE_VIEWER_CLOSE_SHORT.width() as u16;
+    let web_short = IMAGE_VIEWER_WEB_SHORT.width() as u16;
+    // One column separates the controls; one stays inside the right border.
+    let budget = popup_width.saturating_sub(2);
+    if budget >= close_full.saturating_add(web_full).saturating_add(1) {
+        (IMAGE_VIEWER_CLOSE, close_full, IMAGE_VIEWER_WEB, web_full)
+    } else if budget >= close_short.saturating_add(web_short).saturating_add(1) {
+        (
+            IMAGE_VIEWER_CLOSE_SHORT,
+            close_short,
+            IMAGE_VIEWER_WEB_SHORT,
+            web_short,
+        )
+    } else if budget >= close_full {
+        (IMAGE_VIEWER_CLOSE, close_full, "", 0)
+    } else {
+        (IMAGE_VIEWER_CLOSE_SHORT, close_short.min(budget), "", 0)
+    }
+}
+
+/// Columns kept free between the image viewer and the panel edges.
+const VIEWER_GUTTER_COLS: u16 = 3;
+/// Rows kept free above and below the image viewer inside the content area.
+const VIEWER_GUTTER_ROWS: u16 = 1;
+
+/// The viewer box: `area` shrunk by the gutters, on every terminal size.
+///
+/// Very small terminals give the gutters up evenly rather than collapsing the
+/// box, so the border and its controls stay addressable.
+fn image_viewer_rect(area: Rect) -> Rect {
+    let cols = VIEWER_GUTTER_COLS.min(area.width.saturating_sub(2) / 2);
+    let rows = VIEWER_GUTTER_ROWS.min(area.height.saturating_sub(2) / 2);
+    Rect::new(
+        area.x + cols,
+        area.y + rows,
+        area.width.saturating_sub(cols * 2),
+        area.height.saturating_sub(rows * 2),
+    )
+}
+
+/// Renders the image viewer as a floating box inside the content area.
+///
+/// The tab row and the footer stay visible, so the viewer reads as a panel
+/// instead of a mode switch and the surrounding affordances never disappear.
+/// The box keeps a gutter on every side; the close control sits on its border,
 /// outside the box pixels are drawn into, so a fitted image never hides it.
 /// Terminals without a pixel protocol keep pointing at the system viewer
 /// instead of drawing half-blocks, which show a UI screenshot as noise.
@@ -2712,8 +2760,8 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.screenshot.visible || area.is_empty() {
         return;
     }
-    let popup = area;
-    frame.render_widget(Clear, popup);
+    frame.render_widget(Clear, area);
+    let popup = image_viewer_rect(area);
     let standalone = app.screenshot.origin == crate::image_view::ScreenshotOrigin::Image;
     let noun = if standalone { "image" } else { "capture" };
     let total = app.screenshot.refs.len();
@@ -2766,10 +2814,12 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         _ => "Screenshot".to_string(),
     };
-    let close_width = (IMAGE_VIEWER_CLOSE.width() as u16).min(popup.width.saturating_sub(2));
+    let (close_label, close_width, web_label, web_width) = viewer_border_controls(popup.width);
     let title = truncate_line_to_cols(
         Line::raw(title),
-        popup.width.saturating_sub(close_width + 4),
+        popup
+            .width
+            .saturating_sub(close_width.saturating_add(web_width).saturating_add(4)),
     );
     let block = theme::popup_block(title);
     let warning = app.screenshot.support_detail.contains("Windows Zellij")
@@ -2788,7 +2838,7 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             1,
         );
         frame.render_widget(
-            Paragraph::new(Line::from(theme::chip(IMAGE_VIEWER_CLOSE, theme::PRIMARY))),
+            Paragraph::new(Line::from(theme::chip(close_label, theme::PRIMARY))),
             close,
         );
         app.clickable_regions.push(ClickableRegion::ActionButton {

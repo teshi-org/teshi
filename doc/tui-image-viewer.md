@@ -12,14 +12,15 @@ Clicking an image opens the same viewer for that file: a sent image or its
 `▣` label in the AI chat transcript, an `[Image #N]` placeholder or `@path`
 mention in the composer, and an image in the Requirements preview.
 
-The viewer covers the whole terminal, including tabs, sidebars, and the
-footer, and fits the image into the largest box that keeps its aspect ratio.
-The `Close [Esc]` button sits on the viewer's top border, outside the image
-box, so a fitted image never hides it. While the viewer is open, clicks
-outside that button, pastes, and keys it does not use are ignored instead of
-reaching the tab beneath it. Ctrl+Q closes the viewer and then quits as usual,
-so an unsaved-changes confirmation is never hidden. A prompt that arrives
-while the viewer is open, such as an external file change or an agent
+The viewer floats inside the content area and keeps the tab row and the footer
+visible, so the surrounding affordances never disappear. It leaves a small
+gutter on every side and fits the image into the largest box that keeps its
+aspect ratio. The `Close [Esc]` button sits on the viewer's top border, outside
+the image box, so a fitted image never hides it. While the viewer is open,
+clicks outside that button, pastes, and keys it does not use are ignored
+instead of reaching the tab beneath it. Ctrl+Q closes the viewer and then quits
+as usual, so an unsaved-changes confirmation is never hidden. A prompt that
+arrives while the viewer is open, such as an external file change or an agent
 proposal, waits beneath it; the viewer's footer says so, and otherwise repeats
 the latest status message. Closing returns to the same tab, scroll position,
 and draft. Without a pixel protocol the viewer still opens, explains why no
