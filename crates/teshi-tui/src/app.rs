@@ -14243,10 +14243,13 @@ impl App {
                 .to_string();
             // A fresh /generate is a new explicit choice that uses the default
             // Strict policy, so a prior Direct authorization does not silently
-            // carry over to a different task scope.
-            self.review_policy = teshi_agent::pipeline::ReviewPolicy::Strict;
-            self.direct_authorization = None;
-            let _ = self.persist_generation_state();
+            // carry over to a different task scope. Only a real revocation is
+            // written: cancelling the scope prompt must leave no generation state.
+            if self.review_policy != teshi_agent::pipeline::ReviewPolicy::Strict
+                || self.direct_authorization.is_some()
+            {
+                self.revoke_direct_authorization();
+            }
             let pending_user_message = if rest.is_empty() {
                 "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), then follow the active review policy — propose non-Gherkin test points for human review in Strict mode, or go straight to planning in Direct mode. Write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
             } else {
