@@ -4863,8 +4863,7 @@ impl App {
         // scope. Applied before the system prompt is built so Direct guidance is
         // injected on this very turn rather than after a conflicting Strict turn.
         if self.review_policy != teshi_agent::pipeline::ReviewPolicy::Direct
-            && let Some(basis) =
-                teshi_agent::pipeline::recognize_direct_authorization(&user_msg)
+            && let Some(basis) = teshi_agent::pipeline::recognize_direct_authorization(&user_msg)
         {
             self.apply_direct_authorization(basis.to_string(), user_msg.clone());
         }
@@ -5050,7 +5049,8 @@ impl App {
     fn apply_direct_authorization(&mut self, basis: String, scope: String) {
         use teshi_agent::pipeline::GenerationStage;
         self.review_policy = teshi_agent::pipeline::ReviewPolicy::Direct;
-        self.direct_authorization = Some(teshi_agent::pipeline::DirectAuthorization { basis, scope });
+        self.direct_authorization =
+            Some(teshi_agent::pipeline::DirectAuthorization { basis, scope });
         // A Strict session stuck at the review gate advances straight to Planning.
         // This only changes the stage; it never writes a review/approval record.
         if matches!(
@@ -5204,9 +5204,7 @@ impl App {
          Always check the [Project Context] to understand existing files before generating.";
 
     /// Returns the Feature Generation Pipeline guidance block for `policy`.
-    fn generation_pipeline_prompt(
-        policy: teshi_agent::pipeline::ReviewPolicy,
-    ) -> &'static str {
+    fn generation_pipeline_prompt(policy: teshi_agent::pipeline::ReviewPolicy) -> &'static str {
         match policy {
             teshi_agent::pipeline::ReviewPolicy::Strict => Self::STRICT_PIPELINE_GUIDANCE,
             teshi_agent::pipeline::ReviewPolicy::Direct => Self::DIRECT_PIPELINE_GUIDANCE,
@@ -14137,7 +14135,8 @@ impl App {
                 iteration: self.authoring_ui.iteration_filter.clone(),
                 pending_user_message,
             });
-            let traceability = teshi_agent::pipeline::review_traceability(self.review_policy, false);
+            let traceability =
+                teshi_agent::pipeline::review_traceability(self.review_policy, false);
             self.status = format!(
                 "Direct (no-review) generation, traceability: {} — confirm source scope (Enter confirm · Esc cancel · i change iteration)",
                 traceability.label()

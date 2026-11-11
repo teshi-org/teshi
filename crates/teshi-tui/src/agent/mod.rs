@@ -1982,7 +1982,11 @@ fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<S
         .as_ref()
         .map(|a| a.test_points.test_points.as_slice())
         .unwrap_or(&[]);
-    if let Err(errors) = teshi_agent::pipeline::validate_plan_test_point_ids(&plan, test_points) {
+    if let Err(errors) = teshi_agent::pipeline::validate_plan_test_point_ids_with_policy(
+        &plan,
+        test_points,
+        app.review_policy,
+    ) {
         anyhow::bail!("generate_plan rejected: {}", errors.join("; "));
     }
 

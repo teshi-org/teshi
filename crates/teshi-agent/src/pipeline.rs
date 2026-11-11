@@ -10,6 +10,119 @@ use teshi_core::authoring::{
     TextRange, document_char_len,
 };
 
+/// Policy governing whether feature generation requires human test-point review.
+///
+/// Strict is the default, so existing sessions keep the human-review gate unless
+/// the user explicitly authorizes a no-review generation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPolicy {
+    /// Gather, propose test points, wait for human approval, then plan and write.
+    #[default]
+    Strict,
+    /// User-authorized no-review: gather, then plan and write, with no approval gate.
+    Direct,
+}
+
+impl ReviewPolicy {
+    /// Whether the pipeline must pause for explicit human approval.
+    pub fn requires_human_approval(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+
+    /// Whether scenarios must carry approved test-point IDs.
+    pub fn requires_test_point_ids(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+}
+
+/// How a generation relates to human review, for traceability.
+///
+/// A no-review generation is never labeled as human-approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTraceability {
+    /// Test points were explicitly approved in the Test Points tab.
+    HumanApproved,
+    /// The user authorized continuing without human review.
+    UserAuthorizedNoReview,
+    /// No review has been performed.
+    NotReviewed,
+}
+
+impl ReviewTraceability {
+    /// Human-readable traceability label shown in status text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HumanApproved => "human approved",
+            Self::UserAuthorizedNoReview => "user-authorized no-review",
+            Self::NotReviewed => "not reviewed",
+        }
+    }
+}
+
+/// Classifies a generation's review status without granting approval.
+///
+/// A [`ReviewPolicy::Direct`] generation is never
+/// [`ReviewTraceability::HumanApproved`], even when older approved test points
+/// still exist from a previous Strict session.
+pub fn review_traceability(
+    policy: ReviewPolicy,
+    has_human_approved_points: bool,
+) -> ReviewTraceability {
+    match policy {
+        ReviewPolicy::Direct => ReviewTraceability::UserAuthorizedNoReview,
+        ReviewPolicy::Strict if has_human_approved_points => ReviewTraceability::HumanApproved,
+        ReviewPolicy::Strict => ReviewTraceability::NotReviewed,
+    }
+}
+
+/// Recorded basis for a user-authorized no-review generation.
+///
+/// Stored on [`GenerationSessionState`] so a resumed session stays on Direct
+/// and the authorization remains auditable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectAuthorization {
+    /// Recognized instruction or explicit command that granted authorization.
+    pub basis: String,
+    /// Task scope the authorization applies to.
+    pub scope: String,
+}
+
+/// Phrases that explicitly authorize generating without human test-point review.
+///
+/// Matching is case-insensitive. The list is the single auditable set of
+/// instructions the chat path honors, including the original request wording.
+const DIRECT_AUTHORIZATION_MARKERS: &[&str] = &[
+    "generate directly",
+    "direct generation",
+    "generate feature first",
+    "skip human review",
+    "skip the review",
+    "skip review",
+    "bypass review",
+    "without review",
+    "no human review",
+    "no test points needed",
+    "don't need test points",
+    "do not need test points",
+    "skip the audit",
+    "先生成",
+    "测试点不用工具填写",
+    "此次跳过审核",
+    "跳过审核",
+    "不用审核",
+    "直接生成",
+];
+
+/// Returns the matched marker when `message` explicitly authorizes Direct generation.
+pub fn recognize_direct_authorization(message: &str) -> Option<&'static str> {
+    let lower = message.to_lowercase();
+    DIRECT_AUTHORIZATION_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| lower.contains(marker))
+}
+
 /// Tracks the current generation pipeline phase.
 /// The LLM drives the process via tool calls; this just records state
 /// so the system prompt can inject stage-appropriate instructions.
@@ -36,6 +149,36 @@ pub enum GenerationStage {
     Complete,
 }
 
+const DIRECT_GATHERING_GUIDANCE: &str = "\n\n## Current Phase: Requirements Gathering (Direct / no review)\n\
+     Gather requirements, then go straight to planning.\n\
+     - Ask questions or accept pasted requirement text\n\
+     - Use `list_requirement_documents` / `read_requirement_document` to inspect the current store\n\
+     - Do NOT create any files yet and do NOT produce FreeMind `.mm` or mock HTML\n\
+     - Call `submit_requirements` when done; the pipeline then moves directly to Planning\n\
+     - Do NOT propose test points or wait for human review (the user authorized no-review)";
+
+const DIRECT_SKIP_REVIEW_GUIDANCE: &str = "\n\n## Current Phase: No-Review Generation (Direct)\n\
+     The active review policy is Direct: the user explicitly authorized generating without human test-point review.\n\
+     - Do NOT propose test points, do NOT wait in the Test Points tab, and do NOT inject a human-review gate\n\
+     - Proceed directly to `generate_plan`\n\
+     - Do NOT fabricate approval records or approved test-point IDs";
+
+const DIRECT_PLANNING_GUIDANCE: &str = "\n\n## Current Phase: Scenario Planning (Direct / no review)\n\
+     Design self-contained Gherkin scenarios directly from the gathered requirements.\n\
+     - `test_point_ids` may be empty; do NOT invent IDs or reference non-existent approved test points\n\
+     - Do NOT label this generation as human-approved; its traceability is 'user-authorized no-review'\n\
+     - Preserve any existing test points and review records untouched\n\
+     - Keep each scenario independently runnable; use Scenario Outline + Examples for variations\n\
+     - When the plan is ready, call `generate_plan`";
+
+const DIRECT_WRITING_GUIDANCE: &str = "\n\n## Current Phase: Feature Writing (Direct / no review)\n\
+     Execute the accepted plan by creating the feature files.\n\
+     - Use `create_feature_file` and `insert_scenario`\n\
+     - With no test_point_ids, no `@teshi-tp:<id>` tags are emitted; do NOT invent IDs\n\
+     - Reuse existing step patterns from Project Context\n\
+     - Each scenario needs a complete Given/When/Then chain and must be independently runnable\n\
+     - After writing, call `validate_feature` AND `run_tests`";
+
 impl GenerationStage {
     /// Human-readable label for the stage.
     pub fn label(&self) -> &'static str {
@@ -57,6 +200,31 @@ impl GenerationStage {
     /// File-change `ApprovalMode::{Auto, Bypass}` must not resume this stage.
     pub fn is_human_review_gate(self) -> bool {
         matches!(self, Self::ReviewingTestPoints)
+    }
+
+    /// Whether this stage pauses the agent loop for human review under `policy`.
+    ///
+    /// The stage alone is not enough: [`ReviewPolicy::Direct`] must never hold
+    /// the gate, even when a review stage was restored from an older session.
+    pub fn is_review_gate_for(self, policy: ReviewPolicy) -> bool {
+        policy.requires_human_approval() && self.is_human_review_gate()
+    }
+
+    /// Stage guidance tailored to the active review policy.
+    ///
+    /// Strict delegates to [`Self::prompt_guidance`]. Direct replaces the
+    /// test-point review stages with no-review instructions.
+    pub fn prompt_guidance_for_policy(&self, policy: ReviewPolicy) -> &'static str {
+        if policy == ReviewPolicy::Strict {
+            return self.prompt_guidance();
+        }
+        match self {
+            Self::Gathering => DIRECT_GATHERING_GUIDANCE,
+            Self::GeneratingTestPoints | Self::ReviewingTestPoints => DIRECT_SKIP_REVIEW_GUIDANCE,
+            Self::Planning => DIRECT_PLANNING_GUIDANCE,
+            Self::Writing => DIRECT_WRITING_GUIDANCE,
+            _ => self.prompt_guidance(),
+        }
     }
 
     /// Guidance text to inject into the system prompt for this stage.
@@ -293,6 +461,14 @@ pub struct GenerationSessionState {
     /// Confirmed requirement-library window for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_scope: Option<RequirementSourceScope>,
+    /// Policy for human review in this generation session.
+    ///
+    /// Missing values in older state files stay Strict.
+    #[serde(default)]
+    pub review_policy: ReviewPolicy,
+    /// Basis and scope when the user authorized Direct (no-review) generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_authorization: Option<DirectAuthorization>,
 }
 
 /// Validates that every referenced test-point ID is approved and fully resolved.
@@ -305,16 +481,37 @@ pub fn validate_plan_test_point_ids(
     plan: &GenerationPlan,
     test_points: &[TestPoint],
 ) -> Result<(), Vec<String>> {
+    validate_plan_test_point_ids_with_policy(plan, test_points, ReviewPolicy::Strict)
+}
+
+/// Validates a plan according to the active review policy.
+///
+/// In [`ReviewPolicy::Direct`], scenarios may omit `test_point_ids` and a plan
+/// with zero referenced IDs is valid. Any IDs that are referenced must still be
+/// approved and resolved, so Direct cannot fabricate approvals. In
+/// [`ReviewPolicy::Strict`], empty IDs are rejected.
+///
+/// # Errors
+///
+/// Returns a list of actionable diagnostics for missing, unapproved, stale, or
+/// (under Strict) omitted test-point IDs.
+pub fn validate_plan_test_point_ids_with_policy(
+    plan: &GenerationPlan,
+    test_points: &[TestPoint],
+    policy: ReviewPolicy,
+) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
     let mut referenced = 0usize;
 
     for feature in &plan.features {
         for scenario in &feature.scenarios {
             if scenario.test_point_ids.is_empty() {
-                errors.push(format!(
-                    "scenario '{}' in '{}' must reference at least one approved test_point_id",
-                    scenario.name, feature.file_name
-                ));
+                if policy.requires_test_point_ids() {
+                    errors.push(format!(
+                        "scenario '{}' in '{}' must reference at least one approved test_point_id",
+                        scenario.name, feature.file_name
+                    ));
+                }
                 continue;
             }
             for id in &scenario.test_point_ids {
@@ -343,7 +540,7 @@ pub fn validate_plan_test_point_ids(
         }
     }
 
-    if referenced == 0 && errors.is_empty() {
+    if referenced == 0 && errors.is_empty() && policy.requires_test_point_ids() {
         errors.push("plan must reference at least one approved test-point id".into());
     }
 
@@ -395,6 +592,27 @@ pub fn continue_from_review(
         );
     }
     Ok(GenerationStage::Planning)
+}
+
+/// Transitions to Planning for a [`ReviewPolicy::Direct`] generation.
+///
+/// This never inspects or approves test points. Direct planning is valid with
+/// zero approved test points. Use [`continue_from_review`] for the Strict gate.
+///
+/// # Errors
+///
+/// Returns an error when the current stage is not a pre-planning stage.
+pub fn authorize_direct_continuation(current: GenerationStage) -> Result<GenerationStage, String> {
+    match current {
+        GenerationStage::Gathering
+        | GenerationStage::GeneratingTestPoints
+        | GenerationStage::ReviewingTestPoints
+        | GenerationStage::Planning => Ok(GenerationStage::Planning),
+        other => Err(format!(
+            "direct (no-review) continuation requires a pre-planning stage (current: {})",
+            other.label()
+        )),
+    }
 }
 
 /// Returns index metadata that currently belongs to `scope`.
@@ -640,12 +858,15 @@ pub fn evaluate_restored_scope(
 
 /// Infers a resumable stage from persisted session state and current test points.
 ///
-/// Restart never auto-approves. If the session says Planning but no approved
-/// resolved test points remain, the stage falls back to Reviewing Test Points.
+/// Restart never auto-approves. Under [`ReviewPolicy::Strict`], Planning (or
+/// later) with no approved resolved test points falls back to Reviewing Test
+/// Points. Under [`ReviewPolicy::Direct`] the human-review gate is not restored,
+/// and a persisted test-point stage advances to Planning.
 pub fn restore_stage_after_reload(
     saved: &GenerationSessionState,
     test_points: &[TestPoint],
 ) -> GenerationStage {
+    let direct = saved.review_policy == ReviewPolicy::Direct;
     match saved.stage {
         GenerationStage::Idle | GenerationStage::Complete => saved.stage,
         GenerationStage::Confirming => {
@@ -657,15 +878,22 @@ pub fn restore_stage_after_reload(
             }
         }
         GenerationStage::Planning | GenerationStage::Writing | GenerationStage::Validating => {
-            if approved_resolved_test_point_ids(test_points).is_empty() {
+            if direct {
+                saved.stage
+            } else if approved_resolved_test_point_ids(test_points).is_empty() {
                 GenerationStage::ReviewingTestPoints
             } else {
                 saved.stage
             }
         }
-        GenerationStage::Gathering
-        | GenerationStage::GeneratingTestPoints
-        | GenerationStage::ReviewingTestPoints => saved.stage,
+        GenerationStage::GeneratingTestPoints | GenerationStage::ReviewingTestPoints => {
+            if direct {
+                GenerationStage::Planning
+            } else {
+                saved.stage
+            }
+        }
+        GenerationStage::Gathering => saved.stage,
     }
 }
 
@@ -909,6 +1137,7 @@ mod tests {
             requirement: None,
             plan: None,
             source_scope: None,
+            ..GenerationSessionState::default()
         };
         let proposed = vec![sample_tp(
             "tp-1",
@@ -928,6 +1157,7 @@ mod tests {
             requirement: None,
             plan: None,
             source_scope: None,
+            ..GenerationSessionState::default()
         };
         let proposed = vec![sample_tp(
             "tp-1",
@@ -939,6 +1169,37 @@ mod tests {
             GenerationStage::ReviewingTestPoints
         );
         assert_eq!(proposed[0].review_state, ReviewState::Proposed);
+    }
+
+    #[test]
+    fn direct_restore_does_not_reopen_the_review_gate() {
+        let saved = GenerationSessionState {
+            stage: GenerationStage::Planning,
+            review_policy: ReviewPolicy::Direct,
+            direct_authorization: Some(DirectAuthorization {
+                basis: "generate directly".into(),
+                scope: "login".into(),
+            }),
+            ..GenerationSessionState::default()
+        };
+        let proposed = vec![sample_tp(
+            "tp-1",
+            ReviewState::Proposed,
+            ResolutionState::Resolved,
+        )];
+        assert_eq!(
+            restore_stage_after_reload(&saved, &proposed),
+            GenerationStage::Planning
+        );
+        assert_eq!(
+            authorize_direct_continuation(GenerationStage::ReviewingTestPoints).unwrap(),
+            GenerationStage::Planning
+        );
+        assert!(recognize_direct_authorization("Please generate directly, skip review").is_some());
+        assert_eq!(
+            review_traceability(ReviewPolicy::Direct, true).label(),
+            "user-authorized no-review"
+        );
     }
 
     fn sample_store() -> RequirementStoreId {
@@ -1115,6 +1376,7 @@ mod tests {
             }),
             plan: None,
             source_scope: Some(scope.clone()),
+            ..GenerationSessionState::default()
         };
         assert!(evaluate_restored_scope(&saved, Some(&sample_store()), &index, &documents).is_ok());
 
@@ -1132,6 +1394,7 @@ mod tests {
             requirement: saved.requirement.clone(),
             plan: None,
             source_scope: None,
+            ..GenerationSessionState::default()
         };
         let err = evaluate_restored_scope(&legacy, Some(&sample_store()), &index, &documents)
             .unwrap_err();
@@ -1148,6 +1411,7 @@ mod tests {
             }),
             plan: None,
             source_scope: None,
+            ..GenerationSessionState::default()
         };
         assert!(
             evaluate_restored_scope(&free_text, Some(&sample_store()), &index, &documents).is_ok()
