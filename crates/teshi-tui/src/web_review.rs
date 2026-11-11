@@ -136,11 +136,22 @@ fn is_termux() -> bool {
 #[cfg(windows)]
 fn spawn_browser(url: &str) -> Result<()> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // `start` is a cmd builtin. `&` in the URL fragment would otherwise be
     // parsed as a command separator, dropping the token; raw_arg keeps the
     // whole URL quoted. `is_safe_url` bounds what can be interpolated.
     let mut command = Command::new("cmd");
     command.raw_arg(format!("/C start \"\" \"{url}\""));
+    // A console the launcher shares is a console it can reset: cmd's own input
+    // mode restore leaves teshi's VT reader reading a cooked handle, and the
+    // console then echoes every key record onto the screen. Give it its own
+    // console and no inherited std handles, so it cannot reach ours at all.
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command.spawn().context("cannot start the browser")?;
     Ok(())
 }

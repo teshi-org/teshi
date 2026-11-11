@@ -973,6 +973,21 @@ fn open_path_externally(path: &Path) -> Result<()> {
     } else {
         Command::new("xdg-open")
     };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Sharing teshi's console lets cmd reset its input mode, which turns
+        // key records into echoed text over the running UI. Give the launcher
+        // its own console and no inherited std handles, so it cannot reach
+        // teshi's console input handle at all.
+        command
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
     command
         .arg(path)
         .spawn()

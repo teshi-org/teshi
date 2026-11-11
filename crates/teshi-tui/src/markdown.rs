@@ -613,18 +613,35 @@ fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
         return None;
     }
 
+    // Cells are measured on the inline-rendered spans, not on the raw source:
+    // `**bold**`, `` `code` `` and `[text](url)` lose their markers once
+    // rendered, so measuring the source width would leave those rows short and
+    // push their column borders out of line with the rest of the table.
+    let cells: Vec<Vec<Line<'static>>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| parse_inline_with_style(cell.trim(), Style::default()))
+                .collect()
+        })
+        .collect();
+
     let col_count = rows[0].len();
     let mut col_widths: Vec<usize> = vec![0; col_count];
-    for row in &rows {
+    let mut col_floors: Vec<usize> = vec![1; col_count];
+    for row in &cells {
         for (i, cell) in row.iter().enumerate() {
-            let w = UnicodeWidthStr::width(cell.trim());
-            col_widths[i] = col_widths[i].max(w);
+            col_widths[i] = col_widths[i].max(cell.width());
+            col_floors[i] = col_floors[i].max(widest_glyph(cell));
         }
+    }
+    for (width, floor) in col_widths.iter_mut().zip(&col_floors) {
+        *width = (*width).max(*floor);
     }
 
     let natural_total = col_widths.iter().map(|width| width + 2).sum::<usize>() + col_count + 1;
     if ctx.width > 0 && natural_total > ctx.width {
-        let mut block = render_compact_table(rows, &col_widths, ctx.width);
+        let mut block = render_compact_table(cells, &col_widths, &col_floors, ctx.width);
         block.consumed = consumed;
         return Some(block);
     }
@@ -650,7 +667,7 @@ fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len() + 2);
     lines.push(rule("┌", "┬", "┐"));
 
-    for (ri, row) in rows.iter().enumerate() {
+    for (ri, row) in cells.iter().enumerate() {
         if ri == 1 {
             lines.push(rule("├", "┼", "┤"));
             continue;
@@ -663,13 +680,14 @@ fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
         };
         let mut spans: Vec<Span<'static>> = vec![Span::styled("│", border_style)];
         for (ci, cell) in row.iter().enumerate() {
-            let trimmed = cell.trim();
-            let w = UnicodeWidthStr::width(trimmed);
-            let pad = col_widths[ci].saturating_sub(w);
-            let padded = format!(" {}{} ", trimmed, " ".repeat(pad));
-            // Apply inline Markdown parsing to cell content with the row base style.
-            let cell_line = parse_inline_with_style(&padded, base_style);
-            spans.extend(cell_line.spans);
+            let pad = col_widths[ci].saturating_sub(cell.width());
+            spans.push(Span::styled(" ", base_style));
+            spans.extend(
+                cell.spans
+                    .iter()
+                    .map(|span| Span::styled(span.content.clone(), base_style.patch(span.style))),
+            );
+            spans.push(Span::styled(" ".repeat(pad + 1), base_style));
             spans.push(Span::styled("│", border_style));
         }
         lines.push(Line::from(spans));
@@ -685,7 +703,12 @@ fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
 
 /// Renders a table that cannot keep its natural width: cells wrap inside the
 /// available columns, and extremely narrow panes fall back to a borderless list.
-fn render_compact_table(rows: Vec<Vec<String>>, natural: &[usize], limit: usize) -> BlockResult {
+fn render_compact_table(
+    rows: Vec<Vec<Line<'static>>>,
+    natural: &[usize],
+    floors: &[usize],
+    limit: usize,
+) -> BlockResult {
     let columns = natural.len();
     // Below three content cells per column the box is unreadable; list mode is
     // the honest fallback.
@@ -697,14 +720,16 @@ fn render_compact_table(rows: Vec<Vec<String>>, natural: &[usize], limit: usize)
     let budget = limit - (columns * 3 + 1);
     let mut widths = natural.to_vec();
     while widths.iter().sum::<usize>() > budget {
+        // Never squeeze a column below the widest glyph it must hold: a 2-cell
+        // CJK glyph in a 1-cell column makes that row's borders drift.
         let Some(widest) = widths
             .iter()
             .enumerate()
-            .filter(|(_, width)| **width > 1)
+            .filter(|(index, width)| **width > floors[*index])
             .max_by_key(|(_, width)| **width)
             .map(|(index, _)| index)
         else {
-            break;
+            return table_list_fallback(&rows);
         };
         widths[widest] -= 1;
     }
@@ -771,10 +796,9 @@ fn render_compact_table(rows: Vec<Vec<String>>, natural: &[usize], limit: usize)
 }
 
 /// Wraps one cell to a column width while keeping inline span styles.
-fn wrap_table_cell(text: &str, width: usize, base: Style) -> Vec<Vec<Span<'static>>> {
+fn wrap_table_cell(cell: &Line<'static>, width: usize, base: Style) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
-    let parsed = parse_inline_with_style(text.trim(), base);
-    let cells: Vec<(char, Style)> = parsed
+    let cells: Vec<(char, Style)> = cell
         .spans
         .iter()
         .flat_map(|span| {
@@ -841,19 +865,37 @@ fn table_spans(cells: Vec<(char, Style)>) -> Vec<Span<'static>> {
     spans
 }
 
-fn table_list_fallback(rows: &[Vec<String>]) -> BlockResult {
+/// Width of the widest single glyph in a rendered cell.
+///
+/// A column narrower than this cannot render its content without overflowing
+/// the cell, which would shift that row's borders.
+fn widest_glyph(cell: &Line<'static>) -> usize {
+    cell.spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .map(|character| character.width().unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+        .max(1)
+}
+
+fn table_list_fallback(rows: &[Vec<Line<'static>>]) -> BlockResult {
+    let text = |line: &Line<'static>| -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
     let headers = rows.first().cloned().unwrap_or_default();
     let mut lines = Vec::new();
     for row in rows.iter().skip(2) {
         for (column, cell) in row.iter().enumerate() {
-            let label = headers
-                .get(column)
-                .map(|header| header.trim())
-                .unwrap_or("");
+            let label = headers.get(column).map(text).unwrap_or_default();
+            let body = text(cell);
             let text = if label.is_empty() {
-                cell.trim().to_string()
+                body
             } else {
-                format!("{label}: {}", cell.trim())
+                format!("{label}: {body}")
             };
             lines.push(parse_inline_with_style(&text, Style::default()));
         }
@@ -861,7 +903,7 @@ fn table_list_fallback(rows: &[Vec<String>]) -> BlockResult {
     }
     if lines.is_empty() {
         for header in &headers {
-            lines.push(parse_inline_with_style(header.trim(), Style::default()));
+            lines.push(parse_inline_with_style(&text(header), Style::default()));
         }
     } else {
         lines.pop();
@@ -1536,6 +1578,61 @@ mod tests {
     }
 
     // ── Table tests ───────────────────────────────────────────────
+
+    /// Cell offsets of every `│` in a rendered row.
+    fn border_columns(row: &str) -> Vec<usize> {
+        let mut columns = Vec::new();
+        let mut width = 0;
+        for character in row.chars() {
+            if character == '│' {
+                columns.push(width);
+            }
+            width += character.width().unwrap_or(0);
+        }
+        columns
+    }
+
+    #[test]
+    fn inline_markup_does_not_shift_table_borders() {
+        // `**`, backticks and link targets render to fewer cells than their
+        // source, so measuring the source used to shorten those rows and drag
+        // their column borders left.
+        let text = "\
+| 名称 | 说明 |
+|---|---|
+| plain | 普通文本 |
+| bold | **粗体** |
+| code | `code` |
+| link | [文字](https://example.com/a/b/c) |";
+        let lines = render_markdown_width(text, 80);
+        let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        let reference = border_columns(&rows[1]);
+        for row in rows.iter().filter(|row| row.starts_with('│')) {
+            assert_eq!(border_columns(row), reference, "row: {row}");
+        }
+        for rule in rows.iter().filter(|row| row.starts_with(['┌', '├', '└'])) {
+            assert_eq!(
+                UnicodeWidthStr::width(rule.as_str()),
+                rows[1].width(),
+                "{rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_table_keeps_cjk_glyphs_whole() {
+        // A column squeezed below one glyph's width used to overflow its cell
+        // and push that row's right border one cell out.
+        let text = "| ID | 优先级 | 需求 |\n|---|---|---|\n| doc-16 | P0 | 端到端硬超时、取消与执行隔离 |\n| doc-17 | P0 | 协议级健康检查与安全恢复 |";
+        for limit in [30u16, 34, 40, 52] {
+            let lines = render_markdown_width(text, limit);
+            let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+            let reference = border_columns(&rows[1]);
+            for row in rows.iter().filter(|row| row.starts_with('│')) {
+                assert_eq!(border_columns(row), reference, "limit {limit} row: {row}");
+            }
+        }
+    }
 
     #[test]
     fn wide_table_wraps_inside_cells_and_keeps_borders_aligned() {
