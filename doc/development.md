@@ -304,8 +304,10 @@ Nightly builds publish the Windows per-user **setup.exe** from `main` as GitHub 
 
 | Trigger | Workflow |
 |---------|----------|
-| Daily 06:00 UTC | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml). Catch-up only: skipped when `main` HEAD already has a nightly tag or its CI run is not green. |
+| Daily 06:00 UTC | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml). Catch-up only: skipped when `main` HEAD already has a nightly tag or CI has not verified it. |
 | Manual | `gh workflow run nightly.yml` |
+
+CI has verified `main` HEAD when either the push CI run for that exact commit is green, or the merged pull request has a green CI run whose checkout had the same Git tree (`git rev-parse HEAD^{tree}`). Pull request CI runs on the merge with `main`, so a manual Nightly can be dispatched right after merging without waiting for the push run on `main`. A pull request tested against an older `main` has a different tree and still requires the push run. The gate lives in [`scripts/nightly_ci_gate.py`](../scripts/nightly_ci_gate.py).
 
 Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `main` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects its build identity without writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
 

@@ -9,6 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github" / "workflows" / "nightly.yml").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+GATE = (ROOT / "scripts" / "nightly_ci_gate.py").read_text(encoding="utf-8")
 
 
 def require(needle: str, label: str, text: str = WORKFLOW) -> None:
@@ -16,12 +18,11 @@ def require(needle: str, label: str, text: str = WORKFLOW) -> None:
         raise SystemExit(f"missing {label}: {needle}")
 
 
-def nightly_decision(ci_runs: list[dict], head_sha: str, nightly_tags: list[str], trigger: str = "schedule") -> str:
+def nightly_decision(ci_state: str, nightly_tags: list[str], trigger: str = "schedule") -> str:
     """Mirror the workflow gate for table-driven, offline contract tests."""
     if trigger not in {"schedule", "workflow_dispatch"}:
         return "skip"
-    matching = [run for run in ci_runs if run.get("head_sha") == head_sha]
-    if not any(run.get("status") == "completed" and run.get("conclusion") == "success" for run in matching):
+    if not ci_state.startswith("success:"):
         return "skip"
     if nightly_tags:
         return "skip"
@@ -35,9 +36,16 @@ def main() -> int:
     if "  push:" in WORKFLOW:
         raise SystemExit("Nightly must not have a push trigger")
     require("actions: read", "CI status permission")
-    require("actions/workflows/ci.yml/runs?branch=main&head_sha=${full_sha}", "exact-SHA CI query")
-    require("status", "CI run status inspection")
-    require("conclusion", "CI run conclusion inspection")
+    require("pull-requests: read", "merged pull request lookup permission")
+    require('python scripts/nightly_ci_gate.py --repo "${GITHUB_REPOSITORY}" --sha "${full_sha}" --tree "${tree}"', "CI gate invocation")
+    require('tree=$(git rev-parse "${full_sha}^{tree}")', "published tree identity")
+    require('[[ "${ci_state}" != success:* ]]', "success-only gate")
+    require("fail closed", "API-error fail-closed path")
+    require("?branch=main&head_sha={sha}", "exact-SHA CI query", GATE)
+    require("commits/{sha}/pulls", "merged pull request lookup", GATE)
+    require("artifacts?name={marker}", "tested tree marker lookup", GATE)
+    require("git rev-parse 'HEAD^{tree}'", "tested tree record", CI)
+    require("name: tested-tree-${{ steps.tested-tree.outputs.tree }}", "tested tree marker upload", CI)
     require("CI is not green", "pending/failure diagnostic")
     require("cancel-in-progress: false", "non-cancelling publication concurrency")
     require("source_ref: ${{ needs.prepare.outputs.source_ref }}", "immutable release source")
@@ -48,19 +56,19 @@ def main() -> int:
     require("TESHI_NIGHTLY_RELEASE_NUMBER", "nightly display number", RELEASE)
     require("Nightly #{1}", "numbered release title", RELEASE)
 
-    sha = "a" * 40
     cases = [
-        ([{"head_sha": sha, "status": "completed", "conclusion": "success"}], [], "schedule", "publish"),
-        ([{"head_sha": sha, "status": "completed", "conclusion": "failure"}], [], "schedule", "skip"),
-        ([{"head_sha": sha, "status": "in_progress", "conclusion": None}], [], "schedule", "skip"),
-        ([{"head_sha": sha, "status": "completed", "conclusion": "success"}], ["v0.7.10-nightly.20260916.aaaaaaa"], "schedule", "skip"),
-        ([{"head_sha": sha, "status": "completed", "conclusion": "success"}], [], "workflow_dispatch", "publish"),
-        ([], [], "workflow_dispatch", "skip"),
+        ("success:push", [], "schedule", "publish"),
+        ("success:pull-request #36 run 1", [], "workflow_dispatch", "publish"),
+        ("not-green:completed/failure", [], "schedule", "skip"),
+        ("not-green:in_progress/None", [], "schedule", "skip"),
+        ("missing", [], "workflow_dispatch", "skip"),
+        ("success:push", ["v0.7.10-nightly.20260916.aaaaaaa"], "schedule", "skip"),
+        ("success:push", [], "push", "skip"),
     ]
-    for runs, tags, trigger, expected in cases:
-        actual = nightly_decision(runs, sha, tags, trigger)
+    for ci_state, tags, trigger, expected in cases:
+        actual = nightly_decision(ci_state, tags, trigger)
         if actual != expected:
-            raise SystemExit(f"Nightly gate case expected {expected}, got {actual}")
+            raise SystemExit(f"Nightly gate case {ci_state!r} expected {expected}, got {actual}")
 
     print("nightly workflow contract passed")
     return 0
