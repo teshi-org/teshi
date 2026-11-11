@@ -112,7 +112,7 @@ async fn main() -> ExitCode {
                 AcpEvent::PermissionRequest(_) => "permission_request".into(),
                 AcpEvent::SessionUpdate(_) => "session_update".into(),
                 AcpEvent::ExtensionNotification { method, .. } => format!("ext:{method}"),
-                AcpEvent::Completed { stop_reason } => format!("completed {stop_reason:?}"),
+                AcpEvent::Completed { stop_reason, .. } => format!("completed {stop_reason:?}"),
                 AcpEvent::Error(e) => format!("error {e}"),
                 AcpEvent::Cancelled => "cancelled".into(),
             };

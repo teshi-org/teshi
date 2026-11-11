@@ -90,6 +90,19 @@ pub struct AcpSession {
     pub config: crate::session_config::SessionConfig,
 }
 
+/// Result of one `session/prompt` turn.
+///
+/// `stop_reason` is the protocol value. `detail` is a user-facing explanation
+/// some agents attach beside an abnormal stop, for example a quota error that
+/// they still report as `refusal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptCompletion {
+    /// `stopReason` from the prompt result, when the agent included one.
+    pub stop_reason: Option<String>,
+    /// Short explanation extracted from the prompt result, when present.
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcpEvent {
     AgentMessageChunk(String),
@@ -97,8 +110,15 @@ pub enum AcpEvent {
     ToolCallUpdate(Value),
     PermissionRequest(Value),
     SessionUpdate(Value),
-    ExtensionNotification { method: String, params: Value },
-    Completed { stop_reason: Option<String> },
+    ExtensionNotification {
+        method: String,
+        params: Value,
+    },
+    Completed {
+        stop_reason: Option<String>,
+        /// Agent-supplied explanation for this stop, when the result carried one.
+        detail: Option<String>,
+    },
     Error(String),
     Cancelled,
 }
@@ -496,8 +516,10 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     }
 
     pub async fn prompt(&self, session: &AcpSession, prompt: &str) -> AcpResult<Option<String>> {
-        self.prompt_blocks(session, &[crate::PromptBlock::Text(prompt.to_string())])
-            .await
+        Ok(self
+            .prompt_blocks(session, &[crate::PromptBlock::Text(prompt.to_string())])
+            .await?
+            .stop_reason)
     }
 
     /// Run one turn whose prompt is a sequence of content blocks.
@@ -509,7 +531,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         &self,
         session: &AcpSession,
         blocks: &[crate::PromptBlock],
-    ) -> AcpResult<Option<String>> {
+    ) -> AcpResult<PromptCompletion> {
         self.ensure_state(&[AcpLifecycle::Ready], "session/prompt")
             .await?;
         if blocks.iter().any(crate::PromptBlock::is_image)
@@ -563,17 +585,15 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             }
         };
         let result = result?;
-        let stop_reason = result
-            .get("stopReason")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let completion = prompt_completion_from_result(&result);
         let _ = self
             .events
             .send(AcpEvent::Completed {
-                stop_reason: stop_reason.clone(),
+                stop_reason: completion.stop_reason.clone(),
+                detail: completion.detail.clone(),
             })
             .await;
-        Ok(stop_reason)
+        Ok(completion)
     }
 
     pub async fn cancel(&self, session: &AcpSession) -> AcpResult<()> {
@@ -881,6 +901,74 @@ fn update_text(update: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Maximum characters kept from an agent-supplied stop explanation.
+const PROMPT_DETAIL_MAX_CHARS: usize = 400;
+
+fn prompt_completion_from_result(result: &Value) -> PromptCompletion {
+    let stop_reason = result
+        .get("stopReason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let detail = result
+        .get("_meta")
+        .and_then(|meta| {
+            meta.get("codebuddy.ai/errorMessage")
+                .or_else(|| meta.get("errorMessage"))
+        })
+        .or_else(|| result.get("errorMessage"))
+        .and_then(detail_from_meta_value);
+    PromptCompletion {
+        stop_reason,
+        detail,
+    }
+}
+
+fn detail_from_meta_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            // Agents such as CodeBuddy stringify a JSON-RPC error object and
+            // still report the turn as `refusal`. Prefer its message over the
+            // raw envelope.
+            if let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
+                && parsed.is_object()
+            {
+                return detail_from_error_payload(&parsed);
+            }
+            bounded_detail(trimmed)
+        }
+        Value::Object(_) => detail_from_error_payload(value),
+        _ => None,
+    }
+}
+
+fn detail_from_error_payload(value: &Value) -> Option<String> {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/error/message").and_then(Value::as_str))
+        .and_then(bounded_detail)
+}
+
+fn bounded_detail(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut end = text.len();
+    for (count, (index, _)) in text.char_indices().enumerate() {
+        if count == PROMPT_DETAIL_MAX_CHARS {
+            end = index;
+            break;
+        }
+    }
+    let mut owned = text[..end].trim_end().to_string();
+    if end < text.len() {
+        owned.push('…');
+    }
+    Some(owned)
+}
+
 impl<W> Drop for AcpClient<W> {
     fn drop(&mut self) {
         if let Some(t) = self.reader_task.take() {
@@ -892,5 +980,52 @@ impl<W> Drop for AcpClient<W> {
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_completion_reads_stringified_quota_error() {
+        let message = "429 额度已用尽，请访问以下链接，购买加量包以获取更多额度：https://www.codebuddy.cn/profile/usage";
+        let envelope = json!({
+            "code": -32003,
+            "message": message,
+            "data": {"statusCode": 429, "code": 14018, "category": "quota"}
+        });
+        let completion = prompt_completion_from_result(&json!({
+            "stopReason": "refusal",
+            "_meta": {"codebuddy.ai/errorMessage": envelope.to_string()}
+        }));
+        assert_eq!(completion.stop_reason.as_deref(), Some("refusal"));
+        assert_eq!(completion.detail.as_deref(), Some(message));
+    }
+
+    #[test]
+    fn prompt_completion_reads_plain_error_message() {
+        let completion = prompt_completion_from_result(&json!({
+            "stopReason": "refusal",
+            "errorMessage": "model quota exhausted"
+        }));
+        assert_eq!(completion.detail.as_deref(), Some("model quota exhausted"));
+    }
+
+    #[test]
+    fn prompt_completion_ignores_empty_and_missing_detail() {
+        assert!(
+            prompt_completion_from_result(&json!({"stopReason": "end_turn"}))
+                .detail
+                .is_none()
+        );
+        assert!(
+            prompt_completion_from_result(&json!({
+                "stopReason": "refusal",
+                "_meta": {"codebuddy.ai/errorMessage": "  "}
+            }))
+            .detail
+            .is_none()
+        );
     }
 }

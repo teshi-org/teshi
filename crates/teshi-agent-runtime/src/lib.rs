@@ -10,11 +10,13 @@ use teshi_core::llm::{ChatMessage, ToolDefinition};
 use teshi_engine::llm::{LlmConfig, LlmEvent, LlmHandle, LlmRequest};
 
 mod acp_backend;
+mod acp_retry;
 pub mod backend;
 pub mod tool_bridge;
 
 pub use acp_backend::AcpControls;
 pub use acp_backend::ChannelPermissionHost;
+pub use acp_retry::TurnRetryPolicy;
 
 /// Conversation record shared with frontends and persisted sessions.
 /// ACP display records use `acp_reasoning` or `acp_activity` as their source.

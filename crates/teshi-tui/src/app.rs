@@ -274,6 +274,8 @@ pub struct AgentThread {
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
     /// Finish reason from the most recent production model response.
     pub last_finish_reason: Option<String>,
+    /// User-facing explanation attached to the most recent abnormal ACP stop.
+    pub(crate) last_stop_detail: Option<String>,
     /// Workspace member directory this conversation runs in; `None` means the
     /// open project root. Fixed once the backend process has started, because
     /// an ACP agent's cwd cannot change afterwards.
@@ -446,6 +448,7 @@ impl AgentThread {
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
+            last_stop_detail: None,
             member_dir: None,
             completed_answers: Default::default(),
             saved_session: None,
@@ -1390,6 +1393,21 @@ pub(crate) fn is_chat_inline_control(action: &Action) -> bool {
 /// that already completed cleanly. That message is not user-facing content.
 fn is_ignorable_agent_error(message: &str) -> bool {
     message.contains("WritableIterable is closed")
+}
+
+/// Transcript notice for an ACP turn that stopped before a normal completion.
+///
+/// `detail` is the agent's own explanation, such as a quota error reported
+/// through `stopReason: refusal`.
+fn interrupted_acp_message(reason: &str, detail: Option<&str>) -> String {
+    match detail.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(detail) => format!(
+            "Task interrupted: agent returned {reason}. {detail}\nUse /retry or Continue task to continue from the last checkpoint."
+        ),
+        None => format!(
+            "Task interrupted: agent returned {reason}. The task may be incomplete. Use /retry or Continue task to continue from the last checkpoint."
+        ),
+    }
 }
 
 /// The latest assistant message that represents a finished answer, not
@@ -4071,6 +4089,7 @@ impl App {
                         input_tokens,
                         output_tokens,
                         finish_reason,
+                        detail,
                     })) => {
                         self.agents[i].chat.queue_ready = !matches!(
                             finish_reason.as_deref(),
@@ -4094,6 +4113,7 @@ impl App {
                             )
                         );
                         self.agents[i].last_finish_reason = finish_reason;
+                        self.agents[i].last_stop_detail = detail.filter(|text| !text.is_empty());
                         if completed_normally
                             && let Some(index) = latest_answer_index(self.agents[i].messages())
                         {
@@ -4109,8 +4129,9 @@ impl App {
                                 .last_finish_reason
                                 .as_deref()
                                 .unwrap_or("unknown");
-                            let content = format!(
-                                "Task interrupted: agent returned {reason}. The task may be incomplete. Use /retry or Continue task to continue from the last checkpoint."
+                            let content = interrupted_acp_message(
+                                reason,
+                                self.agents[i].last_stop_detail.as_deref(),
                             );
                             self.agents[i].messages_mut().push(AiChatMessage {
                                 role: AiRole::Assistant,
@@ -4280,9 +4301,30 @@ impl App {
                         self.agents[i].retain_partial_response();
                         self.agents[i].status = AiStatus::Error;
                         if i == self.selected_agent {
-                            self.status = format!("AI: {message}");
+                            // Same prefix as native failures so the chat row
+                            // shows this text instead of the API-key hint.
+                            self.status = format!("AI error: {message}");
                             self.set_status_message(self.status.clone());
                         }
+                    }
+                    Ok(Some(AgentBackendEvent::Retrying {
+                        attempt,
+                        max_attempts,
+                        delay,
+                        ..
+                    })) => {
+                        // The turn is still running; the waiting row shows the
+                        // retry until the next attempt reports activity.
+                        self.agents[i].chat.rate.clear();
+                        self.agents[i].chat.last_activity = Some(Instant::now());
+                        let notice = format!(
+                            "Connection interrupted — retrying in {}s ({attempt}/{max_attempts})",
+                            delay.as_secs().max(1)
+                        );
+                        if i == self.selected_agent {
+                            self.status = notice.clone();
+                        }
+                        self.agents[i].tool_status = Some(notice);
                     }
                     Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status, .. })) => {
                         self.agents[i].chat.rate.clear();
@@ -4828,6 +4870,7 @@ impl App {
             }
         };
         self.agents[agent_idx].last_finish_reason = None;
+        self.agents[agent_idx].last_stop_detail = None;
         self.agents[agent_idx].chat.queue_ready = false;
         self.agents[agent_idx].chat.rate.clear();
         self.agents[agent_idx].chat.last_activity = Some(Instant::now());
@@ -14202,6 +14245,7 @@ impl App {
         agent.pending_acp_permission = None;
         agent.latest_visual_observation = None;
         agent.last_finish_reason = None;
+        agent.last_stop_detail = None;
         agent.input.clear();
         agent.input_cursor = 0;
         agent.status = AiStatus::Idle;
@@ -14238,7 +14282,8 @@ mod tests {
         AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
         ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
         MindMapFocus, ModelPanelMode, RunStatus, ViewStage, attach_prompt_images,
-        completed_assistant_responses, current_step_keyword_index, replace_step_keyword_line,
+        completed_assistant_responses, current_step_keyword_index, interrupted_acp_message,
+        replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -17189,6 +17234,15 @@ mod tests {
             "{}",
             app.status
         );
+    }
+
+    #[test]
+    fn interrupted_acp_message_includes_agent_detail() {
+        assert_eq!(
+            interrupted_acp_message("refusal", Some("429 额度已用尽")),
+            "Task interrupted: agent returned refusal. 429 额度已用尽\nUse /retry or Continue task to continue from the last checkpoint."
+        );
+        assert!(interrupted_acp_message("refusal", None).contains("may be incomplete"));
     }
 
     #[test]

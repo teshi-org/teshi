@@ -21,6 +21,7 @@ use teshi_agent::backend::{AgentBackendEvent, AgentBackendStatus, PermissionChoi
 use teshi_core::llm::{ChatMessage, ContentBlock, ImageSource, MessageContent};
 use tokio::sync::{mpsc as async_mpsc, oneshot};
 
+use crate::acp_retry::{self, TurnRetryPolicy};
 use crate::{AiChatMessage, AiRole};
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,8 @@ pub struct AcpBackendConfig {
     pub option_preferences_path: Option<PathBuf>,
     /// Optional live-host MCP transport supplied by an interactive frontend.
     pub tool_bridge: Option<crate::tool_bridge::ToolBridgeConfig>,
+    /// Automatic retries for turns that a transient network failure ended.
+    pub turn_retry: TurnRetryPolicy,
 }
 
 impl AcpBackendConfig {
@@ -54,6 +57,7 @@ impl AcpBackendConfig {
             model_preference_path: None,
             option_preferences_path: None,
             tool_bridge: None,
+            turn_retry: TurnRetryPolicy::default(),
         }
     }
 }
@@ -598,11 +602,13 @@ impl AcpAgentBackend {
         match events.try_recv() {
             Ok(event) => {
                 // Seal preceding text before activity so the transcript follows
-                // event order. Only text remaining at turn completion is final.
+                // event order. Only text remaining at turn completion is final;
+                // a retry's output starts a new record after the interrupted one.
                 if matches!(
                     &event,
                     AgentBackendEvent::ReasoningChunk { .. }
                         | AgentBackendEvent::ExternalToolActivity { .. }
+                        | AgentBackendEvent::Retrying { .. }
                 ) && !self.partial_response.is_empty()
                 {
                     self.messages.push(AiChatMessage {
@@ -964,6 +970,7 @@ async fn run_worker(
     let cwd: PathBuf = config.command.cwd.clone();
     let model_preference_path = config.model_preference_path.clone();
     let option_preferences_path = config.option_preferences_path.clone();
+    let turn_retry = config.turn_retry.clone();
     let auth_method = config.auth_method.clone();
     let permission_host: Option<Arc<dyn PermissionHost>> = config
         .permission_host
@@ -1191,10 +1198,15 @@ async fn run_worker(
             }
             WorkerCommand::Prompt(prompt) => {
                 let mut prompt = prompt;
+                // Retries spent on the current user turn, and whether any of its
+                // attempts showed output or ran tools. Once one has, a retry asks
+                // the agent to continue instead of resending the request.
+                let mut retries = 0_usize;
+                let mut progressed = false;
                 loop {
                     // Scoped so the turn future's borrow of `prompt` ends before
-                    // a deferred prompt replaces it.
-                    let (stop, deferred_prompt) = {
+                    // a deferred prompt or a retry replaces it.
+                    let (stop, deferred_prompt, retry_reason) = {
                         let mut turn = Box::pin(client.prompt_blocks(&session, &prompt));
                         let mut cancelled = false;
                         // Re-armed on every cancel so an agent that ignores
@@ -1204,19 +1216,31 @@ async fn run_worker(
                         let mut deferred_prompt: Option<Vec<PromptBlock>> = None;
                         let mut protocol_failed = false;
                         let mut turn_failed = false;
+                        let mut attempt = TurnAttempt::default();
+                        let mut retry_reason = None;
                         loop {
                             tokio::select! {
                                 result = &mut turn => {
                                     while let Ok(update) = updates_rx.try_recv() {
                                         apply_control_update(&update, &session.id, &controls);
-                                        protocol_failed |= forward_update(update, &output, cancelled);
+                                        protocol_failed |= attempt.route(update, &output, cancelled);
                                     }
                                     if !cancelled && !protocol_failed {
-                                        match result {
-                                            Ok(reason) => { let _ = output.send(AgentBackendEvent::Completed {
-                                                model: model.clone(), input_tokens: None, output_tokens: None, finish_reason: reason,
+                                        let transient = match &result {
+                                            Ok(_) => attempt.notice.take().map(|notice| notice.trim().to_string()),
+                                            Err(error) if acp_retry::is_transient_prompt_error(error) => Some(error.to_string()),
+                                            Err(_) => None,
+                                        };
+                                        match (transient, result) {
+                                            (Some(reason), _) => retry_reason = Some(reason),
+                                            (None, Ok(completion)) => { let _ = output.send(AgentBackendEvent::Completed {
+                                                model: model.clone(),
+                                                input_tokens: None,
+                                                output_tokens: None,
+                                                finish_reason: completion.stop_reason,
+                                                detail: completion.detail,
                                             }); }
-                                            Err(error) => {
+                                            (None, Err(error)) => {
                                                 turn_failed = true;
                                                 let _ = output.send(AgentBackendEvent::Failed(format!("ACP prompt failed: {error}")));
                                             }
@@ -1226,7 +1250,7 @@ async fn run_worker(
                                 }
                                 Some(update) = updates_rx.recv() => {
                                     apply_control_update(&update, &session.id, &controls);
-                                    protocol_failed |= forward_update(update, &output, cancelled);
+                                    protocol_failed |= attempt.route(update, &output, cancelled);
                                 }
                                 Some(command) = commands.recv() => match command {
                                     WorkerCommand::Policy(policy) => {
@@ -1270,15 +1294,67 @@ async fn run_worker(
                                 }
                             }
                         }
-                        (shutdown || protocol_failed || turn_failed, deferred_prompt)
+                        progressed |= attempt.progressed;
+                        (
+                            shutdown || protocol_failed || turn_failed,
+                            deferred_prompt,
+                            retry_reason,
+                        )
                     };
                     if stop {
                         break;
                     }
+                    if let Some(reason) = retry_reason {
+                        let Some(delay) = turn_retry.delay(retries) else {
+                            let _ = output.send(AgentBackendEvent::Failed(
+                                exhausted_retry_message(retries, &reason),
+                            ));
+                            break;
+                        };
+                        retries += 1;
+                        let _ = output.send(AgentBackendEvent::Retrying {
+                            attempt: retries as u32,
+                            max_attempts: turn_retry.max_retries() as u32,
+                            delay,
+                            reason,
+                        });
+                        match wait_before_retry(
+                            delay,
+                            &mut commands,
+                            &mut updates_rx,
+                            &client,
+                            &session.id,
+                            &controls,
+                            &output,
+                        )
+                        .await
+                        {
+                            RetryWait::Elapsed => {
+                                if progressed {
+                                    prompt = vec![PromptBlock::Text(
+                                        acp_retry::CONTINUE_AFTER_INTERRUPTION.into(),
+                                    )];
+                                }
+                                continue;
+                            }
+                            RetryWait::Stopped => break,
+                            RetryWait::Shutdown => {
+                                shutdown = true;
+                                break;
+                            }
+                        }
+                    }
                     match deferred_prompt {
-                        Some(next) => prompt = next,
+                        Some(next) => {
+                            prompt = next;
+                            retries = 0;
+                            progressed = false;
+                        }
                         None => break,
                     }
+                }
+                if shutdown {
+                    break;
                 }
             }
             // A cancel received between turns keeps the session for the next prompt.
@@ -1386,4 +1462,115 @@ fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>, mu
         let _ = output.send(event);
     }
     failed
+}
+
+/// Routes one attempt's updates and records what the attempt did, so a
+/// transient failure can be retried without repeating visible work.
+#[derive(Default)]
+struct TurnAttempt {
+    /// Transient-failure notice held back from the transcript, as streamed.
+    notice: Option<String>,
+    /// Whether the attempt streamed answer text or reported tool activity.
+    progressed: bool,
+}
+
+impl TurnAttempt {
+    /// Forwards `update` like [`forward_update`], except that a
+    /// transient-failure notice waits for the turn's outcome.
+    fn route(
+        &mut self,
+        update: AcpEvent,
+        output: &mpsc::Sender<AgentBackendEvent>,
+        muted: bool,
+    ) -> bool {
+        if !muted {
+            match &update {
+                AcpEvent::AgentMessageChunk(content)
+                    if acp_retry::transient_notice(content).is_some() =>
+                {
+                    self.notice = Some(content.clone());
+                    return false;
+                }
+                AcpEvent::AgentMessageChunk(content) if !content.trim().is_empty() => {
+                    self.record_progress(output);
+                }
+                AcpEvent::ToolCall(_) | AcpEvent::ToolCallUpdate(_) => self.record_progress(output),
+                _ => {}
+            }
+        }
+        forward_update(update, output, muted)
+    }
+
+    /// Work after a notice means the agent recovered by itself: the notice
+    /// did not end the turn, so it is shown in its original position.
+    fn record_progress(&mut self, output: &mpsc::Sender<AgentBackendEvent>) {
+        self.progressed = true;
+        if let Some(content) = self.notice.take() {
+            let _ = output.send(AgentBackendEvent::MessageChunk { content });
+        }
+    }
+}
+
+/// How the pause before an automatic retry ended.
+enum RetryWait {
+    Elapsed,
+    /// The user cancelled the turn, or the session failed during the pause.
+    Stopped,
+    Shutdown,
+}
+
+/// Waits out a retry backoff without parking the worker: settings and policy
+/// commands keep working, and a cancel or shutdown ends the turn at once.
+async fn wait_before_retry<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
+    delay: std::time::Duration,
+    commands: &mut async_mpsc::UnboundedReceiver<WorkerCommand>,
+    updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+    client: &AcpClient<W>,
+    session_id: &str,
+    controls: &Mutex<AcpControls>,
+    output: &mpsc::Sender<AgentBackendEvent>,
+) -> RetryWait {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            () = &mut sleep => return RetryWait::Elapsed,
+            Some(update) = updates_rx.recv() => {
+                apply_control_update(&update, session_id, controls);
+                // The failed attempt is over, so its stragglers stay muted;
+                // a protocol error still surfaces and ends the turn.
+                if forward_update(update, output, true) {
+                    return RetryWait::Stopped;
+                }
+            }
+            command = commands.recv() => match command {
+                Some(WorkerCommand::Policy(policy)) => {
+                    client.set_permission_policy(policy).await;
+                    if let Ok(mut state) = controls.lock() {
+                        state.policy = Some(policy);
+                    }
+                }
+                Some(WorkerCommand::Configure { .. }) => {
+                    if let Ok(mut state) = controls.lock() {
+                        state.pending = false;
+                        state.error = Some("Wait for the current turn to finish".into());
+                    }
+                }
+                Some(WorkerCommand::Prompt(_)) => {
+                    let _ = output.send(AgentBackendEvent::Failed("ACP prompt already running".into()));
+                }
+                Some(WorkerCommand::Cancel) => return RetryWait::Stopped,
+                Some(WorkerCommand::Shutdown) | None => return RetryWait::Shutdown,
+            }
+        }
+    }
+}
+
+/// Terminal failure text once a turn's retry budget is spent.
+fn exhausted_retry_message(retries: usize, reason: &str) -> String {
+    match retries {
+        0 => format!("ACP prompt failed: {reason}"),
+        1 => format!("ACP prompt failed after 1 automatic retry: {reason}"),
+        n => format!("ACP prompt failed after {n} automatic retries: {reason}"),
+    }
 }

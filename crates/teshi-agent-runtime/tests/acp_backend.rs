@@ -7,7 +7,7 @@ use std::{
 
 use teshi_acp::AcpAgentCommand;
 use teshi_agent::backend::{AgentBackendEvent, AgentBackendKind, AgentBackendStatus};
-use teshi_agent_runtime::backend::{AcpBackendConfig, AgentBackendRuntime};
+use teshi_agent_runtime::backend::{AcpBackendConfig, AgentBackendRuntime, TurnRetryPolicy};
 use teshi_core::llm::ChatMessage;
 
 fn backend(mode: &str) -> AgentBackendRuntime {
@@ -830,6 +830,198 @@ fn reconnecting_after_a_transport_failure_restores_the_transcript() {
         )),
         "{events:?}"
     );
+}
+
+/// Builds a backend whose automatic turn retries wait `backoff` each time.
+fn backend_with_retry(mode: &str, backoff: Vec<Duration>) -> AgentBackendRuntime {
+    let mut config = fixture_config(mode, Vec::new(), HashMap::new());
+    config.turn_retry = TurnRetryPolicy { backoff };
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    backend.configure_acp(config).unwrap();
+    backend
+}
+
+fn retry_attempts(events: &[AgentBackendEvent]) -> Vec<(u32, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentBackendEvent::Retrying {
+                attempt,
+                max_attempts,
+                ..
+            } => Some((*attempt, *max_attempts)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn shows_retriable_notice(backend: &AgentBackendRuntime, events: &[AgentBackendEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(event, AgentBackendEvent::MessageChunk { content } if content.contains("RetriableError"))
+    }) || backend
+        .messages()
+        .iter()
+        .any(|message| message.content.contains("RetriableError"))
+}
+
+#[test]
+fn test_transient_notice_without_progress_resends_the_original_prompt() {
+    let mut backend = backend_with_retry("transient_once", vec![Duration::from_millis(10); 3]);
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert_eq!(retry_attempts(&events), [(1, 3)], "{events:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content }
+                if content.starts_with("recovered:") && content.contains("do task")
+        )),
+        "the retry must resend the user's request: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(AgentBackendEvent::Completed { .. })),
+        "{events:?}"
+    );
+    assert!(
+        !shows_retriable_notice(&backend, &events),
+        "a retried notice must not reach the transcript"
+    );
+    assert_eq!(backend.status(), AgentBackendStatus::Completed);
+}
+
+#[test]
+fn test_transient_notice_after_progress_asks_the_agent_to_continue() {
+    let mut backend =
+        backend_with_retry("transient_after_progress", vec![Duration::from_millis(10)]);
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert_eq!(retry_attempts(&events), [(1, 1)], "{events:?}");
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AgentBackendEvent::MessageChunk { content } if content == "continued")
+        ),
+        "a retry after tool work must not resend the request: {events:?}"
+    );
+    assert!(!shows_retriable_notice(&backend, &events));
+    let messages = backend.messages();
+    assert_eq!(messages[0].content, "working");
+    assert_eq!(messages[0].source.as_deref(), Some("agent_progress"));
+    assert_eq!(messages.last().unwrap().content, "continued");
+}
+
+#[test]
+fn test_transient_prompt_error_is_retried() {
+    let mut backend = backend_with_retry(
+        "transient_prompt_error_once",
+        vec![Duration::from_millis(10)],
+    );
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert_eq!(retry_attempts(&events), [(1, 1)], "{events:?}");
+    assert!(
+        matches!(events.last(), Some(AgentBackendEvent::Completed { .. })),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn test_transient_failures_fail_the_turn_once_the_budget_is_spent() {
+    for (backoff, retries, expected) in [
+        (
+            vec![Duration::from_millis(10); 2],
+            vec![(1, 2), (2, 2)],
+            "after 2 automatic retries",
+        ),
+        (
+            Vec::new(),
+            Vec::new(),
+            "ACP prompt failed: Error: RetriableError",
+        ),
+    ] {
+        let mut backend = backend_with_retry("transient_always", backoff);
+        backend.start().unwrap();
+        backend
+            .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+            .unwrap();
+        let events = events_until_terminal(&mut backend);
+        assert_eq!(retry_attempts(&events), retries, "{events:?}");
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentBackendEvent::Failed(error))
+                    if error.contains(expected) && error.contains("http/2 stream closed")
+            ),
+            "{events:?}"
+        );
+        assert_eq!(backend.status(), AgentBackendStatus::Failed);
+    }
+}
+
+#[test]
+fn test_cancel_during_retry_backoff_keeps_the_session() {
+    let mut backend = backend_with_retry("transient_once", vec![Duration::from_secs(30)]);
+    backend.start().unwrap();
+    backend
+        .submit_turn(
+            None,
+            vec![ChatMessage::text("user", "first question")],
+            None,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match backend.try_next_event() {
+            Ok(Some(AgentBackendEvent::Retrying { .. })) => break,
+            Ok(Some(event)) => assert!(
+                !matches!(
+                    event,
+                    AgentBackendEvent::Completed { .. } | AgentBackendEvent::Failed(_)
+                ),
+                "turn ended before retrying: {event:?}"
+            ),
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(Instant::now() < deadline, "no retry was scheduled");
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("event channel disconnected: {error}"),
+        }
+    }
+    let session = backend.acp_controls().unwrap().session_id;
+    backend.cancel();
+    assert_eq!(backend.status(), AgentBackendStatus::Cancelled);
+
+    // The cancel must end the 30-second backoff, not wait it out.
+    backend.start().unwrap();
+    backend
+        .submit_turn(
+            None,
+            vec![
+                ChatMessage::text("user", "first question"),
+                ChatMessage::text("user", "second question"),
+            ],
+            None,
+        )
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content }
+                if content.starts_with("recovered:") && content.contains("second question")
+        )),
+        "{events:?}"
+    );
+    assert!(retry_attempts(&events).is_empty(), "{events:?}");
+    assert_eq!(backend.acp_controls().unwrap().session_id, session);
 }
 
 #[test]

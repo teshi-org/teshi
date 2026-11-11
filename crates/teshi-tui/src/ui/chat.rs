@@ -2277,6 +2277,25 @@ fn push_acp_permission_prompt(out: &mut Vec<Line<'static>>, app: &App, width: us
     out.push(Line::default());
 }
 
+/// Text for the one-row error status.
+///
+/// Native and ACP turn failures are recorded as `AI error:`; a missing backend
+/// is `AI backend unavailable:`. A leftover status from an unrelated action
+/// must not replace the failure, but neither may a recorded AI or ACP failure
+/// be rewritten as an API-key hint.
+fn chat_error_label(status: &str) -> String {
+    let trimmed = status.trim();
+    if trimmed.starts_with("AI error:")
+        || trimmed.starts_with("AI backend unavailable:")
+        || trimmed.starts_with("ACP ")
+        || trimmed.starts_with("Could not reconnect ACP")
+    {
+        trimmed.to_string()
+    } else {
+        "AI error — check TESHI_LLM_API_KEY and your network connection.".to_string()
+    }
+}
+
 /// Renders the one-row status line: activity on the left, model tag on the right.
 fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -2303,11 +2322,12 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .last_finish_reason
             .as_deref()
             .unwrap_or("unknown");
+        let status = match app.agent().last_stop_detail.as_deref() {
+            Some(detail) => format!("Task interrupted ({reason}): {detail} · /retry"),
+            None => format!("Task interrupted ({reason}) · /retry"),
+        };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                format!("Task interrupted ({reason}) · /retry"),
-                fg(theme::WARNING),
-            )),
+            Paragraph::new(Line::styled(status, fg(theme::WARNING))),
             Rect::new(
                 area.x,
                 area.y,
@@ -2337,15 +2357,7 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 "◆ Waiting for approval — Y/N".into()
             }
         }
-        AiStatus::Error => {
-            if app.status.starts_with("AI error:")
-                || app.status.starts_with("AI backend unavailable:")
-            {
-                app.status.clone()
-            } else {
-                "AI error — check TESHI_LLM_API_KEY and your network connection.".to_string()
-            }
-        }
+        AiStatus::Error => chat_error_label(&app.status),
         AiStatus::Idle if agent.backend.is_connected() => "Ready".into(),
         AiStatus::Idle if agent.backend_selected => "Not connected · /agent".into(),
         AiStatus::Idle => "No agent selected · /agent".into(),
@@ -2724,6 +2736,38 @@ mod tests {
             tool_call_id: None,
             activity: None,
         }
+    }
+
+    #[test]
+    fn chat_error_label_keeps_the_recorded_failure() {
+        let cases = [
+            (
+                "AI error: background LLM thread has exited",
+                "AI error: background LLM thread has exited",
+            ),
+            (
+                "AI error: ACP prompt failed: rate limit",
+                "AI error: ACP prompt failed: rate limit",
+            ),
+            (
+                "  AI backend unavailable: connection reset  ",
+                "AI backend unavailable: connection reset",
+            ),
+            (
+                "ACP permission request is no longer pending",
+                "ACP permission request is no longer pending",
+            ),
+            (
+                "Could not reconnect ACP for profile Cursor: closed",
+                "Could not reconnect ACP for profile Cursor: closed",
+            ),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(chat_error_label(status), expected, "{status}");
+        }
+        let generic = "AI error — check TESHI_LLM_API_KEY and your network connection.";
+        assert_eq!(chat_error_label("Switched to model: grok-4.7"), generic);
+        assert_eq!(chat_error_label("   "), generic);
     }
 
     #[test]

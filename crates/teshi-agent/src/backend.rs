@@ -82,6 +82,8 @@ pub enum AgentBackendEvent {
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
         finish_reason: Option<String>,
+        /// User-facing explanation supplied with an abnormal ACP stop.
+        detail: Option<String>,
     },
     ToolActivity {
         tool_calls: Vec<ToolCall>,
@@ -94,6 +96,18 @@ pub enum AgentBackendEvent {
         title: String,
         status: Option<String>,
         details: ToolActivityInfo,
+    },
+    /// A transient failure ended the turn's latest attempt and the backend
+    /// will retry after `delay`. The turn is still running: a terminal
+    /// `Completed` or `Failed` event follows unless the user cancels.
+    Retrying {
+        /// One-based number of this retry.
+        attempt: u32,
+        /// Retry budget for the turn.
+        max_attempts: u32,
+        delay: std::time::Duration,
+        /// The agent's description of the failure.
+        reason: String,
     },
     Failed(String),
     Ignored,
