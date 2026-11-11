@@ -26,7 +26,9 @@ the latest status message. Closing returns to the same tab, scroll position,
 and draft. Without a pixel protocol the viewer still opens, explains why no
 pixels are drawn, and shows the file path. The `Web [w]` control on the top
 border opens the hosted Web UI in the host browser, where the replay captures
-are reviewable with WebGPU. Only files with an image extension
+are reviewable with WebGPU. The first activation starts the project daemon on
+loopback when none is listening; a later activation reuses that process and
+only mints a new hosted session. Only files with an image extension
 open, because `o` hands the file to the operating system's default opener.
 
 | Key | Behavior |
@@ -39,7 +41,7 @@ open, because `o` hands the file to the operating system's default opener.
 | `h` / `l` | Pan horizontally |
 | Up / Down in fit view | Previous / next captured step |
 | `o` | Open the original in the operating system's viewer |
-| `w`, `Web [w]` | Open the hosted Web UI in the host browser |
+| `w`, `Web [w]` | Open the hosted Web UI. Starts the project daemon when none is listening; later presses reuse it |
 | `i` / Esc, `Close [Esc]` | Close immediately, including during loading |
 
 100 percent is measured in the terminal graphics protocol's virtual pixels;

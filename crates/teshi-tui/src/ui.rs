@@ -2824,11 +2824,10 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = theme::popup_block(title);
     let warning = app.screenshot.support_detail.contains("Windows Zellij")
         && app.screenshot.support.is_pixels();
-    let [body, footer] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(if warning { 2 } else { 1 }),
-    ])
-    .areas(block.inner(popup));
+    let web_notice = app.web_review.notice().map(str::to_string);
+    let footer_rows = 1 + u16::from(warning) + u16::from(web_notice.is_some());
+    let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(footer_rows)])
+        .areas(block.inner(popup));
     frame.render_widget(block, popup);
     if close_width > 0 {
         let close = Rect::new(
@@ -2854,8 +2853,11 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             web_width,
             1,
         );
+        // Same emphasis as Close. A muted chip reads as disabled, but this
+        // control is always actionable: the first activation starts a daemon
+        // when none is listening, and a later one reuses it.
         frame.render_widget(
-            Paragraph::new(Line::from(theme::chip(web_label, theme::PRIMARY_MUTED))),
+            Paragraph::new(Line::from(theme::chip(web_label, theme::PRIMARY))),
             web,
         );
         app.clickable_regions.push(ClickableRegion::ActionButton {
@@ -2953,6 +2955,12 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         },
         Style::default().fg(theme::MUTED),
     ));
+    if let Some(notice) = web_notice {
+        footer_lines.push(Line::styled(
+            format!(" {notice}"),
+            Style::default().fg(theme::WARNING),
+        ));
+    }
     frame.render_widget(Paragraph::new(footer_lines), footer);
 }
 

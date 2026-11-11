@@ -33,12 +33,19 @@ Feature: Launch Web replay review from the screenshot viewer
     When the user activates the Web control through the top button
     Then the same launch behavior as the w key occurs
 
-  Scenario: Report a missing daemon without a half-built address
+  Scenario: Start the project daemon on the first activation
     Given no live daemon for the project
     When the user activates the Web control
-    Then the status explains that the daemon must be started
-    And no browser is launched
-    And no address is produced
+    Then a daemon is started for the project
+    And a hosted Web UI address is built from that daemon's port
+    And the address opens in the host browser
+
+  Scenario: Reuse the daemon on a later activation
+    Given the viewer already started the project daemon
+    When the user activates the Web control again
+    Then the running daemon is reused
+    And no additional daemon is started
+    And the new address uses the same port
 
   Scenario: Keep the address when the browser cannot be started
     Given a live daemon for the project

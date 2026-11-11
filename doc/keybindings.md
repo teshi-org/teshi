@@ -150,11 +150,12 @@ for limits and validation.
 Terminals without an image protocol (kitty, sixel or iTerm2) show the capture
 path instead of the picture; `o` still works there. `w` (or the `Web [w]`
 control on the viewer's top border) instead opens the hosted Web UI in the host
-browser to review the replay captures there. It reads the running daemon's port
-from `.teshi/daemon.json`, mints a fresh hosted session, and opens the resulting
-Pages URL. The full URL is also copied to the clipboard and shown in the status
-bar, so a browser that cannot be started still leaves a usable address. Each
-activation supersedes the previous hosted session.
+browser to review the replay captures there. The first activation checks the
+project daemon and starts one on loopback when none is listening; a later
+activation reuses that process. Each activation mints a fresh hosted session
+and opens the resulting Pages URL. The full URL is also copied to the clipboard
+and shown in the status bar, so a browser that cannot be started still leaves a
+usable address. Each activation supersedes the previous hosted session.
 
 Windows Terminal 1.22+ supports Sixel. On Windows, Teshi queries device
 attributes through the console before starting its input reader. Sixel does

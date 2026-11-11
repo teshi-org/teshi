@@ -1135,6 +1135,9 @@ pub struct App {
     pub preview_panel_rect: Option<ratatui::layout::Rect>,
     /// Replay screenshot panel state for the MindMap preview.
     pub screenshot: crate::image_view::ScreenshotPanel,
+    /// Hosted Web review launch. The first click starts a daemon when none is
+    /// listening; a later click reuses that process.
+    pub(crate) web_review: crate::web_review::LaunchState,
     /// Images drawn inside the chat transcript and requirement documents.
     pub inline_images: crate::image_view::InlineImages,
     /// Chip metadata and send payloads for AI input attachments.
@@ -2490,6 +2493,7 @@ impl App {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            web_review: Default::default(),
             inline_images: Default::default(),
             chat_attachments: Default::default(),
             capture_index: Default::default(),
@@ -2711,6 +2715,7 @@ impl App {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            web_review: Default::default(),
             inline_images: Default::default(),
             chat_attachments: Default::default(),
             capture_index: Default::default(),
@@ -2910,6 +2915,7 @@ impl App {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            web_review: Default::default(),
             inline_images: Default::default(),
             chat_attachments: Default::default(),
             capture_index: Default::default(),
@@ -8170,6 +8176,9 @@ impl App {
         step_text: Option<&str>,
     ) {
         let start = step_text.and_then(|step| index_of_step_capture(&refs, step));
+        if !self.web_review.is_pending() {
+            self.web_review.clear_notice();
+        }
         self.screenshot.close();
         self.screenshot.origin = origin;
         self.screenshot.visible = true;
@@ -8231,28 +8240,60 @@ impl App {
         }
     }
 
-    /// Opens the hosted Web UI in the host browser and always surfaces the
-    /// address as plain text, so a failed launch still leaves a usable URL.
+    /// Opens the hosted Web UI in the host browser.
+    ///
+    /// The first activation starts the project daemon when none is listening.
+    /// A second activation while that start is still running is ignored; once
+    /// the daemon is up, later activations reuse it. The address is always
+    /// surfaced as plain text, so a failed browser launch still leaves a URL.
     fn open_replay_web_ui(&mut self) {
-        let launch = match crate::web_review::prepare(&self.project.root_dir) {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.status = format!("Web review unavailable: {error:#}");
-                self.set_status_message(self.status.clone());
-                return;
-            }
+        self.web_review.request(&self.project.root_dir);
+        self.publish_web_review_notice();
+    }
+
+    /// Completes a background Web review launch and opens its address.
+    pub(crate) fn poll_web_review(&mut self) {
+        let Some(result) = self.web_review.poll() else {
+            return;
         };
+        match result {
+            Ok(launch) => self.finish_web_review(launch),
+            Err(error) => {
+                self.web_review
+                    .show(format!("Web review unavailable: {error:#}"));
+                self.publish_web_review_notice();
+            }
+        }
+    }
+
+    fn finish_web_review(&mut self, launch: crate::web_review::ReviewLaunch) {
         // A long URL outlives the three-second status message in the clipboard.
         let copied = self.try_copy_to_clipboard(&launch.url);
         let opened = crate::web_review::open_in_browser(&launch.url);
-        let outcome = match (opened, copied) {
-            (Ok(()), true) => "URL copied; opened Web review: ".to_string(),
-            (Ok(()), false) => "Opened Web review: ".to_string(),
-            (Err(error), true) => format!("Could not open a browser ({error:#}); URL copied: "),
-            (Err(error), false) => format!("Could not open a browser ({error:#}); copy this URL: "),
+        let started = if launch.started_daemon {
+            "Started daemon; "
+        } else {
+            ""
         };
-        self.status = format!("{outcome}{}", launch.url);
-        self.set_status_message(self.status.clone());
+        let outcome = match (opened, copied) {
+            (Ok(()), true) => format!("{started}URL copied; opened Web review: "),
+            (Ok(()), false) => format!("{started}Opened Web review: "),
+            (Err(error), true) => {
+                format!("{started}Could not open a browser ({error:#}); URL copied: ")
+            }
+            (Err(error), false) => {
+                format!("{started}Could not open a browser ({error:#}); copy this URL: ")
+            }
+        };
+        self.web_review.show(format!("{outcome}{}", launch.url));
+        self.publish_web_review_notice();
+    }
+
+    fn publish_web_review_notice(&mut self) {
+        if let Some(notice) = self.web_review.notice() {
+            self.status = notice.to_string();
+            self.set_status_message(self.status.clone());
+        }
     }
 
     /// Captures recorded for the selected scenario, in step order.
@@ -21473,6 +21514,7 @@ mod tests {
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            web_review: Default::default(),
             inline_images: Default::default(),
             chat_attachments: Default::default(),
             capture_index: Default::default(),
@@ -21684,6 +21726,7 @@ Feature: B
             tree_panel_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
+            web_review: Default::default(),
             inline_images: Default::default(),
             chat_attachments: Default::default(),
             capture_index: Default::default(),

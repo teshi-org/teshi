@@ -354,6 +354,7 @@ pub fn run() -> Result<()> {
         app.poll_status_message_expiry();
         app.screenshot.poll();
         app.inline_images.poll();
+        app.poll_web_review();
         if app.screenshot.prepare_frame(&mut terminal)? {
             app.inline_images.forget_painted();
         }
