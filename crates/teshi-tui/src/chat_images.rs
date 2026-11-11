@@ -539,6 +539,25 @@ fn with_adjoining_space(text: &str, mut range: Range<usize>) -> Range<usize> {
     range
 }
 
+/// Remove the `index`-th draft attachment and one adjoining space from `text`.
+///
+/// Returns the byte offset where the attachment started, or `None` when there
+/// is no such attachment.
+pub fn remove_attachment(
+    text: &mut String,
+    images: &DraftImages,
+    base: &Path,
+    index: usize,
+) -> Option<usize> {
+    let attachment = draft_attachments(text, images, base)
+        .into_iter()
+        .nth(index)?;
+    let range = with_adjoining_space(text, attachment.range);
+    let start = range.start;
+    text.replace_range(range, "");
+    Some(start)
+}
+
 /// The text to send and store for a draft: each known placeholder becomes an
 /// `@path` mention, padded with spaces where it touches a word so it still
 /// parses as a mention.
@@ -984,6 +1003,19 @@ mod tests {
         let mentions = image_mentions("@img/a.png @/abs/b.png", Path::new("/root"));
         assert_eq!(mentions[0].path, Path::new("/root/img/a.png"));
         assert_eq!(mentions[1].path, Path::new("/abs/b.png"));
+    }
+
+    #[test]
+    fn test_remove_attachment_drops_one_adjoining_space() {
+        let base = Path::new("/p");
+        let none = DraftImages::default();
+        let mut text = String::from("see @a.png @b.png now");
+        assert_eq!(remove_attachment(&mut text, &none, base, 0), Some(4));
+        assert_eq!(text, "see @b.png now");
+        let mut text = String::from("tail @a.png");
+        remove_attachment(&mut text, &none, base, 0);
+        assert_eq!(text, "tail");
+        assert_eq!(remove_attachment(&mut text, &none, base, 0), None);
     }
 
     #[test]

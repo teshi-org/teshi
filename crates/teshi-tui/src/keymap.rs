@@ -331,6 +331,8 @@ pub enum Action {
     /// Paste clipboard content into the AI input (Ctrl+V or Alt+V); clipboard
     /// images are attached as `@path` mentions.
     AiClipboardPaste,
+    /// Remove the n-th image attachment from the AI input.
+    AiRemoveAttachment(usize),
     /// Copy the current conversation's local session ID to the clipboard.
     AiCopySessionId,
     /// Open an image from the chat, the composer, or a requirement in the
