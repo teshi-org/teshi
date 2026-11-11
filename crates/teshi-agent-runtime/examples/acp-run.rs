@@ -191,6 +191,17 @@ fn pump_turn(backend: &mut AgentBackendRuntime, started: Instant, deadline: Inst
                         terminal = true;
                         break;
                     }
+                    AgentBackendEvent::Retrying {
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                    } => {
+                        println!();
+                        println!(
+                            "  [{ms}ms] RETRY : {attempt}/{max_attempts} in {delay:?}: {reason}"
+                        );
+                    }
                     AgentBackendEvent::Ignored => {}
                 }
             }

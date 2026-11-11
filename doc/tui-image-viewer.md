@@ -8,21 +8,41 @@ the capture that was last shown. `i` on a MindMap node opens the same viewer for
 browsing evidence by requirement structure. The viewer uses the newest replay
 run with captures for that scenario.
 
-In Explore the viewer covers the Scenarios and Steps panes and leaves the
-Features column visible; below 84 columns of tab width it covers the whole tab.
-On the MindMap tab it always covers the tab.
+Clicking an image opens the same viewer for that file: a sent image or its
+`▣` label in the AI chat transcript, an `[Image #N]` placeholder or `@path`
+mention in the composer, and an image in the Requirements preview.
+
+The viewer floats inside the content area and keeps the tab row and the footer
+visible, so the surrounding affordances never disappear. It leaves a small
+gutter on every side and fits the image into the largest box that keeps its
+aspect ratio. The `Close [Esc]` button sits on the viewer's top border, outside
+the image box, so a fitted image never hides it. While the viewer is open,
+clicks outside that button, pastes, and keys it does not use are ignored
+instead of reaching the tab beneath it. Ctrl+Q closes the viewer and then quits
+as usual, so an unsaved-changes confirmation is never hidden. A prompt that
+arrives while the viewer is open, such as an external file change or an agent
+proposal, waits beneath it; the viewer's footer says so, and otherwise repeats
+the latest status message. Closing returns to the same tab, scroll position,
+and draft. Without a pixel protocol the viewer still opens, explains why no
+pixels are drawn, and shows the file path. The `Web [w]` control on the top
+border opens the hosted Web UI in the host browser, where the replay captures
+are reviewable with WebGPU. The first activation starts the project daemon on
+loopback when none is listening; a later activation reuses that process and
+only mints a new hosted session. Only files with an image extension
+open, because `o` hands the file to the operating system's default opener.
 
 | Key | Behavior |
 | --- | --- |
 | `j` / `k` | Next / previous captured step |
-| `+` / `=` / `-` | Increase / decrease magnification |
+| `+` / `=` / `-`, mouse wheel | Increase / decrease magnification |
 | `1` | View original pixels at 100 percent |
 | `0` / `f` | Fit the image and reset its center |
 | Arrow keys | Pan a zoomed view by a quarter viewport |
 | `h` / `l` | Pan horizontally |
 | Up / Down in fit view | Previous / next captured step |
 | `o` | Open the original in the operating system's viewer |
-| `i` / Esc | Close immediately, including during loading |
+| `w`, `Web [w]` | Open the hosted Web UI. Starts the project daemon when none is listening; later presses reuse it |
+| `i` / Esc, `Close [Esc]` | Close immediately, including during loading |
 
 100 percent is measured in the terminal graphics protocol's virtual pixels;
 the terminal may scale those pixels for its font and display DPI. Use the
@@ -83,12 +103,27 @@ Idle frames do not resend an image. Replacing or closing a capture, or resizing 
 pixel output before repainting. Transport throughput can still limit a single
 bounded write; this is not a hard real-time latency guarantee.
 
+Images inside the chat transcript and the Requirements preview keep the panel's
+own cells underneath. A placement records the cells it was drawn over, and its
+tiles are sent again from the first row once a later frame prints into one of
+them, which is what such a terminal erases an image with. A row on the last
+screen line keeps its text: a Sixel row's last band reaches into the row below
+it, and a terminal that moves below a payload scrolls to make room. Tiles are
+positioned absolutely, without saving and restoring the cursor, because a
+payload leaves the cursor wherever the terminal puts it.
+
 ## Terminal compatibility
 
 Automatic detection requires actual protocol support. `TESHI_IMAGE_PROTOCOL`
 is a diagnostic override, not a way to make a terminal support images. If no
 protocol is available, the viewer shows the reason and the path to the capture.
 It does not silently substitute a low-resolution half-block preview.
+
+On Windows the console's device attributes alone are not enough: a ConPTY older
+than Windows Terminal 1.22's answers them itself. Images are drawn only in a
+Windows Terminal session (`WT_SESSION` set, no `TERM_PROGRAM`), and
+`TMUX`, `STY` and `ZELLIJ` disable detection before it queries anything, since a
+multiplexer decides what reaches the terminal that draws.
 
 The Windows Zellij/system-ConPTY path must be tested separately from a direct
 Windows Terminal session or a PTY using packaged `conpty.dll` / `OpenConsole.exe`.

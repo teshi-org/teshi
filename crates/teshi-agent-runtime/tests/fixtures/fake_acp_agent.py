@@ -198,6 +198,33 @@ for line in sys.stdin:
                 reason = "end_turn"
             send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": reason}})
             continue
+        if mode.startswith("transient_"):
+            # Mimics Cursor's adapter: a dropped connection becomes message
+            # text and the turn still ends with end_turn.
+            prompt = message["params"]["prompt"][0]["text"]
+
+            def chunk(text):
+                send_update("fake-session", {"sessionUpdate": "agent_message_chunk",
+                                             "content": {"type": "text", "text": text}})
+
+            notice = "\n\nError: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)"
+            failing = mode == "transient_always" or prompt_count == 1
+            if failing and mode == "transient_prompt_error_once":
+                send({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -1, "message": "Error: RetriableError: ECONNRESET"}})
+                continue
+            if failing:
+                if mode == "transient_after_progress":
+                    chunk("working")
+                    send_update("fake-session", {"sessionUpdate": "tool_call", "toolCallId": "edit-1",
+                                                 "title": "Edit file", "status": "completed"})
+                chunk(notice)
+            elif "do not repeat completed tool actions" in prompt:
+                chunk("continued")
+            else:
+                chunk("recovered:" + prompt)
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
         if mode.startswith("mcp_"):
             address = mcp_server["args"][-1]
             host, port = address.rsplit(":", 1)

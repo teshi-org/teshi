@@ -218,6 +218,175 @@ pub fn normalize_iteration_name(raw: &str) -> Result<String, InvalidIterationNam
     Ok(trimmed.to_string())
 }
 
+/// Why a tag name was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidTagName {
+    /// Empty or whitespace-only after trim.
+    Empty,
+    /// Contained ASCII control characters.
+    ControlCharacters,
+}
+
+impl fmt::Display for InvalidTagName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("tag name must not be empty"),
+            Self::ControlCharacters => f.write_str("tag name must not contain control characters"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidTagName {}
+
+/// Trims and validates a user-supplied tag name.
+///
+/// Tags are free-form: any non-empty text without control characters is
+/// accepted. Names are case-sensitive, so `AI` and `ai` stay distinct tags.
+///
+/// # Errors
+///
+/// Returns [`InvalidTagName`] when the trimmed value is empty or contains
+/// ASCII control characters.
+pub fn normalize_tag_name(raw: &str) -> Result<String, InvalidTagName> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(InvalidTagName::Empty);
+    }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        return Err(InvalidTagName::ControlCharacters);
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Named display color of a requirement tag.
+///
+/// The store keeps palette-neutral names; each host maps them onto its own
+/// theme, so the TUI never receives raw RGB values from the shared index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementTagColor {
+    /// Red.
+    Red,
+    /// Green.
+    Green,
+    /// Blue.
+    Blue,
+    /// Yellow.
+    Yellow,
+    /// Magenta.
+    Magenta,
+    /// Cyan.
+    Cyan,
+    /// Gray.
+    Gray,
+}
+
+impl RequirementTagColor {
+    /// Every color in the order pickers cycle through them.
+    pub const ALL: [Self; 7] = [
+        Self::Red,
+        Self::Green,
+        Self::Blue,
+        Self::Yellow,
+        Self::Magenta,
+        Self::Cyan,
+        Self::Gray,
+    ];
+
+    /// Parses a color name after trimming; ASCII case is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequirementTagColor`] for names outside [`Self::ALL`].
+    pub fn parse(raw: &str) -> Result<Self, InvalidRequirementTagColor> {
+        let trimmed = raw.trim();
+        Self::ALL
+            .into_iter()
+            .find(|color| color.as_str().eq_ignore_ascii_case(trimmed))
+            .ok_or_else(|| InvalidRequirementTagColor(trimmed.to_string()))
+    }
+
+    /// Returns the canonical serialized color name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Green => "green",
+            Self::Blue => "blue",
+            Self::Yellow => "yellow",
+            Self::Magenta => "magenta",
+            Self::Cyan => "cyan",
+            Self::Gray => "gray",
+        }
+    }
+}
+
+impl fmt::Display for RequirementTagColor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why a tag color name was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidRequirementTagColor(String);
+
+impl InvalidRequirementTagColor {
+    /// Returns the rejected input after trimming surrounding whitespace.
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for InvalidRequirementTagColor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = RequirementTagColor::ALL.map(RequirementTagColor::as_str);
+        write!(
+            f,
+            "invalid tag color '{}'; expected one of {}",
+            self.0,
+            names.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for InvalidRequirementTagColor {}
+
+/// Display settings of one tag, shared by every project like the tag itself.
+///
+/// The default (no color, not a prefix) is the plain `#tag` suffix, so the
+/// store only records tags whose settings differ from it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequirementTagStyle {
+    /// Optional display color. An unknown stored name decodes as `None` so a
+    /// newer palette never makes an older build reject the whole index.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_tag_color",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub color: Option<RequirementTagColor>,
+    /// Show the tag as a badge before the title instead of after it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prefix: bool,
+}
+
+impl RequirementTagStyle {
+    /// Returns `true` when these settings equal the default suffix display.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn deserialize_lenient_tag_color<'de, D>(
+    deserializer: D,
+) -> Result<Option<RequirementTagColor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.and_then(|name| RequirementTagColor::parse(&name).ok()))
+}
+
 /// Scheduling priority for a requirement document.
 ///
 /// Priority is optional document metadata. It expresses planning urgency and
@@ -443,6 +612,13 @@ pub struct RequirementDocumentMeta {
     /// Optional scheduling priority. `None` means no priority is assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<RequirementPriority>,
+    /// Free-form topical labels shared by every project.
+    ///
+    /// Tags are global document attributes, not project views: the same document
+    /// shows the same tags in every project. Empty on documents without tags, so
+    /// older indexes decode unchanged and are rewritten without the field.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
     /// Project membership and explicitly recorded delivery state, keyed by durable project ID.
     /// Missing on older documents, which remain unassigned until explicitly linked.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -490,6 +666,7 @@ impl RequirementDocumentMeta {
             revision,
             iteration: None,
             priority: None,
+            tags: BTreeSet::new(),
             projects: BTreeMap::new(),
         }
     }
@@ -532,6 +709,12 @@ pub struct RequirementDocumentIndex {
     /// Indexed requirement documents keyed by stable identity.
     #[serde(default)]
     pub documents: Vec<RequirementDocumentMeta>,
+    /// Display settings keyed by tag name (case-sensitive, like tags).
+    ///
+    /// Only tags with non-default settings appear. A key may name a tag that no
+    /// document currently carries, so removing a tag keeps its settings.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tag_styles: BTreeMap<String, RequirementTagStyle>,
 }
 
 fn default_index_version() -> u32 {
@@ -544,6 +727,7 @@ impl Default for RequirementDocumentIndex {
             version: REQUIREMENT_INDEX_VERSION,
             store_id: None,
             documents: Vec::new(),
+            tag_styles: BTreeMap::new(),
         }
     }
 }
@@ -555,7 +739,13 @@ impl RequirementDocumentIndex {
             version: REQUIREMENT_INDEX_VERSION,
             store_id: Some(RequirementStoreId::generate()),
             documents: Vec::new(),
+            tag_styles: BTreeMap::new(),
         }
+    }
+
+    /// Display settings of `tag`, or the default suffix display when unset.
+    pub fn tag_style(&self, tag: &str) -> RequirementTagStyle {
+        self.tag_styles.get(tag).copied().unwrap_or_default()
     }
 
     /// Returns the store identity when present.
@@ -575,6 +765,19 @@ impl RequirementDocumentIndex {
             }
         }
         names.into_iter().collect()
+    }
+
+    /// Tag names currently used by any document, sorted and unique.
+    ///
+    /// This is the picker vocabulary: it holds tags already in use, never a
+    /// separately maintained list.
+    pub fn discovered_tags(&self) -> Vec<String> {
+        self.documents
+            .iter()
+            .flat_map(|doc| doc.tags.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -624,6 +827,7 @@ mod tests {
                 "Login",
                 DocumentRevision::new("abc123"),
             )],
+            ..Default::default()
         };
         let json = serde_json::to_string_pretty(&index).expect("serialize");
         let back: RequirementDocumentIndex = serde_json::from_str(&json).expect("deserialize");
@@ -708,6 +912,102 @@ mod tests {
         assert_ne!(
             normalize_iteration_name("Sprint 1").unwrap(),
             normalize_iteration_name("sprint 1").unwrap()
+        );
+    }
+
+    #[test]
+    fn tag_name_trims_but_stays_case_sensitive() {
+        assert_eq!(normalize_tag_name("  Login  ").unwrap(), "Login");
+        assert_ne!(
+            normalize_tag_name("AI").unwrap(),
+            normalize_tag_name("ai").unwrap()
+        );
+        assert_eq!(
+            normalize_tag_name("   ").unwrap_err(),
+            InvalidTagName::Empty
+        );
+        assert_eq!(
+            normalize_tag_name("bad\u{0007}tag").unwrap_err(),
+            InvalidTagName::ControlCharacters
+        );
+    }
+
+    #[test]
+    fn documents_without_tags_load_and_serialize_without_the_field() {
+        let json = serde_json::json!({
+            "id": "doc-1",
+            "path": "a.md",
+            "title": "A",
+            "revision": "rev-1",
+        });
+        let meta: RequirementDocumentMeta = serde_json::from_value(json).expect("decode");
+        assert!(meta.tags.is_empty());
+        let encoded = serde_json::to_value(&meta).expect("encode");
+        assert!(
+            encoded.get("tags").is_none(),
+            "empty tags must not be written"
+        );
+    }
+
+    #[test]
+    fn discovered_tags_are_sorted_and_unique() {
+        let mut first = RequirementDocumentMeta::new("a", "a.md", "A", DocumentRevision::new("1"));
+        first.tags = ["Beta".to_string(), "Alpha".to_string()].into();
+        let mut second = RequirementDocumentMeta::new("b", "b.md", "B", DocumentRevision::new("1"));
+        second.tags = ["Alpha".to_string()].into();
+        let index = RequirementDocumentIndex {
+            version: REQUIREMENT_INDEX_VERSION,
+            store_id: Some(RequirementStoreId::generate()),
+            documents: vec![first, second],
+            ..Default::default()
+        };
+        assert_eq!(index.discovered_tags(), vec!["Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn tag_color_parse_ignores_case_and_rejects_unknown_names() {
+        assert_eq!(
+            RequirementTagColor::parse(" Red ").unwrap(),
+            RequirementTagColor::Red
+        );
+        for color in RequirementTagColor::ALL {
+            assert_eq!(RequirementTagColor::parse(color.as_str()).unwrap(), color);
+        }
+        let err = RequirementTagColor::parse("orange").unwrap_err();
+        assert_eq!(err.value(), "orange");
+        assert!(err.to_string().contains("red, green, blue"), "{err}");
+    }
+
+    #[test]
+    fn index_without_tag_styles_loads_and_writes_no_empty_fields() {
+        let index: RequirementDocumentIndex =
+            serde_json::from_str(r#"{"version": 2, "documents": []}"#).expect("decode");
+        assert!(index.tag_styles.is_empty());
+        assert!(index.tag_style("ui").is_default());
+        let encoded = serde_json::to_value(&index).expect("encode");
+        assert!(encoded.get("tag_styles").is_none(), "{encoded}");
+
+        let style = RequirementTagStyle {
+            color: Some(RequirementTagColor::Cyan),
+            prefix: false,
+        };
+        let encoded = serde_json::to_value(style).expect("encode");
+        assert_eq!(encoded, serde_json::json!({"color": "cyan"}));
+    }
+
+    #[test]
+    fn unknown_stored_tag_color_decodes_as_no_color() {
+        let index: RequirementDocumentIndex = serde_json::from_str(
+            r#"{"version": 2, "documents": [],
+                "tag_styles": {"ui": {"color": "ultraviolet", "prefix": true}}}"#,
+        )
+        .expect("an unknown color must not reject the index");
+        assert_eq!(
+            index.tag_style("ui"),
+            RequirementTagStyle {
+                color: None,
+                prefix: true
+            }
         );
     }
 

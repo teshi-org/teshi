@@ -74,6 +74,24 @@ mod windows_vt {
     /// Opts out of VT input and keeps crossterm's console-record backend.
     const LEGACY_INPUT_ENV: &str = "TESHI_LEGACY_CONSOLE_INPUT";
 
+    /// Console input mode the VT reader needs; a mismatch means someone else
+    /// changed it under us.
+    const VT_INPUT_MODE: u32 = ENABLE_WINDOW_INPUT
+        | ENABLE_MOUSE_INPUT
+        | ENABLE_EXTENDED_FLAGS
+        | ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+    /// Puts `handle` back into `vt_mode` if another process changed it.
+    fn ensure_vt_input_mode(handle: windows_sys::Win32::Foundation::HANDLE, vt_mode: u32) {
+        let mut mode = 0;
+        if unsafe { GetConsoleMode(handle, &mut mode) } == 0 || mode == vt_mode {
+            return;
+        }
+        unsafe {
+            SetConsoleMode(handle, vt_mode);
+        }
+    }
+
     pub struct VtInput {
         events: Receiver<io::Result<Event>>,
         stop: Arc<AtomicBool>,
@@ -157,6 +175,12 @@ mod windows_vt {
                     let mut buffer = [0u16; 4096];
                     let mut pending_surrogate = None;
                     while !reader_stop.load(Ordering::Acquire) {
+                        // A child sharing this console (a browser launcher, an
+                        // agent process) can reset the input mode while the
+                        // read below is pending. Without VT input the console
+                        // echoes every key record as text, so restore our mode
+                        // before blocking again.
+                        ensure_vt_input_mode(stdin, VT_INPUT_MODE);
                         let mut read = 0;
                         // Read UTF-16 directly: std::io::Stdin retries a
                         // cancelled read, while byte console reads can split
@@ -255,13 +279,21 @@ mod windows_vt {
         key_records: bool,
     }
 
-    /// Writes a mode switch to the console host. A console that does not
-    /// know the mode ignores it, which leaves plain VT input.
+    /// Writes a mode switch to the console host. A console that does not know
+    /// the mode ignores it, which leaves plain VT input.
+    ///
+    /// The switch goes to the console itself rather than to `stdout`: a
+    /// redirected or stale stdout would drop it, and a console left in
+    /// win32-input-mode reports every later key as text.
     fn write_mode(sequence: &str) -> io::Result<()> {
         use std::io::Write;
-        let mut stdout = io::stdout();
-        stdout.write_all(sequence.as_bytes())?;
-        stdout.flush()
+        let mut output: Box<dyn Write> =
+            match std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                Ok(console) => Box::new(console),
+                Err(_) => Box::new(io::stdout()),
+            };
+        output.write_all(sequence.as_bytes())?;
+        output.flush()
     }
 
     impl ConsoleModeGuard {
@@ -277,10 +309,7 @@ mod windows_vt {
                     return Err(io::Error::last_os_error());
                 }
 
-                let vt_mode = ENABLE_WINDOW_INPUT
-                    | ENABLE_MOUSE_INPUT
-                    | ENABLE_EXTENDED_FLAGS
-                    | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                let vt_mode = VT_INPUT_MODE;
                 if SetConsoleMode(handle, vt_mode) == 0 {
                     return Err(io::Error::last_os_error());
                 }

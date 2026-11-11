@@ -1982,7 +1982,11 @@ fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<S
         .as_ref()
         .map(|a| a.test_points.test_points.as_slice())
         .unwrap_or(&[]);
-    if let Err(errors) = teshi_agent::pipeline::validate_plan_test_point_ids(&plan, test_points) {
+    if let Err(errors) = teshi_agent::pipeline::validate_plan_test_point_ids_with_policy(
+        &plan,
+        test_points,
+        app.review_policy,
+    ) {
         anyhow::bail!("generate_plan rejected: {}", errors.join("; "));
     }
 
@@ -2418,6 +2422,7 @@ mod pipeline_gate_tests {
             version: 2,
             store_id: Some(store_id.clone()),
             documents: vec![meta.clone()],
+            ..Default::default()
         };
         teshi_engine::save_requirement_document_index(&app.requirements_root, &index)
             .expect("persist store");
@@ -2643,6 +2648,7 @@ mod pipeline_gate_tests {
             meta: RequirementDocumentMeta {
                 iteration: None,
                 priority: None,
+                tags: Default::default(),
                 projects: Default::default(),
                 id: "doc-1".into(),
                 path: "auth.md".into(),

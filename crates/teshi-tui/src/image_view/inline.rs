@@ -5,10 +5,10 @@
 //! on whether or when the pixels arrive. Decoding and protocol encoding run on
 //! a background thread; the UI thread only places finished images.
 //!
-//! Sixel and iTerm2 pixels live outside Ratatui's buffer. Each placement marks
-//! its cells as hidden blanks; after the frame those marks prove nothing was
-//! drawn on top, and when a placement moves or disappears its old cells are
-//! written again from the frame buffer, which erases the stale pixels.
+//! Sixel and iTerm2 pixels live outside Ratatui's buffer, over cells that keep
+//! the panel's own content. Text printed into one of those cells replaces its
+//! pixels, so each placement records the cells it was drawn over, and a
+//! placement whose cells changed is drawn again from its first row.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -20,7 +20,6 @@ use ratatui::Frame;
 use ratatui::backend::Backend;
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Rect, Size};
-use ratatui::style::Modifier;
 use ratatui_image::picker::Picker;
 
 use super::pipeline::{self, Encoded, Prepared};
@@ -67,11 +66,24 @@ struct Slot {
     /// Screen cells showing image rows `skip..skip + area.height`.
     area: Rect,
     skip: u16,
+    /// The panel's cells in `area` when the pixels were drawn: while the frame
+    /// still holds them, nothing has been printed over the image.
+    cells: Vec<Cell>,
 }
 
 impl Slot {
     fn same_place(&self, other: &Slot) -> bool {
         self.key == other.key && self.area == other.area && self.skip == other.skip
+    }
+
+    /// Whether the frame still holds the cells the pixels were drawn over.
+    fn still_placed(&self, buffer: &Buffer) -> bool {
+        self.cells.len() == self.area.area() as usize
+            && self
+                .area
+                .positions()
+                .zip(&self.cells)
+                .all(|(position, cell)| buffer.cell(position).is_some_and(|now| now == cell))
     }
 }
 
@@ -187,12 +199,13 @@ impl InlineImages {
                 frame.render_widget(ratatui_image::Image::new(protocol), visible);
             }
             Encoded::Pixels(_) => {
-                mark(frame.buffer_mut(), visible);
+                let cells = snapshot(frame.buffer_mut(), visible);
                 self.frame.push(Slot {
                     key,
                     prepared,
                     area: visible,
                     skip,
+                    cells,
                 });
             }
         }
@@ -310,7 +323,7 @@ impl InlineImages {
         } else {
             std::mem::take(&mut self.frame)
                 .into_iter()
-                .filter(|slot| still_marked(buffer, slot.area))
+                .filter(|slot| slot.still_placed(buffer))
                 .collect()
         };
         let mut stale = Vec::new();
@@ -351,7 +364,12 @@ impl InlineImages {
         }
         let mut written = 0;
         for painted in &mut kept {
-            written += write_tiles(backend, painted, pipeline::OUTPUT_BUDGET - written)?;
+            written += write_tiles(
+                backend,
+                painted,
+                pipeline::OUTPUT_BUDGET - written,
+                screen.height,
+            )?;
             if written >= pipeline::OUTPUT_BUDGET {
                 break;
             }
@@ -364,23 +382,12 @@ impl InlineImages {
     }
 }
 
-/// Marks reserved cells as hidden blanks so later overdraw is detectable.
-fn mark(buffer: &mut Buffer, area: Rect) {
-    for position in area.positions() {
-        if let Some(cell) = buffer.cell_mut(position) {
-            cell.reset();
-            cell.modifier = Modifier::HIDDEN;
-        }
-    }
-}
-
-/// Whether nothing was drawn over a marked area after it was placed.
-fn still_marked(buffer: &Buffer, area: Rect) -> bool {
-    area.positions().all(|position| {
-        buffer
-            .cell(position)
-            .is_some_and(|cell| cell.symbol() == " " && cell.modifier.contains(Modifier::HIDDEN))
-    })
+/// Copies the frame's cells in `area`, so a later frame can tell whether the
+/// panel still shows them.
+fn snapshot(buffer: &Buffer, area: Rect) -> Vec<Cell> {
+    area.positions()
+        .filter_map(|position| buffer.cell(position).cloned())
+        .collect()
 }
 
 fn tile_count(slot: &Slot) -> usize {
@@ -391,33 +398,50 @@ fn tile_count(slot: &Slot) -> usize {
 }
 
 /// Writes the visible rows of one placement, resuming at `next_tile`, within `budget` bytes.
-fn write_tiles(writer: &mut impl Write, painted: &mut Painted, budget: usize) -> io::Result<usize> {
+fn write_tiles(
+    writer: &mut impl Write,
+    painted: &mut Painted,
+    budget: usize,
+    screen_height: u16,
+) -> io::Result<usize> {
     let slot = &painted.slot;
     let Encoded::Pixels(tiles) = slot.prepared.encoded.as_ref() else {
         return Ok(0);
     };
     let mut bytes = 0;
     while let Some(tile) = tiles.get(painted.next_tile) {
-        let visible_row = tile.y >= slot.skip && tile.y - slot.skip < slot.area.height;
-        if visible_row && tile.x < slot.area.width {
-            let prefix = format!(
-                "\x1b7\x1b[{};{}H",
-                slot.area.y + (tile.y - slot.skip) + 1,
-                slot.area.x + tile.x + 1
-            );
-            let wire_bytes = prefix.len() + tile.data.len() + 2;
-            // Always make progress, even when one tile exceeds what is left.
-            if bytes > 0 && bytes + wire_bytes > budget {
-                break;
-            }
-            writer.write_all(prefix.as_bytes())?;
-            writer.write_all(tile.data.as_bytes())?;
-            writer.write_all(b"\x1b8")?;
-            bytes += wire_bytes;
+        let Some(row) = placement_row(slot, tile, screen_height) else {
+            painted.next_tile += 1;
+            continue;
+        };
+        // Positioned absolutely, with no cursor save and restore: a payload
+        // leaves the cursor wherever the terminal puts it, and a restore that
+        // disagrees prints the rest of the frame a row or a column off.
+        let prefix = format!("\x1b[{};{}H", row + 1, slot.area.x + tile.x + 1);
+        let wire_bytes = prefix.len() + tile.data.len();
+        // Always make progress, even when one tile exceeds what is left.
+        if bytes > 0 && bytes + wire_bytes > budget {
+            break;
         }
+        writer.write_all(prefix.as_bytes())?;
+        writer.write_all(tile.data.as_bytes())?;
+        bytes += wire_bytes;
         painted.next_tile += 1;
     }
     Ok(bytes)
+}
+
+/// The screen row `tile` draws, or None where drawing it would be unsafe.
+///
+/// A Sixel row's last band reaches into the row below it, and a terminal that
+/// moves below a payload scrolls for it: the bottom row keeps its text.
+fn placement_row(slot: &Slot, tile: &pipeline::Tile, screen_height: u16) -> Option<u16> {
+    let offset = tile.y.checked_sub(slot.skip)?;
+    if offset >= slot.area.height || tile.x >= slot.area.width {
+        return None;
+    }
+    let row = slot.area.y + offset;
+    (row + 1 < screen_height).then_some(row)
 }
 
 fn prepare(job: &Job) -> anyhow::Result<Prepared> {
@@ -459,7 +483,8 @@ mod tests {
     }
 
     /// Draws one frame placing `path` at `area`, and returns the reported state
-    /// with everything written to the terminal after the frame.
+    /// with everything written to the terminal after the frame. `overdraw`
+    /// prints a panel over the whole frame, as a popup does.
     fn frame(
         images: &mut InlineImages,
         terminal: &mut ratatui::Terminal<TestBackend>,
@@ -475,7 +500,9 @@ mod tests {
                     state = images.place(frame, path, (8, 2), area, 0);
                 }
                 if overdraw {
-                    frame.render_widget(ratatui::widgets::Clear, frame.area());
+                    // A popup over the image box: its border cells replace the
+                    // pixels, so the placement must be drawn again afterwards.
+                    frame.render_widget(ratatui::widgets::Block::bordered(), Rect::new(1, 1, 8, 2));
                 }
             })
             .unwrap();
@@ -597,7 +624,7 @@ mod tests {
         wait_ready(&mut images);
         let (state, output) = frame(&mut images, &mut terminal, &path, first, false);
         assert_eq!(state, InlineState::Shown);
-        assert!(output.starts_with(b"\x1b7\x1b[2;2H\x1bP"), "{output:?}");
+        assert!(output.starts_with(b"\x1b[2;2H\x1bP"), "{output:?}");
         let (_, idle) = frame(&mut images, &mut terminal, &path, first, false);
         assert!(idle.is_empty(), "an unchanged placement is not resent");
         let (_, moved) = frame(
@@ -619,16 +646,44 @@ mod tests {
     }
 
     #[test]
-    fn test_overdrawn_placements_are_not_drawn() {
+    fn test_an_overdrawn_placement_is_drawn_again_when_the_overdraw_ends() {
         let dir = tempfile::tempdir().unwrap();
         let (mut images, path) = sixel_images(dir.path());
         let mut terminal = ratatui::Terminal::new(TestBackend::new(20, 6)).unwrap();
-        let area = Some(Rect::new(0, 0, 8, 2));
+        let area = Some(Rect::new(1, 1, 8, 2));
         frame(&mut images, &mut terminal, &path, area, false);
         wait_ready(&mut images);
-        let (state, output) = frame(&mut images, &mut terminal, &path, area, true);
+        let (_, shown) = frame(&mut images, &mut terminal, &path, area, false);
+        assert!(String::from_utf8_lossy(&shown).contains("\x1bP"));
+        let (state, covered) = frame(&mut images, &mut terminal, &path, area, true);
         assert_eq!(state, InlineState::Shown);
-        assert!(output.is_empty(), "a popup over the image keeps its cells");
+        let covered = String::from_utf8_lossy(&covered);
+        assert!(
+            !covered.contains("\x1bP"),
+            "a popup over the image keeps its own cells: {covered:?}"
+        );
+        let (_, again) = frame(&mut images, &mut terminal, &path, area, false);
+        let again = String::from_utf8_lossy(&again);
+        assert!(
+            again.contains("\x1bP"),
+            "the pixels return once the popup is gone: {again:?}"
+        );
+    }
+
+    #[test]
+    fn test_the_bottom_screen_row_keeps_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut images, path) = sixel_images(dir.path());
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(20, 3)).unwrap();
+        let area = Some(Rect::new(0, 2, 8, 1));
+        frame(&mut images, &mut terminal, &path, area, false);
+        wait_ready(&mut images);
+        let (state, output) = frame(&mut images, &mut terminal, &path, area, false);
+        assert_eq!(state, InlineState::Shown);
+        assert!(
+            String::from_utf8_lossy(&output).is_empty(),
+            "a band that would scroll the screen is not drawn"
+        );
     }
 
     #[test]

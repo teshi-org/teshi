@@ -27,6 +27,7 @@ impl NativeAgentBackend {
 }
 
 pub use crate::acp_backend::AcpBackendConfig;
+pub use crate::acp_retry::TurnRetryPolicy;
 
 /// One owned backend per conversation. Enum dispatch keeps the two possible
 /// implementations visible to the compiler without shared mutable UI state.
@@ -395,6 +396,7 @@ impl From<NativeRuntimeEvent> for AgentBackendEvent {
                 input_tokens,
                 output_tokens,
                 finish_reason,
+                detail: None,
             },
             NativeRuntimeEvent::ToolCalls {
                 tool_calls,

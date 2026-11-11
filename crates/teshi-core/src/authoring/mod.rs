@@ -19,12 +19,13 @@ pub use positions::{
 };
 pub use requirements::{
     DocumentRevision, InvalidIterationName, InvalidRequirementPath, InvalidRequirementPriority,
-    InvalidRequirementStoreId, InvalidRequirementTitle, REQUIREMENT_INDEX_FILE,
-    REQUIREMENT_INDEX_VERSION, RequirementDocumentIndex, RequirementDocumentMeta,
-    RequirementGroupMode, RequirementIterationFilter, RequirementPriority,
-    RequirementProjectFilter, RequirementProjectStatus, RequirementStoreId,
-    UNASSIGNED_ITERATION_LABEL, is_safe_requirement_path, normalize_iteration_name,
-    requirement_title, resolve_requirement_store_path, validate_requirement_path,
+    InvalidRequirementStoreId, InvalidRequirementTagColor, InvalidRequirementTitle, InvalidTagName,
+    REQUIREMENT_INDEX_FILE, REQUIREMENT_INDEX_VERSION, RequirementDocumentIndex,
+    RequirementDocumentMeta, RequirementGroupMode, RequirementIterationFilter, RequirementPriority,
+    RequirementProjectFilter, RequirementProjectStatus, RequirementStoreId, RequirementTagColor,
+    RequirementTagStyle, UNASSIGNED_ITERATION_LABEL, is_safe_requirement_path,
+    normalize_iteration_name, normalize_tag_name, requirement_title,
+    resolve_requirement_store_path, validate_requirement_path,
 };
 pub use resolve::{
     ANCHOR_CONTEXT_CHARS, create_requirement_link, mark_document_links_missing,

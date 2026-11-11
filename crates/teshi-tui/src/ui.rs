@@ -804,16 +804,28 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let label = app
-        .pending_delete
-        .as_ref()
-        .map(|request| request.label.clone())
-        .unwrap_or_default();
-    let error = app
-        .pending_delete
-        .as_ref()
-        .and_then(|request| request.error.clone());
-    let height = if error.is_some() { 10 } else { 7 };
+    let Some(request) = app.pending_delete.clone() else {
+        return;
+    };
+    // Closing a conversation saves it first, so it stays resumable and the
+    // prompt must not claim the loss is permanent.
+    let closing = request.action == Action::AgentClose;
+    let (title, verb, consequence, confirm) = if closing {
+        (
+            "Confirm close",
+            "Close",
+            "Its history stays available in the session list.",
+            "Close [Enter/y] ",
+        )
+    } else {
+        (
+            "Confirm deletion",
+            "Delete",
+            "This cannot be undone.",
+            "Delete [Enter/y] ",
+        )
+    };
+    let height = if request.error.is_some() { 10 } else { 7 };
     let popup = Rect::new(
         area.x + area.width.saturating_sub(60) / 2,
         area.y + area.height.saturating_sub(height) / 2,
@@ -821,15 +833,17 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         area.height.min(height),
     );
     frame.render_widget(Clear, popup);
-    let block = theme::popup_block("Confirm deletion");
+    let block = theme::popup_block(title);
     let [body, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(format!(
-            "Delete {label}?\nThis cannot be undone.{}",
-            error.map_or_else(String::new, |error| format!(
-                "\n\nCould not delete: {error}"
+            "{verb} {}?\n{consequence}{}",
+            request.label,
+            request.error.map_or_else(String::new, |error| format!(
+                "\n\nCould not {}: {error}",
+                verb.to_lowercase()
             ))
         ))
         .wrap(ratatui::widgets::Wrap { trim: false }),
@@ -841,7 +855,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         footer,
         "",
         &[
-            ("Delete [Enter/y] ", Action::DeleteConfirm),
+            (confirm, Action::DeleteConfirm),
             ("Cancel [Esc/n]", Action::DeleteCancel),
         ],
         true,
@@ -858,22 +872,18 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-/// Minimum panel width that still shows the agent sidebar. Narrower panels
-/// keep the chat at full width instead of squeezing both surfaces.
-const AI_SIDEBAR_MIN_PANEL_WIDTH: u16 = 90;
-/// The sidebar takes a quarter of the panel but never drops below this width.
-const AI_SIDEBAR_MIN_WIDTH: u16 = 20;
+/// Chat-title column, matching iCode's sidebar: 30% of the row, never under
+/// 42 columns (titles stay readable) and never over 60 (the conversation
+/// keeps the extra width).
+const AI_SIDEBAR_MIN_WIDTH: u16 = 42;
 /// Beyond this width extra columns belong to the conversation, not the list.
-const AI_SIDEBAR_MAX_WIDTH: u16 = 30;
+const AI_SIDEBAR_MAX_WIDTH: u16 = 60;
 /// The sidebar never appears when the conversation would fall below this.
 const AI_CHAT_MIN_WIDTH: u16 = 50;
 
 /// Resolve the sidebar width, or `None` when the chat should own the row.
 pub(super) fn ai_sidebar_width(panel_width: u16) -> Option<u16> {
-    if panel_width < AI_SIDEBAR_MIN_PANEL_WIDTH {
-        return None;
-    }
-    let width = (panel_width / 4).clamp(AI_SIDEBAR_MIN_WIDTH, AI_SIDEBAR_MAX_WIDTH);
+    let width = (panel_width * 3 / 10).clamp(AI_SIDEBAR_MIN_WIDTH, AI_SIDEBAR_MAX_WIDTH);
     (panel_width.saturating_sub(width) >= AI_CHAT_MIN_WIDTH).then_some(width)
 }
 
@@ -2682,32 +2692,78 @@ fn render_mindmap_scenario_preview(
     }
 }
 
-/// Renders the replay screenshot viewer over the active tab.
+/// Label of the viewer's close control on its top border.
+const IMAGE_VIEWER_CLOSE: &str = " Close [Esc] ";
+/// Close label for terminals too narrow to show [`IMAGE_VIEWER_CLOSE`] whole.
+const IMAGE_VIEWER_CLOSE_SHORT: &str = " Esc ";
+/// Label of the viewer's hosted Web UI control on its top border.
+const IMAGE_VIEWER_WEB: &str = " Web [w] ";
+/// Web label for terminals too narrow to show [`IMAGE_VIEWER_WEB`] whole.
+const IMAGE_VIEWER_WEB_SHORT: &str = " w ";
+
+/// Close and Web labels that fit `popup_width`, preferring the full wording.
 ///
+/// Close stays whenever any columns remain. Web is omitted when even the short
+/// pair would consume the whole border, so the title is not covered.
+fn viewer_border_controls(popup_width: u16) -> (&'static str, u16, &'static str, u16) {
+    let close_full = IMAGE_VIEWER_CLOSE.width() as u16;
+    let web_full = IMAGE_VIEWER_WEB.width() as u16;
+    let close_short = IMAGE_VIEWER_CLOSE_SHORT.width() as u16;
+    let web_short = IMAGE_VIEWER_WEB_SHORT.width() as u16;
+    // One column separates the controls; one stays inside the right border.
+    let budget = popup_width.saturating_sub(2);
+    if budget >= close_full.saturating_add(web_full).saturating_add(1) {
+        (IMAGE_VIEWER_CLOSE, close_full, IMAGE_VIEWER_WEB, web_full)
+    } else if budget >= close_short.saturating_add(web_short).saturating_add(1) {
+        (
+            IMAGE_VIEWER_CLOSE_SHORT,
+            close_short,
+            IMAGE_VIEWER_WEB_SHORT,
+            web_short,
+        )
+    } else if budget >= close_full {
+        (IMAGE_VIEWER_CLOSE, close_full, "", 0)
+    } else {
+        (IMAGE_VIEWER_CLOSE_SHORT, close_short.min(budget), "", 0)
+    }
+}
+
+/// Columns kept free between the image viewer and the panel edges.
+const VIEWER_GUTTER_COLS: u16 = 3;
+/// Rows kept free above and below the image viewer inside the content area.
+const VIEWER_GUTTER_ROWS: u16 = 1;
+
+/// The viewer box: `area` shrunk by the gutters, on every terminal size.
+///
+/// Very small terminals give the gutters up evenly rather than collapsing the
+/// box, so the border and its controls stay addressable.
+fn image_viewer_rect(area: Rect) -> Rect {
+    let cols = VIEWER_GUTTER_COLS.min(area.width.saturating_sub(2) / 2);
+    let rows = VIEWER_GUTTER_ROWS.min(area.height.saturating_sub(2) / 2);
+    Rect::new(
+        area.x + cols,
+        area.y + rows,
+        area.width.saturating_sub(cols * 2),
+        area.height.saturating_sub(rows * 2),
+    )
+}
+
+/// Renders the image viewer as a floating box inside the content area.
+///
+/// The tab row and the footer stay visible, so the viewer reads as a panel
+/// instead of a mode switch and the surrounding affordances never disappear.
+/// The box keeps a gutter on every side; the close control sits on its border,
+/// outside the box pixels are drawn into, so a fitted image never hides it.
 /// Terminals without a pixel protocol keep pointing at the system viewer
 /// instead of drawing half-blocks, which show a UI screenshot as noise.
 fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if !app.screenshot.visible || area.width < 20 || area.height < 6 {
+    if !app.screenshot.visible || area.is_empty() {
         return;
     }
-    // Explore keeps its Features column as context for the captures; a narrow
-    // terminal falls back to covering the whole tab.
-    let area = match app.screenshot.origin {
-        crate::image_view::ScreenshotOrigin::Explore => {
-            let right =
-                Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)])
-                    .split(area)[1];
-            if right.width >= 60 { right } else { area }
-        }
-        crate::image_view::ScreenshotOrigin::MindMap => area,
-    };
-    let popup = Rect::new(
-        area.x + area.width / 20,
-        area.y + area.height / 20,
-        area.width.saturating_sub(area.width / 10),
-        area.height.saturating_sub(area.height / 10),
-    );
-    frame.render_widget(Clear, popup);
+    frame.render_widget(Clear, area);
+    let popup = image_viewer_rect(area);
+    let standalone = app.screenshot.origin == crate::image_view::ScreenshotOrigin::Image;
+    let noun = if standalone { "image" } else { "capture" };
     let total = app.screenshot.refs.len();
     let index = app.screenshot.index.min(total.saturating_sub(1));
     let size = app
@@ -2737,6 +2793,7 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ""
     };
     let title = match app.screenshot.refs.get(index) {
+        Some(shot) if standalone => format!("Image{size} · {view}{progress}  {}", shot.file),
         Some(shot) if total > 0 => {
             let step = shot.step_text.trim();
             let step = if step.is_empty() {
@@ -2757,19 +2814,58 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         _ => "Screenshot".to_string(),
     };
-    let title: String = title
-        .chars()
-        .take(popup.width.saturating_sub(4) as usize)
-        .collect();
+    let (close_label, close_width, web_label, web_width) = viewer_border_controls(popup.width);
+    let title = truncate_line_to_cols(
+        Line::raw(title),
+        popup
+            .width
+            .saturating_sub(close_width.saturating_add(web_width).saturating_add(4)),
+    );
     let block = theme::popup_block(title);
     let warning = app.screenshot.support_detail.contains("Windows Zellij")
         && app.screenshot.support.is_pixels();
-    let [body, footer] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(if warning { 2 } else { 1 }),
-    ])
-    .areas(block.inner(popup));
+    let web_notice = app.web_review.notice().map(str::to_string);
+    let footer_rows = 1 + u16::from(warning) + u16::from(web_notice.is_some());
+    let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(footer_rows)])
+        .areas(block.inner(popup));
     frame.render_widget(block, popup);
+    if close_width > 0 {
+        let close = Rect::new(
+            popup.right().saturating_sub(close_width + 1),
+            popup.y,
+            close_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(theme::chip(close_label, theme::PRIMARY))),
+            close,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: close,
+            action: Action::ImageViewerClose,
+            modal: true,
+        });
+    }
+    if web_width > 0 {
+        let web = Rect::new(
+            popup.right().saturating_sub(close_width + web_width + 2),
+            popup.y,
+            web_width,
+            1,
+        );
+        // Same emphasis as Close. A muted chip reads as disabled, but this
+        // control is always actionable: the first activation starts a daemon
+        // when none is listening, and a later one reuses it.
+        frame.render_widget(
+            Paragraph::new(Line::from(theme::chip(web_label, theme::PRIMARY))),
+            web,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: web,
+            action: Action::OpenReplayWebUi,
+            modal: true,
+        });
+    }
     if body.width == 0 || body.height == 0 {
         return;
     }
@@ -2779,13 +2875,17 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         let mut lines: Vec<Line<'static>> = Vec::new();
         if let Some(error) = app.screenshot.error.as_ref() {
-            lines.push(Line::raw(format!("Cannot show capture: {error}")));
+            lines.push(Line::raw(format!("Cannot show {noun}: {error}")));
             lines.push(Line::raw(
                 "Press o to open the original in the system viewer.",
             ));
         } else if app.screenshot.loading {
             lines.push(Line::raw("Preparing image in the background..."));
-            lines.push(Line::raw("Zoom, switch steps, or press i/Esc to close."));
+            lines.push(Line::raw(if standalone {
+                "Zoom, or press Esc to close."
+            } else {
+                "Zoom, switch steps, or press i/Esc to close."
+            }));
         } else if app.screenshot.refs.is_empty() {
             lines.push(Line::raw("No captured screenshots for this scenario."));
             lines.push(Line::raw(String::new()));
@@ -2826,9 +2926,9 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 lines.push(Line::raw(
                     "Use a terminal with image support, or open the original externally.",
                 ));
-                lines.push(Line::raw(
-                    "Press o to open the capture in the system viewer.",
-                ));
+                lines.push(Line::raw(format!(
+                    "Press o to open the {noun} in the system viewer."
+                )));
             }
             if let Some(shot) = app.screenshot.refs.get(index) {
                 lines.push(Line::raw(
@@ -2848,9 +2948,19 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ));
     }
     footer_lines.push(Line::styled(
-        " +/- zoom · 1 100% · 0 fit · arrows pan · j/k steps · o open · i/Esc close",
+        if standalone {
+            " +/- or wheel zoom · 1 100% · 0 fit · arrows pan · o open · Esc close"
+        } else {
+            " +/- zoom · 1 100% · 0 fit · arrows pan · j/k steps · o open · i/Esc close"
+        },
         Style::default().fg(theme::MUTED),
     ));
+    if let Some(notice) = web_notice {
+        footer_lines.push(Line::styled(
+            format!(" {notice}"),
+            Style::default().fg(theme::WARNING),
+        ));
+    }
     frame.render_widget(Paragraph::new(footer_lines), footer);
 }
 
@@ -4998,6 +5108,21 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// Content viewport of a requirement pane.
+///
+/// The last interior column stays empty because the vertical scrollbar paints
+/// on the right border; without the gap the widest rows run into the bar.
+fn requirement_viewport(area: Rect) -> Rect {
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    }
+}
+
 /// Draw overflow indicators on panel borders, preserving the content viewport.
 ///
 /// Every pane shares the chat scrollbar paint: solid cells instead of glyphs, a
@@ -5011,14 +5136,11 @@ fn render_requirement_scrollbars(
     extent: (usize, usize),
     offset: (usize, usize),
 ) {
-    let inner = area.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    let viewport = requirement_viewport(area);
     let (width, height) = extent;
     ui.scroll_limits[pane] = [
-        width.saturating_sub(inner.width as usize),
-        height.saturating_sub(inner.height as usize),
+        width.saturating_sub(viewport.width as usize),
+        height.saturating_sub(viewport.height as usize),
     ];
     ui.pane_bars[pane] = [None; 2];
 
@@ -5026,8 +5148,13 @@ fn render_requirement_scrollbars(
     let grabbed = |axis: usize| {
         grab.is_some_and(|(dragged, dragged_axis, _)| dragged == pane && dragged_axis == axis)
     };
-    if width > inner.width as usize && inner.width > 0 {
-        let rect = Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1);
+    if width > viewport.width as usize && viewport.width > 0 {
+        let rect = Rect::new(
+            viewport.x,
+            area.bottom().saturating_sub(1),
+            viewport.width,
+            1,
+        );
         let bar = crate::app::ScrollbarBar {
             rect,
             axis: theme::ScrollAxis::Horizontal,
@@ -5037,7 +5164,7 @@ fn render_requirement_scrollbars(
         frame.render_widget(
             Paragraph::new(theme::scrollbar_lines(
                 width,
-                inner.width as usize,
+                viewport.width as usize,
                 offset.0,
                 theme::ScrollAxis::Horizontal,
                 state,
@@ -5046,8 +5173,13 @@ fn render_requirement_scrollbars(
         );
         ui.pane_bars[pane][0] = Some(bar);
     }
-    if height > inner.height as usize && inner.height > 0 {
-        let rect = Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height);
+    if height > viewport.height as usize && viewport.height > 0 {
+        let rect = Rect::new(
+            area.right().saturating_sub(1),
+            viewport.y,
+            1,
+            viewport.height,
+        );
         let bar = crate::app::ScrollbarBar {
             rect,
             axis: theme::ScrollAxis::Vertical,
@@ -5057,7 +5189,7 @@ fn render_requirement_scrollbars(
         frame.render_widget(
             Paragraph::new(theme::scrollbar_lines(
                 height,
-                inner.height as usize,
+                viewport.height as usize,
                 offset.1,
                 theme::ScrollAxis::Vertical,
                 state,
@@ -5237,6 +5369,7 @@ fn render_requirements_tree(
         frame.render_widget(Paragraph::new("No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project").wrap(ratatui::widgets::Wrap { trim: false }).style(Style::default().fg(theme::MUTED)), inner);
         return;
     }
+    let viewport = requirement_viewport(area);
     let visible = ui.tree_state.flatten(&ui.tree_items);
     let height = visible.len();
     let width = visible
@@ -5248,11 +5381,15 @@ fn render_requirements_tree(
             } else if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
                 ui.artifacts
                     .as_ref()
-                    .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
-                    .map(|d| {
-                        UnicodeWidthStr::width(
-                            crate::authoring_tab::requirement_document_tree_label(d).as_str(),
-                        )
+                    .and_then(|a| {
+                        let doc = a.index.documents.iter().find(|d| d.id == doc_id)?;
+                        Some(UnicodeWidthStr::width(
+                            crate::authoring_tab::requirement_document_tree_label(
+                                doc,
+                                &a.index.tag_styles,
+                            )
+                            .as_str(),
+                        ))
                     })
                     .unwrap_or(0)
             } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
@@ -5271,23 +5408,23 @@ fn render_requirements_tree(
         .unwrap_or(0)
         .min(u16::MAX.saturating_sub(inner.x) as usize);
     ui.horizontal_scroll[0] =
-        ui.horizontal_scroll[0].min(width.saturating_sub(inner.width as usize));
+        ui.horizontal_scroll[0].min(width.saturating_sub(viewport.width as usize));
     // Render at full width so clipping does not discard text before horizontal scrolling.
     let wide = Rect::new(
-        inner.x,
-        inner.y,
-        width.max(inner.width as usize) as u16,
-        inner.height,
+        viewport.x,
+        viewport.y,
+        width.max(viewport.width as usize) as u16,
+        viewport.height,
     );
     let mut buffer = ratatui::buffer::Buffer::empty(wide);
     let tree = Tree::new(&ui.tree_items)
         .expect("requirement tree")
         .highlight_style(theme::selected_row(focused));
     ratatui::widgets::StatefulWidget::render(tree, wide, &mut buffer, &mut ui.tree_state);
-    for y in inner.y..inner.bottom() {
-        for x in 0..inner.width {
-            frame.buffer_mut()[(inner.x + x, y)] =
-                buffer[(inner.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
+    for y in viewport.y..viewport.bottom() {
+        for x in 0..viewport.width {
+            frame.buffer_mut()[(viewport.x + x, y)] =
+                buffer[(viewport.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
         }
     }
     render_requirement_scrollbars(
@@ -5316,9 +5453,9 @@ fn render_requirements_tree(
         frame.render_widget(
             Paragraph::new(diag_lines),
             Rect {
-                x: inner.x,
+                x: viewport.x,
                 y,
-                width: inner.width,
+                width: viewport.width,
                 height: diag_height,
             },
         );
@@ -5410,12 +5547,13 @@ fn render_requirements_editor(
     }
 
     ui.horizontal_scroll[1] = 0;
+    let viewport = requirement_viewport(area);
     if ui.is_previewing() {
-        render_requirement_preview(frame, ui, area, inner, images);
+        render_requirement_preview(frame, ui, area, viewport, images);
         return;
     }
-    let resized = ui.editor_wrap_width != inner.width as usize;
-    ui.wrap_editor_rows(inner.width as usize);
+    let resized = ui.editor_wrap_width != viewport.width as usize;
+    ui.wrap_editor_rows(viewport.width as usize);
     let cursor = (ui.cursor_row, ui.cursor_col);
     let cursor_display_row = ui
         .editor_display_rows
@@ -5535,13 +5673,13 @@ fn render_requirements_editor(
         lines.push(Line::from(spans));
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), viewport);
     render_requirement_scrollbars(
         frame,
         ui,
         1,
         area,
-        (inner.width as usize, line_count),
+        (viewport.width as usize, line_count),
         (0, scroll_row),
     );
 }
@@ -5551,7 +5689,7 @@ fn render_requirement_preview(
     frame: &mut Frame<'_>,
     ui: &mut crate::authoring_tab::AuthoringUiState,
     area: Rect,
-    inner: Rect,
+    viewport: Rect,
     images: Option<&mut crate::image_view::InlineImages>,
 ) {
     let image_rows = if images.as_ref().is_some_and(|images| images.has_pixels()) {
@@ -5560,10 +5698,10 @@ fn render_requirement_preview(
         1
     };
     let total = ui
-        .refresh_preview(inner.width as usize, image_rows)
+        .refresh_preview(viewport.width as usize, image_rows)
         .lines
         .len();
-    let visible = inner.height as usize;
+    let visible = viewport.height as usize;
     ui.preview_scroll = ui.preview_scroll.min(total.saturating_sub(visible));
     let scroll = ui.preview_scroll;
     let preview = ui.preview();
@@ -5574,20 +5712,20 @@ fn render_requirement_preview(
         .skip(scroll)
         .take(visible)
         .map(|(index, line)| match preview.images.get(&index) {
-            Some(image) => requirement_image_label(image, inner.width as usize),
+            Some(image) => requirement_image_label(image, viewport.width as usize),
             None => line.clone(),
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), viewport);
     if let Some(images) = images {
-        place_requirement_images(frame, &preview.images, total, images, inner, scroll);
+        place_requirement_images(frame, &preview.images, total, images, viewport, scroll);
     }
     render_requirement_scrollbars(
         frame,
         ui,
         1,
         area,
-        (inner.width as usize, total),
+        (viewport.width as usize, total),
         (0, scroll),
     );
 }
@@ -5780,14 +5918,15 @@ fn render_requirements_linked(
         }
     }
     ui.rendered_linked_selection = Some(ui.selected_linked_index);
+    let viewport = requirement_viewport(area);
     ui.horizontal_scroll[2] =
-        ui.horizontal_scroll[2].min(width.saturating_sub(inner.width as usize));
+        ui.horizontal_scroll[2].min(width.saturating_sub(viewport.width as usize));
     frame.render_widget(
         Paragraph::new(lines).scroll((
             ui.linked_scroll.min(u16::MAX as usize) as u16,
             ui.horizontal_scroll[2].min(u16::MAX as usize) as u16,
         )),
-        inner,
+        viewport,
     );
     render_requirement_scrollbars(
         frame,
@@ -6110,6 +6249,127 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     (" Cancel [Esc]", Action::OverlayCancel),
                 ],
             );
+        }
+        RequirementsOverlay::TagPicker {
+            document_id,
+            options,
+            checked,
+            styles,
+            selection,
+            new_tag,
+            ..
+        } => {
+            let title = app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .and_then(|a| a.index.documents.iter().find(|d| &d.id == document_id))
+                .map_or(document_id.clone(), |d| d.title.clone());
+            let rows = (options.len() + 1).max(1) as u16;
+            let panel = centered_rect(area, 64, rows + 6);
+            frame.render_widget(Clear, panel);
+            let visible = (panel.height.saturating_sub(6) as usize).max(1);
+            let start = selection.saturating_sub(visible.saturating_sub(1));
+            let mut lines: Vec<Line> = if options.is_empty() {
+                vec![Line::styled("  No tags yet.", theme::muted())]
+            } else {
+                Vec::new()
+            };
+            lines.extend(options.iter().enumerate().skip(start).take(visible).map(
+                |(index, tag)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel.x + 1,
+                                panel.y + 1 + (index - start) as u16,
+                                panel.width.saturating_sub(2),
+                                1,
+                            ),
+                            index,
+                        });
+                    let style = if index == *selection {
+                        theme::selected_row(true)
+                    } else {
+                        Style::default()
+                    };
+                    let mark = if checked.contains(tag) { "[x]" } else { "[ ]" };
+                    let tag_style = styles.get(tag).copied().unwrap_or_default();
+                    // Preview the tree rendering: a chip before titles, colored text after.
+                    let label = format!("#{tag}");
+                    let tag_span = match (tag_style.prefix, tag_style.color) {
+                        (true, color) => {
+                            theme::chip(label, color.map_or(theme::ACCENT, theme::tag_color))
+                        }
+                        (false, Some(color)) => {
+                            Span::styled(label, Style::default().fg(theme::tag_color(color)))
+                        }
+                        (false, None) => Span::raw(label),
+                    };
+                    let mut spans = vec![Span::raw(format!("  {mark} ")), tag_span];
+                    if !tag_style.is_default() {
+                        let color = tag_style.color.map_or("no color", |color| color.as_str());
+                        let position = if tag_style.prefix {
+                            "before title"
+                        } else {
+                            "after title"
+                        };
+                        spans.push(Span::styled(
+                            format!("  {color} · {position}"),
+                            theme::muted(),
+                        ));
+                    }
+                    Line::from(spans).style(style)
+                },
+            ));
+            let new_row = options.len();
+            let new_index = new_row.saturating_sub(start);
+            app.clickable_regions
+                .push(ClickableRegion::RequirementFilterOption {
+                    rect: Rect::new(
+                        panel.x + 1,
+                        panel.y + 1 + new_index as u16,
+                        panel.width.saturating_sub(2),
+                        1,
+                    ),
+                    index: new_row,
+                });
+            let new_style = if new_row == *selection {
+                theme::selected_row(true)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::styled(
+                match new_tag {
+                    Some(buffer) => format!("  New tag: {buffer}"),
+                    None => "  ＋ New tag…".to_string(),
+                },
+                new_style,
+            ));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  Tags belong to the document, so every project sees the same set.",
+                theme::muted(),
+            ));
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
+                    .block(theme::popup_block(format!(" Tags of {title} "))),
+                panel,
+            );
+            let footer: &[(&str, Action)] = if new_tag.is_some() {
+                &[
+                    (" Add [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ]
+            } else {
+                &[
+                    (" Toggle [Space]", Action::OverlayInsert(' ')),
+                    (" Color [c]", Action::OverlayInsert('c')),
+                    (" Front [f]", Action::OverlayInsert('f')),
+                    (" Save [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ]
+            };
+            render_overlay_footer(frame, app, panel, footer);
         }
         RequirementsOverlay::OrganizationForm(form) => {
             use crate::authoring_tab::OrganizationForm;
@@ -7641,7 +7901,8 @@ Feature: Rule only
         let original = "ab中文cdefghijklmnop";
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string(original.into());
         ui.cursor_col = original.chars().count();
-        let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("terminal");
+        // Six content columns: the interior keeps one column clear of the scrollbar.
+        let mut terminal = Terminal::new(TestBackend::new(9, 4)).expect("terminal");
         terminal
             .draw(|frame| {
                 super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
@@ -7725,6 +7986,29 @@ Feature: Rule only
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
             .expect("render");
         assert_eq!(ui.scroll_limits[0], [0, 0]);
+    }
+
+    #[test]
+    fn requirement_tree_keeps_a_column_clear_of_the_vertical_scrollbar() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.discovered = true;
+        ui.tree_items = (0..12)
+            .map(|i| {
+                tui_tree_widget::TreeItem::new_leaf(format!("req-iter:row-{i}"), "x".repeat(40))
+            })
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        let bar = ui.pane_bars[0][1].expect("overflowing tree draws a vertical bar");
+        for y in bar.rect.y..bar.rect.y + bar.rect.height {
+            assert_eq!(
+                terminal.backend().buffer()[(bar.rect.x - 1, y)].symbol(),
+                " ",
+                "row {y} runs into the scrollbar"
+            );
+        }
     }
 
     #[test]
@@ -8360,5 +8644,20 @@ Feature: Rule only
         assert!(screen.contains("1 msgs"), "{screen}");
         assert!(screen.contains("demo-project"), "{screen}");
         assert!(screen.contains("gpt-test"), "{screen}");
+    }
+}
+
+#[cfg(test)]
+mod ai_sidebar_width_tests {
+    use super::ai_sidebar_width;
+
+    #[test]
+    fn test_chat_title_column_follows_icode_band() {
+        // 30% of the row, clamped to 42..=60, and hidden when chat would drop below 50.
+        assert_eq!(ai_sidebar_width(91), None);
+        assert_eq!(ai_sidebar_width(92), Some(42));
+        assert_eq!(ai_sidebar_width(140), Some(42));
+        assert_eq!(ai_sidebar_width(200), Some(60));
+        assert_eq!(ai_sidebar_width(240), Some(60));
     }
 }

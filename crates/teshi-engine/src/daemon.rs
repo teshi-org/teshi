@@ -146,6 +146,8 @@ pub fn spawn_daemon_background(
 
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         // Delegate to PowerShell Start-Process to avoid self-spawn deadlock.
         // NOTE: -ArgumentList must be a single string (not comma-separated)
         // because comma-separated args don't handle spaces in paths correctly.
@@ -166,8 +168,12 @@ pub fn spawn_daemon_background(
             exe.display(),
             arg_str.replace('\'', "''"),
         );
+        // A console child attached to teshi's console can reset its shared
+        // input mode while win32-input-mode is enabled, so give powershell its
+        // own hidden console rather than inheriting the TUI's.
         std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+            .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

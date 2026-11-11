@@ -1,7 +1,7 @@
-//! Pixel output for replay screenshots.
+//! Pixel output for replay screenshots and standalone images.
 //!
-//! Terminals with a graphics protocol get the capture at full color. Without
-//! one the panel keeps the capture path and defers to the operating system's
+//! Terminals with a graphics protocol get the image at full color. Without
+//! one the viewer keeps the file path and defers to the operating system's
 //! viewer: half-block cells turn a UI screenshot into noise, so they are not
 //! offered as a preview.
 
@@ -227,8 +227,9 @@ fn detect_stdio(env: &dyn Fn(&str) -> Option<String>) -> Detection {
     }
 }
 
-/// One captured step image belonging to the selected scenario.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One image the viewer can show: a captured step of the selected scenario,
+/// or a standalone file opened from the chat, the composer, or a requirement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScreenshotRef {
     /// Run directory that owns the file.
     pub run_id: String,
@@ -244,6 +245,25 @@ pub struct ScreenshotRef {
     pub captured_at: String,
     /// `passed` or `failed` for the step that produced the capture.
     pub status: String,
+    /// Standalone image file; `None` for replay captures.
+    ///
+    /// Chat and requirement images belong to no run, so they resolve to this
+    /// path instead of a file inside the replay history.
+    pub image_path: Option<PathBuf>,
+}
+
+impl ScreenshotRef {
+    /// A standalone image file, named by its file name.
+    pub fn image(path: PathBuf) -> Self {
+        Self {
+            file: path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            image_path: Some(path),
+            ..Self::default()
+        }
+    }
 }
 
 /// An encoded viewport prepared off the UI thread.
@@ -308,17 +328,20 @@ impl Rendered {
     }
 }
 
-/// Tab the viewer was opened from.
+/// Where the viewer was opened from.
 ///
-/// The origin decides how much of the tab the overlay covers and whether
-/// closing hands the viewed capture back to the selected Explore step.
+/// The viewer always covers the whole terminal. The origin decides its
+/// wording and whether closing hands the viewed capture back to the selected
+/// Explore step.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScreenshotOrigin {
-    /// Opened from a MindMap node; the viewer covers the active tab.
+    /// Opened from a MindMap node.
     #[default]
     MindMap,
-    /// Opened from the Explore Steps pane; the Features column stays visible.
+    /// Opened from the Explore Steps pane or the Failure Details popup.
     Explore,
+    /// A standalone image clicked in the chat, the composer, or a requirement.
+    Image,
 }
 
 /// Screenshot panel state owned by the app.
@@ -662,6 +685,7 @@ fn run_screenshots(
                     .unwrap_or_default()
                     .to_string(),
                 status: event["status"].as_str().unwrap_or("unknown").to_string(),
+                image_path: None,
             })
         })
         .collect()
@@ -846,18 +870,31 @@ fn capture_bytes(project: &Path, shot: &ScreenshotRef) -> Result<Vec<u8>> {
     let file = std::fs::File::open(&path)?;
     anyhow::ensure!(
         file.metadata()?.len() <= MAX_FILE_BYTES,
-        "screenshot exceeds the 64 MiB file limit; press o to open externally"
+        "image exceeds the 64 MiB file limit; press o to open externally"
     );
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
     anyhow::ensure!(
         bytes.len() as u64 <= MAX_FILE_BYTES,
-        "screenshot exceeds the 64 MiB file limit; press o to open externally"
+        "image exceeds the 64 MiB file limit; press o to open externally"
     );
     Ok(bytes)
 }
 
 fn checked_capture_path(project: &Path, shot: &ScreenshotRef) -> Result<PathBuf> {
+    // A standalone image was clicked by the user in the chat or a document,
+    // so it is not confined to the replay history. The extension check keeps
+    // the viewer from becoming a way to run other files.
+    if let Some(path) = &shot.image_path {
+        anyhow::ensure!(
+            crate::chat_images::has_image_extension(path),
+            "not an image file: {}",
+            path.display()
+        );
+        return path
+            .canonicalize()
+            .with_context(|| format!("image is missing: {}", path.display()));
+    }
     anyhow::ensure!(
         Path::new(&shot.file)
             .file_name()
@@ -895,8 +932,11 @@ fn checked_capture_path(project: &Path, shot: &ScreenshotRef) -> Result<PathBuf>
 /// Path of a saved capture inside its run directory.
 ///
 /// Legacy captures recorded before per-run directories live directly in the
-/// history root.
+/// history root. A standalone image is its own path.
 pub fn capture_path(project: &Path, shot: &ScreenshotRef) -> PathBuf {
+    if let Some(path) = &shot.image_path {
+        return path.clone();
+    }
     let root = project.join(".teshi/logs/replay-screenshots");
     if shot.run_id == "legacy" {
         return root.join(&shot.file);
@@ -904,19 +944,25 @@ pub fn capture_path(project: &Path, shot: &ScreenshotRef) -> PathBuf {
     root.join(&shot.run_id).join(&shot.file)
 }
 
-/// Hand a capture to the operating system's image viewer.
+/// Hand a capture or standalone image to the operating system's viewer.
 ///
 /// # Errors
-/// Returns an error when no viewer could be started.
+/// Returns an error when a standalone file has no image extension, or when no
+/// viewer could be started.
 pub fn open_externally(project: &Path, shot: &ScreenshotRef) -> Result<()> {
-    open_path_externally(&capture_path(project, shot))
+    let path = capture_path(project, shot);
+    // The system opener runs whatever it is given, including scripts and
+    // programs, so a standalone file must at least look like an image.
+    anyhow::ensure!(
+        shot.image_path.is_none() || crate::chat_images::has_image_extension(&path),
+        "not an image file: {}",
+        path.display()
+    );
+    open_path_externally(&path)
 }
 
-/// Hand any image file to the operating system's image viewer.
-///
-/// # Errors
-/// Returns an error when no viewer could be started.
-pub fn open_path_externally(path: &Path) -> Result<()> {
+/// Hand a file to the operating system's default opener.
+fn open_path_externally(path: &Path) -> Result<()> {
     let mut command = if cfg!(windows) {
         let mut command = Command::new("cmd");
         // `start` treats a quoted argument as a window title, so pass an empty one.
@@ -927,6 +973,21 @@ pub fn open_path_externally(path: &Path) -> Result<()> {
     } else {
         Command::new("xdg-open")
     };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Sharing teshi's console lets cmd reset its input mode, which turns
+        // key records into echoed text over the running UI. Give the launcher
+        // its own console and no inherited std handles, so it cannot reach
+        // teshi's console input handle at all.
+        command
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
     command
         .arg(path)
         .spawn()
@@ -1236,6 +1297,7 @@ mod tests {
             step_line: None,
             captured_at: String::new(),
             status: "passed".into(),
+            image_path: None,
         };
         let files = |panel: &ScreenshotPanel| {
             panel
@@ -1424,6 +1486,7 @@ mod tests {
             step_line: None,
             captured_at: String::new(),
             status: "passed".into(),
+            image_path: None,
         };
 
         assert!(capture_bytes(dir.path(), &shot).is_err());
@@ -1439,6 +1502,7 @@ mod tests {
             step_line: None,
             captured_at: String::new(),
             status: "passed".into(),
+            image_path: None,
         };
         let path = capture_path(Path::new("proj"), &shot);
         assert_eq!(

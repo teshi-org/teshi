@@ -113,6 +113,7 @@ mod tests {
             }),
             plan: None,
             source_scope: None,
+            ..GenerationSessionState::default()
         };
         save_generation_state(dir.path(), &state).unwrap();
         let (stage, restored) = restore_generation_session(dir.path(), &[proposed_tp()]).unwrap();

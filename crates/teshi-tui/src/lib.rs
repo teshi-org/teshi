@@ -35,6 +35,7 @@ mod test_points_tab;
 mod theme;
 mod ui;
 mod version;
+mod web_review;
 
 pub use app::{RequirementsTabSnapshot, requirements_tab_without_project};
 pub use version::{VersionInfo, version_display, version_info};
@@ -353,6 +354,7 @@ pub fn run() -> Result<()> {
         app.poll_status_message_expiry();
         app.screenshot.poll();
         app.inline_images.poll();
+        app.poll_web_review();
         if app.screenshot.prepare_frame(&mut terminal)? {
             app.inline_images.forget_painted();
         }
@@ -489,6 +491,9 @@ pub fn run() -> Result<()> {
                         mouse_event.modifiers,
                     )?;
                 }
+                // The full-screen image viewer has no text input, and a paste
+                // must not edit the draft or document beneath it.
+                Event::Paste(_) if app.screenshot.visible => {}
                 Event::Paste(text)
                     if app.active_tab == crate::app::MainTab::Explore
                         && app.feature_browser.searching =>

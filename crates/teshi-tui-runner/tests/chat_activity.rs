@@ -230,7 +230,7 @@ fn a_failed_turn_preserves_and_pauses_queued_messages() {
         .expect_text("ACTIVITY_FIXTURE_FAILURE", true, 10000)
         .unwrap();
     terminal
-        .expect_text("/sendqueued to resume", true, 10000)
+        .expect_text("send a message to resume", true, 10000)
         .unwrap();
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(
@@ -241,12 +241,26 @@ fn a_failed_turn_preserves_and_pauses_queued_messages() {
         1
     );
     capture(&terminal, "queue-paused-on-failure");
-    terminal.write("/sendqueued").unwrap();
+    terminal.write("RESUME_WITH_THIS").unwrap();
     terminal.key("Enter").unwrap();
     terminal
-        .expect_text("ACTIVITY_DONE_2", true, 10000)
+        .expect_text("ACTIVITY_DONE_3", true, 15000)
         .unwrap();
-    terminal.expect_text("Queued 1:", false, 10000).unwrap();
+    terminal.expect_text("Queued ", false, 10000).unwrap();
+    let trace = fs::read_to_string(root.path().join("trace.jsonl")).unwrap();
+    let prompts: Vec<String> = trace
+        .lines()
+        .map(|line| {
+            let call: serde_json::Value = serde_json::from_str(line).unwrap();
+            call["text"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(prompts.len(), 3, "{trace}");
+    assert!(
+        prompts[1].contains("KEEP_THIS_FOLLOWUP") && !prompts[1].contains("RESUME_WITH_THIS"),
+        "the paused follow-up must be sent before the resuming message: {trace}"
+    );
+    assert!(prompts[2].contains("RESUME_WITH_THIS"), "{trace}");
 }
 
 #[test]

@@ -26,6 +26,23 @@ pub(crate) fn highlight_color(color: teshi_core::mindmap::HighlightColor) -> Col
     }
 }
 
+/// Maps a stored requirement tag color onto the shared palette.
+///
+/// Mirrors [`highlight_color`] so a color name reads the same in MindMap
+/// highlights and requirement tags.
+pub(crate) fn tag_color(color: teshi_core::authoring::RequirementTagColor) -> Color {
+    use teshi_core::authoring::RequirementTagColor;
+    match color {
+        RequirementTagColor::Red => ERROR,
+        RequirementTagColor::Green => SUCCESS,
+        RequirementTagColor::Blue => SECONDARY,
+        RequirementTagColor::Yellow => WARNING,
+        RequirementTagColor::Magenta => ACCENT,
+        RequirementTagColor::Cyan => PRIMARY,
+        RequirementTagColor::Gray => MUTED,
+    }
+}
+
 /// Main brand color: headings, focused borders, bullets, links.
 pub(crate) const PRIMARY: Color = Color::Rgb(0xAF, 0x87, 0xFF);
 /// Subdued primary for quote bars and other low-emphasis brand accents.

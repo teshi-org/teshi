@@ -22,8 +22,13 @@ pub enum RequirementCondition {
     Iteration(String),
     /// Matches title text, ignoring case.
     TitleContains(String),
-    /// Matches direct membership of a manual folder.
+    /// Matches a manual folder.
     Folder(String),
+    /// Matches documents carrying this tag exactly.
+    ///
+    /// Several tag atoms combine with `All` for AND semantics, which is the
+    /// default for multi-tag filters.
+    Tag(String),
 }
 
 /// A manual folder or a saved query, identified independently of its name.
@@ -474,6 +479,7 @@ impl RequirementOrganization {
                 .collections
                 .iter()
                 .any(|c| &c.id == id && c.condition.is_none() && c.documents.contains(&doc.id)),
+            RequirementCondition::Tag(tag) => doc.tags.contains(tag),
         }
     }
 }
@@ -509,6 +515,7 @@ pub fn format_requirement_condition(q: &RequirementCondition) -> Option<String> 
             RequirementCondition::Iteration(v) => ("iteration", v.as_str()),
             RequirementCondition::TitleContains(v) => ("title", v.as_str()),
             RequirementCondition::Folder(v) => ("folder", v.as_str()),
+            RequirementCondition::Tag(v) => ("tag", v.as_str()),
             RequirementCondition::All(_) | RequirementCondition::Any(_) => return None,
         };
         if value.contains(['&', '|', '!', '=']) || value.trim() != value {
@@ -576,6 +583,7 @@ pub fn parse_requirement_condition(text: &str) -> Result<RequirementCondition> {
         "iteration" => RequirementCondition::Iteration(value.into()),
         "title" => RequirementCondition::TitleContains(value.into()),
         "folder" => RequirementCondition::Folder(value.into()),
+        "tag" => RequirementCondition::Tag(value.into()),
         _ => bail!("unknown condition field or value"),
     })
 }
@@ -659,6 +667,37 @@ pub fn save_requirement_organization_checked(
 mod tests {
     use super::*;
     const PROJECT: &str = "51940e52-6a0b-4cff-8c9c-8954b5e88957";
+
+    #[test]
+    fn tag_atoms_combine_with_and_semantics() {
+        let org = RequirementOrganization::default();
+        let mut doc = RequirementDocumentMeta::new(
+            "doc-1",
+            "one.md",
+            "Login",
+            teshi_core::authoring::DocumentRevision::new("r1"),
+        );
+        doc.tags = ["ui".to_string(), "Login".to_string()].into();
+
+        let single = parse_requirement_condition("tag=ui").unwrap();
+        assert!(org.matches(&single, &doc, PROJECT));
+        // Tag names are matched exactly, so casing matters.
+        assert!(!org.matches(
+            &parse_requirement_condition("tag=UI").unwrap(),
+            &doc,
+            PROJECT
+        ));
+
+        let both = parse_requirement_condition("tag=ui & tag=Login").unwrap();
+        assert!(org.matches(&both, &doc, PROJECT));
+        let missing = parse_requirement_condition("tag=ui & tag=payments").unwrap();
+        assert!(!org.matches(&missing, &doc, PROJECT));
+
+        assert_eq!(
+            format_requirement_condition(&both).as_deref(),
+            Some("tag=ui & tag=Login")
+        );
+    }
 
     #[test]
     fn folders_queries_and_project_states_are_independent() {

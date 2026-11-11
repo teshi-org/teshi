@@ -20,7 +20,7 @@ and never changes stored state.
 
 - **Space**: open the action menu for the selected row. It lists only operations valid
   for that row, with their direct shortcut where one exists:
-  - Requirement: Open in editor, Folders…, Link / unlink project (`b`),
+  - Requirement: Open in editor, Folders…, Tags…, Link / unlink project (`b`),
     Set iteration… (`I`), Set priority… (`p`), Delete requirement… (`d`).
   - Inbox: New folder…, New requirement.
   - Folder: New subfolder…, New requirement here, Rename…, Delete folder….
@@ -28,6 +28,14 @@ and never changes stored state.
   - Saved query: Edit query…, Rename…, Delete query….
 - **Folders…** shows every folder as a checklist. Space toggles, Enter saves the exact
   set; no checked folder returns the requirement to Inbox.
+- **Tags…** shows every tag already in use as a checklist plus a **New tag…** row.
+  Space toggles, Enter on **New tag…** opens an inline field (Enter commits the name),
+  and Enter on a tag row saves. Tags are flat, free-form, case-sensitive, and belong to
+  the document itself, so they apply to every project and work in All projects scope.
+  On a tag row, `c` cycles its color (none, red, green, blue, yellow, magenta, cyan,
+  gray) and `f` toggles showing it as a badge before titles; Enter saves these display
+  settings together with the checked set. Display settings are global, like tags. Up to
+  two prefix badges show per row, sorted by name; the rest join the `+N` count.
 - **New folder…** creates the name below the selected folder (or at the root from
   Inbox). `Chat/Archive` creates nested folders.
 - **New requirement here** (or Ctrl+N with a folder selected) files the draft in that
@@ -44,11 +52,16 @@ Tab or Up/Down switches between Name and Condition, and the form shows how many 
 requirements match while you type. Invalid input keeps the form open.
 
 Organization edits require Current project scope. Query input supports `status`,
-`priority`, `iteration`, `title` (case-insensitive substring), and `folder` (a folder
-path such as `AI/Chat`, stored as its stable ID). Use `&` for AND, `|` for OR, and `!`
-for negation. AND binds more tightly than OR. Parentheses and escaping separators are
-not supported in text expressions; use the structured CLI JSON format for arbitrary
-nesting or literal separator characters. Such queries cannot be edited in the TUI form.
+`priority`, `iteration`, `title` (case-insensitive substring), `folder` (a folder
+path such as `AI/Chat`, stored as its stable ID), and `tag` (exact tag name). Use
+`&` for AND, `|` for OR, and `!` for negation. AND binds more tightly than OR.
+Parentheses and escaping separators are not supported in text expressions; use the
+structured CLI JSON format for arbitrary nesting or literal separator characters.
+Such queries cannot be edited in the TUI form.
+
+Unlike folders and saved queries, tags are not project-local: they are stored on the
+document in the shared index, so `tag=` conditions match the same documents in every
+project, and the **Tags…** picker needs no project scope.
 
 ## CLI
 
@@ -57,6 +70,7 @@ teshi requirements organize --project . --folder "AI/Chat"
 teshi requirements organize --project . --assign doc-14 doc-53 --to "AI/Chat"
 teshi requirements organize --project . --query "Pending P1" --condition "status=planned & priority=P1"
 teshi requirements organize --project . --query "Chat work" --condition "folder=AI/Chat & status=planned"
+teshi requirements organize --project . --query "Auth and UI" --condition "tag=auth & tag=ui"
 teshi requirements organize --project .
 ```
 

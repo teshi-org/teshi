@@ -223,7 +223,7 @@ async fn streaming_updates_are_preserved_and_prompt_concurrency_rejected() {
     assert!(matches!(&seen[2], AcpEvent::ToolCall(_)));
     assert!(matches!(&seen[3], AcpEvent::AgentMessageChunk(s) if s == "C"));
     assert!(
-        matches!(&seen[4], AcpEvent::Completed { stop_reason } if stop_reason.as_deref() == Some("end_turn"))
+        matches!(&seen[4], AcpEvent::Completed { stop_reason, detail: None } if stop_reason.as_deref() == Some("end_turn"))
     );
     server.await.unwrap();
 }

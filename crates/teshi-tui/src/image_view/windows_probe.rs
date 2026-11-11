@@ -125,21 +125,52 @@ fn query() -> io::Result<Option<Vec<u16>>> {
     Ok(None)
 }
 
-/// Selects Sixel from DA1 even without a font-size reply or WT_SESSION.
+/// Whether the console belongs to a Windows Terminal session.
+///
+/// A ConPTY older than Windows Terminal 1.22's answers the device attributes
+/// itself and forwards the rest, so attribute `4` only proves that some console
+/// in the chain claims Sixel. Windows Terminal is the console that draws it,
+/// and `WT_SESSION` without a `TERM_PROGRAM` is what names it; a terminal
+/// started from its shell inherits the marker, which the program name then
+/// rules out.
+fn windows_terminal(env: &dyn Fn(&str) -> Option<String>) -> bool {
+    env("WT_SESSION").is_some() && env("TERM_PROGRAM").is_none()
+}
+
+/// Selects Sixel from DA1 even without a font-size reply.
 fn from_attributes(attributes: &[u16], env: &dyn Fn(&str) -> Option<String>) -> Detection {
     if let Some((protocol, marker)) = protocol_from_env(env) {
         return Detection::forced(protocol, marker);
     }
+    if !windows_terminal(env) {
+        return Detection::unavailable("the console is not a Windows Terminal session");
+    }
     if attributes.contains(&4) {
         // Windows Terminal exposes a virtual 10x20 pixel grid for Sixel,
         // independent of the display font or DPI; no font-size query is needed.
-        return Detection::forced(ProtocolType::Sixel, "console DA1 reports Sixel support");
+        return Detection::forced(
+            ProtocolType::Sixel,
+            "Windows Terminal reports Sixel support",
+        );
     }
     Detection::unavailable("the console answered without Sixel support")
 }
 
 pub(super) fn detect(env: &dyn Fn(&str) -> Option<String>) -> Detection {
-    let mut detection = match query() {
+    // A multiplexer sits between the console and the terminal that draws, and
+    // hides or rewrites DCS graphics on the way through. Its answer says
+    // nothing about what reaches the screen, and a payload it drops leaves the
+    // transcript showing whatever the terminal made of the bytes instead.
+    if let Some(name) = ["TMUX", "STY", "ZELLIJ"]
+        .into_iter()
+        .find(|name| env(name).is_some())
+    {
+        return Detection::unavailable(format!(
+            "{name} may filter pixel output; open teshi in the terminal directly, or force \
+             TESHI_IMAGE_PROTOCOL"
+        ));
+    }
+    match query() {
         Ok(Some(attributes)) => from_attributes(&attributes, env),
         result => {
             let reason = match result {
@@ -153,11 +184,7 @@ pub(super) fn detect(env: &dyn Fn(&str) -> Option<String>) -> Detection {
                 Detection::unavailable(reason)
             }
         }
-    };
-    if !detection.support.is_pixels() && env("ZELLIJ").is_some() {
-        detection.detail.push_str("; Windows Zellij may filter pixel output; use direct Windows Terminal or open externally");
     }
-    detection
 }
 
 #[cfg(test)]
@@ -174,13 +201,48 @@ mod tests {
     }
 
     #[test]
-    fn sixel_does_not_require_cell_size_or_terminal_environment() {
-        let detection = from_attributes(&[61, 4, 6, 22], &|_| None);
+    fn sixel_does_not_require_cell_size() {
+        let detection = from_attributes(&[61, 4, 6, 22], &|name| {
+            (name == "WT_SESSION").then(|| "x".into())
+        });
         assert_eq!(
             detection.support,
             super::super::GraphicsSupport::Pixels(ProtocolType::Sixel)
         );
         assert_eq!(detection.picker.unwrap().font_size(), (10, 20));
+    }
+
+    #[test]
+    fn device_attributes_alone_do_not_enable_sixel() {
+        // A ConPTY older than Windows Terminal 1.22's answers DA1 itself, so a
+        // bare conhost or an unknown console can claim attribute 4 without
+        // anything able to draw the payload.
+        let detection = from_attributes(&[61, 4, 6, 22], &|_| None);
+        assert!(!detection.support.is_pixels());
+        assert!(detection.detail.contains("Windows Terminal session"));
+    }
+
+    #[test]
+    fn a_terminal_inside_windows_terminal_is_not_taken_for_it() {
+        let detection = from_attributes(&[61, 4, 6, 22], &|name| match name {
+            "WT_SESSION" => Some("x".into()),
+            "TERM_PROGRAM" => Some("some-ide".into()),
+            _ => None,
+        });
+        assert!(!detection.support.is_pixels());
+    }
+
+    #[test]
+    fn a_multiplexer_disables_pixels_before_the_probe() {
+        for name in ["TMUX", "STY", "ZELLIJ"] {
+            let detection = detect(&|key| (key == name).then(|| "1".into()));
+            assert!(!detection.support.is_pixels(), "{name}");
+            assert!(
+                detection.detail.contains(name),
+                "{name}: {}",
+                detection.detail
+            );
+        }
     }
 
     #[test]

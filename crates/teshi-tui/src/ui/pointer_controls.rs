@@ -195,7 +195,10 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
     if !app.has_agent_change_prompt() && !app.has_acp_permission_prompt() {
         return;
     }
-    if app.change_summary_visible
+    // The full-screen image viewer owns the screen; a decision that arrives
+    // while it is open waits for it to close.
+    if app.screenshot.visible
+        || app.change_summary_visible
         || app.auth_panel_active
         || app.model_panel_active
         || app.session_panel_active

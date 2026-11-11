@@ -10,13 +10,15 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use teshi_core::authoring::{
     RequirementIterationFilter, RequirementPriority, RequirementProjectFilter,
-    RequirementProjectStatus,
+    RequirementProjectStatus, RequirementTagColor, RequirementTagStyle,
 };
 use teshi_engine::{
-    ImportProjectOptions, ImportProjectPlan, RequirementStoreError, import_project_requirements,
-    list_requirement_documents, read_requirement_document, requirements_data_dir,
-    resolve_requirement_ref_in_store, set_requirement_documents_iteration,
-    update_requirement_document_body,
+    ImportProjectOptions, ImportProjectPlan, RequirementStoreError, RequirementTagStylePatch,
+    add_requirement_documents_tags, clear_requirement_tag_style, import_project_requirements,
+    list_requirement_documents, read_requirement_document, read_requirement_tag_styles,
+    remove_requirement_documents_tags, requirements_data_dir, resolve_requirement_ref_in_store,
+    set_requirement_documents_iteration, set_requirement_documents_tags,
+    update_requirement_document_body, update_requirement_tag_style,
 };
 
 use super::RequirementsCommand;
@@ -125,6 +127,7 @@ struct DocumentMetaJson {
     path: String,
     iteration: Option<String>,
     priority: Option<RequirementPriority>,
+    tags: Vec<String>,
     projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
 }
@@ -145,6 +148,7 @@ struct ShowEnvelopeJson {
     path: String,
     iteration: Option<String>,
     priority: Option<RequirementPriority>,
+    tags: Vec<String>,
     projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
     body: String,
@@ -353,6 +357,7 @@ fn run_store_command(
             priority,
             project,
             iteration,
+            tags,
             json,
         } => (|| -> Result<String, CliError> {
             let body = if let Some(path) = file {
@@ -392,13 +397,14 @@ fn run_store_command(
                 &body,
                 priority,
                 iteration.as_deref(),
+                tags,
                 project.as_ref().map(|p| p.id.as_str()),
             )
             .map_err(CliError::Io)?;
             if *json {
                 Ok(serde_json::json!({"ok": true, "id": meta.id,
                     "path": meta.path, "revision": meta.revision, "projects": meta.projects,
-                    "priority": meta.priority, "iteration": meta.iteration})
+                    "priority": meta.priority, "iteration": meta.iteration, "tags": meta.tags})
                 .to_string())
             } else {
                 Ok(format!("Created {} ({})", meta.id, meta.path))
@@ -411,6 +417,7 @@ fn run_store_command(
             unassigned_project,
             iteration,
             unassigned,
+            tags,
             json,
         } => project_list_filter(project.as_deref(), *all_projects, *unassigned_project)
             .and_then(|scope| {
@@ -418,6 +425,7 @@ fn run_store_command(
                     &requirements_root,
                     iteration.as_deref(),
                     *unassigned,
+                    tags,
                     *json,
                     &scope,
                 )
@@ -448,6 +456,44 @@ fn run_store_command(
             .map_err(|err| (*json, err)),
         RequirementsCommand::ClearIteration { refs, json } => {
             mutate_iteration(&requirements_root, refs, None, *json).map_err(|err| (*json, err))
+        }
+        RequirementsCommand::AddTags { refs, tags, json } => {
+            mutate_tags(&requirements_root, refs, tags, TagMutation::Add, *json)
+                .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::RemoveTags { refs, tags, json } => {
+            mutate_tags(&requirements_root, refs, tags, TagMutation::Remove, *json)
+                .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::ClearTags { refs, json } => {
+            mutate_tags(&requirements_root, refs, &[], TagMutation::Replace, *json)
+                .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::SetTagStyle {
+            tag,
+            color,
+            no_color,
+            prefix,
+            no_prefix,
+            json,
+        } => set_tag_style(
+            &requirements_root,
+            tag,
+            color.as_deref(),
+            *no_color,
+            *prefix,
+            *no_prefix,
+            *json,
+        )
+        .map_err(|err| (*json, err)),
+        RequirementsCommand::ClearTagStyle { tag, json } => {
+            clear_requirement_tag_style(&requirements_root, tag)
+                .map_err(CliError::store)
+                .and_then(|index| tag_style_result(&index, tag, *json))
+                .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::ListTagStyles { json } => {
+            list_tag_styles(&requirements_root, *json).map_err(|err| (*json, err))
         }
         RequirementsCommand::LinkProject {
             refs,
@@ -583,6 +629,7 @@ fn list_documents(
     requirements_root: &Path,
     iteration: Option<&str>,
     unassigned: bool,
+    tags: &[String],
     json: bool,
     scope: &RequirementProjectFilter,
 ) -> Result<String, CliError> {
@@ -598,6 +645,12 @@ fn list_documents(
     listed
         .documents
         .retain(|doc| doc.matches_project_filter(scope));
+    // Repeated --tag values are a conjunction, matching the saved-query default.
+    listed.documents.retain(|doc| {
+        tags.iter()
+            .map(|tag| tag.trim())
+            .all(|tag| doc.tags.contains(tag))
+    });
     if json {
         let envelope = ListEnvelopeJson {
             store_id: listed.store_id.to_string(),
@@ -611,6 +664,7 @@ fn list_documents(
                     path: doc.path.clone(),
                     iteration: doc.iteration.clone(),
                     priority: doc.priority,
+                    tags: doc.tags.iter().cloned().collect(),
                     projects: doc.projects.clone(),
                     revision: doc.revision.as_str().to_string(),
                 })
@@ -654,6 +708,7 @@ fn show_document(
             path: document.meta.path,
             iteration: document.meta.iteration,
             priority: document.meta.priority,
+            tags: document.meta.tags.into_iter().collect(),
             projects: document.meta.projects,
             revision: document.meta.revision.as_str().to_string(),
             body: document.body,
@@ -691,6 +746,153 @@ fn mutate_iteration(
     } else {
         Ok(String::new())
     }
+}
+
+/// How `mutate_tags` changes the tag set of each referenced document.
+enum TagMutation {
+    /// Replace the whole set, ignoring `tags`.
+    Replace,
+    /// Keep existing tags and add `tags`.
+    Add,
+    /// Remove `tags` and keep everything else.
+    Remove,
+}
+
+fn mutate_tags(
+    requirements_root: &Path,
+    refs: &[String],
+    tags: &[String],
+    mutation: TagMutation,
+    json: bool,
+) -> Result<String, CliError> {
+    let mut ids = Vec::with_capacity(refs.len());
+    for reference in refs {
+        ids.push(
+            resolve_requirement_ref_in_store(requirements_root, reference)
+                .map_err(CliError::store)?,
+        );
+    }
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let index = match mutation {
+        TagMutation::Replace => set_requirement_documents_tags(requirements_root, &id_refs, tags),
+        TagMutation::Add => add_requirement_documents_tags(requirements_root, &id_refs, tags),
+        TagMutation::Remove => remove_requirement_documents_tags(requirements_root, &id_refs, tags),
+    }
+    .map_err(CliError::store)?;
+    if json {
+        let tags: std::collections::BTreeMap<String, Vec<String>> = ids
+            .iter()
+            .filter_map(|id| {
+                index
+                    .documents
+                    .iter()
+                    .find(|doc| &doc.id == id)
+                    .map(|doc| (id.clone(), doc.tags.iter().cloned().collect()))
+            })
+            .collect();
+        Ok(serde_json::json!({"ok": true, "ids": ids, "tags": tags}).to_string())
+    } else {
+        Ok(format!("Updated tags of {} requirement(s)", ids.len()))
+    }
+}
+
+/// One tag's display settings with every field present, for stable JSON consumers.
+#[derive(Serialize)]
+struct TagStyleJson {
+    tag: String,
+    color: Option<RequirementTagColor>,
+    prefix: bool,
+}
+
+impl TagStyleJson {
+    fn new(tag: &str, style: RequirementTagStyle) -> Self {
+        Self {
+            tag: tag.to_string(),
+            color: style.color,
+            prefix: style.prefix,
+        }
+    }
+}
+
+/// Applies `set-tag-style`; clap guarantees at least one flag and no conflicting pair.
+fn set_tag_style(
+    requirements_root: &Path,
+    tag: &str,
+    color: Option<&str>,
+    no_color: bool,
+    prefix: bool,
+    no_prefix: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let color = match (color, no_color) {
+        (Some(name), _) => {
+            Some(Some(RequirementTagColor::parse(name).map_err(|err| {
+                CliError::store(RequirementStoreError::InvalidTagColor(err))
+            })?))
+        }
+        (None, true) => Some(None),
+        (None, false) => None,
+    };
+    let prefix = match (prefix, no_prefix) {
+        (true, _) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    };
+    let index = update_requirement_tag_style(
+        requirements_root,
+        tag,
+        RequirementTagStylePatch { color, prefix },
+    )
+    .map_err(CliError::store)?;
+    tag_style_result(&index, tag, json)
+}
+
+fn list_tag_styles(requirements_root: &Path, json: bool) -> Result<String, CliError> {
+    let styles = read_requirement_tag_styles(requirements_root).map_err(CliError::store)?;
+    if json {
+        let tags: Vec<TagStyleJson> = styles
+            .iter()
+            .map(|(tag, style)| TagStyleJson::new(tag, *style))
+            .collect();
+        return Ok(serde_json::json!({ "tags": tags }).to_string());
+    }
+    if styles.is_empty() {
+        return Ok("No tag display settings; every tag shows as #tag after the title".to_string());
+    }
+    Ok(styles
+        .iter()
+        .map(|(tag, style)| describe_tag_style(tag, *style))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Reports the stored settings of `tag` after a mutation.
+fn tag_style_result(
+    index: &teshi_core::authoring::RequirementDocumentIndex,
+    tag: &str,
+    json: bool,
+) -> Result<String, CliError> {
+    // The engine trims the name; look up the stored key, not the raw argument.
+    let tag = tag.trim();
+    let style = index.tag_style(tag);
+    if json {
+        let mut value = serde_json::to_value(TagStyleJson::new(tag, style))
+            .map_err(|err| CliError::Io(err.into()))?;
+        value["ok"] = serde_json::Value::Bool(true);
+        Ok(value.to_string())
+    } else {
+        Ok(describe_tag_style(tag, style))
+    }
+}
+
+fn describe_tag_style(tag: &str, style: RequirementTagStyle) -> String {
+    let color = style.color.map_or("none", RequirementTagColor::as_str);
+    let position = if style.prefix {
+        "before title"
+    } else {
+        "after title"
+    };
+    format!("#{tag}  color: {color}  position: {position}")
 }
 
 fn edit_document(
@@ -1021,6 +1223,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: Some("Sprint 12".into()),
                 unassigned: false,
+                tags: Vec::new(),
                 json: true,
             },
         );
@@ -1038,6 +1241,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: Some("Missing".into()),
                 unassigned: false,
+                tags: Vec::new(),
                 json: true,
             },
         );
@@ -1058,6 +1262,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: None,
                 unassigned: false,
+                tags: Vec::new(),
                 json: true,
             },
         );
@@ -1084,6 +1289,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: None,
                 unassigned: true,
+                tags: Vec::new(),
                 json: false,
             },
         );
@@ -1437,5 +1643,240 @@ mod tests {
                 .body,
             "# Login\n\nedited in tty\n"
         );
+    }
+
+    #[test]
+    fn add_remove_and_clear_tags_update_the_shared_index() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let add = run(
+            store.path(),
+            RequirementsCommand::AddTags {
+                refs: vec!["doc-12".into()],
+                tags: vec!["Login".into(), "ui".into()],
+                json: true,
+            },
+        );
+        assert_eq!(add.exit_code, 0, "{}", add.stderr);
+        let value: serde_json::Value = serde_json::from_str(&add.stdout).unwrap();
+        assert_eq!(value["tags"]["doc-12"], serde_json::json!(["Login", "ui"]));
+
+        let remove = run(
+            store.path(),
+            RequirementsCommand::RemoveTags {
+                refs: vec!["doc-12".into()],
+                tags: vec!["ui".into()],
+                json: false,
+            },
+        );
+        assert_eq!(remove.exit_code, 0, "{}", remove.stderr);
+        assert_eq!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .tags
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Login"]
+        );
+
+        let clear = run(
+            store.path(),
+            RequirementsCommand::ClearTags {
+                refs: vec!["doc-12".into()],
+                json: false,
+            },
+        );
+        assert_eq!(clear.exit_code, 0, "{}", clear.stderr);
+        assert!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .tags
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_tag_repeats_are_a_conjunction() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        run(
+            store.path(),
+            RequirementsCommand::AddTags {
+                refs: vec!["doc-12".into(), "doc-37".into(), "doc-9".into()],
+                tags: vec!["ui".into()],
+                json: false,
+            },
+        );
+        run(
+            store.path(),
+            RequirementsCommand::AddTags {
+                refs: vec!["doc-12".into()],
+                tags: vec!["payments".into()],
+                json: false,
+            },
+        );
+
+        let both = run(
+            store.path(),
+            RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
+                iteration: None,
+                unassigned: false,
+                tags: vec!["ui".into(), "payments".into()],
+                json: true,
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&both.stdout).unwrap();
+        let ids: Vec<&str> = value["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|doc| doc["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["doc-12"]);
+
+        let single = run(
+            store.path(),
+            RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
+                iteration: None,
+                unassigned: false,
+                tags: vec!["ui".into()],
+                json: true,
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&single.stdout).unwrap();
+        assert_eq!(value["documents"].as_array().unwrap().len(), 3);
+    }
+
+    fn tag_config(store: &Path, action: RequirementsCommand) -> RequirementsCommandOutput {
+        run(store, action)
+    }
+
+    fn set_tag(tag: &str, color: Option<&str>, prefix: Option<bool>) -> RequirementsCommand {
+        RequirementsCommand::SetTagStyle {
+            tag: tag.into(),
+            color: color.map(Into::into),
+            no_color: false,
+            prefix: prefix == Some(true),
+            no_prefix: prefix == Some(false),
+            json: true,
+        }
+    }
+
+    #[test]
+    fn tag_config_set_updates_named_fields_and_list_reports_them() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+
+        let set = tag_config(store.path(), set_tag("ui", Some("Red"), Some(true)));
+        assert_eq!(set.exit_code, 0, "{}", set.stdout);
+        let value: serde_json::Value = serde_json::from_str(&set.stdout).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"ok": true, "tag": "ui", "color": "red", "prefix": true})
+        );
+
+        // Changing only the color keeps the prefix; repeating it is idempotent.
+        for _ in 0..2 {
+            let recolor = tag_config(store.path(), set_tag("ui", Some("cyan"), None));
+            assert_eq!(recolor.exit_code, 0, "{}", recolor.stdout);
+        }
+        let list = tag_config(
+            store.path(),
+            RequirementsCommand::ListTagStyles { json: true },
+        );
+        let value: serde_json::Value = serde_json::from_str(&list.stdout).unwrap();
+        assert_eq!(
+            value["tags"],
+            serde_json::json!([{"tag": "ui", "color": "cyan", "prefix": true}])
+        );
+
+        let text = tag_config(
+            store.path(),
+            RequirementsCommand::ListTagStyles { json: false },
+        );
+        assert_eq!(text.stdout, "#ui  color: cyan  position: before title\n");
+    }
+
+    #[test]
+    fn tag_config_clear_restores_the_default_display() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        tag_config(store.path(), set_tag("ui", Some("green"), Some(true)));
+
+        let clear = tag_config(
+            store.path(),
+            RequirementsCommand::ClearTagStyle {
+                tag: "ui".into(),
+                json: true,
+            },
+        );
+        assert_eq!(clear.exit_code, 0, "{}", clear.stdout);
+        let value: serde_json::Value = serde_json::from_str(&clear.stdout).unwrap();
+        assert_eq!(value["color"], serde_json::Value::Null);
+        assert_eq!(value["prefix"], false);
+        let list = tag_config(
+            store.path(),
+            RequirementsCommand::ListTagStyles { json: true },
+        );
+        let value: serde_json::Value = serde_json::from_str(&list.stdout).unwrap();
+        assert_eq!(value["tags"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn tag_config_rejects_invalid_input_without_changing_settings() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        tag_config(store.path(), set_tag("ui", Some("blue"), Some(true)));
+
+        for (action, code) in [
+            (set_tag("ui", Some("orange"), None), "invalid_tag_color"),
+            (set_tag("   ", Some("red"), None), "invalid_tag_name"),
+            (
+                set_tag("bad\u{7}tag", Some("red"), None),
+                "invalid_tag_name",
+            ),
+        ] {
+            let output = tag_config(store.path(), action);
+            assert_eq!(output.exit_code, 1, "{}", output.stdout);
+            let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+            assert_eq!(value["code"], code, "{value}");
+        }
+        let styles = read_requirement_tag_styles(store.path()).unwrap();
+        assert_eq!(
+            styles.get("ui").copied(),
+            Some(RequirementTagStyle {
+                color: Some(RequirementTagColor::Blue),
+                prefix: true
+            })
+        );
+        assert_eq!(styles.len(), 1, "rejected names must not be stored");
+    }
+
+    #[test]
+    fn set_tag_style_requires_a_change_and_rejects_conflicting_flags() {
+        use clap::Parser;
+        let parse = |flags: &[&str]| {
+            let args = ["teshi", "requirements", "set-tag-style", "ui"]
+                .into_iter()
+                .chain(flags.iter().copied());
+            crate::cli::Cli::try_parse_from(args)
+        };
+        for flags in [
+            &[][..],
+            &["--prefix", "--no-prefix"],
+            &["--color", "red", "--no-color"],
+        ] {
+            assert!(parse(flags).is_err(), "{flags:?} should be rejected");
+        }
+        assert!(parse(&["--no-color", "--prefix"]).is_ok());
     }
 }
