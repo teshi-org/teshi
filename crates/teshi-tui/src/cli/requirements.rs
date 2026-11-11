@@ -13,9 +13,10 @@ use teshi_core::authoring::{
     RequirementProjectStatus,
 };
 use teshi_engine::{
-    ImportProjectOptions, ImportProjectPlan, RequirementStoreError, import_project_requirements,
-    list_requirement_documents, read_requirement_document, requirements_data_dir,
-    resolve_requirement_ref_in_store, set_requirement_documents_iteration,
+    ImportProjectOptions, ImportProjectPlan, RequirementStoreError, add_requirement_documents_tags,
+    import_project_requirements, list_requirement_documents, read_requirement_document,
+    remove_requirement_documents_tags, requirements_data_dir, resolve_requirement_ref_in_store,
+    set_requirement_documents_iteration, set_requirement_documents_tags,
     update_requirement_document_body,
 };
 
@@ -125,6 +126,7 @@ struct DocumentMetaJson {
     path: String,
     iteration: Option<String>,
     priority: Option<RequirementPriority>,
+    tags: Vec<String>,
     projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
 }
@@ -145,6 +147,7 @@ struct ShowEnvelopeJson {
     path: String,
     iteration: Option<String>,
     priority: Option<RequirementPriority>,
+    tags: Vec<String>,
     projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
     body: String,
@@ -353,6 +356,7 @@ fn run_store_command(
             priority,
             project,
             iteration,
+            tags,
             json,
         } => (|| -> Result<String, CliError> {
             let body = if let Some(path) = file {
@@ -392,13 +396,14 @@ fn run_store_command(
                 &body,
                 priority,
                 iteration.as_deref(),
+                tags,
                 project.as_ref().map(|p| p.id.as_str()),
             )
             .map_err(CliError::Io)?;
             if *json {
                 Ok(serde_json::json!({"ok": true, "id": meta.id,
                     "path": meta.path, "revision": meta.revision, "projects": meta.projects,
-                    "priority": meta.priority, "iteration": meta.iteration})
+                    "priority": meta.priority, "iteration": meta.iteration, "tags": meta.tags})
                 .to_string())
             } else {
                 Ok(format!("Created {} ({})", meta.id, meta.path))
@@ -411,6 +416,7 @@ fn run_store_command(
             unassigned_project,
             iteration,
             unassigned,
+            tags,
             json,
         } => project_list_filter(project.as_deref(), *all_projects, *unassigned_project)
             .and_then(|scope| {
@@ -418,6 +424,7 @@ fn run_store_command(
                     &requirements_root,
                     iteration.as_deref(),
                     *unassigned,
+                    tags,
                     *json,
                     &scope,
                 )
@@ -448,6 +455,18 @@ fn run_store_command(
             .map_err(|err| (*json, err)),
         RequirementsCommand::ClearIteration { refs, json } => {
             mutate_iteration(&requirements_root, refs, None, *json).map_err(|err| (*json, err))
+        }
+        RequirementsCommand::AddTags { refs, tags, json } => {
+            mutate_tags(&requirements_root, refs, tags, TagMutation::Add, *json)
+                .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::RemoveTags { refs, tags, json } => {
+            mutate_tags(&requirements_root, refs, tags, TagMutation::Remove, *json)
+                .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::ClearTags { refs, json } => {
+            mutate_tags(&requirements_root, refs, &[], TagMutation::Replace, *json)
+                .map_err(|err| (*json, err))
         }
         RequirementsCommand::LinkProject {
             refs,
@@ -583,6 +602,7 @@ fn list_documents(
     requirements_root: &Path,
     iteration: Option<&str>,
     unassigned: bool,
+    tags: &[String],
     json: bool,
     scope: &RequirementProjectFilter,
 ) -> Result<String, CliError> {
@@ -598,6 +618,12 @@ fn list_documents(
     listed
         .documents
         .retain(|doc| doc.matches_project_filter(scope));
+    // Repeated --tag values are a conjunction, matching the saved-query default.
+    listed.documents.retain(|doc| {
+        tags.iter()
+            .map(|tag| tag.trim())
+            .all(|tag| doc.tags.contains(tag))
+    });
     if json {
         let envelope = ListEnvelopeJson {
             store_id: listed.store_id.to_string(),
@@ -611,6 +637,7 @@ fn list_documents(
                     path: doc.path.clone(),
                     iteration: doc.iteration.clone(),
                     priority: doc.priority,
+                    tags: doc.tags.iter().cloned().collect(),
                     projects: doc.projects.clone(),
                     revision: doc.revision.as_str().to_string(),
                 })
@@ -654,6 +681,7 @@ fn show_document(
             path: document.meta.path,
             iteration: document.meta.iteration,
             priority: document.meta.priority,
+            tags: document.meta.tags.into_iter().collect(),
             projects: document.meta.projects,
             revision: document.meta.revision.as_str().to_string(),
             body: document.body,
@@ -690,6 +718,54 @@ fn mutate_iteration(
         .map_err(|err| CliError::Io(err.into()))
     } else {
         Ok(String::new())
+    }
+}
+
+/// How `mutate_tags` changes the tag set of each referenced document.
+enum TagMutation {
+    /// Replace the whole set, ignoring `tags`.
+    Replace,
+    /// Keep existing tags and add `tags`.
+    Add,
+    /// Remove `tags` and keep everything else.
+    Remove,
+}
+
+fn mutate_tags(
+    requirements_root: &Path,
+    refs: &[String],
+    tags: &[String],
+    mutation: TagMutation,
+    json: bool,
+) -> Result<String, CliError> {
+    let mut ids = Vec::with_capacity(refs.len());
+    for reference in refs {
+        ids.push(
+            resolve_requirement_ref_in_store(requirements_root, reference)
+                .map_err(CliError::store)?,
+        );
+    }
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let index = match mutation {
+        TagMutation::Replace => set_requirement_documents_tags(requirements_root, &id_refs, tags),
+        TagMutation::Add => add_requirement_documents_tags(requirements_root, &id_refs, tags),
+        TagMutation::Remove => remove_requirement_documents_tags(requirements_root, &id_refs, tags),
+    }
+    .map_err(CliError::store)?;
+    if json {
+        let tags: std::collections::BTreeMap<String, Vec<String>> = ids
+            .iter()
+            .filter_map(|id| {
+                index
+                    .documents
+                    .iter()
+                    .find(|doc| &doc.id == id)
+                    .map(|doc| (id.clone(), doc.tags.iter().cloned().collect()))
+            })
+            .collect();
+        Ok(serde_json::json!({"ok": true, "ids": ids, "tags": tags}).to_string())
+    } else {
+        Ok(format!("Updated tags of {} requirement(s)", ids.len()))
     }
 }
 
@@ -1021,6 +1097,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: Some("Sprint 12".into()),
                 unassigned: false,
+                tags: Vec::new(),
                 json: true,
             },
         );
@@ -1038,6 +1115,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: Some("Missing".into()),
                 unassigned: false,
+                tags: Vec::new(),
                 json: true,
             },
         );
@@ -1058,6 +1136,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: None,
                 unassigned: false,
+                tags: Vec::new(),
                 json: true,
             },
         );
@@ -1084,6 +1163,7 @@ mod tests {
                 unassigned_project: false,
                 iteration: None,
                 unassigned: true,
+                tags: Vec::new(),
                 json: false,
             },
         );
@@ -1437,5 +1517,116 @@ mod tests {
                 .body,
             "# Login\n\nedited in tty\n"
         );
+    }
+
+    #[test]
+    fn add_remove_and_clear_tags_update_the_shared_index() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let add = run(
+            store.path(),
+            RequirementsCommand::AddTags {
+                refs: vec!["doc-12".into()],
+                tags: vec!["Login".into(), "ui".into()],
+                json: true,
+            },
+        );
+        assert_eq!(add.exit_code, 0, "{}", add.stderr);
+        let value: serde_json::Value = serde_json::from_str(&add.stdout).unwrap();
+        assert_eq!(value["tags"]["doc-12"], serde_json::json!(["Login", "ui"]));
+
+        let remove = run(
+            store.path(),
+            RequirementsCommand::RemoveTags {
+                refs: vec!["doc-12".into()],
+                tags: vec!["ui".into()],
+                json: false,
+            },
+        );
+        assert_eq!(remove.exit_code, 0, "{}", remove.stderr);
+        assert_eq!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .tags
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Login"]
+        );
+
+        let clear = run(
+            store.path(),
+            RequirementsCommand::ClearTags {
+                refs: vec!["doc-12".into()],
+                json: false,
+            },
+        );
+        assert_eq!(clear.exit_code, 0, "{}", clear.stderr);
+        assert!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .tags
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_tag_repeats_are_a_conjunction() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        run(
+            store.path(),
+            RequirementsCommand::AddTags {
+                refs: vec!["doc-12".into(), "doc-37".into(), "doc-9".into()],
+                tags: vec!["ui".into()],
+                json: false,
+            },
+        );
+        run(
+            store.path(),
+            RequirementsCommand::AddTags {
+                refs: vec!["doc-12".into()],
+                tags: vec!["payments".into()],
+                json: false,
+            },
+        );
+
+        let both = run(
+            store.path(),
+            RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
+                iteration: None,
+                unassigned: false,
+                tags: vec!["ui".into(), "payments".into()],
+                json: true,
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&both.stdout).unwrap();
+        let ids: Vec<&str> = value["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|doc| doc["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["doc-12"]);
+
+        let single = run(
+            store.path(),
+            RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
+                iteration: None,
+                unassigned: false,
+                tags: vec!["ui".into()],
+                json: true,
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&single.stdout).unwrap();
+        assert_eq!(value["documents"].as_array().unwrap().len(), 3);
     }
 }

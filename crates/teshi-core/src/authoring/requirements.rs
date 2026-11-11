@@ -218,6 +218,46 @@ pub fn normalize_iteration_name(raw: &str) -> Result<String, InvalidIterationNam
     Ok(trimmed.to_string())
 }
 
+/// Why a tag name was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidTagName {
+    /// Empty or whitespace-only after trim.
+    Empty,
+    /// Contained ASCII control characters.
+    ControlCharacters,
+}
+
+impl fmt::Display for InvalidTagName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("tag name must not be empty"),
+            Self::ControlCharacters => f.write_str("tag name must not contain control characters"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidTagName {}
+
+/// Trims and validates a user-supplied tag name.
+///
+/// Tags are free-form: any non-empty text without control characters is
+/// accepted. Names are case-sensitive, so `AI` and `ai` stay distinct tags.
+///
+/// # Errors
+///
+/// Returns [`InvalidTagName`] when the trimmed value is empty or contains
+/// ASCII control characters.
+pub fn normalize_tag_name(raw: &str) -> Result<String, InvalidTagName> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(InvalidTagName::Empty);
+    }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        return Err(InvalidTagName::ControlCharacters);
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Scheduling priority for a requirement document.
 ///
 /// Priority is optional document metadata. It expresses planning urgency and
@@ -443,6 +483,13 @@ pub struct RequirementDocumentMeta {
     /// Optional scheduling priority. `None` means no priority is assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<RequirementPriority>,
+    /// Free-form topical labels shared by every project.
+    ///
+    /// Tags are global document attributes, not project views: the same document
+    /// shows the same tags in every project. Empty on documents without tags, so
+    /// older indexes decode unchanged and are rewritten without the field.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
     /// Project membership and explicitly recorded delivery state, keyed by durable project ID.
     /// Missing on older documents, which remain unassigned until explicitly linked.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -490,6 +537,7 @@ impl RequirementDocumentMeta {
             revision,
             iteration: None,
             priority: None,
+            tags: BTreeSet::new(),
             projects: BTreeMap::new(),
         }
     }
@@ -575,6 +623,19 @@ impl RequirementDocumentIndex {
             }
         }
         names.into_iter().collect()
+    }
+
+    /// Tag names currently used by any document, sorted and unique.
+    ///
+    /// This is the picker vocabulary: it holds tags already in use, never a
+    /// separately maintained list.
+    pub fn discovered_tags(&self) -> Vec<String> {
+        self.documents
+            .iter()
+            .flat_map(|doc| doc.tags.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -709,6 +770,54 @@ mod tests {
             normalize_iteration_name("Sprint 1").unwrap(),
             normalize_iteration_name("sprint 1").unwrap()
         );
+    }
+
+    #[test]
+    fn tag_name_trims_but_stays_case_sensitive() {
+        assert_eq!(normalize_tag_name("  Login  ").unwrap(), "Login");
+        assert_ne!(
+            normalize_tag_name("AI").unwrap(),
+            normalize_tag_name("ai").unwrap()
+        );
+        assert_eq!(
+            normalize_tag_name("   ").unwrap_err(),
+            InvalidTagName::Empty
+        );
+        assert_eq!(
+            normalize_tag_name("bad\u{0007}tag").unwrap_err(),
+            InvalidTagName::ControlCharacters
+        );
+    }
+
+    #[test]
+    fn documents_without_tags_load_and_serialize_without_the_field() {
+        let json = serde_json::json!({
+            "id": "doc-1",
+            "path": "a.md",
+            "title": "A",
+            "revision": "rev-1",
+        });
+        let meta: RequirementDocumentMeta = serde_json::from_value(json).expect("decode");
+        assert!(meta.tags.is_empty());
+        let encoded = serde_json::to_value(&meta).expect("encode");
+        assert!(
+            encoded.get("tags").is_none(),
+            "empty tags must not be written"
+        );
+    }
+
+    #[test]
+    fn discovered_tags_are_sorted_and_unique() {
+        let mut first = RequirementDocumentMeta::new("a", "a.md", "A", DocumentRevision::new("1"));
+        first.tags = ["Beta".to_string(), "Alpha".to_string()].into();
+        let mut second = RequirementDocumentMeta::new("b", "b.md", "B", DocumentRevision::new("1"));
+        second.tags = ["Alpha".to_string()].into();
+        let index = RequirementDocumentIndex {
+            version: REQUIREMENT_INDEX_VERSION,
+            store_id: Some(RequirementStoreId::generate()),
+            documents: vec![first, second],
+        };
+        assert_eq!(index.discovered_tags(), vec!["Alpha", "Beta"]);
     }
 
     #[test]

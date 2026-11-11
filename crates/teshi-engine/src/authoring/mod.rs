@@ -19,10 +19,12 @@ pub use import::{
     import_project_requirements, ImportMapping, ImportProjectOptions, ImportProjectPlan,
 };
 pub use service::{
-    delete_requirement_document, list_requirement_documents, read_requirement_document,
-    resolve_requirement_ref, resolve_requirement_ref_in_store, set_requirement_documents_iteration,
-    update_requirement_document_body, update_requirement_document_priority,
-    RequirementDocumentList, RequirementRefMatch, RequirementStoreError,
+    add_requirement_documents_tags, delete_requirement_document, list_requirement_documents,
+    read_requirement_document, remove_requirement_documents_tags, resolve_requirement_ref,
+    resolve_requirement_ref_in_store, set_requirement_documents_iteration,
+    set_requirement_documents_tags, update_requirement_document_body,
+    update_requirement_document_priority, RequirementDocumentList, RequirementRefMatch,
+    RequirementStoreError,
 };
 pub use store::{
     compute_document_revision, initialize_requirement_store, is_requirement_document_id_reserved,

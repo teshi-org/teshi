@@ -1,15 +1,16 @@
 //! Document-id oriented requirement-store facade shared by CLI and other hosts.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use teshi_core::authoring::{
-    normalize_iteration_name, requirement_title, resolve_requirement_store_path,
-    InvalidIterationName, InvalidRequirementPriority, InvalidRequirementTitle,
-    RequirementDocumentContent, RequirementDocumentIndex, RequirementDocumentMeta,
-    RequirementIterationFilter, RequirementPriority, RequirementStoreId,
+    normalize_iteration_name, normalize_tag_name, requirement_title,
+    resolve_requirement_store_path, InvalidIterationName, InvalidRequirementPriority,
+    InvalidRequirementTitle, InvalidTagName, RequirementDocumentContent, RequirementDocumentIndex,
+    RequirementDocumentMeta, RequirementIterationFilter, RequirementPriority, RequirementStoreId,
 };
 
 use super::store::{
@@ -87,6 +88,8 @@ pub enum RequirementStoreError {
     },
     /// Iteration name failed validation.
     InvalidIterationName(InvalidIterationName),
+    /// Tag name failed validation.
+    InvalidTagName(InvalidTagName),
     /// Priority label failed validation.
     InvalidPriority(InvalidRequirementPriority),
     /// Markdown lacks a non-empty first-line H1 title.
@@ -117,6 +120,7 @@ impl RequirementStoreError {
             Self::Ambiguous { .. } => "ambiguous_requirement_ref",
             Self::RevisionConflict { .. } => "revision_conflict",
             Self::InvalidIterationName(_) => "invalid_iteration_name",
+            Self::InvalidTagName(_) => "invalid_tag_name",
             Self::InvalidPriority(_) => "invalid_requirement_priority",
             Self::InvalidTitle(_) => "invalid_requirement_title",
             Self::PriorityConflict { .. } => "priority_conflict",
@@ -167,6 +171,7 @@ impl fmt::Display for RequirementStoreError {
                 "requirement document '{document_id}' changed on disk (expected revision {expected}, found {actual})"
             ),
             Self::InvalidIterationName(err) => write!(f, "{err}"),
+            Self::InvalidTagName(err) => write!(f, "{err}"),
             Self::InvalidPriority(err) => write!(f, "{err}"),
             Self::InvalidTitle(err) => write!(f, "{err}"),
             Self::PriorityConflict {
@@ -191,6 +196,7 @@ impl std::error::Error for RequirementStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidIterationName(err) => Some(err),
+            Self::InvalidTagName(err) => Some(err),
             Self::InvalidPriority(err) => Some(err),
             Self::InvalidTitle(err) => Some(err),
             Self::Io(err) => Some(err.as_ref()),
@@ -622,6 +628,101 @@ pub fn set_requirement_documents_iteration(
         }
         for position in positions {
             index.documents[position].iteration = normalized.clone();
+        }
+        write_requirement_index_unlocked(requirements_root, &index)
+            .map_err(RequirementStoreError::from)?;
+        Ok(index)
+    })
+}
+
+/// Replaces the tags of every listed document.
+///
+/// Tags are document-global, so this writes only the shared index: names, paths,
+/// Markdown bodies, revisions, iterations, priorities, and project delivery
+/// states are untouched.
+///
+/// # Errors
+///
+/// Returns a store, not-found, empty-list, or invalid-tag error. A missing id
+/// fails the whole batch before any document is changed.
+pub fn set_requirement_documents_tags(
+    requirements_root: &Path,
+    document_ids: &[&str],
+    tags: &[String],
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    let normalized = normalize_tags(tags)?;
+    mutate_requirement_document_tags(requirements_root, document_ids, move |current| {
+        *current = normalized.clone();
+    })
+}
+
+/// Adds tags to every listed document, keeping tags it already has.
+///
+/// # Errors
+///
+/// Returns a store, not-found, empty-list, or invalid-tag error.
+pub fn add_requirement_documents_tags(
+    requirements_root: &Path,
+    document_ids: &[&str],
+    tags: &[String],
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    let normalized = normalize_tags(tags)?;
+    mutate_requirement_document_tags(requirements_root, document_ids, move |current| {
+        current.extend(normalized.iter().cloned());
+    })
+}
+
+/// Removes tags from every listed document; absent tags are ignored.
+///
+/// # Errors
+///
+/// Returns a store, not-found, empty-list, or invalid-tag error.
+pub fn remove_requirement_documents_tags(
+    requirements_root: &Path,
+    document_ids: &[&str],
+    tags: &[String],
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    let normalized = normalize_tags(tags)?;
+    mutate_requirement_document_tags(requirements_root, document_ids, move |current| {
+        for tag in &normalized {
+            current.remove(tag);
+        }
+    })
+}
+
+fn normalize_tags(tags: &[String]) -> Result<BTreeSet<String>, RequirementStoreError> {
+    tags.iter()
+        .map(|raw| normalize_tag_name(raw).map_err(RequirementStoreError::InvalidTagName))
+        .collect()
+}
+
+/// Applies `edit` to each listed document under one store lock.
+///
+/// Every id is resolved before the first mutation so a bad id cannot leave a
+/// partially updated batch.
+fn mutate_requirement_document_tags(
+    requirements_root: &Path,
+    document_ids: &[&str],
+    mut edit: impl FnMut(&mut BTreeSet<String>),
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    if document_ids.is_empty() {
+        return Err(RequirementStoreError::EmptyDocumentIdList);
+    }
+    with_store_lock(requirements_root, || {
+        let mut index = require_initialized_index(requirements_root)?;
+        let mut positions = Vec::with_capacity(document_ids.len());
+        for document_id in document_ids {
+            let position = index
+                .documents
+                .iter()
+                .position(|doc| doc.id == *document_id)
+                .ok_or_else(|| RequirementStoreError::NotFound {
+                    query: (*document_id).to_string(),
+                })?;
+            positions.push(position);
+        }
+        for position in positions {
+            edit(&mut index.documents[position].tags);
         }
         write_requirement_index_unlocked(requirements_root, &index)
             .map_err(RequirementStoreError::from)?;
@@ -1257,5 +1358,100 @@ mod tests {
                 .unwrap()
                 .iteration
         );
+    }
+
+    #[test]
+    fn tag_updates_add_remove_and_clear_without_touching_revision() {
+        let store = tempfile::tempdir().unwrap();
+        let before = seed_store(store.path());
+
+        let added = add_requirement_documents_tags(
+            store.path(),
+            &["doc-12", "doc-9"],
+            &[" Login ".to_string(), "ui".to_string()],
+        )
+        .unwrap();
+        let login = added
+            .documents
+            .iter()
+            .find(|doc| doc.id == "doc-12")
+            .unwrap();
+        assert_eq!(
+            login.tags.iter().cloned().collect::<Vec<_>>(),
+            vec!["Login", "ui"]
+        );
+        assert_eq!(
+            login.revision,
+            before
+                .documents
+                .iter()
+                .find(|doc| doc.id == "doc-12")
+                .unwrap()
+                .revision
+        );
+
+        // Re-adding the same tag is idempotent.
+        let again =
+            add_requirement_documents_tags(store.path(), &["doc-12"], &["ui".to_string()]).unwrap();
+        assert_eq!(
+            again
+                .documents
+                .iter()
+                .find(|doc| doc.id == "doc-12")
+                .unwrap()
+                .tags
+                .len(),
+            2
+        );
+
+        let removed =
+            remove_requirement_documents_tags(store.path(), &["doc-12"], &["ui".to_string()])
+                .unwrap();
+        assert_eq!(
+            removed
+                .documents
+                .iter()
+                .find(|doc| doc.id == "doc-12")
+                .unwrap()
+                .tags
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Login"]
+        );
+
+        let cleared = set_requirement_documents_tags(store.path(), &["doc-12"], &[]).unwrap();
+        assert!(cleared
+            .documents
+            .iter()
+            .find(|doc| doc.id == "doc-12")
+            .unwrap()
+            .tags
+            .is_empty());
+    }
+
+    #[test]
+    fn tag_updates_reject_invalid_names_and_missing_ids() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let empty = add_requirement_documents_tags(store.path(), &["doc-12"], &["   ".to_string()])
+            .unwrap_err();
+        assert_eq!(empty.code(), "invalid_tag_name");
+        let missing = add_requirement_documents_tags(
+            store.path(),
+            &["doc-12", "doc-missing"],
+            &["ui".to_string()],
+        )
+        .unwrap_err();
+        assert_eq!(missing.code(), "requirement_not_found");
+        // The valid id in the failed batch stayed untouched.
+        let after = require_initialized_index(store.path()).unwrap();
+        assert!(after
+            .documents
+            .iter()
+            .find(|doc| doc.id == "doc-12")
+            .unwrap()
+            .tags
+            .is_empty());
     }
 }

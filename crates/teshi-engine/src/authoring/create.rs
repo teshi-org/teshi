@@ -4,7 +4,8 @@ use super::store::*;
 use anyhow::{bail, Context, Result};
 use std::{fs, io::Write, path::Path};
 use teshi_core::authoring::{
-    normalize_iteration_name, requirement_title, RequirementDocumentMeta, RequirementPriority,
+    normalize_iteration_name, normalize_tag_name, requirement_title, RequirementDocumentMeta,
+    RequirementPriority,
 };
 
 /// Persists a UI draft without overwriting an ID claimed since the draft opened.
@@ -86,6 +87,7 @@ pub fn create_requirement_document(
     body: &str,
     priority: Option<RequirementPriority>,
     iteration: Option<&str>,
+    tags: &[String],
     project_id: Option<&str>,
 ) -> Result<RequirementDocumentMeta> {
     create_requirement_document_with_clock(
@@ -93,6 +95,7 @@ pub fn create_requirement_document(
         body,
         priority,
         iteration,
+        tags,
         project_id,
         requirement_timestamp_filename,
     )
@@ -103,11 +106,16 @@ fn create_requirement_document_with_clock(
     body: &str,
     priority: Option<RequirementPriority>,
     iteration: Option<&str>,
+    tags: &[String],
     project_id: Option<&str>,
     clock: impl FnOnce() -> String,
 ) -> Result<RequirementDocumentMeta> {
     let title = requirement_title(body)?;
     let iteration = iteration.map(normalize_iteration_name).transpose()?;
+    let tags = tags
+        .iter()
+        .map(|raw| normalize_tag_name(raw))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     with_requirement_store_lock(root, || {
         let mut index = match read_requirement_index_unlocked(root)? {
             Some(index) if index.store_id.is_some() => index,
@@ -153,6 +161,7 @@ fn create_requirement_document_with_clock(
             RequirementDocumentMeta::new(id, &path, title, compute_document_revision(body));
         meta.priority = priority;
         meta.iteration = iteration;
+        meta.tags = tags;
         if let Some(project_id) = project_id {
             meta.projects
                 .insert(project_id.to_owned(), Default::default());
@@ -190,7 +199,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let create_at = |timestamp: &str, body: &str| {
-            create_requirement_document_with_clock(root, body, None, None, None, || {
+            create_requirement_document_with_clock(root, body, None, None, &[], None, || {
                 timestamp.to_owned()
             })
             .unwrap()
@@ -219,11 +228,12 @@ mod tests {
     fn creation_never_reuses_a_tombstoned_identity() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let first = create_requirement_document(root, "# Original\n", None, None, None).unwrap();
+        let first =
+            create_requirement_document(root, "# Original\n", None, None, &[], None).unwrap();
         crate::authoring::delete_requirement_document(root, &first.id, None).unwrap();
         let trash_before = fs::read(root.join(REQUIREMENTS_TRASH_FILE)).unwrap();
         let second =
-            create_requirement_document(root, "# Replacement\n", None, None, None).unwrap();
+            create_requirement_document(root, "# Replacement\n", None, None, &[], None).unwrap();
         assert_ne!(first.id, second.id);
         assert_eq!(
             fs::read(root.join(REQUIREMENTS_TRASH_FILE)).unwrap(),
@@ -238,7 +248,9 @@ mod tests {
     #[test]
     fn invalid_body_does_not_initialize_or_modify_the_store() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(create_requirement_document(directory.path(), "No H1", None, None, None).is_err());
+        assert!(
+            create_requirement_document(directory.path(), "No H1", None, None, &[], None).is_err()
+        );
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
@@ -273,10 +285,11 @@ mod tests {
     fn failed_index_write_removes_new_body_and_preserves_existing_document() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let existing = create_requirement_document(root, "# Existing\n", None, None, None).unwrap();
+        let existing =
+            create_requirement_document(root, "# Existing\n", None, None, &[], None).unwrap();
         let index_before = fs::read(root.join(REQUIREMENTS_INDEX_FILE)).unwrap();
         fs::create_dir(root.join("_teshi.tmp")).unwrap();
-        assert!(create_requirement_document(root, "# Rejected\n", None, None, None).is_err());
+        assert!(create_requirement_document(root, "# Rejected\n", None, None, &[], None).is_err());
         assert_eq!(
             fs::read(root.join(REQUIREMENTS_INDEX_FILE)).unwrap(),
             index_before
@@ -299,7 +312,8 @@ mod tests {
                 let root = root.clone();
                 std::thread::spawn(move || {
                     let body = format!("# Requirement {n}\n\nBody {n}\n");
-                    let meta = create_requirement_document(&root, &body, None, None, None).unwrap();
+                    let meta =
+                        create_requirement_document(&root, &body, None, None, &[], None).unwrap();
                     assert_eq!(fs::read_to_string(root.join(&meta.path)).unwrap(), body);
                     meta
                 })
@@ -329,7 +343,7 @@ mod tests {
             "Draft",
             compute_document_revision("# Draft\n"),
         ));
-        let saved = create_requirement_document(root, "# Winner\n", None, None, None).unwrap();
+        let saved = create_requirement_document(root, "# Winner\n", None, None, &[], None).unwrap();
         assert!(save_requirement_draft(root, &mut draft, "draft.md", "# Draft\n").is_err());
         assert!(!root.join("draft.md").exists());
         assert_eq!(

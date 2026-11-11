@@ -2647,6 +2647,7 @@ mod pipeline_gate_tests {
             meta: RequirementDocumentMeta {
                 iteration: None,
                 priority: None,
+                tags: Default::default(),
                 projects: Default::default(),
                 id: "doc-1".into(),
                 path: "auth.md".into(),

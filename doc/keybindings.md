@@ -264,7 +264,7 @@ valid selections; changed streamed text or a different session clears them.
 | Home/End | First/last item |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Page through items |
 | Enter | Expand/collapse a folder or query; open a requirement in the editor |
-| Space | Action menu for the selected row (folders, queries, membership, and the keys below) |
+| Space | Action menu for the selected row (folders, tags, queries, membership, and the keys below) |
 | Ctrl+N | New requirement; with a folder selected, it is filed there on first save |
 | `d` / Delete | Open global-document deletion confirmation |
 | `i` | Iteration filter |

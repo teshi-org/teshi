@@ -493,6 +493,7 @@ fn apply_import(
                     revision: compute_document_revision(body),
                     iteration: meta.iteration.clone(),
                     priority: meta.priority,
+                    tags: meta.tags.clone(),
                     projects: meta.projects.clone(),
                 });
             }
@@ -515,6 +516,7 @@ fn apply_import(
                 revision: compute_document_revision(body),
                 iteration: meta.iteration.clone(),
                 priority: meta.priority,
+                tags: meta.tags.clone(),
                 projects: meta.projects.clone(),
             });
             continue;
@@ -532,6 +534,7 @@ fn apply_import(
             revision: compute_document_revision(body),
             iteration: meta.iteration.clone(),
             priority: meta.priority,
+            tags: meta.tags.clone(),
             projects: meta.projects.clone(),
         });
     }

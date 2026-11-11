@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use teshi_core::authoring::{
     RequirementDocumentMeta, RequirementGroupMode, RequirementProjectFilter,
-    RequirementProjectStatus,
+    RequirementProjectStatus, normalize_tag_name,
 };
 use teshi_engine::organization::{
     RequirementOrganization, format_requirement_condition, load_requirement_organization,
@@ -126,6 +126,7 @@ pub enum TreeTarget {
 pub enum MenuCommand {
     OpenEditor,
     EditFolders,
+    EditTags,
     ToggleLink,
     EditIteration,
     EditPriority,
@@ -312,6 +313,7 @@ impl AuthoringUiState {
                     items.push(item(EditFolders, "Folders…", None, ""));
                 }
                 items.extend([
+                    item(EditTags, "Tags…", None, ""),
                     item(ToggleLink, "Link / unlink project", Some('b'), "b"),
                     item(EditIteration, "Set iteration…", Some('I'), "I"),
                     item(EditPriority, "Set priority…", Some('p'), "p"),
@@ -403,8 +405,141 @@ impl AuthoringUiState {
         match &self.overlay {
             RequirementsOverlay::ActionMenu { target, .. } => Some(self.menu_items(target).len()),
             RequirementsOverlay::FolderPicker { options, .. } => Some(options.len()),
+            // Known tags plus the trailing "New tag…" row.
+            RequirementsOverlay::TagPicker { options, .. } => Some(options.len() + 1),
             _ => None,
         }
+    }
+
+    /// Opens the tag picker for a document row.
+    ///
+    /// Tags are document-global, so this works in every scope, including
+    /// All projects where folders and saved queries are unavailable.
+    ///
+    /// # Errors
+    /// When the row is not a document or the row is no longer in the index.
+    pub fn open_tag_picker(&mut self, target: &TreeTarget) -> Result<(), String> {
+        let TreeTarget::Document(id) = target else {
+            return Err("Select a requirement row first".into());
+        };
+        let index = &self
+            .artifacts
+            .as_ref()
+            .ok_or("Requirement store is not loaded")?
+            .index;
+        let document = index
+            .documents
+            .iter()
+            .find(|doc| &doc.id == id)
+            .ok_or("This requirement no longer exists")?;
+        self.overlay = RequirementsOverlay::TagPicker {
+            document_id: id.clone(),
+            options: index.discovered_tags(),
+            checked: document.tags.clone(),
+            selection: 0,
+            new_tag: None,
+        };
+        Ok(())
+    }
+
+    /// Checks or unchecks the highlighted tag, ignoring the "New tag…" row.
+    pub fn toggle_tag_choice(&mut self) {
+        if let RequirementsOverlay::TagPicker {
+            options,
+            checked,
+            selection,
+            new_tag,
+            ..
+        } = &mut self.overlay
+            && new_tag.is_none()
+            && let Some(tag) = options.get(*selection)
+        {
+            let tag = tag.clone();
+            if !checked.remove(&tag) {
+                checked.insert(tag);
+            }
+        }
+    }
+
+    /// Applies the highlighted tag-picker row.
+    ///
+    /// The "New tag…" row opens the inline field; Enter in that field commits the
+    /// typed name and keeps the picker open; Enter anywhere else saves the set.
+    ///
+    /// # Errors
+    /// When the tag name is empty, contains control characters, or the store
+    /// write fails.
+    pub(crate) fn confirm_tag_picker(&mut self) -> Result<String, String> {
+        let RequirementsOverlay::TagPicker {
+            document_id,
+            options,
+            checked,
+            selection,
+            new_tag,
+        } = self.overlay.clone()
+        else {
+            return Err("No tag picker is open".into());
+        };
+        if let Some(raw) = new_tag {
+            let tag = normalize_tag_name(&raw).map_err(|err| err.to_string())?;
+            if let RequirementsOverlay::TagPicker {
+                options,
+                checked,
+                selection,
+                new_tag,
+                ..
+            } = &mut self.overlay
+            {
+                if !options.contains(&tag) {
+                    options.push(tag.clone());
+                    options.sort();
+                }
+                checked.insert(tag.clone());
+                *new_tag = None;
+                *selection = options.iter().position(|item| item == &tag).unwrap_or(0);
+            }
+            return Ok(format!("Added tag {tag}"));
+        }
+        if selection == options.len() {
+            if let RequirementsOverlay::TagPicker { new_tag, .. } = &mut self.overlay {
+                *new_tag = Some(String::new());
+            }
+            return Ok(String::new());
+        }
+        let tags: Vec<String> = checked.into_iter().collect();
+        let index = teshi_engine::set_requirement_documents_tags(
+            &self.requirements_root,
+            &[&document_id],
+            &tags,
+        )
+        .map_err(|err| err.to_string())?;
+        let saved = index
+            .documents
+            .iter()
+            .find(|doc| doc.id == document_id)
+            .map(|doc| doc.tags.clone())
+            .unwrap_or_default();
+        if let Some(artifacts) = self.artifacts.as_mut() {
+            if let Some(meta) = artifacts
+                .index
+                .documents
+                .iter_mut()
+                .find(|d| d.id == document_id)
+            {
+                meta.tags = saved.clone();
+            }
+            if let Some(doc) = artifacts
+                .documents
+                .iter_mut()
+                .find(|d| d.meta.id == document_id)
+            {
+                doc.meta.tags = saved;
+            }
+        }
+        self.overlay = RequirementsOverlay::None;
+        self.rebuild_tree();
+        self.note_store_write();
+        Ok(format!("Updated tags of {document_id}"))
     }
 
     /// Opens the form, picker, or confirmation behind an organization menu command.

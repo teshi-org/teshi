@@ -112,6 +112,19 @@ pub enum RequirementsOverlay {
         /// Highlighted option index.
         selection: usize,
     },
+    /// Tag set of one requirement: check existing tags or add a new one.
+    TagPicker {
+        /// Stable target captured before any external reload can change selection.
+        document_id: String,
+        /// Every tag in use across the store, sorted.
+        options: Vec<String>,
+        /// Tags the requirement will carry after saving.
+        checked: BTreeSet<String>,
+        /// Highlighted row: `options.len()` is the "New tag…" row.
+        selection: usize,
+        /// Buffer of the inline new-tag field; `Some` while that row accepts text.
+        new_tag: Option<String>,
+    },
     /// Confirm removal of a folder (with subfolders) or a saved query.
     RemoveCollection {
         /// Stable collection ID.
@@ -1340,6 +1353,9 @@ impl AuthoringUiState {
     ///
     /// Returns an error when saving metadata fails or its expected value changed.
     pub fn confirm_overlay(&mut self) -> Result<(), String> {
+        if matches!(self.overlay, RequirementsOverlay::TagPicker { .. }) {
+            return self.confirm_tag_picker().map(drop);
+        }
         if let Some(result) = self.confirm_organization_overlay() {
             return result.map(drop);
         }
@@ -1347,6 +1363,7 @@ impl AuthoringUiState {
             RequirementsOverlay::ActionMenu { .. }
             | RequirementsOverlay::OrganizationForm(_)
             | RequirementsOverlay::FolderPicker { .. }
+            | RequirementsOverlay::TagPicker { .. }
             | RequirementsOverlay::RemoveCollection { .. } => Ok(()),
             RequirementsOverlay::Unsaved { .. } => Ok(()),
             RequirementsOverlay::None => Ok(()),
@@ -1369,13 +1386,27 @@ impl AuthoringUiState {
     }
 
     /// Closes the overlay without applying it.
+    ///
+    /// While the tag picker's new-tag field is open, Esc only dismisses that field.
     pub fn cancel_overlay(&mut self) {
+        if let RequirementsOverlay::TagPicker { new_tag, .. } = &mut self.overlay
+            && new_tag.take().is_some()
+        {
+            return;
+        }
         self.overlay = RequirementsOverlay::None;
     }
 
     /// Moves the highlight of a list overlay, or switches query form fields.
     pub fn overlay_move_selection(&mut self, delta: isize) {
         if self.organization_form_switch_field() {
+            return;
+        }
+        // The new-tag field owns j/k as text, so list navigation pauses while it is open.
+        if let RequirementsOverlay::TagPicker {
+            new_tag: Some(_), ..
+        } = &self.overlay
+        {
             return;
         }
         let len = match &self.overlay {
@@ -1386,7 +1417,8 @@ impl AuthoringUiState {
         if let RequirementsOverlay::FilterPicker { selection }
         | RequirementsOverlay::PriorityEdit { selection, .. }
         | RequirementsOverlay::ActionMenu { selection, .. }
-        | RequirementsOverlay::FolderPicker { selection, .. } = &mut self.overlay
+        | RequirementsOverlay::FolderPicker { selection, .. }
+        | RequirementsOverlay::TagPicker { selection, .. } = &mut self.overlay
             && len > 0
         {
             *selection = (*selection as isize + delta).rem_euclid(len as isize) as usize;
@@ -1398,7 +1430,13 @@ impl AuthoringUiState {
         if ch.is_control() {
             return;
         }
-        if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay {
+        if let RequirementsOverlay::TagPicker {
+            new_tag: Some(buffer),
+            ..
+        } = &mut self.overlay
+        {
+            buffer.push(ch);
+        } else if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay {
             buffer.push(ch);
         } else if let Some(input) = self.organization_form_input() {
             input.insert(ch);
@@ -1407,7 +1445,13 @@ impl AuthoringUiState {
 
     /// Deletes the character before the cursor in the focused overlay text field.
     pub fn overlay_backspace(&mut self) {
-        if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay {
+        if let RequirementsOverlay::TagPicker {
+            new_tag: Some(buffer),
+            ..
+        } = &mut self.overlay
+        {
+            buffer.pop();
+        } else if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay {
             buffer.pop();
         } else if let Some(input) = self.organization_form_input() {
             input.backspace();
@@ -1421,10 +1465,12 @@ impl AuthoringUiState {
 
     /// Returns `true` when the open overlay edits text rather than choosing from a list.
     pub fn overlay_accepts_text(&self) -> bool {
-        matches!(
-            self.overlay,
-            RequirementsOverlay::IterationEdit { .. } | RequirementsOverlay::OrganizationForm(_)
-        )
+        match &self.overlay {
+            RequirementsOverlay::IterationEdit { .. }
+            | RequirementsOverlay::OrganizationForm(_) => true,
+            RequirementsOverlay::TagPicker { new_tag, .. } => new_tag.is_some(),
+            _ => false,
+        }
     }
 
     /// Returns `true` when the open overlay is a navigable choice list.
@@ -1435,6 +1481,7 @@ impl AuthoringUiState {
                 | RequirementsOverlay::PriorityEdit { .. }
                 | RequirementsOverlay::ActionMenu { .. }
                 | RequirementsOverlay::FolderPicker { .. }
+                | RequirementsOverlay::TagPicker { .. }
         )
     }
 
@@ -2649,17 +2696,35 @@ pub fn build_requirement_tree(
     }
 }
 
-/// Display label for a requirement document, including an optional priority badge.
+/// Display label for a requirement document: optional priority badge, then tags.
 pub fn requirement_document_tree_label(doc: &RequirementDocumentMeta) -> String {
     let title = if doc.title.trim().is_empty() {
         doc.path.as_str()
     } else {
         doc.title.as_str()
     };
-    match doc.priority {
+    let mut label = match doc.priority {
         Some(priority) => format!("[{priority}] {title}"),
         None => title.to_string(),
+    };
+    if !doc.tags.is_empty() {
+        // Two badges fit beside a title; the rest stay one keystroke away in Tags….
+        const VISIBLE_TAGS: usize = 2;
+        let mut tags = doc
+            .tags
+            .iter()
+            .take(VISIBLE_TAGS)
+            .map(|tag| format!("#{tag}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hidden = doc.tags.len().saturating_sub(VISIBLE_TAGS);
+        if hidden > 0 {
+            tags.push_str(&format!(" +{hidden}"));
+        }
+        label.push_str("  ");
+        label.push_str(&tags);
     }
+    label
 }
 
 /// Status indicator for a test point row.
@@ -2914,8 +2979,15 @@ mod tests {
         state.buffer = EditorBuffer::from_string("unsaved draft".into());
         state.buffer_dirty = true;
 
-        teshi_engine::create_requirement_document(store.path(), "# External\n", None, None, None)
-            .unwrap();
+        teshi_engine::create_requirement_document(
+            store.path(),
+            "# External\n",
+            None,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
         state.last_store_check = None;
         assert!(state.poll_external_store_changes().unwrap());
         assert!(

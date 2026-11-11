@@ -139,6 +139,11 @@ teshi requirements edit doc-12 --file body.md
 teshi requirements edit doc-12 --file body.md --force
 teshi requirements set-iteration doc-12 doc-13 --iteration "Sprint 12"
 teshi requirements clear-iteration doc-12 doc-13
+teshi requirements create --title "Login" --tags auth,ui --project .
+teshi requirements add-tags doc-12 doc-13 --tags auth
+teshi requirements remove-tags doc-12 --tags ui
+teshi requirements clear-tags doc-12
+teshi requirements list --tag auth --tag ui      # both tags required
 ```
 
 `teshi` with no subcommand still opens the TUI. Only explicit `teshi requirements ...` runs the non-interactive store commands.
@@ -157,6 +162,7 @@ Document arguments (`<REF>`) resolve in this order: exact document ID, then stor
       "title": "Login",
       "path": "auth/login.md",
       "iteration": "Sprint 12",
+      "tags": ["auth"],
       "revision": "..."
     }
   ]
@@ -168,6 +174,8 @@ Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown onl
 `edit` on a TTY copies the current body to a temporary `.md` file and opens `$VISUAL`, then `$EDITOR`. On Windows, if both are unset, Teshi falls back to `notepad`. After the editor exits, Teshi writes through the store API and updates `_teshi.json` revision and title from the first-line H1 (`# Title`). Renaming preserves the document ID and file path. Empty titles or a missing first-line H1 fail with `invalid_requirement_title` without changing the saved document. Non-interactive agents should pass `--file` or stdin; a non-TTY with neither input fails instead of launching an editor. If the on-disk revision changed during the edit, Teshi refuses to overwrite unless `--force` is set and leaves the temp file path in the error.
 
 `--iteration` and `--unassigned` cannot be combined. The iteration value for `set-iteration` must be `--iteration <name>` so multiple refs can be listed.
+
+Tags are free-form, case-sensitive document metadata shared by every project. `--tags` accepts a comma-separated list; names are trimmed and empty names are rejected with `invalid_tag_name`. `add-tags` is idempotent, `remove-tags` ignores tags the document does not have, and `clear-tags` removes the whole set. Repeating `list --tag` requires every listed tag (AND). Editing tags never changes the document revision.
 
 | Platform | Default store |
 |----------|----------------|

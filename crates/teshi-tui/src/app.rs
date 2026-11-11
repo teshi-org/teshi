@@ -4758,6 +4758,12 @@ impl App {
             MenuCommand::EditPriority => Action::ReqEditPriority,
             MenuCommand::DeleteDocument => Action::ReqDeleteDocument,
             MenuCommand::NewRequirement => Action::ReqNewDocument,
+            MenuCommand::EditTags => {
+                if let Err(error) = self.authoring_ui.open_tag_picker(&target) {
+                    self.status = error;
+                }
+                return Ok(());
+            }
             _ => {
                 if let Err(error) = self
                     .authoring_ui
@@ -4774,6 +4780,18 @@ impl App {
     fn confirm_requirements_overlay(&mut self) -> Result<()> {
         if let Some((target, command)) = self.authoring_ui.menu_selection() {
             return self.run_requirements_menu(target, command);
+        }
+        if matches!(
+            self.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::TagPicker { .. }
+        ) {
+            let result = self.authoring_ui.confirm_tag_picker();
+            match result {
+                Ok(message) if !message.is_empty() => self.status = message,
+                Ok(_) => {}
+                Err(error) => self.status = error,
+            }
+            return Ok(());
         }
         if let Some(result) = self.authoring_ui.confirm_organization_overlay() {
             self.status = result.unwrap_or_else(|error| error);
@@ -8938,6 +8956,16 @@ impl App {
                     self.authoring_ui.toggle_folder_choice();
                     Ok(())
                 }
+                Action::OverlayInsert(' ')
+                    if matches!(
+                        self.authoring_ui.overlay,
+                        // The new-tag field accepts spaces in tag names.
+                        RequirementsOverlay::TagPicker { new_tag: None, .. }
+                    ) =>
+                {
+                    self.authoring_ui.toggle_tag_choice();
+                    Ok(())
+                }
                 Action::OverlayInsert(ch)
                     if matches!(
                         self.authoring_ui.overlay,
@@ -11453,7 +11481,9 @@ impl App {
         } else if let crate::authoring_tab::RequirementsOverlay::ActionMenu { selection, .. }
         | crate::authoring_tab::RequirementsOverlay::FolderPicker {
             selection, ..
-        } = &mut self.authoring_ui.overlay
+        }
+        | crate::authoring_tab::RequirementsOverlay::TagPicker { selection, .. } =
+            &mut self.authoring_ui.overlay
         {
             apply_list_navigation(selection, organization_count, action);
         } else if self.agent_profile_panel_active {
@@ -13060,6 +13090,14 @@ impl App {
                     // Clicking a folder toggles it; saving stays an explicit Enter.
                     *selection = *index;
                     self.authoring_ui.toggle_folder_choice();
+                } else if let RequirementsOverlay::TagPicker {
+                    selection,
+                    new_tag: None,
+                    ..
+                } = &mut self.authoring_ui.overlay
+                {
+                    *selection = *index;
+                    self.authoring_ui.toggle_tag_choice();
                 } else if let RequirementsOverlay::FilterPicker { selection }
                 | RequirementsOverlay::PriorityEdit { selection, .. }
                 | RequirementsOverlay::ActionMenu { selection, .. } =
@@ -19864,6 +19902,52 @@ mod tests {
             app.status
         );
         assert_eq!(app.authoring_ui.tree_labels["req-dir:inbox"], "Inbox (1)");
+    }
+
+    #[test]
+    fn test_space_menu_tags_a_requirement() {
+        use crate::authoring_tab::RequirementsOverlay;
+        let (mut app, _project, store) = requirements_test_app();
+        select_requirement_row(&mut app, "req-doc:doc-1");
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        // Document menu: Open in editor, Folders…, Tags…
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        let RequirementsOverlay::TagPicker { options, .. } = &app.authoring_ui.overlay else {
+            panic!("Tags… opens the picker: {:?}", app.authoring_ui.overlay);
+        };
+        assert!(options.is_empty(), "the store has no tags yet");
+
+        // Enter on "New tag…" opens the inline field; a second Enter commits the name.
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        type_into_overlay(&mut app, "Login ui");
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert!(
+            matches!(
+                &app.authoring_ui.overlay,
+                RequirementsOverlay::TagPicker { checked, .. } if checked.contains("Login ui")
+            ),
+            "typed tag is checked: {:?}",
+            app.authoring_ui.overlay
+        );
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert_eq!(
+            app.authoring_ui.overlay,
+            RequirementsOverlay::None,
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            teshi_engine::read_requirement_document(store.path(), "doc-1")
+                .unwrap()
+                .meta
+                .tags
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["Login ui"]
+        );
     }
 
     #[test]

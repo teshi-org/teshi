@@ -342,7 +342,7 @@ pub enum RequirementsCommand {
         /// Create or update a root query collection by name
         #[arg(long, requires = "condition", conflicts_with_all = ["file", "assign"])]
         query: Option<String>,
-        /// Query expression: status=planned & priority=P1 (also supports |, !, and folder=AI/Chat)
+        /// Query expression: status=planned & priority=P1 (also supports |, !, tag=AI, and folder=AI/Chat)
         #[arg(long, requires = "query")]
         condition: Option<String>,
         /// Link requirement IDs to the folder supplied with --to
@@ -372,6 +372,9 @@ pub enum RequirementsCommand {
         /// Iteration name
         #[arg(long)]
         iteration: Option<String>,
+        /// Comma-separated tags; whitespace around each name is trimmed
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
         /// Machine-readable result or diagnostic
         #[arg(long)]
         json: bool,
@@ -407,6 +410,9 @@ pub enum RequirementsCommand {
         /// Include only documents with no iteration
         #[arg(long)]
         unassigned: bool,
+        /// Include only documents carrying this tag; repeat to require every tag
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
         /// Machine-readable JSON envelope
         #[arg(long)]
         json: bool,
@@ -497,6 +503,39 @@ pub enum RequirementsCommand {
     },
     /// Clear the iteration for one or more documents
     ClearIteration {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add tags to one or more documents, keeping tags they already have
+    AddTags {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Tags to add
+        #[arg(long, value_name = "TAG", value_delimiter = ',', required = true)]
+        tags: Vec<String>,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove tags from one or more documents; tags they do not have are ignored
+    RemoveTags {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Tags to remove
+        #[arg(long, value_name = "TAG", value_delimiter = ',', required = true)]
+        tags: Vec<String>,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove every tag from one or more documents
+    ClearTags {
         /// Document ID, relative path, or unique title
         #[arg(value_name = "REF", required = true)]
         refs: Vec<String>,

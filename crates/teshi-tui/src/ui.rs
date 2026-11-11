@@ -6221,6 +6221,98 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 ],
             );
         }
+        RequirementsOverlay::TagPicker {
+            document_id,
+            options,
+            checked,
+            selection,
+            new_tag,
+        } => {
+            let title = app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .and_then(|a| a.index.documents.iter().find(|d| &d.id == document_id))
+                .map_or(document_id.clone(), |d| d.title.clone());
+            let rows = (options.len() + 1).max(1) as u16;
+            let panel = centered_rect(area, 64, rows + 6);
+            frame.render_widget(Clear, panel);
+            let visible = (panel.height.saturating_sub(6) as usize).max(1);
+            let start = selection.saturating_sub(visible.saturating_sub(1));
+            let mut lines: Vec<Line> = if options.is_empty() {
+                vec![Line::styled("  No tags yet.", theme::muted())]
+            } else {
+                Vec::new()
+            };
+            lines.extend(options.iter().enumerate().skip(start).take(visible).map(
+                |(index, tag)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel.x + 1,
+                                panel.y + 1 + (index - start) as u16,
+                                panel.width.saturating_sub(2),
+                                1,
+                            ),
+                            index,
+                        });
+                    let style = if index == *selection {
+                        theme::selected_row(true)
+                    } else {
+                        Style::default()
+                    };
+                    let mark = if checked.contains(tag) { "[x]" } else { "[ ]" };
+                    Line::styled(format!("  {mark} #{tag}"), style)
+                },
+            ));
+            let new_row = options.len();
+            let new_index = new_row.saturating_sub(start);
+            app.clickable_regions
+                .push(ClickableRegion::RequirementFilterOption {
+                    rect: Rect::new(
+                        panel.x + 1,
+                        panel.y + 1 + new_index as u16,
+                        panel.width.saturating_sub(2),
+                        1,
+                    ),
+                    index: new_row,
+                });
+            let new_style = if new_row == *selection {
+                theme::selected_row(true)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::styled(
+                match new_tag {
+                    Some(buffer) => format!("  New tag: {buffer}"),
+                    None => "  ＋ New tag…".to_string(),
+                },
+                new_style,
+            ));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  Tags belong to the document, so every project sees the same set.",
+                theme::muted(),
+            ));
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
+                    .block(theme::popup_block(format!(" Tags of {title} "))),
+                panel,
+            );
+            let footer: &[(&str, Action)] = if new_tag.is_some() {
+                &[
+                    (" Add [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ]
+            } else {
+                &[
+                    (" Toggle [Space]", Action::OverlayInsert(' ')),
+                    (" Save [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ]
+            };
+            render_overlay_footer(frame, app, panel, footer);
+        }
         RequirementsOverlay::OrganizationForm(form) => {
             use crate::authoring_tab::OrganizationForm;
             let (title, mut lines, query) = match form {
