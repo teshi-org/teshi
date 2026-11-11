@@ -5108,6 +5108,21 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// Content viewport of a requirement pane.
+///
+/// The last interior column stays empty because the vertical scrollbar paints
+/// on the right border; without the gap the widest rows run into the bar.
+fn requirement_viewport(area: Rect) -> Rect {
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    }
+}
+
 /// Draw overflow indicators on panel borders, preserving the content viewport.
 ///
 /// Every pane shares the chat scrollbar paint: solid cells instead of glyphs, a
@@ -5121,14 +5136,11 @@ fn render_requirement_scrollbars(
     extent: (usize, usize),
     offset: (usize, usize),
 ) {
-    let inner = area.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    let viewport = requirement_viewport(area);
     let (width, height) = extent;
     ui.scroll_limits[pane] = [
-        width.saturating_sub(inner.width as usize),
-        height.saturating_sub(inner.height as usize),
+        width.saturating_sub(viewport.width as usize),
+        height.saturating_sub(viewport.height as usize),
     ];
     ui.pane_bars[pane] = [None; 2];
 
@@ -5136,8 +5148,13 @@ fn render_requirement_scrollbars(
     let grabbed = |axis: usize| {
         grab.is_some_and(|(dragged, dragged_axis, _)| dragged == pane && dragged_axis == axis)
     };
-    if width > inner.width as usize && inner.width > 0 {
-        let rect = Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1);
+    if width > viewport.width as usize && viewport.width > 0 {
+        let rect = Rect::new(
+            viewport.x,
+            area.bottom().saturating_sub(1),
+            viewport.width,
+            1,
+        );
         let bar = crate::app::ScrollbarBar {
             rect,
             axis: theme::ScrollAxis::Horizontal,
@@ -5147,7 +5164,7 @@ fn render_requirement_scrollbars(
         frame.render_widget(
             Paragraph::new(theme::scrollbar_lines(
                 width,
-                inner.width as usize,
+                viewport.width as usize,
                 offset.0,
                 theme::ScrollAxis::Horizontal,
                 state,
@@ -5156,8 +5173,13 @@ fn render_requirement_scrollbars(
         );
         ui.pane_bars[pane][0] = Some(bar);
     }
-    if height > inner.height as usize && inner.height > 0 {
-        let rect = Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height);
+    if height > viewport.height as usize && viewport.height > 0 {
+        let rect = Rect::new(
+            area.right().saturating_sub(1),
+            viewport.y,
+            1,
+            viewport.height,
+        );
         let bar = crate::app::ScrollbarBar {
             rect,
             axis: theme::ScrollAxis::Vertical,
@@ -5167,7 +5189,7 @@ fn render_requirement_scrollbars(
         frame.render_widget(
             Paragraph::new(theme::scrollbar_lines(
                 height,
-                inner.height as usize,
+                viewport.height as usize,
                 offset.1,
                 theme::ScrollAxis::Vertical,
                 state,
@@ -5347,6 +5369,7 @@ fn render_requirements_tree(
         frame.render_widget(Paragraph::new("No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project").wrap(ratatui::widgets::Wrap { trim: false }).style(Style::default().fg(theme::MUTED)), inner);
         return;
     }
+    let viewport = requirement_viewport(area);
     let visible = ui.tree_state.flatten(&ui.tree_items);
     let height = visible.len();
     let width = visible
@@ -5381,23 +5404,23 @@ fn render_requirements_tree(
         .unwrap_or(0)
         .min(u16::MAX.saturating_sub(inner.x) as usize);
     ui.horizontal_scroll[0] =
-        ui.horizontal_scroll[0].min(width.saturating_sub(inner.width as usize));
+        ui.horizontal_scroll[0].min(width.saturating_sub(viewport.width as usize));
     // Render at full width so clipping does not discard text before horizontal scrolling.
     let wide = Rect::new(
-        inner.x,
-        inner.y,
-        width.max(inner.width as usize) as u16,
-        inner.height,
+        viewport.x,
+        viewport.y,
+        width.max(viewport.width as usize) as u16,
+        viewport.height,
     );
     let mut buffer = ratatui::buffer::Buffer::empty(wide);
     let tree = Tree::new(&ui.tree_items)
         .expect("requirement tree")
         .highlight_style(theme::selected_row(focused));
     ratatui::widgets::StatefulWidget::render(tree, wide, &mut buffer, &mut ui.tree_state);
-    for y in inner.y..inner.bottom() {
-        for x in 0..inner.width {
-            frame.buffer_mut()[(inner.x + x, y)] =
-                buffer[(inner.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
+    for y in viewport.y..viewport.bottom() {
+        for x in 0..viewport.width {
+            frame.buffer_mut()[(viewport.x + x, y)] =
+                buffer[(viewport.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
         }
     }
     render_requirement_scrollbars(
@@ -5426,9 +5449,9 @@ fn render_requirements_tree(
         frame.render_widget(
             Paragraph::new(diag_lines),
             Rect {
-                x: inner.x,
+                x: viewport.x,
                 y,
-                width: inner.width,
+                width: viewport.width,
                 height: diag_height,
             },
         );
@@ -5520,12 +5543,13 @@ fn render_requirements_editor(
     }
 
     ui.horizontal_scroll[1] = 0;
+    let viewport = requirement_viewport(area);
     if ui.is_previewing() {
-        render_requirement_preview(frame, ui, area, inner, images);
+        render_requirement_preview(frame, ui, area, viewport, images);
         return;
     }
-    let resized = ui.editor_wrap_width != inner.width as usize;
-    ui.wrap_editor_rows(inner.width as usize);
+    let resized = ui.editor_wrap_width != viewport.width as usize;
+    ui.wrap_editor_rows(viewport.width as usize);
     let cursor = (ui.cursor_row, ui.cursor_col);
     let cursor_display_row = ui
         .editor_display_rows
@@ -5645,13 +5669,13 @@ fn render_requirements_editor(
         lines.push(Line::from(spans));
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), viewport);
     render_requirement_scrollbars(
         frame,
         ui,
         1,
         area,
-        (inner.width as usize, line_count),
+        (viewport.width as usize, line_count),
         (0, scroll_row),
     );
 }
@@ -5661,7 +5685,7 @@ fn render_requirement_preview(
     frame: &mut Frame<'_>,
     ui: &mut crate::authoring_tab::AuthoringUiState,
     area: Rect,
-    inner: Rect,
+    viewport: Rect,
     images: Option<&mut crate::image_view::InlineImages>,
 ) {
     let image_rows = if images.as_ref().is_some_and(|images| images.has_pixels()) {
@@ -5670,10 +5694,10 @@ fn render_requirement_preview(
         1
     };
     let total = ui
-        .refresh_preview(inner.width as usize, image_rows)
+        .refresh_preview(viewport.width as usize, image_rows)
         .lines
         .len();
-    let visible = inner.height as usize;
+    let visible = viewport.height as usize;
     ui.preview_scroll = ui.preview_scroll.min(total.saturating_sub(visible));
     let scroll = ui.preview_scroll;
     let preview = ui.preview();
@@ -5684,20 +5708,20 @@ fn render_requirement_preview(
         .skip(scroll)
         .take(visible)
         .map(|(index, line)| match preview.images.get(&index) {
-            Some(image) => requirement_image_label(image, inner.width as usize),
+            Some(image) => requirement_image_label(image, viewport.width as usize),
             None => line.clone(),
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), viewport);
     if let Some(images) = images {
-        place_requirement_images(frame, &preview.images, total, images, inner, scroll);
+        place_requirement_images(frame, &preview.images, total, images, viewport, scroll);
     }
     render_requirement_scrollbars(
         frame,
         ui,
         1,
         area,
-        (inner.width as usize, total),
+        (viewport.width as usize, total),
         (0, scroll),
     );
 }
@@ -5890,14 +5914,15 @@ fn render_requirements_linked(
         }
     }
     ui.rendered_linked_selection = Some(ui.selected_linked_index);
+    let viewport = requirement_viewport(area);
     ui.horizontal_scroll[2] =
-        ui.horizontal_scroll[2].min(width.saturating_sub(inner.width as usize));
+        ui.horizontal_scroll[2].min(width.saturating_sub(viewport.width as usize));
     frame.render_widget(
         Paragraph::new(lines).scroll((
             ui.linked_scroll.min(u16::MAX as usize) as u16,
             ui.horizontal_scroll[2].min(u16::MAX as usize) as u16,
         )),
-        inner,
+        viewport,
     );
     render_requirement_scrollbars(
         frame,
@@ -7843,7 +7868,8 @@ Feature: Rule only
         let original = "ab中文cdefghijklmnop";
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string(original.into());
         ui.cursor_col = original.chars().count();
-        let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("terminal");
+        // Six content columns: the interior keeps one column clear of the scrollbar.
+        let mut terminal = Terminal::new(TestBackend::new(9, 4)).expect("terminal");
         terminal
             .draw(|frame| {
                 super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
@@ -7927,6 +7953,29 @@ Feature: Rule only
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
             .expect("render");
         assert_eq!(ui.scroll_limits[0], [0, 0]);
+    }
+
+    #[test]
+    fn requirement_tree_keeps_a_column_clear_of_the_vertical_scrollbar() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.discovered = true;
+        ui.tree_items = (0..12)
+            .map(|i| {
+                tui_tree_widget::TreeItem::new_leaf(format!("req-iter:row-{i}"), "x".repeat(40))
+            })
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        let bar = ui.pane_bars[0][1].expect("overflowing tree draws a vertical bar");
+        for y in bar.rect.y..bar.rect.y + bar.rect.height {
+            assert_eq!(
+                terminal.backend().buffer()[(bar.rect.x - 1, y)].symbol(),
+                " ",
+                "row {y} runs into the scrollbar"
+            );
+        }
     }
 
     #[test]
