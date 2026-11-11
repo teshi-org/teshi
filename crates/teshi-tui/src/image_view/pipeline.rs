@@ -337,7 +337,7 @@ fn decode(bytes: &[u8]) -> Result<DynamicImage> {
     reader.limits(limits);
     let decoder = reader
         .into_decoder()
-        .context("screenshot is not a readable PNG or JPEG")?;
+        .context("file is not a readable image")?;
     ensure!(
         decoder.total_bytes() <= MAX_DECODED_BYTES,
         "image exceeds the 128 MiB decoded-image limit; press o to open externally"
@@ -347,8 +347,7 @@ fn decode(bytes: &[u8]) -> Result<DynamicImage> {
         u64::from(w) * u64::from(h) <= MAX_DECODED_BYTES / 4,
         "image exceeds the 32-megapixel limit; press o to open externally"
     );
-    DynamicImage::from_decoder(decoder)
-        .context("cannot decode screenshot within the image memory limit")
+    DynamicImage::from_decoder(decoder).context("cannot decode the image within the memory limit")
 }
 
 pub(super) fn prepare_image(
@@ -625,6 +624,7 @@ mod tests {
                 step_line: Some(3),
                 captured_at: String::new(),
                 status: "passed".into(),
+                image_path: None,
             },
             picker,
             view: ViewState::default(),

@@ -211,8 +211,8 @@ fn append_unselectable(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>, lines: Vec
 /// Appends a label row per image mentioned in a user message, plus a box of
 /// rows for its pixels when the terminal can draw them.
 ///
-/// The label opens the image in the system viewer, so a terminal without a
-/// pixel protocol still gives access to the full image.
+/// Clicking the label or the box opens the full-screen viewer, which also
+/// explains a missing pixel protocol and offers the system viewer.
 fn append_message_images(
     out: &mut Vec<std::rc::Rc<ChatProjectedLine>>,
     app: &App,
@@ -261,8 +261,7 @@ fn append_message_images(
             std::rc::Rc::new(ChatProjectedLine {
                 line,
                 source: None,
-                action: (index == 0 && exists)
-                    .then(|| crate::keymap::Action::OpenImageExternally((*path).clone())),
+                action: exists.then(|| crate::keymap::Action::OpenImageViewer((*path).clone())),
                 image,
             })
         }));
@@ -681,13 +680,17 @@ pub(super) fn render_chat_panel(
     let input_active = focused && app.ai_input_focused;
     let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 7);
     let alert_height = u16::from(needs_chat_status(app) && inner.height >= 6);
-    let attachments = crate::chat_images::draft_attachments(
+    // The draft already shows `[Image #N]`. Polling here still starts the
+    // header read and compression while the user is editing, without a
+    // second filename row between the toolbar and the composer.
+    for mention in crate::chat_images::draft_attachments(
         &app.agent().input,
         &app.agent().input_images,
         &app.project.root_dir,
-    );
-    let attachment_height = u16::from(!attachments.is_empty() && inner.height >= 6);
-    let dock_height = 1 + queue_height + alert_height + attachment_height;
+    ) {
+        let _ = app.chat_attachments.info(&mention.path);
+    }
+    let dock_height = 1 + queue_height + alert_height;
     let input_width = composer_text_width(inner.width);
     let input_rows =
         visual_line_count_for_width(&app.agent().input, input_width).min((inner.height / 3).max(3));
@@ -727,7 +730,7 @@ pub(super) fn render_chat_panel(
         ) {
             "Enter queues another"
         } else {
-            "/sendqueued to resume"
+            "send a message to resume"
         };
         let preview = app
             .agent()
@@ -754,15 +757,6 @@ pub(super) fn render_chat_panel(
         shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
     );
     dock_y += 1;
-    if attachment_height > 0 {
-        render_chat_attachments(
-            frame,
-            app,
-            &attachments,
-            shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
-        );
-        dock_y += 1;
-    }
     if let Some(filter) = filter.as_deref()
         && suggestion_height > 0
     {
@@ -848,54 +842,6 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
         }
     }
     title
-}
-
-/// One chip per image attached to the draft; clicking a chip removes it.
-///
-/// Chips that cannot fit collapse into a `+N` count so the row never wraps.
-fn render_chat_attachments(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    attachments: &[crate::chat_images::ImageMention],
-    area: Rect,
-) {
-    let mut x = area.x;
-    for (index, mention) in attachments.iter().enumerate() {
-        let info = app.chat_attachments.info(&mention.path);
-        let failed = info.is_err();
-        let label = format!(
-            " ▣ {} ✗ ",
-            activity_summary(&crate::chat_images::chip_label(&mention.path, &info), 40)
-        );
-        let width = label.width() as u16;
-        let remaining = attachments.len() - index;
-        let overflow = format!("+{remaining}");
-        // Keep room for the overflow count unless this is the last chip.
-        let reserve = if remaining > 1 {
-            overflow.width() as u16 + 1
-        } else {
-            0
-        };
-        if x.saturating_add(width + reserve) > area.right() {
-            frame.render_widget(
-                Paragraph::new(Line::styled(overflow, muted())),
-                Rect::new(x, area.y, area.right().saturating_sub(x), 1),
-            );
-            return;
-        }
-        let rect = Rect::new(x, area.y, width, 1);
-        let color = if failed { theme::ERROR } else { theme::PRIMARY };
-        frame.render_widget(
-            Paragraph::new(label).style(fg(color).bg(theme::CHAT_CHIP_BG)),
-            rect,
-        );
-        app.clickable_regions.push(ClickableRegion::ActionButton {
-            rect,
-            action: crate::keymap::Action::AiRemoveAttachment(index),
-            modal: false,
-        });
-        x += width + 1;
-    }
 }
 
 /// Warnings and recovery remain visible; ordinary progress already lives in the transcript.
@@ -2279,14 +2225,15 @@ fn push_acp_permission_prompt(out: &mut Vec<Line<'static>>, app: &App, width: us
 
 /// Text for the one-row error status.
 ///
-/// Native and ACP turn failures are recorded as `AI error:`; a missing backend
-/// is `AI backend unavailable:`. A leftover status from an unrelated action
-/// must not replace the failure, but neither may a recorded AI or ACP failure
-/// be rewritten as an API-key hint.
+/// Native failures use `AI error:` and `AI backend unavailable:`. ACP prompt
+/// and protocol failures are recorded as `AI:`. A leftover status from an
+/// unrelated action must not replace the failure, but neither may a recorded
+/// AI or ACP failure be rewritten as an API-key hint.
 fn chat_error_label(status: &str) -> String {
     let trimmed = status.trim();
     if trimmed.starts_with("AI error:")
         || trimmed.starts_with("AI backend unavailable:")
+        || trimmed.starts_with("AI:")
         || trimmed.starts_with("ACP ")
         || trimmed.starts_with("Could not reconnect ACP")
     {
@@ -2517,6 +2464,16 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         )
     };
     frame.render_widget(Paragraph::new(display), text_area);
+    // Registered after the composer region so a click on a placeholder opens
+    // the image instead of only focusing the input.
+    for (rect, path) in attachment_hitboxes(app, text_area, scroll) {
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect,
+            action: crate::keymap::Action::OpenImageViewer(path),
+            modal: false,
+        });
+    }
+    let agent = app.agent();
     if active && text_width > 0 {
         let position = (text_x + cursor.1, inner.y + cursor.0 - scroll);
         let under = agent.input.chars().nth(agent.input_cursor);
@@ -2582,11 +2539,30 @@ fn visual_line_count_for_width(input: &str, width: u16) -> u16 {
 
 /// Use the same cell wrapping for text and cursor, including trailing empty lines.
 fn input_rows(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (u16, u16)) {
+    let layout = input_layout(input, width);
+    let position = layout
+        .cells
+        .get(cursor)
+        .map_or(layout.end, |&(row, column, _)| (row, column));
+    (layout.rows.into_iter().map(Line::raw).collect(), position)
+}
+
+/// Composer text wrapped into display rows.
+struct InputLayout {
+    rows: Vec<String>,
+    /// `(row, column, cells)` of every character, in char order.
+    cells: Vec<(u16, u16, u16)>,
+    /// Position just past the last character.
+    end: (u16, u16),
+}
+
+fn input_layout(input: &str, width: u16) -> InputLayout {
     let width = usize::from(width.max(1));
     let mut rows = vec![String::new()];
     let mut column = 0;
-    let mut position = (0, 0);
-    for (index, ch) in input.chars().enumerate() {
+    let mut positions = Vec::new();
+    let row_index = |rows: &Vec<String>| (rows.len() - 1).min(usize::from(u16::MAX)) as u16;
+    for ch in input.chars() {
         let cells = if ch == '\t' {
             4 - column % 4
         } else {
@@ -2596,12 +2572,7 @@ fn input_rows(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (u
             rows.push(String::new());
             column = 0;
         }
-        if index == cursor {
-            position = (
-                (rows.len() - 1).min(usize::from(u16::MAX)) as u16,
-                column as u16,
-            );
-        }
+        positions.push((row_index(&rows), column as u16, cells as u16));
         if ch == '\n' {
             rows.push(String::new());
             column = 0;
@@ -2620,13 +2591,59 @@ fn input_rows(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (u
             }
         }
     }
-    if cursor >= input.chars().count() {
-        position = (
-            (rows.len() - 1).min(usize::from(u16::MAX)) as u16,
-            column as u16,
-        );
+    InputLayout {
+        end: (row_index(&rows), column as u16),
+        rows,
+        cells: positions,
     }
-    (rows.into_iter().map(Line::raw).collect(), position)
+}
+
+/// Cell rectangles of each draft image in the visible composer rows.
+///
+/// `scroll` is the first visible row. A placeholder that wraps gets one
+/// rectangle per row it touches.
+fn attachment_hitboxes(app: &App, text_area: Rect, scroll: u16) -> Vec<(Rect, std::path::PathBuf)> {
+    let agent = app.agent();
+    let attachments = crate::chat_images::draft_attachments(
+        &agent.input,
+        &agent.input_images,
+        &app.project.root_dir,
+    );
+    if attachments.is_empty() {
+        return Vec::new();
+    }
+    let cells = input_layout(&agent.input, text_area.width).cells;
+    let mut hitboxes = Vec::new();
+    for mention in attachments {
+        if !mention.path.is_file() {
+            continue;
+        }
+        let start = agent.input[..mention.range.start].chars().count();
+        let end = agent.input[..mention.range.end].chars().count();
+        let mut spans: Vec<(u16, u16, u16)> = Vec::new();
+        for &(row, column, width) in cells.get(start..end).unwrap_or_default() {
+            match spans.last_mut() {
+                Some((last_row, _, right)) if *last_row == row => *right = column + width,
+                _ => spans.push((row, column, column + width)),
+            }
+        }
+        for (row, left, right) in spans {
+            if row < scroll || row - scroll >= text_area.height {
+                continue;
+            }
+            let rect = Rect::new(
+                text_area.x + left,
+                text_area.y + row - scroll,
+                right.saturating_sub(left),
+                1,
+            )
+            .intersection(text_area);
+            if !rect.is_empty() {
+                hitboxes.push((rect, mention.path.clone()));
+            }
+        }
+    }
+    hitboxes
 }
 
 /// Compute the insertion position using the input renderer's cell wrapping.
@@ -2746,8 +2763,8 @@ mod tests {
                 "AI error: background LLM thread has exited",
             ),
             (
-                "AI error: ACP prompt failed: rate limit",
-                "AI error: ACP prompt failed: rate limit",
+                "AI: ACP prompt failed: rate limit",
+                "AI: ACP prompt failed: rate limit",
             ),
             (
                 "  AI backend unavailable: connection reset  ",
@@ -2792,6 +2809,71 @@ mod tests {
         assert!(
             rows[1].source.is_some(),
             "the detail row carries the copyable title"
+        );
+    }
+
+    #[test]
+    fn test_sent_image_rows_open_the_full_screen_viewer() {
+        let (mut app, project, _store) = activity_test_app();
+        let shown = project.path().join("shown.png");
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&shown)
+            .unwrap();
+        let content = format!("look @{} and @missing.png", shown.display());
+        app.agents[0]
+            .messages_mut()
+            .push(message(AiRole::User, &content, None));
+
+        let projection = build_chat_projection(&app, 80, 40, ChatPlacement::Tab);
+        let action_for = |name: &str| {
+            projection
+                .lines
+                .iter()
+                .find(|row| line_text(&row.line).contains(name))
+                .map(|row| row.action.clone())
+        };
+        assert_eq!(
+            action_for("shown.png"),
+            Some(Some(crate::keymap::Action::OpenImageViewer(shown.clone()))),
+            "the label row opens the viewer"
+        );
+        assert_eq!(
+            action_for("missing.png · file not found"),
+            Some(None),
+            "a missing file has nothing to open"
+        );
+        assert!(crate::app::is_chat_inline_control(
+            &crate::keymap::Action::OpenImageViewer(shown)
+        ));
+    }
+
+    #[test]
+    fn test_draft_placeholders_get_hitboxes_on_every_row_they_touch() {
+        let (mut app, project, _store) = activity_test_app();
+        let path = project.path().join("draft.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        app.handle_action(crate::keymap::Action::AiPaste(path.display().to_string()))
+            .unwrap();
+        app.agent_mut().input = format!("abcdefgh{}", app.agent().input);
+        let area = Rect::new(10, 5, 12, 3);
+
+        let hitboxes = attachment_hitboxes(&app, area, 0);
+        let rects: Vec<Rect> = hitboxes.iter().map(|(rect, _)| *rect).collect();
+        assert_eq!(
+            rects,
+            [Rect::new(18, 5, 4, 1), Rect::new(10, 6, 6, 1)],
+            "`[Image #1]` wraps after four cells"
+        );
+        assert!(hitboxes.iter().all(|(_, target)| target == &path));
+        assert_eq!(
+            attachment_hitboxes(&app, area, 1)
+                .into_iter()
+                .map(|(rect, _)| rect)
+                .collect::<Vec<_>>(),
+            [Rect::new(10, 5, 6, 1)],
+            "scrolled-off rows have no hitbox"
         );
     }
 

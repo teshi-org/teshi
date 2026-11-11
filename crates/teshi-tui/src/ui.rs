@@ -602,7 +602,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     {
         render_requirements_overlay(frame, app, frame.area());
     }
-    render_screenshot_overlay(frame, app, content_row);
+    render_screenshot_overlay(frame, app, frame.area());
     crate::acp_controls::render_picker(frame, app);
     pointer_controls::render_pending_review(frame, app, content_row);
     if app.pending_delete.is_some() {
@@ -804,16 +804,28 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let label = app
-        .pending_delete
-        .as_ref()
-        .map(|request| request.label.clone())
-        .unwrap_or_default();
-    let error = app
-        .pending_delete
-        .as_ref()
-        .and_then(|request| request.error.clone());
-    let height = if error.is_some() { 10 } else { 7 };
+    let Some(request) = app.pending_delete.clone() else {
+        return;
+    };
+    // Closing a conversation saves it first, so it stays resumable and the
+    // prompt must not claim the loss is permanent.
+    let closing = request.action == Action::AgentClose;
+    let (title, verb, consequence, confirm) = if closing {
+        (
+            "Confirm close",
+            "Close",
+            "Its history stays available in the session list.",
+            "Close [Enter/y] ",
+        )
+    } else {
+        (
+            "Confirm deletion",
+            "Delete",
+            "This cannot be undone.",
+            "Delete [Enter/y] ",
+        )
+    };
+    let height = if request.error.is_some() { 10 } else { 7 };
     let popup = Rect::new(
         area.x + area.width.saturating_sub(60) / 2,
         area.y + area.height.saturating_sub(height) / 2,
@@ -821,15 +833,17 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         area.height.min(height),
     );
     frame.render_widget(Clear, popup);
-    let block = theme::popup_block("Confirm deletion");
+    let block = theme::popup_block(title);
     let [body, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(format!(
-            "Delete {label}?\nThis cannot be undone.{}",
-            error.map_or_else(String::new, |error| format!(
-                "\n\nCould not delete: {error}"
+            "{verb} {}?\n{consequence}{}",
+            request.label,
+            request.error.map_or_else(String::new, |error| format!(
+                "\n\nCould not {}: {error}",
+                verb.to_lowercase()
             ))
         ))
         .wrap(ratatui::widgets::Wrap { trim: false }),
@@ -841,7 +855,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         footer,
         "",
         &[
-            ("Delete [Enter/y] ", Action::DeleteConfirm),
+            (confirm, Action::DeleteConfirm),
             ("Cancel [Esc/n]", Action::DeleteCancel),
         ],
         true,
@@ -858,22 +872,18 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-/// Minimum panel width that still shows the agent sidebar. Narrower panels
-/// keep the chat at full width instead of squeezing both surfaces.
-const AI_SIDEBAR_MIN_PANEL_WIDTH: u16 = 90;
-/// The sidebar takes a quarter of the panel but never drops below this width.
-const AI_SIDEBAR_MIN_WIDTH: u16 = 20;
+/// Chat-title column, matching iCode's sidebar: 30% of the row, never under
+/// 42 columns (titles stay readable) and never over 60 (the conversation
+/// keeps the extra width).
+const AI_SIDEBAR_MIN_WIDTH: u16 = 42;
 /// Beyond this width extra columns belong to the conversation, not the list.
-const AI_SIDEBAR_MAX_WIDTH: u16 = 30;
+const AI_SIDEBAR_MAX_WIDTH: u16 = 60;
 /// The sidebar never appears when the conversation would fall below this.
 const AI_CHAT_MIN_WIDTH: u16 = 50;
 
 /// Resolve the sidebar width, or `None` when the chat should own the row.
 pub(super) fn ai_sidebar_width(panel_width: u16) -> Option<u16> {
-    if panel_width < AI_SIDEBAR_MIN_PANEL_WIDTH {
-        return None;
-    }
-    let width = (panel_width / 4).clamp(AI_SIDEBAR_MIN_WIDTH, AI_SIDEBAR_MAX_WIDTH);
+    let width = (panel_width * 3 / 10).clamp(AI_SIDEBAR_MIN_WIDTH, AI_SIDEBAR_MAX_WIDTH);
     (panel_width.saturating_sub(width) >= AI_CHAT_MIN_WIDTH).then_some(width)
 }
 
@@ -2682,32 +2692,30 @@ fn render_mindmap_scenario_preview(
     }
 }
 
-/// Renders the replay screenshot viewer over the active tab.
+/// Label of the viewer's close control on its top border.
+const IMAGE_VIEWER_CLOSE: &str = " Close [Esc] ";
+/// Close label for terminals too narrow to show [`IMAGE_VIEWER_CLOSE`] whole.
+const IMAGE_VIEWER_CLOSE_SHORT: &str = " Esc ";
+/// Label of the viewer's hosted Web UI control on its top border.
+const IMAGE_VIEWER_WEB: &str = " Web [w] ";
+/// Web label for terminals too narrow to show [`IMAGE_VIEWER_WEB`] whole.
+const IMAGE_VIEWER_WEB_SHORT: &str = " w ";
+
+/// Renders the image viewer over the whole terminal.
 ///
+/// Every tab, sidebar, and status row is covered so the image gets the
+/// largest box the terminal allows. The close control sits on the border,
+/// outside the box pixels are drawn into, so a fitted image never hides it.
 /// Terminals without a pixel protocol keep pointing at the system viewer
 /// instead of drawing half-blocks, which show a UI screenshot as noise.
 fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    if !app.screenshot.visible || area.width < 20 || area.height < 6 {
+    if !app.screenshot.visible || area.is_empty() {
         return;
     }
-    // Explore keeps its Features column as context for the captures; a narrow
-    // terminal falls back to covering the whole tab.
-    let area = match app.screenshot.origin {
-        crate::image_view::ScreenshotOrigin::Explore => {
-            let right =
-                Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)])
-                    .split(area)[1];
-            if right.width >= 60 { right } else { area }
-        }
-        crate::image_view::ScreenshotOrigin::MindMap => area,
-    };
-    let popup = Rect::new(
-        area.x + area.width / 20,
-        area.y + area.height / 20,
-        area.width.saturating_sub(area.width / 10),
-        area.height.saturating_sub(area.height / 10),
-    );
+    let popup = area;
     frame.render_widget(Clear, popup);
+    let standalone = app.screenshot.origin == crate::image_view::ScreenshotOrigin::Image;
+    let noun = if standalone { "image" } else { "capture" };
     let total = app.screenshot.refs.len();
     let index = app.screenshot.index.min(total.saturating_sub(1));
     let size = app
@@ -2737,6 +2745,7 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ""
     };
     let title = match app.screenshot.refs.get(index) {
+        Some(shot) if standalone => format!("Image{size} · {view}{progress}  {}", shot.file),
         Some(shot) if total > 0 => {
             let step = shot.step_text.trim();
             let step = if step.is_empty() {
@@ -2757,10 +2766,11 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         _ => "Screenshot".to_string(),
     };
-    let title: String = title
-        .chars()
-        .take(popup.width.saturating_sub(4) as usize)
-        .collect();
+    let close_width = (IMAGE_VIEWER_CLOSE.width() as u16).min(popup.width.saturating_sub(2));
+    let title = truncate_line_to_cols(
+        Line::raw(title),
+        popup.width.saturating_sub(close_width + 4),
+    );
     let block = theme::popup_block(title);
     let warning = app.screenshot.support_detail.contains("Windows Zellij")
         && app.screenshot.support.is_pixels();
@@ -2770,6 +2780,40 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     ])
     .areas(block.inner(popup));
     frame.render_widget(block, popup);
+    if close_width > 0 {
+        let close = Rect::new(
+            popup.right().saturating_sub(close_width + 1),
+            popup.y,
+            close_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(theme::chip(IMAGE_VIEWER_CLOSE, theme::PRIMARY))),
+            close,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: close,
+            action: Action::ImageViewerClose,
+            modal: true,
+        });
+    }
+    if web_width > 0 {
+        let web = Rect::new(
+            popup.right().saturating_sub(close_width + web_width + 2),
+            popup.y,
+            web_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(theme::chip(web_label, theme::PRIMARY_MUTED))),
+            web,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: web,
+            action: Action::OpenReplayWebUi,
+            modal: true,
+        });
+    }
     if body.width == 0 || body.height == 0 {
         return;
     }
@@ -2779,13 +2823,17 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         let mut lines: Vec<Line<'static>> = Vec::new();
         if let Some(error) = app.screenshot.error.as_ref() {
-            lines.push(Line::raw(format!("Cannot show capture: {error}")));
+            lines.push(Line::raw(format!("Cannot show {noun}: {error}")));
             lines.push(Line::raw(
                 "Press o to open the original in the system viewer.",
             ));
         } else if app.screenshot.loading {
             lines.push(Line::raw("Preparing image in the background..."));
-            lines.push(Line::raw("Zoom, switch steps, or press i/Esc to close."));
+            lines.push(Line::raw(if standalone {
+                "Zoom, or press Esc to close."
+            } else {
+                "Zoom, switch steps, or press i/Esc to close."
+            }));
         } else if app.screenshot.refs.is_empty() {
             lines.push(Line::raw("No captured screenshots for this scenario."));
             lines.push(Line::raw(String::new()));
@@ -2826,9 +2874,9 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 lines.push(Line::raw(
                     "Use a terminal with image support, or open the original externally.",
                 ));
-                lines.push(Line::raw(
-                    "Press o to open the capture in the system viewer.",
-                ));
+                lines.push(Line::raw(format!(
+                    "Press o to open the {noun} in the system viewer."
+                )));
             }
             if let Some(shot) = app.screenshot.refs.get(index) {
                 lines.push(Line::raw(
@@ -2848,7 +2896,11 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ));
     }
     footer_lines.push(Line::styled(
-        " +/- zoom · 1 100% · 0 fit · arrows pan · j/k steps · o open · i/Esc close",
+        if standalone {
+            " +/- or wheel zoom · 1 100% · 0 fit · arrows pan · o open · Esc close"
+        } else {
+            " +/- zoom · 1 100% · 0 fit · arrows pan · j/k steps · o open · i/Esc close"
+        },
         Style::default().fg(theme::MUTED),
     ));
     frame.render_widget(Paragraph::new(footer_lines), footer);
@@ -8360,5 +8412,20 @@ Feature: Rule only
         assert!(screen.contains("1 msgs"), "{screen}");
         assert!(screen.contains("demo-project"), "{screen}");
         assert!(screen.contains("gpt-test"), "{screen}");
+    }
+}
+
+#[cfg(test)]
+mod ai_sidebar_width_tests {
+    use super::ai_sidebar_width;
+
+    #[test]
+    fn test_chat_title_column_follows_icode_band() {
+        // 30% of the row, clamped to 42..=60, and hidden when chat would drop below 50.
+        assert_eq!(ai_sidebar_width(91), None);
+        assert_eq!(ai_sidebar_width(92), Some(42));
+        assert_eq!(ai_sidebar_width(140), Some(42));
+        assert_eq!(ai_sidebar_width(200), Some(60));
+        assert_eq!(ai_sidebar_width(240), Some(60));
     }
 }

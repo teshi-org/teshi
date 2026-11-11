@@ -148,7 +148,13 @@ Loading and encoding run in the background; the title distinguishes loading
 from incremental pixel output. See [screenshot viewing](tui-image-viewer.md)
 for limits and validation.
 Terminals without an image protocol (kitty, sixel or iTerm2) show the capture
-path instead of the picture; `o` still works there.
+path instead of the picture; `o` still works there. `w` (or the `Web [w]`
+control on the viewer's top border) instead opens the hosted Web UI in the host
+browser to review the replay captures there. It reads the running daemon's port
+from `.teshi/daemon.json`, mints a fresh hosted session, and opens the resulting
+Pages URL. The full URL is also copied to the clipboard and shown in the status
+bar, so a browser that cannot be started still leaves a usable address. Each
+activation supersedes the previous hosted session.
 
 Windows Terminal 1.22+ supports Sixel. On Windows, Teshi queries device
 attributes through the console before starting its input reader. Sixel does
@@ -192,7 +198,9 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | Esc (AI tab, agent idle) | Ask to quit Teshi |
 
 Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
-`a` creates one, and `x` closes the current one. `j/k` no longer switch Agents.
+`a` creates one, and `x` asks to close the current one (the Close button asks
+the same way; the closed conversation stays in the session list). `j/k` no
+longer switch Agents.
 **Ctrl+W h** (or plain `h` while the chat is in Normal mode) moves focus from
 the chat to the Chats sidebar and **Ctrl+W l** moves back (the chord stops at
 the edges like other pane rows). A focused sidebar shows a highlighted border
@@ -231,12 +239,12 @@ Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
 A pasted screenshot or a pasted or dropped image file appears in the input as
 an `[Image #N]` placeholder; typing `@path` to a PNG, JPEG, GIF, WebP, or BMP
 file also attaches it. Pasted screenshots are saved in the user cache, not the
-project. Each attachment shows as a `▣` chip above the input; click a chip to
-remove it. The agent receives the images as image blocks and the message text
+project. Backspace removes a placeholder as a whole. The agent receives the images as image blocks and the message text
 without their placeholders or paths. Images are sent only to ACP agents that
 accept them; otherwise the send is blocked and the draft stays. Sent images
 appear in the transcript under the message, as wide as the message and up to 16
-rows tall; click the `▣` row to open one in the system viewer.
+rows tall; click an image, its `▣` row, or a draft's `[Image #N]` placeholder to
+open it in the full-screen viewer (see `doc/tui-image-viewer.md`).
 
 Drag over chat text to select it; Ctrl+Shift+C or right-click copies the displayed
 plain text without role rails or soft-wrap line breaks. Scrolling/resizing keep
@@ -350,7 +358,7 @@ Markdown source.
 | `a/A` | Approve selected / batch-approve visible eligible points |
 | `r` | Reject the selected point |
 | `f` | Cycle review-state filter |
-| `c` | Continue generation after human approval |
+| `c` | Continue generation after human approval (Strict review policy only) |
 | `o` | Open the selected realized Gherkin scenario |
 | Enter (Excerpts) | Follow the excerpt into Requirements |
 | `s` / Ctrl+S | Save |
@@ -387,6 +395,7 @@ cancels/closes. Text forms preserve printable `j/k`.
 | Quit confirmation | h/l or Left/Right select a button; Enter/q executes it; y/Y always exits; n/N/Esc cancels |
 | Interrupt confirmation | h/l or Left/Right select a button; Enter/y interrupts; n/N/Esc keeps the turn running; the prompt closes by itself when the turn ends |
 | Model/session deletion | Requested with dd, Delete, or the button; Enter/y confirms; Esc/n cancels; background input blocked |
+| Conversation close | Requested with `x` or the Close button on the AI tab; Enter/y closes; Esc/n cancels; the last conversation reports instead of asking |
 | Step keyword picker | List navigation; Enter applies; Esc cancels |
 | Scenario location | List navigation; Enter selects; o or Esc closes |
 | Slash suggestions | Up/Down selects; Enter/Tab executes; Esc dismisses; other keys continue typing |
@@ -490,9 +499,9 @@ will arrive. Neither the wait indicator nor process controls enter copied messag
 
 The input remains editable during a response or approval wait. **Enter** queues a
 follow-up, and successful completion submits queued messages in order. Failed or
-cancelled turns pause the queue; `/sendqueued` resumes it, and `/unqueue` returns the
-latest queued message to the input for editing. Unsent messages survive session
-checkpoints and are paused on restore. Queuing never approves tools or test points.
+cancelled turns pause the queue; sending another message appends it and resumes the
+queue in order, and `/unqueue` returns the latest queued message to the input for
+editing. Unsent messages survive session checkpoints and are paused on restore. Queuing never approves tools or test points.
 
 The configuration row shows an approximate live output rate, such as `~42 tok/s`, while
 text or readable reasoning arrives. The estimate uses recent text, disappears during

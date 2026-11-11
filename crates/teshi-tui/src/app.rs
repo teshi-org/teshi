@@ -40,7 +40,6 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("copy", "Copy last N assistant responses to clipboard"),
     ("details", "Expand or collapse thinking and tool details"),
     ("unqueue", "Restore the latest queued message for editing"),
-    ("sendqueued", "Resume queued messages after a stopped turn"),
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("project", "Open or switch the active project"),
@@ -225,7 +224,6 @@ pub struct AcpPermissionPrompt {
 /// A single independent agent conversation with its own state and LLM connection.
 #[derive(Debug)]
 pub struct AgentThread {
-    #[allow(dead_code)]
     pub id: usize,
     pub title: String,
     pub status: AiStatus,
@@ -599,7 +597,8 @@ pub enum ModelPanelMode {
     Editing,
 }
 
-/// Stable model/session target retained until deletion succeeds or is cancelled.
+/// Stable model/session/conversation target retained until deletion succeeds
+/// or is cancelled.
 #[derive(Debug, Clone)]
 pub struct DeleteConfirmation {
     pub action: Action,
@@ -1298,6 +1297,10 @@ pub struct App {
     pub generation_scope_prompt: Option<GenerationScopePrompt>,
     /// Why restored generation cannot continue until the user reconfirms scope.
     pub generation_paused_reason: Option<String>,
+    /// Active human-review policy for feature generation (Strict by default).
+    pub review_policy: teshi_agent::pipeline::ReviewPolicy,
+    /// Basis and scope when the user authorized Direct (no-review) generation.
+    pub direct_authorization: Option<teshi_agent::pipeline::DirectAuthorization>,
     /// Requirements / test-point authoring UI state.
     pub authoring_ui: crate::authoring_tab::AuthoringUiState,
     /// Test Points tab UI state.
@@ -1386,6 +1389,7 @@ pub(crate) fn is_chat_inline_control(action: &Action) -> bool {
             | Action::AiToggleThought(_)
             | Action::AiToggleTools(_)
             | Action::AiCopyCodeBlock { .. }
+            | Action::OpenImageViewer(_)
     )
 }
 
@@ -1858,6 +1862,11 @@ impl App {
         self.generation_scope = None;
         self.generation_scope_prompt = None;
         self.generation_paused_reason = None;
+        // A project switch is a scope change; reset to the default Strict
+        // policy. The subsequent restore below reloads the target project's
+        // own persisted policy when one exists.
+        self.review_policy = teshi_agent::pipeline::ReviewPolicy::Strict;
+        self.direct_authorization = None;
         self.authoring_ui = prepared.authoring_ui;
         self.test_points_ui = prepared.test_points_ui;
         self.agent_registry = prepared.agent_registry;
@@ -2583,6 +2592,8 @@ impl App {
             generation_scope: None,
             generation_scope_prompt: None,
             generation_paused_reason: None,
+            review_policy: teshi_agent::pipeline::ReviewPolicy::Strict,
+            direct_authorization: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(
                 &project_root,
                 &requirements_root,
@@ -2792,6 +2803,8 @@ impl App {
             generation_scope: None,
             generation_scope_prompt: None,
             generation_paused_reason: None,
+            review_policy: teshi_agent::pipeline::ReviewPolicy::Strict,
+            direct_authorization: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(
                 &project_root,
                 &requirements_root,
@@ -2986,6 +2999,8 @@ impl App {
             generation_scope: None,
             generation_scope_prompt: None,
             generation_paused_reason: None,
+            review_policy: teshi_agent::pipeline::ReviewPolicy::Strict,
+            direct_authorization: None,
             // Requirement documents live in the user-level store, not the BDD
             // project. `teshi` with no PATH still opens tab [4] against that store.
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(
@@ -3921,8 +3936,8 @@ impl App {
         }
         self.insert_ai_text(&text);
         self.status = match count {
-            1 => "Image attached; click its chip to remove it".to_string(),
-            count => format!("{count} images attached; click a chip to remove one"),
+            1 => "Image attached".to_string(),
+            count => format!("{count} images attached"),
         };
     }
 
@@ -4384,7 +4399,11 @@ impl App {
                 && self.agents[i].chat.queue_ready
                 && !(self.agents[i].backend_kind()
                     == teshi_agent::backend::AgentBackendKind::Native
-                    && self.generation_stage.is_human_review_gate())
+                    // Direct policy never holds the human-review gate, even if a
+                    // stage was restored from an older persisted session.
+                    && self
+                        .generation_stage
+                        .is_review_gate_for(self.review_policy))
                 && !self.agents[i].shutdown_pending()
                 && let Some(message) = self.agents[i].chat.queue.front().cloned()
             {
@@ -4708,6 +4727,8 @@ impl App {
             requirement: self.pipeline_requirement.clone(),
             plan: self.pipeline_plan.clone(),
             source_scope: self.generation_scope.clone(),
+            review_policy: self.review_policy,
+            direct_authorization: self.direct_authorization.clone(),
         };
         crate::generation_state::save_generation_state(&self.project.root_dir, &state)
             .context("persist generation session state")
@@ -4838,6 +4859,15 @@ impl App {
         user_msg: String,
         restore_draft: bool,
     ) -> Result<bool> {
+        // An explicit no-review authorization is honored for the current task
+        // scope. Applied before the system prompt is built so Direct guidance is
+        // injected on this very turn rather than after a conflicting Strict turn.
+        if self.review_policy != teshi_agent::pipeline::ReviewPolicy::Direct
+            && let Some(basis) =
+                teshi_agent::pipeline::recognize_direct_authorization(&user_msg)
+        {
+            self.apply_direct_authorization(basis.to_string(), user_msg.clone());
+        }
         self.agents[agent_idx].chat.queue_ready = false;
         if !self.start_agent_backend(agent_idx) {
             // An explicit queue resume may first have to reap the failed ACP process.
@@ -4854,7 +4884,8 @@ impl App {
             return Ok(false);
         }
         if !restore_draft && !self.agents[agent_idx].backend.is_connected() {
-            self.status = "Queued message paused: configure an Agent before /sendqueued".into();
+            self.status =
+                "Queued message paused: configure an Agent, then send a message to resume".into();
             return Ok(false);
         }
         let images = match self.prepare_prompt_images(agent_idx, &user_msg) {
@@ -4963,6 +4994,10 @@ impl App {
                 self.pipeline_requirement = saved.requirement.clone();
                 self.pipeline_plan = saved.plan.clone();
                 self.generation_scope = saved.source_scope.clone();
+                // Restore the review policy so a resumed Direct session does not
+                // silently fall back into the human-review gate.
+                self.review_policy = saved.review_policy;
+                self.direct_authorization = saved.direct_authorization.clone();
                 let current_store = self
                     .authoring_ui
                     .artifacts
@@ -5007,10 +5042,43 @@ impl App {
         }
     }
 
-    /// Human-only transition from Reviewing Test Points to Planning.
+    /// Records an explicit user authorization for Direct (no-review) generation
+    /// and clears any pending human-review gate without approving anything.
+    ///
+    /// WHY: doc-48 requires one explicit authorization to stay effective for the
+    /// agreed task scope and to never fall back into the Test Points review gate.
+    fn apply_direct_authorization(&mut self, basis: String, scope: String) {
+        use teshi_agent::pipeline::GenerationStage;
+        self.review_policy = teshi_agent::pipeline::ReviewPolicy::Direct;
+        self.direct_authorization = Some(teshi_agent::pipeline::DirectAuthorization { basis, scope });
+        // A Strict session stuck at the review gate advances straight to Planning.
+        // This only changes the stage; it never writes a review/approval record.
+        if matches!(
+            self.generation_stage,
+            GenerationStage::GeneratingTestPoints | GenerationStage::ReviewingTestPoints
+        ) && let Ok(next) =
+            teshi_agent::pipeline::authorize_direct_continuation(self.generation_stage)
+        {
+            self.generation_stage = next;
+        }
+        let _ = self.persist_generation_state();
+    }
+
+    /// Revokes a Direct authorization and returns generation to the default Strict policy.
+    fn revoke_direct_authorization(&mut self) {
+        self.review_policy = teshi_agent::pipeline::ReviewPolicy::Strict;
+        self.direct_authorization = None;
+        let _ = self.persist_generation_state();
+    }
+
+    /// Human-only transition from Reviewing Test Points to Planning (Strict policy).
     ///
     /// Intentionally ignores `approval_mode`: Auto/Bypass cannot trigger this gate.
     fn continue_test_point_generation(&mut self) -> Result<()> {
+        if self.review_policy == teshi_agent::pipeline::ReviewPolicy::Direct {
+            self.status = "Direct (no-review) generation has no Test Points review gate; send the generation request to continue.".into();
+            return Ok(());
+        }
         let test_points: Vec<teshi_core::authoring::TestPoint> = self
             .authoring_ui
             .artifacts
@@ -5102,6 +5170,49 @@ impl App {
         }
     }
 
+    /// Feature-generation guidance for the default Strict (review-required) policy.
+    const STRICT_PIPELINE_GUIDANCE: &'static str = "\n\n## Feature Generation Pipeline (Strict — human review required)\n\
+         When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
+         1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand; do not assume every Markdown file is already in the prompt. Prefer `source_refs` to persisted documents/ranges in the confirmed store/iteration scope. Pasted or conversational text is not a requirement-library source. Call `submit_requirements` when done.\n\
+         2. **Generating Test Points** — Call `propose_test_points` with non-Gherkin verification intents (title, objective, hierarchy). Do NOT write Given/When/Then inside test points.\n\
+         3. **Reviewing Test Points** — Stop and wait. Humans approve/reject in the Test Points tab. Do NOT call `generate_plan` and do NOT treat Auto/Bypass file approval as test-point approval.\n\
+         4. **Planning** — After the user continues generation, design Gherkin scenarios. Every scenario must include `test_point_ids` for approved test points. Call `generate_plan`.\n\
+         5. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
+         6. **Validation** — Use `validate_feature` to check for issues.\n\
+         \n\
+         Test points are durable verification intents, NOT Gherkin scenarios. Scenarios realize approved test points.\n\
+         Do NOT produce FreeMind `.mm` files or mock HTML.\n\
+         Do NOT skip the human review gate. Start by gathering requirements.\n\
+         If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
+         Always check the [Project Context] to understand existing files before generating.";
+
+    /// Feature-generation guidance for the user-authorized Direct (no-review) policy.
+    ///
+    /// WHY: doc-48 forbids injecting conflicting mandatory-review instructions
+    /// after the user chooses direct generation. This block deliberately omits
+    /// the human-review gate and any requirement for approved test-point IDs.
+    const DIRECT_PIPELINE_GUIDANCE: &'static str = "\n\n## Feature Generation Pipeline (Direct — user-authorized no review)\n\
+         The active review policy is Direct: the user explicitly authorized generating a feature without human test-point review. This authorization is recorded in the generation state and stays in effect for the current task scope; do not ask for the same permission again.\n\
+         1. **Requirements Gathering** — Ask questions or accept pasted requirement text; use `list_requirement_documents` and `read_requirement_document` to inspect the store on demand. Prefer `source_refs` to persisted documents/ranges in the confirmed scope. Call `submit_requirements` when done.\n\
+         2. **Planning** — After gathering, call `generate_plan` directly. Do NOT call `propose_test_points`, do NOT wait for the Test Points tab, and do NOT pause for human review. `test_point_ids` may be empty or omitted; never invent IDs or reference non-existent approved test points.\n\
+         3. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only). With no test_point_ids, no `@teshi-tp:<id>` tags are added.\n\
+         4. **Validation** — Use `validate_feature` to check for issues.\n\
+         \n\
+         This generation is 'user-authorized no-review', NOT 'human approved'; never fabricate approval records or approved IDs. Preserve existing test points and review records; traceability can be added later.\n\
+         Do NOT produce FreeMind `.mm` files or mock HTML.\n\
+         If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
+         Always check the [Project Context] to understand existing files before generating.";
+
+    /// Returns the Feature Generation Pipeline guidance block for `policy`.
+    fn generation_pipeline_prompt(
+        policy: teshi_agent::pipeline::ReviewPolicy,
+    ) -> &'static str {
+        match policy {
+            teshi_agent::pipeline::ReviewPolicy::Strict => Self::STRICT_PIPELINE_GUIDANCE,
+            teshi_agent::pipeline::ReviewPolicy::Direct => Self::DIRECT_PIPELINE_GUIDANCE,
+        }
+    }
+
     /// The system prompt used for all AI chat requests.
     /// Uses the active agent profile's instructions as the base, then appends
     /// pipeline guidance.
@@ -5112,23 +5223,9 @@ impl App {
             .unwrap_or_else(|| "You are a helpful assistant.".to_string());
         let mut prompt = instructions;
 
-        // Generation pipeline guidance
-        prompt.push_str(
-            "\n\n## Feature Generation Pipeline\n\
-             When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
-             1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand; do not assume every Markdown file is already in the prompt. Prefer `source_refs` to persisted documents/ranges in the confirmed store/iteration scope. Pasted or conversational text is not a requirement-library source. Call `submit_requirements` when done.\n\
-             2. **Generating Test Points** — Call `propose_test_points` with non-Gherkin verification intents (title, objective, hierarchy). Do NOT write Given/When/Then inside test points.\n\
-             3. **Reviewing Test Points** — Stop and wait. Humans approve/reject in the Test Points tab. Do NOT call `generate_plan` and do NOT treat Auto/Bypass file approval as test-point approval.\n\
-             4. **Planning** — After the user continues generation, design Gherkin scenarios. Every scenario must include `test_point_ids` for approved test points. Call `generate_plan`.\n\
-             5. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
-             6. **Validation** — Use `validate_feature` to check for issues.\n\
-             \n\
-             Test points are durable verification intents, NOT Gherkin scenarios. Scenarios realize approved test points.\n\
-             Do NOT produce FreeMind `.mm` files or mock HTML.\n\
-             Do NOT skip the human review gate. Start by gathering requirements.\n\
-             If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
-             Always check the [Project Context] to understand existing files before generating.",
-        );
+        // Generation pipeline guidance is policy-aware: Direct never injects a
+        // mandatory human-review instruction after the user opts out.
+        prompt.push_str(Self::generation_pipeline_prompt(self.review_policy));
 
         // Inject pipeline stage guidance if a generation is in progress
         if !matches!(
@@ -5142,7 +5239,10 @@ impl App {
                 "Current stage: **{}**\n",
                 self.generation_stage.label()
             ));
-            prompt.push_str(self.generation_stage.prompt_guidance());
+            prompt.push_str(
+                self.generation_stage
+                    .prompt_guidance_for_policy(self.review_policy),
+            );
             if let Some(scope) = &self.generation_scope {
                 let iteration = match &scope.iteration {
                     teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
@@ -7980,9 +8080,24 @@ impl App {
             KeyCode::Down => self.step_screenshot(1),
             KeyCode::Up => self.step_screenshot(-1),
             KeyCode::Char('o') => self.open_screenshot_externally(),
-            _ => return false,
+            KeyCode::Char('w') => self.open_replay_web_ui(),
+            // The viewer covers the whole terminal, so keys must not reach the
+            // tab beneath it. Ctrl+Q still quits from anywhere.
+            _ => {
+                return !(key.code == KeyCode::Char('q')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            }
         }
         true
+    }
+
+    /// Opens a chat, composer, or requirement image in the full-screen viewer.
+    fn open_image_viewer(&mut self, path: PathBuf) {
+        self.show_screenshot_panel(
+            crate::image_view::ScreenshotOrigin::Image,
+            vec![crate::image_view::ScreenshotRef::image(path)],
+            None,
+        );
     }
 
     /// Rescans replay history for tree markers and the fallback list.
@@ -8107,10 +8222,39 @@ impl App {
         let Some(shot) = self.screenshot.refs.get(self.screenshot.index).cloned() else {
             return;
         };
+        let noun = if shot.image_path.is_some() {
+            "image"
+        } else {
+            "capture"
+        };
         match crate::image_view::open_externally(&self.project.root_dir, &shot) {
-            Ok(()) => self.set_status_message("Opened capture in the system viewer".to_string()),
-            Err(error) => self.set_status_message(format!("Cannot open capture: {error:#}")),
+            Ok(()) => self.set_status_message(format!("Opened {noun} in the system viewer")),
+            Err(error) => self.set_status_message(format!("Cannot open {noun}: {error:#}")),
         }
+    }
+
+    /// Opens the hosted Web UI in the host browser and always surfaces the
+    /// address as plain text, so a failed launch still leaves a usable URL.
+    fn open_replay_web_ui(&mut self) {
+        let launch = match crate::web_review::prepare(&self.project.root_dir) {
+            Ok(launch) => launch,
+            Err(error) => {
+                self.status = format!("Web review unavailable: {error:#}");
+                self.set_status_message(self.status.clone());
+                return;
+            }
+        };
+        // A long URL outlives the three-second status message in the clipboard.
+        let copied = self.try_copy_to_clipboard(&launch.url);
+        let opened = crate::web_review::open_in_browser(&launch.url);
+        let outcome = match (opened, copied) {
+            (Ok(()), true) => "URL copied; opened Web review: ".to_string(),
+            (Ok(()), false) => "Opened Web review: ".to_string(),
+            (Err(error), true) => format!("Could not open a browser ({error:#}); URL copied: "),
+            (Err(error), false) => format!("Could not open a browser ({error:#}); copy this URL: "),
+        };
+        self.status = format!("{outcome}{}", launch.url);
+        self.set_status_message(self.status.clone());
     }
 
     /// Captures recorded for the selected scenario, in step order.
@@ -8468,6 +8612,15 @@ impl App {
                     .session_list
                     .get(self.session_panel_selection)
                     .map(|s| (s.id.clone(), format!("session '{}'", s.id))),
+                // The last conversation cannot close, so it reports that
+                // directly instead of asking first.
+                Action::AgentClose if self.agents.len() > 1 => {
+                    let agent = self.agent();
+                    Some((
+                        agent.id.to_string(),
+                        format!("conversation '{}'", agent.title),
+                    ))
+                }
                 _ => None,
             };
             if let Some((target_id, label)) = target {
@@ -8491,6 +8644,17 @@ impl App {
                     .session_list
                     .iter()
                     .position(|s| s.id == request.target_id),
+                // Agent ids are not guaranteed unique across restored threads,
+                // so the still-selected thread wins over the first id match.
+                Action::AgentClose => request.target_id.parse::<usize>().ok().and_then(|id| {
+                    if self.agents.len() <= 1 {
+                        None
+                    } else if self.agent().id == id {
+                        Some(self.selected_agent)
+                    } else {
+                        self.agents.iter().position(|agent| agent.id == id)
+                    }
+                }),
                 _ => None,
             };
             let Some(position) = position else {
@@ -8502,6 +8666,7 @@ impl App {
             match request.action {
                 Action::ModelPanelDelete => self.model_panel_selection = position,
                 Action::SessionPanelDelete => self.session_panel_selection = position,
+                Action::AgentClose => self.selected_agent = position,
                 _ => {}
             }
         }
@@ -10259,12 +10424,9 @@ impl App {
                 }
                 self.quit_pending_confirm = false;
             }
-            Action::OpenImageExternally(path) => {
-                self.status = match crate::image_view::open_path_externally(&path) {
-                    Ok(()) => format!("Opened {}", crate::chat_images::display_name(&path)),
-                    Err(error) => format!("{error:#}"),
-                };
-            }
+            Action::OpenImageViewer(path) => self.open_image_viewer(path),
+            Action::ImageViewerClose => self.close_screenshot_panel(),
+            Action::OpenReplayWebUi => self.open_replay_web_ui(),
             Action::AiNewline => {
                 self.focus_ai_input();
                 let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
@@ -10338,8 +10500,13 @@ impl App {
                     self.agent_mut().chat.queue.push_back(message);
                     if paused_queue {
                         // A stopped turn keeps the queue paused; a new message
-                        // must join it in order instead of overtaking it.
+                        // must join it in order instead of overtaking it. A
+                        // failed turn parks the agent in the error state, which
+                        // the dispatcher never drains, so resuming leaves it.
                         self.agent_mut().chat.queue_ready = true;
+                        if self.agent().status == AiStatus::Error {
+                            self.agent_mut().status = AiStatus::Idle;
+                        }
                     }
                     self.status = format!(
                         "Message queued ({}) — /unqueue to edit",
@@ -12070,6 +12237,28 @@ impl App {
         if self.command_line.is_some() && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
             self.command_line = None;
         }
+        // The image viewer covers the whole terminal: only its own controls
+        // and the wheel respond, so nothing beneath it is clicked or selected.
+        if self.screenshot.visible {
+            let pos = ratatui::layout::Position::new(col, row);
+            match kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(region @ ClickableRegion::ActionButton { modal: true, .. }) =
+                        self.hit_test(&pos).cloned()
+                    {
+                        self.handle_region_click(&region, &pos)?;
+                    }
+                }
+                MouseEventKind::ScrollUp => self
+                    .screenshot
+                    .change_view(crate::image_view::ViewAction::ZoomIn),
+                MouseEventKind::ScrollDown => self
+                    .screenshot
+                    .change_view(crate::image_view::ViewAction::ZoomOut),
+                _ => {}
+            }
+            return Ok(());
+        }
         if !matches!(
             self.project_switch.overlay,
             crate::project_context::SwitchOverlay::None
@@ -12214,6 +12403,21 @@ impl App {
                     self.hit_test(&pos).cloned()
             {
                 return self.handle_region_click(&region, &pos);
+            }
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                let inner = self.authoring_ui.pane_areas[1].inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                if inner.contains(pos)
+                    && let Some(path) = self.authoring_ui.preview_image_at(
+                        usize::from(pos.x - inner.x),
+                        usize::from(pos.y - inner.y),
+                    )
+                {
+                    self.open_image_viewer(path);
+                    return Ok(());
+                }
             }
             use crate::authoring_tab::RequirementsFocus;
             let ui = &mut self.authoring_ui;
@@ -13797,17 +14001,6 @@ impl App {
             }
             return Ok(());
         }
-        if command == "sendqueued" {
-            // A failed turn parks the queue in the error state, which the
-            // dispatcher never drains; resuming has to leave it first.
-            let failed = self.agent().status == AiStatus::Error;
-            self.agent_mut().chat.queue_ready = true;
-            if failed {
-                self.agent_mut().status = AiStatus::Idle;
-            }
-            self.status = "Queued messages will send when this turn is ready".into();
-            return Ok(());
-        }
         if command == "settings" {
             self.open_acp_controls(None);
             return Ok(());
@@ -13919,17 +14112,55 @@ impl App {
             self.status = "Agent profiles: ↑↓ select · Enter apply · Esc close".to_string();
             return Ok(());
         }
+        // Direct (no-review) generation is an explicit UI/CLI choice, recorded
+        // with its authorization basis before the scope prompt is shown.
+        if command == "generate-direct" || command.starts_with("generate-direct ") {
+            let rest = command
+                .strip_prefix("generate-direct")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let scope = if rest.is_empty() {
+                "feature generation (no review)".to_string()
+            } else {
+                rest.clone()
+            };
+            self.apply_direct_authorization("/generate-direct".to_string(), scope);
+            let pending_user_message = if rest.is_empty() {
+                "I want to generate a feature directly without human test-point review. Gather requirements (I can paste detailed text next), then go straight to planning and write Gherkin .feature files. Do not wait for the Test Points tab, and do not invent test-point IDs or approvals. Do not use FreeMind or mock HTML.".to_string()
+            } else {
+                format!(
+                    "Please generate a feature directly from these requirements without human test-point review (Direct no-review policy). Gather requirements, then go straight to planning and write Gherkin .feature files; test_point_ids may be empty. Do not use FreeMind or mock HTML.\n\nRequirements:\n{rest}"
+                )
+            };
+            self.generation_scope_prompt = Some(GenerationScopePrompt {
+                iteration: self.authoring_ui.iteration_filter.clone(),
+                pending_user_message,
+            });
+            let traceability = teshi_agent::pipeline::review_traceability(self.review_policy, false);
+            self.status = format!(
+                "Direct (no-review) generation, traceability: {} — confirm source scope (Enter confirm · Esc cancel · i change iteration)",
+                traceability.label()
+            );
+            return Ok(());
+        }
         if command == "generate" || command.starts_with("generate ") {
             let rest = command
                 .strip_prefix("generate")
                 .unwrap_or("")
                 .trim()
                 .to_string();
+            // A fresh /generate is a new explicit choice that uses the default
+            // Strict policy, so a prior Direct authorization does not silently
+            // carry over to a different task scope.
+            self.review_policy = teshi_agent::pipeline::ReviewPolicy::Strict;
+            self.direct_authorization = None;
+            let _ = self.persist_generation_state();
             let pending_user_message = if rest.is_empty() {
-                "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), propose non-Gherkin test points for human review, then plan and write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
+                "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), then follow the active review policy — propose non-Gherkin test points for human review in Strict mode, or go straight to planning in Direct mode. Write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
             } else {
                 format!(
-                    "Please generate a feature from these requirements using the Feature Generation Pipeline. Propose non-Gherkin test points for human review before planning scenarios. Write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
+                    "Please generate a feature from these requirements using the Feature Generation Pipeline, following the active review policy (Strict: propose test points for human review before planning; Direct: plan directly). Write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
                 )
             };
             self.generation_scope_prompt = Some(GenerationScopePrompt {
@@ -13941,10 +14172,15 @@ impl App {
                     .to_string();
             return Ok(());
         }
+        if command == "review-strict" {
+            self.revoke_direct_authorization();
+            self.status = "Switched back to Strict review (human approval required). Restart generation with /generate to follow the review flow.".to_string();
+            return Ok(());
+        }
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /generate, /generate-direct, /review-strict, /continue".to_string();
         Ok(())
     }
 
@@ -14294,6 +14530,62 @@ mod tests {
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
 
+    #[test]
+    fn direct_system_prompt_has_no_mandatory_review_instruction() {
+        use teshi_agent::pipeline::ReviewPolicy;
+        let direct = App::generation_pipeline_prompt(ReviewPolicy::Direct);
+        assert!(!direct.contains("Do NOT skip the human review gate"));
+        assert!(!direct.contains("Stop and wait"));
+        assert!(!direct.contains("human review gate"));
+        assert!(!direct.contains("Every scenario MUST reference"));
+        assert!(!direct.contains("awaiting explicit human approval"));
+        // Direct guidance supports empty IDs and labels no-review correctly.
+        assert!(direct.contains("test_point_ids` may be empty"));
+        assert!(direct.contains("user-authorized no-review"));
+        let strict = App::generation_pipeline_prompt(ReviewPolicy::Strict);
+        assert!(strict.contains("Do NOT skip the human review gate"));
+        assert!(strict.contains("Stop and wait"));
+    }
+
+    #[test]
+    fn generate_direct_and_review_strict_toggle_review_policy() {
+        use teshi_agent::pipeline::ReviewPolicy;
+        let (mut app, project, _store) = slash_test_app();
+        assert_eq!(app.review_policy, ReviewPolicy::Strict);
+
+        app.execute_slash_command("generate-direct").unwrap();
+        assert_eq!(app.review_policy, ReviewPolicy::Direct);
+        assert_eq!(
+            app.direct_authorization.as_ref().unwrap().basis,
+            "/generate-direct"
+        );
+        let prompt = app.generation_scope_prompt.as_ref().unwrap();
+        assert!(prompt.pending_user_message.contains("directly"));
+        assert!(!prompt.pending_user_message.contains("for human review"));
+        // The choice and its basis are persisted so resume stays Direct.
+        let saved = crate::generation_state::load_generation_state(project.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.review_policy, ReviewPolicy::Direct);
+
+        app.execute_slash_command("review-strict").unwrap();
+        assert_eq!(app.review_policy, ReviewPolicy::Strict);
+        assert!(app.direct_authorization.is_none());
+    }
+
+    #[test]
+    fn chat_direct_authorization_clears_a_pending_review_gate() {
+        use teshi_agent::pipeline::{GenerationStage, ReviewPolicy};
+        let (mut app, _project, _store) = slash_test_app();
+        app.generation_stage = GenerationStage::ReviewingTestPoints;
+        app.dispatch_user_message("Please generate directly, skip review".into())
+            .unwrap();
+        assert_eq!(app.review_policy, ReviewPolicy::Direct);
+        // The gate is cleared without approving or persisting any test points.
+        assert_eq!(app.generation_stage, GenerationStage::Planning);
+        assert!(app.direct_authorization.is_some());
+    }
+
     fn requirements_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempdir().unwrap();
         let store = tempdir().unwrap();
@@ -14425,6 +14717,57 @@ mod tests {
         );
         app.handle_action(Action::DeleteCancel).unwrap();
         assert!(app.pending_delete.is_none());
+    }
+
+    #[test]
+    fn test_agent_close_asks_before_closing_the_captured_conversation() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.active_tab = MainTab::Ai;
+        app.handle_action(Action::AgentNew).unwrap();
+        app.handle_action(Action::AgentNew).unwrap();
+        assert_eq!(app.agents.len(), 3);
+        app.handle_action(Action::AgentSelect(1)).unwrap();
+        let target = app.agent().id;
+
+        app.handle_action(Action::AgentClose).unwrap();
+        let pending = app
+            .pending_delete
+            .as_ref()
+            .expect("closing a conversation must ask for confirmation");
+        assert_eq!(pending.action, Action::AgentClose);
+        assert_eq!(pending.target_id, target.to_string());
+        assert!(
+            pending.label.contains(&app.agent().title),
+            "label: {}",
+            pending.label
+        );
+        assert_eq!(app.agents.len(), 3, "nothing closes before confirmation");
+
+        // Navigation is blocked while the prompt owns input.
+        app.handle_action(Action::AgentNext).unwrap();
+        assert_eq!(app.selected_agent, 1);
+
+        app.handle_action(Action::DeleteCancel).unwrap();
+        assert!(app.pending_delete.is_none());
+        assert_eq!(app.agents.len(), 3, "cancel keeps the conversation");
+
+        app.handle_action(Action::AgentClose).unwrap();
+        // Background selection drift must not redirect the close.
+        app.selected_agent = 2;
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        assert!(app.pending_delete.is_none());
+        assert_eq!(app.agents.len(), 2);
+        assert!(app.agents.iter().all(|agent| agent.id != target));
+
+        app.handle_action(Action::AgentClose).unwrap();
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        assert_eq!(app.agents.len(), 1);
+        app.handle_action(Action::AgentClose).unwrap();
+        assert!(
+            app.pending_delete.is_none(),
+            "the last conversation reports instead of asking"
+        );
+        assert_eq!(app.status, "Cannot close the last agent");
     }
 
     #[test]
@@ -15022,8 +15365,8 @@ mod tests {
             .unwrap();
         let expanded_x = app.chat_history_rect.expect("chat renders").x;
         assert!(
-            expanded_x >= 30,
-            "the sidebar takes a proportional share, chat starts at {expanded_x}"
+            expanded_x >= 43,
+            "the chat-title column is at least 42 columns, chat starts at {expanded_x}"
         );
         assert!(app.ai_sidebar_visible);
 
@@ -15053,7 +15396,8 @@ mod tests {
             "the collapsed sidebar leaves no hit targets"
         );
 
-        // Below 90 columns the sidebar never squeezes the conversation.
+        // A 42-column list plus a 50-column conversation needs 92 columns.
+        // Narrower terminals keep the chat at full width.
         app.ai_sidebar_collapsed = false;
         let mut narrow = Terminal::new(TestBackend::new(80, 30)).unwrap();
         narrow
@@ -15249,8 +15593,8 @@ mod tests {
         app.agents[0].status = AiStatus::Waiting;
         app.agent_mut().input = "first queued".into();
         app.handle_action(Action::AiSendMessage).unwrap();
-        // Stopping the turn pauses the queue (`/sendqueued` used to be the only
-        // way back); a later message must not jump ahead of what is queued.
+        // Stopping the turn pauses the queue; a later message resumes it but
+        // must not jump ahead of what is queued.
         app.handle_action(Action::AiCancel).unwrap();
         assert!(!app.agent().chat.queue_ready);
 
@@ -15275,6 +15619,35 @@ mod tests {
                 .iter()
                 .any(|message| message.role == AiRole::User),
             "the new message must not be dispatched ahead of the queue"
+        );
+    }
+
+    #[test]
+    fn a_new_message_after_a_failed_turn_resumes_the_queue() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Error;
+        app.agents[0].chat.queue.push_back("kept follow-up".into());
+        app.agent_mut().input = "next question".into();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(
+            app.agent()
+                .chat
+                .queue
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["kept follow-up", "next question"]
+        );
+        assert!(app.agent().chat.queue_ready);
+        assert_eq!(
+            app.agent().status,
+            AiStatus::Idle,
+            "the dispatcher only drains an idle agent"
         );
     }
 
@@ -17050,11 +17423,18 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(screen.contains("▣ drop.png 3×2 1 KB ✗"), "{screen}");
-        assert!(app.clickable_regions.iter().any(|region| matches!(
+        assert!(
+            screen.contains("[Image #2]"),
+            "the composer keeps the placeholder, {screen}"
+        );
+        assert!(
+            !screen.contains("drop.png"),
+            "the filename row between the toolbar and the composer is gone, {screen}"
+        );
+        assert!(!app.clickable_regions.iter().any(|region| matches!(
             region,
             ClickableRegion::ActionButton {
-                action: Action::AiRemoveAttachment(0),
+                action: Action::AiRemoveAttachment(_),
                 ..
             }
         )));
@@ -17063,6 +17443,98 @@ mod tests {
         app.handle_action(Action::AiPaste("plain text".into()))
             .unwrap();
         assert_eq!(app.agent().input, "compare plain text");
+    }
+
+    #[test]
+    fn test_image_viewer_covers_the_terminal_and_only_its_close_button_responds() {
+        let (mut app, _project, _store) = slash_test_app();
+        let path = app.project.root_dir.join("drop.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        app.handle_action(Action::AiPaste(path.display().to_string()))
+            .unwrap();
+        let draft = app.agent().input.clone();
+        app.active_tab = MainTab::Ai;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        let mut draw = |app: &mut App| {
+            terminal
+                .draw(|frame| crate::ui::render(frame, app))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let text: String = (0..30)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        + "\n"
+                })
+                .collect();
+            (buffer, text)
+        };
+        let action_rect = |app: &App, wanted: &dyn Fn(&Action) -> bool| {
+            app.clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton { rect, action, .. } if wanted(action) => {
+                        Some(*rect)
+                    }
+                    _ => None,
+                })
+        };
+
+        draw(&mut app);
+        let placeholder = action_rect(&app, &|action| matches!(action, Action::OpenImageViewer(_)))
+            .expect("the draft placeholder is clickable");
+        let left = MouseEventKind::Down(MouseButton::Left);
+        app.handle_mouse_event(left, placeholder.x, placeholder.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.screenshot.visible, "clicking the placeholder opens it");
+        assert_eq!(
+            app.screenshot.origin,
+            crate::image_view::ScreenshotOrigin::Image
+        );
+        assert_eq!(app.agent().input, draft, "opening keeps the draft");
+
+        let (buffer, text) = draw(&mut app);
+        assert_eq!(
+            buffer[(0, 0)].symbol(),
+            "╭",
+            "the viewer starts at the corner"
+        );
+        assert_eq!(buffer[(99, 29)].symbol(), "╯", "and ends at the far corner");
+        assert!(!text.contains("Explore"), "tabs are covered: {text}");
+        assert!(text.contains("drop.png"), "{text}");
+        assert!(text.contains("no image protocol"), "{text}");
+        let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
+            .expect("the close button is registered");
+        assert_eq!(close.y, 0, "the close button sits on the top border");
+        assert!(text.contains("Close [Esc]"), "{text}");
+
+        // Neither the composer below nor typed keys react while it is open.
+        let (x, y) = (placeholder.x, placeholder.y);
+        app.handle_mouse_event(left, x, y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert!(app.screenshot.visible);
+        assert_eq!(app.agent().input, draft);
+        assert_eq!(app.active_tab, MainTab::Ai);
+
+        app.handle_mouse_event(left, close.x, close.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            !app.screenshot.visible,
+            "the close button closes the viewer"
+        );
+        assert_eq!(app.agent().input, draft);
+        assert_eq!(app.active_tab, MainTab::Ai);
+        let (_, text) = draw(&mut app);
+        assert!(!text.contains("Close [Esc]"), "{text}");
+
+        app.handle_action(Action::OpenImageViewer(path)).unwrap();
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible, "Esc closes the viewer as well");
     }
 
     fn recall_test_app(
@@ -21094,6 +21566,8 @@ mod tests {
             generation_scope: None,
             generation_scope_prompt: None,
             generation_paused_reason: None,
+            review_policy: teshi_agent::pipeline::ReviewPolicy::Strict,
+            direct_authorization: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root: teshi_engine::requirements_data_dir(None).unwrap_or_default(),
@@ -21303,6 +21777,8 @@ Feature: B
             generation_scope: None,
             generation_scope_prompt: None,
             generation_paused_reason: None,
+            review_policy: teshi_agent::pipeline::ReviewPolicy::Strict,
+            direct_authorization: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root: teshi_engine::requirements_data_dir(None).unwrap_or_default(),
@@ -21963,6 +22439,7 @@ Feature: B
             step_line: Some(4),
             captured_at: "2026-01-01T00:00:00Z".into(),
             status: "passed".into(),
+            image_path: None,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

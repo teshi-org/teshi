@@ -539,24 +539,6 @@ fn with_adjoining_space(text: &str, mut range: Range<usize>) -> Range<usize> {
     range
 }
 
-/// Remove the `index`-th draft attachment and one adjoining space from `text`.
-///
-/// Returns the byte offset where the attachment started, or `None` when there
-/// is no such attachment.
-pub fn remove_attachment(
-    text: &mut String,
-    images: &DraftImages,
-    base: &Path,
-    index: usize,
-) -> Option<usize> {
-    let attachment = draft_attachments(text, images, base)
-        .into_iter()
-        .nth(index)?;
-    let range = with_adjoining_space(text, attachment.range);
-    text.replace_range(range.clone(), "");
-    Some(range.start)
-}
-
 /// The text to send and store for a draft: each known placeholder becomes an
 /// `@path` mention, padded with spaces where it touches a word so it still
 /// parses as a mention.
@@ -708,7 +690,7 @@ pub fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// What the attachment strip knows about one image file, read from its header.
+/// What a draft image's header contributes: pixel size and file size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageInfo {
     /// Pixel width and height.
@@ -763,8 +745,9 @@ struct Job {
 
 /// Per-file results reused across frames and sends.
 ///
-/// Chips are drawn every frame and a draft is often sent more than once after
-/// an error, so header reads and compression are cached until the file changes.
+/// The composer polls each draft image every frame, and a draft is often sent
+/// more than once after an error, so header reads and compression are cached
+/// until the file changes.
 /// Saving a pasted bitmap and compressing a screenshot each take hundreds of
 /// milliseconds, so both run in the background as soon as the image is
 /// attached; only a send that arrives before they finish waits for them.
@@ -776,7 +759,7 @@ pub struct AttachmentCache {
 }
 
 impl AttachmentCache {
-    /// Header metadata for a chip, or a short reason it cannot be attached.
+    /// Header metadata for a draft image, or a short reason it cannot be attached.
     ///
     /// The first successful read of a file version also starts compressing it
     /// for the agent in the background.
@@ -952,25 +935,6 @@ impl AttachmentCache {
     }
 }
 
-/// Short chip label: `name W×H 120 KB`.
-pub fn chip_label(path: &Path, info: &Result<ImageInfo, String>) -> String {
-    let name = display_name(path);
-    match info {
-        Ok(info) => {
-            let (width, height) = info.size;
-            match info.bytes {
-                Some(bytes) if bytes >= 1024 * 1024 => format!(
-                    "{name} {width}×{height} {:.1} MB",
-                    bytes as f64 / (1024.0 * 1024.0)
-                ),
-                Some(bytes) => format!("{name} {width}×{height} {} KB", bytes.div_ceil(1024)),
-                None => format!("{name} {width}×{height}"),
-            }
-        }
-        Err(reason) => format!("{name} {reason}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,11 +947,6 @@ mod tests {
         assert!(cache.info(&path).is_err(), "a missing file has a reason");
         write_png(&path, 4, 2);
         assert_eq!(cache.info(&path).map(|info| info.size), Ok((4, 2)));
-        assert_eq!(
-            chip_label(&path, &cache.info(&path)),
-            "a.png 4×2 1 KB",
-            "small files round up to one KB"
-        );
         assert_eq!(cache.prepare(&path).unwrap().media_type, "image/png");
     }
 
@@ -1025,19 +984,6 @@ mod tests {
         let mentions = image_mentions("@img/a.png @/abs/b.png", Path::new("/root"));
         assert_eq!(mentions[0].path, Path::new("/root/img/a.png"));
         assert_eq!(mentions[1].path, Path::new("/abs/b.png"));
-    }
-
-    #[test]
-    fn test_remove_attachment_drops_one_adjoining_space() {
-        let base = Path::new("/p");
-        let none = DraftImages::default();
-        let mut text = String::from("see @a.png @b.png now");
-        assert_eq!(remove_attachment(&mut text, &none, base, 0), Some(4));
-        assert_eq!(text, "see @b.png now");
-        let mut text = String::from("tail @a.png");
-        remove_attachment(&mut text, &none, base, 0);
-        assert_eq!(text, "tail");
-        assert_eq!(remove_attachment(&mut text, &none, base, 0), None);
     }
 
     #[test]
@@ -1227,16 +1173,6 @@ mod tests {
             cache.info(&path).unwrap().bytes.map(|bytes| bytes > 0),
             Some(true)
         );
-    }
-
-    #[test]
-    fn test_chip_label_omits_size_while_saving() {
-        let path = Path::new("/c/clip.png");
-        let saving = Ok(ImageInfo {
-            size: (3, 2),
-            bytes: None,
-        });
-        assert_eq!(chip_label(path, &saving), "clip.png 3×2");
     }
 
     #[test]

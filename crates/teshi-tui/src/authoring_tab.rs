@@ -502,6 +502,27 @@ impl AuthoringUiState {
         &self.preview
     }
 
+    /// Image shown at cell (`col`, `row`) of the preview text area.
+    ///
+    /// A pixel box only covers its own columns; a one-row stand-in covers its
+    /// whole row. Missing images and the source view have nothing to open.
+    /// Documents may come from agents or shared stores and Markdown accepts
+    /// any target, so only files with an image extension are offered; the
+    /// viewer can hand them to the operating system.
+    pub fn preview_image_at(&self, col: usize, row: usize) -> Option<PathBuf> {
+        if !self.is_previewing() {
+            return None;
+        }
+        let path = match self.preview.images.get(&(self.preview_scroll + row))? {
+            EditorImageRow::Pixels { path, size, .. } => {
+                (col < usize::from(size.0)).then_some(path)?
+            }
+            EditorImageRow::Label { path, .. } => path,
+            EditorImageRow::Missing { .. } => return None,
+        };
+        crate::chat_images::has_image_extension(path).then(|| path.clone())
+    }
+
     /// Display rows for the local images referenced on one line.
     fn image_rows(
         &self,
@@ -2721,6 +2742,56 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn test_preview_image_at_finds_the_clicked_image_box() {
+        let project = tempdir().unwrap();
+        fs::write(project.path().join("shot.png"), b"png").unwrap();
+        let mut state = AuthoringUiState::empty();
+        state.project_root = project.path().to_path_buf();
+        state.editor_mode = RequirementsEditorMode::Preview;
+        state.buffer = EditorBuffer::from_string("![ui](shot.png) ![x](gone.png)".into());
+        state.refresh_preview(80, 3);
+        let (&first, path) = state
+            .preview()
+            .images
+            .iter()
+            .find_map(|(row, image)| match image {
+                EditorImageRow::Pixels { path, row: 0, .. } => Some((row, path.clone())),
+                _ => None,
+            })
+            .expect("the existing image has a pixel box");
+        let missing = first + 3;
+
+        assert_eq!(state.preview_image_at(0, first + 2), Some(path.clone()));
+        assert_eq!(
+            state.preview_image_at(64, first),
+            None,
+            "columns right of the box are text, not image"
+        );
+        assert_eq!(state.preview_image_at(0, missing), None, "nothing to open");
+        assert_eq!(state.preview_image_at(0, 0), None, "the caption row");
+
+        state.preview_scroll = 1;
+        assert_eq!(state.preview_image_at(0, first + 1), Some(path.clone()));
+        state.editor_mode = RequirementsEditorMode::Browse;
+        assert_eq!(
+            state.preview_image_at(0, first + 1),
+            None,
+            "the source view has no images"
+        );
+
+        state.editor_mode = RequirementsEditorMode::Preview;
+        state.preview_scroll = 0;
+        state.refresh_preview(80, 1);
+        let label = state
+            .preview()
+            .images
+            .iter()
+            .find_map(|(row, image)| matches!(image, EditorImageRow::Label { .. }).then_some(*row))
+            .expect("without pixels the image is a one-row label");
+        assert_eq!(state.preview_image_at(70, label), Some(path));
     }
 
     #[test]

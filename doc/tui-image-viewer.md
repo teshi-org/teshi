@@ -8,21 +8,38 @@ the capture that was last shown. `i` on a MindMap node opens the same viewer for
 browsing evidence by requirement structure. The viewer uses the newest replay
 run with captures for that scenario.
 
-In Explore the viewer covers the Scenarios and Steps panes and leaves the
-Features column visible; below 84 columns of tab width it covers the whole tab.
-On the MindMap tab it always covers the tab.
+Clicking an image opens the same viewer for that file: a sent image or its
+`▣` label in the AI chat transcript, an `[Image #N]` placeholder or `@path`
+mention in the composer, and an image in the Requirements preview.
+
+The viewer covers the whole terminal, including tabs, sidebars, and the
+footer, and fits the image into the largest box that keeps its aspect ratio.
+The `Close [Esc]` button sits on the viewer's top border, outside the image
+box, so a fitted image never hides it. While the viewer is open, clicks
+outside that button, pastes, and keys it does not use are ignored instead of
+reaching the tab beneath it. Ctrl+Q closes the viewer and then quits as usual,
+so an unsaved-changes confirmation is never hidden. A prompt that arrives
+while the viewer is open, such as an external file change or an agent
+proposal, waits beneath it; the viewer's footer says so, and otherwise repeats
+the latest status message. Closing returns to the same tab, scroll position,
+and draft. Without a pixel protocol the viewer still opens, explains why no
+pixels are drawn, and shows the file path. The `Web [w]` control on the top
+border opens the hosted Web UI in the host browser, where the replay captures
+are reviewable with WebGPU. Only files with an image extension
+open, because `o` hands the file to the operating system's default opener.
 
 | Key | Behavior |
 | --- | --- |
 | `j` / `k` | Next / previous captured step |
-| `+` / `=` / `-` | Increase / decrease magnification |
+| `+` / `=` / `-`, mouse wheel | Increase / decrease magnification |
 | `1` | View original pixels at 100 percent |
 | `0` / `f` | Fit the image and reset its center |
 | Arrow keys | Pan a zoomed view by a quarter viewport |
 | `h` / `l` | Pan horizontally |
 | Up / Down in fit view | Previous / next captured step |
 | `o` | Open the original in the operating system's viewer |
-| `i` / Esc | Close immediately, including during loading |
+| `w`, `Web [w]` | Open the hosted Web UI in the host browser |
+| `i` / Esc, `Close [Esc]` | Close immediately, including during loading |
 
 100 percent is measured in the terminal graphics protocol's virtual pixels;
 the terminal may scale those pixels for its font and display DPI. Use the

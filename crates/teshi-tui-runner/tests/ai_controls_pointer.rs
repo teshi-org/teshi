@@ -459,6 +459,9 @@ fn footer_and_threads(narrow: bool) {
         terminal.key("[").unwrap();
         terminal.key("]").unwrap();
         terminal.key("x").unwrap();
+        terminal.expect_text("Confirm close", true, 5000).unwrap();
+        terminal.key("y").unwrap();
+        terminal.expect_text("Confirm close", false, 5000).unwrap();
         fixture.capture(&terminal, "narrow-after-close");
         assert_eq!(accepted(&trace), before + 2, "expected one turn per thread");
     } else {
@@ -498,6 +501,8 @@ fn footer_and_threads(narrow: bool) {
         }
         fixture.click(&terminal, "Agent 2", "select-third");
         fixture.click(&terminal, "Close [x]", "close-third");
+        terminal.expect_text("Confirm close", true, 5000).unwrap();
+        fixture.click(&terminal, "Close [Enter/y]", "confirm-close-third");
         terminal.expect_text("Agent 2", false, 5000).unwrap();
     }
     fixture.click_footer(&terminal, "Blur", "blur");

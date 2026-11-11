@@ -334,6 +334,7 @@ mod tests {
         assert!(app.agent().backend.is_connected());
         assert!(!app.agents[0].backend.is_connected());
         app.handle_action(Action::AgentClose).unwrap();
+        app.handle_action(Action::DeleteConfirm).unwrap();
         assert!(app.ai_input_focused);
         assert!(app.agent().backend.is_connected());
         assert!(app.agent().messages().is_empty());
@@ -792,6 +793,7 @@ impl App {
 
     pub(crate) fn handle_acp_controls_key(&mut self, event: KeyEvent) -> bool {
         if self.pending_delete.is_some()
+            || self.screenshot.visible
             || self.quit_pending_confirm
             || self.ai_interrupt_confirm
             || self.authoring_ui.overlay_active()

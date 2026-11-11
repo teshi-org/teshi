@@ -265,8 +265,10 @@ class World:
             self.wait(lambda screen: "Screenshot " in self.header(screen))
         elif action == "explore_capture_ready":
             screen = self.ready("1/2", "a saved screenshot")
-            # Explore keeps its Features column outside the viewer.
-            assert "Features" in screen, screen
+            # The viewer covers the whole terminal, including the Features
+            # column, whose title is the only place showing the `[/]` search key.
+            assert self.header(screen).startswith("╭"), screen
+            assert "[/]" not in screen, screen
         elif action == "close_explore":
             self.key("Escape")
             self.wait(lambda screen: "Screenshot " not in screen and "Steps" in screen,
