@@ -1218,6 +1218,7 @@ mod tests {
             version: 2,
             store_id: Some(sample_store()),
             documents: vec![meta],
+            ..Default::default()
         }
     }
 

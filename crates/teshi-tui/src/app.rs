@@ -8966,6 +8966,19 @@ impl App {
                     self.authoring_ui.toggle_tag_choice();
                     Ok(())
                 }
+                Action::OverlayInsert(ch @ ('c' | 'f'))
+                    if matches!(
+                        self.authoring_ui.overlay,
+                        RequirementsOverlay::TagPicker { new_tag: None, .. }
+                    ) =>
+                {
+                    if ch == 'c' {
+                        self.authoring_ui.cycle_tag_color();
+                    } else {
+                        self.authoring_ui.toggle_tag_prefix();
+                    }
+                    Ok(())
+                }
                 Action::OverlayInsert(ch)
                     if matches!(
                         self.authoring_ui.overlay,
@@ -19947,6 +19960,63 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
             ["Login ui"]
+        );
+    }
+
+    #[test]
+    fn test_tag_picker_sets_color_and_prefix_for_tree_rows() {
+        use crate::authoring_tab::RequirementsOverlay;
+        use teshi_core::authoring::{RequirementTagColor, RequirementTagStyle};
+        let (mut app, _project, store) = requirements_test_app();
+        teshi_engine::add_requirement_documents_tags(store.path(), &["doc-1"], &["ui".into()])
+            .unwrap();
+        app.authoring_ui.reload_from_disk().unwrap();
+        select_requirement_row(&mut app, "req-doc:doc-1");
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert!(
+            matches!(
+                app.authoring_ui.overlay,
+                RequirementsOverlay::TagPicker { .. }
+            ),
+            "{:?}",
+            app.authoring_ui.overlay
+        );
+
+        // `c` steps none -> red -> green; `f` moves the tag before titles.
+        type_into_overlay(&mut app, "ccf");
+        let RequirementsOverlay::TagPicker { styles, .. } = &app.authoring_ui.overlay else {
+            panic!("picker stays open while styling");
+        };
+        let expected = RequirementTagStyle {
+            color: Some(RequirementTagColor::Green),
+            prefix: true,
+        };
+        assert_eq!(styles.get("ui"), Some(&expected));
+
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert_eq!(
+            app.authoring_ui.overlay,
+            RequirementsOverlay::None,
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            teshi_engine::read_requirement_tag_styles(store.path()).unwrap()["ui"],
+            expected
+        );
+        let index = &app.authoring_ui.artifacts.as_ref().unwrap().index;
+        let doc = index.documents.iter().find(|d| d.id == "doc-1").unwrap();
+        assert_eq!(
+            crate::authoring_tab::requirement_document_tree_label(doc, &index.tag_styles),
+            "#ui Req"
+        );
+        assert_eq!(
+            doc.tags.iter().cloned().collect::<Vec<_>>(),
+            ["ui"],
+            "styling a tag keeps the document's tag set"
         );
     }
 

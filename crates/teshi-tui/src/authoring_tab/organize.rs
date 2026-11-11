@@ -4,11 +4,11 @@
 //! query edits use typed forms and reload the organization file before writing, so a
 //! stale in-memory snapshot never overwrites edits made by the CLI or another window.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use teshi_core::authoring::{
     RequirementDocumentMeta, RequirementGroupMode, RequirementProjectFilter,
-    RequirementProjectStatus, normalize_tag_name,
+    RequirementProjectStatus, RequirementTagColor, RequirementTagStyle, normalize_tag_name,
 };
 use teshi_engine::organization::{
     RequirementOrganization, format_requirement_condition, load_requirement_organization,
@@ -17,7 +17,7 @@ use teshi_engine::organization::{
 use tui_tree_widget::TreeItem;
 
 use super::{
-    AuthoringUiState, RequirementsOverlay, TREE_DOC_PREFIX, requirement_document_tree_label,
+    AuthoringUiState, RequirementsOverlay, TREE_DOC_PREFIX, requirement_document_tree_line,
 };
 
 /// Tree node of the implicit Inbox (documents without a manual folder).
@@ -436,10 +436,56 @@ impl AuthoringUiState {
             document_id: id.clone(),
             options: index.discovered_tags(),
             checked: document.tags.clone(),
+            styles: index.tag_styles.clone(),
+            edited: BTreeSet::new(),
             selection: 0,
             new_tag: None,
         };
         Ok(())
+    }
+
+    /// Advances the highlighted tag's draft color: none, then each named color.
+    pub fn cycle_tag_color(&mut self) {
+        self.edit_highlighted_tag_style(|style| {
+            let next = match style.color {
+                None => Some(0),
+                Some(color) => RequirementTagColor::ALL
+                    .iter()
+                    .position(|candidate| *candidate == color)
+                    .map(|position| position + 1)
+                    .filter(|position| *position < RequirementTagColor::ALL.len()),
+            };
+            style.color = next.map(|position| RequirementTagColor::ALL[position]);
+        });
+    }
+
+    /// Toggles whether the highlighted tag shows before titles in the draft.
+    pub fn toggle_tag_prefix(&mut self) {
+        self.edit_highlighted_tag_style(|style| style.prefix = !style.prefix);
+    }
+
+    /// Edits the draft style of the highlighted tag row; the "New tag…" row and an
+    /// open name field are ignored. Default settings are dropped from the draft.
+    fn edit_highlighted_tag_style(&mut self, edit: impl FnOnce(&mut RequirementTagStyle)) {
+        if let RequirementsOverlay::TagPicker {
+            options,
+            styles,
+            edited,
+            selection,
+            new_tag: None,
+            ..
+        } = &mut self.overlay
+            && let Some(tag) = options.get(*selection)
+        {
+            let mut style = styles.get(tag).copied().unwrap_or_default();
+            edit(&mut style);
+            if style.is_default() {
+                styles.remove(tag);
+            } else {
+                styles.insert(tag.clone(), style);
+            }
+            edited.insert(tag.clone());
+        }
     }
 
     /// Checks or unchecks the highlighted tag, ignoring the "New tag…" row.
@@ -474,6 +520,8 @@ impl AuthoringUiState {
             document_id,
             options,
             checked,
+            styles,
+            edited,
             selection,
             new_tag,
         } = self.overlay.clone()
@@ -507,12 +555,23 @@ impl AuthoringUiState {
             return Ok(String::new());
         }
         let tags: Vec<String> = checked.into_iter().collect();
-        let index = teshi_engine::set_requirement_documents_tags(
+        let mut index = teshi_engine::set_requirement_documents_tags(
             &self.requirements_root,
             &[&document_id],
             &tags,
         )
         .map_err(|err| err.to_string())?;
+        let changed: Vec<(String, RequirementTagStyle)> = edited
+            .into_iter()
+            .map(|tag| {
+                let style = styles.get(&tag).copied().unwrap_or_default();
+                (tag, style)
+            })
+            .collect();
+        if !changed.is_empty() {
+            index = teshi_engine::set_requirement_tag_styles(&self.requirements_root, &changed)
+                .map_err(|err| err.to_string())?;
+        }
         let saved = index
             .documents
             .iter()
@@ -520,6 +579,7 @@ impl AuthoringUiState {
             .map(|doc| doc.tags.clone())
             .unwrap_or_default();
         if let Some(artifacts) = self.artifacts.as_mut() {
+            artifacts.index.tag_styles = index.tag_styles;
             if let Some(meta) = artifacts
                 .index
                 .documents
@@ -849,7 +909,12 @@ impl AuthoringUiState {
                     let _ = shown.add_documents(folder, std::slice::from_ref(id));
                 }
                 let docs = self.project_view_documents();
-                let (items, labels) = build_organization_tree(&docs, &shown, project);
+                let styles = self
+                    .artifacts
+                    .as_ref()
+                    .map(|artifacts| artifacts.index.tag_styles.clone())
+                    .unwrap_or_default();
+                let (items, labels) = build_organization_tree(&docs, &shown, project, &styles);
                 self.tree_items = items;
                 self.tree_labels = labels;
                 self.organization = Some(org);
@@ -892,11 +957,13 @@ pub(super) fn build_organization_tree(
     docs: &[RequirementDocumentMeta],
     org: &RequirementOrganization,
     project: &str,
+    styles: &BTreeMap<String, RequirementTagStyle>,
 ) -> (Vec<TreeItem<'static, String>>, HashMap<String, String>) {
     let mut builder = OrganizationTreeBuilder {
         docs,
         org,
         project,
+        styles,
         labels: HashMap::new(),
     };
     let inbox: Vec<_> = docs
@@ -925,6 +992,7 @@ struct OrganizationTreeBuilder<'a> {
     docs: &'a [RequirementDocumentMeta],
     org: &'a RequirementOrganization,
     project: &'a str,
+    styles: &'a BTreeMap<String, RequirementTagStyle>,
     labels: HashMap<String, String>,
 }
 
@@ -936,9 +1004,12 @@ impl OrganizationTreeBuilder<'_> {
             _ => "",
         };
         let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
-        let label = format!("{}{state}", requirement_document_tree_label(doc));
-        self.labels.insert(id.clone(), label.clone());
-        TreeItem::new_leaf(id, label)
+        let mut line = requirement_document_tree_line(doc, self.styles);
+        if !state.is_empty() {
+            line.push_span(state);
+        }
+        self.labels.insert(id.clone(), line.to_string());
+        TreeItem::new_leaf(id, line)
     }
 
     fn node(

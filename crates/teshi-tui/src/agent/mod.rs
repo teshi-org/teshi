@@ -2422,6 +2422,7 @@ mod pipeline_gate_tests {
             version: 2,
             store_id: Some(store_id.clone()),
             documents: vec![meta.clone()],
+            ..Default::default()
         };
         teshi_engine::save_requirement_document_index(&app.requirements_root, &index)
             .expect("persist store");

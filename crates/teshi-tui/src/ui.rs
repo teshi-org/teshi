@@ -5381,11 +5381,15 @@ fn render_requirements_tree(
             } else if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
                 ui.artifacts
                     .as_ref()
-                    .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
-                    .map(|d| {
-                        UnicodeWidthStr::width(
-                            crate::authoring_tab::requirement_document_tree_label(d).as_str(),
-                        )
+                    .and_then(|a| {
+                        let doc = a.index.documents.iter().find(|d| d.id == doc_id)?;
+                        Some(UnicodeWidthStr::width(
+                            crate::authoring_tab::requirement_document_tree_label(
+                                doc,
+                                &a.index.tag_styles,
+                            )
+                            .as_str(),
+                        ))
                     })
                     .unwrap_or(0)
             } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
@@ -6250,8 +6254,10 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             document_id,
             options,
             checked,
+            styles,
             selection,
             new_tag,
+            ..
         } => {
             let title = app
                 .authoring_ui
@@ -6287,7 +6293,32 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                         Style::default()
                     };
                     let mark = if checked.contains(tag) { "[x]" } else { "[ ]" };
-                    Line::styled(format!("  {mark} #{tag}"), style)
+                    let tag_style = styles.get(tag).copied().unwrap_or_default();
+                    // Preview the tree rendering: a chip before titles, colored text after.
+                    let label = format!("#{tag}");
+                    let tag_span = match (tag_style.prefix, tag_style.color) {
+                        (true, color) => {
+                            theme::chip(label, color.map_or(theme::ACCENT, theme::tag_color))
+                        }
+                        (false, Some(color)) => {
+                            Span::styled(label, Style::default().fg(theme::tag_color(color)))
+                        }
+                        (false, None) => Span::raw(label),
+                    };
+                    let mut spans = vec![Span::raw(format!("  {mark} ")), tag_span];
+                    if !tag_style.is_default() {
+                        let color = tag_style.color.map_or("no color", |color| color.as_str());
+                        let position = if tag_style.prefix {
+                            "before title"
+                        } else {
+                            "after title"
+                        };
+                        spans.push(Span::styled(
+                            format!("  {color} · {position}"),
+                            theme::muted(),
+                        ));
+                    }
+                    Line::from(spans).style(style)
                 },
             ));
             let new_row = options.len();
@@ -6332,6 +6363,8 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             } else {
                 &[
                     (" Toggle [Space]", Action::OverlayInsert(' ')),
+                    (" Color [c]", Action::OverlayInsert('c')),
+                    (" Front [f]", Action::OverlayInsert('f')),
                     (" Save [Enter]", Action::OverlayConfirm),
                     (" Cancel [Esc]", Action::OverlayCancel),
                 ]

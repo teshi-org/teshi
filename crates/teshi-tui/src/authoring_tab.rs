@@ -3,7 +3,7 @@
 mod organize;
 pub use organize::{CursorMotion, LineInput, MenuCommand, OrganizationForm, TreeTarget};
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -13,10 +13,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
-    RequirementGroupMode, RequirementIterationFilter, RequirementPriority, ResolutionState,
-    ReviewState, TestPoint, TextRange, UNASSIGNED_ITERATION_LABEL, create_requirement_link,
-    line_col_range_to_char_range, mark_document_links_missing, re_resolve_document_links,
-    requirement_title,
+    RequirementGroupMode, RequirementIterationFilter, RequirementPriority, RequirementTagStyle,
+    ResolutionState, ReviewState, TestPoint, TextRange, UNASSIGNED_ITERATION_LABEL,
+    create_requirement_link, line_col_range_to_char_range, mark_document_links_missing,
+    re_resolve_document_links, requirement_title,
 };
 use teshi_engine::{
     compute_document_revision, delete_requirement_document, initialize_requirement_store,
@@ -120,6 +120,11 @@ pub enum RequirementsOverlay {
         options: Vec<String>,
         /// Tags the requirement will carry after saving.
         checked: BTreeSet<String>,
+        /// Draft display settings for every option, saved together with `checked`.
+        styles: BTreeMap<String, RequirementTagStyle>,
+        /// Tags whose settings were changed in this picker; only these are written,
+        /// so settings another process changed meanwhile survive the save.
+        edited: BTreeSet<String>,
         /// Highlighted row: `options.len()` is the "New tag…" row.
         selection: usize,
         /// Buffer of the inline new-tag field; `Some` while that row accepts text.
@@ -2600,6 +2605,7 @@ fn collect_visible_requirement_rows(
 fn build_path_tree(
     documents: &[RequirementDocumentMeta],
     dir_prefix: &str,
+    styles: &BTreeMap<String, RequirementTagStyle>,
 ) -> Vec<TreeItem<'static, String>> {
     #[derive(Default)]
     struct DirNode {
@@ -2627,6 +2633,7 @@ fn build_path_tree(
         path: String,
         node: &DirNode,
         dir_prefix: &str,
+        styles: &BTreeMap<String, RequirementTagStyle>,
     ) -> Vec<TreeItem<'static, String>> {
         let mut items = Vec::new();
         for (name, child) in node.children.iter() {
@@ -2636,18 +2643,18 @@ fn build_path_tree(
                 format!("{path}/{name}")
             };
             let id = format!("{TREE_DIR_PREFIX}{dir_prefix}{child_path}");
-            let child_items = dir_to_items(child_path, child, dir_prefix);
+            let child_items = dir_to_items(child_path, child, dir_prefix, styles);
             items.push(TreeItem::new(id, name.clone(), child_items).unwrap());
         }
         for doc in &node.documents {
-            let label = requirement_document_tree_label(doc);
+            let label = requirement_document_tree_line(doc, styles);
             let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
             items.push(TreeItem::new(id, label, Vec::new()).unwrap());
         }
         items
     }
 
-    dir_to_items(String::new(), &root, dir_prefix)
+    dir_to_items(String::new(), &root, dir_prefix, styles)
 }
 
 /// Builds folder/document tree items from indexed paths after applying filter/group.
@@ -2662,8 +2669,9 @@ pub fn build_requirement_tree(
         .filter(|doc| doc.matches_iteration_filter(filter))
         .cloned()
         .collect();
+    let styles = &index.tag_styles;
     match group {
-        RequirementGroupMode::Path => build_path_tree(&docs, ""),
+        RequirementGroupMode::Path => build_path_tree(&docs, "", styles),
         RequirementGroupMode::Iteration => {
             let mut named: std::collections::BTreeMap<String, Vec<RequirementDocumentMeta>> =
                 std::collections::BTreeMap::new();
@@ -2676,12 +2684,12 @@ pub fn build_requirement_tree(
             }
             let mut items = Vec::new();
             for (name, group_docs) in named {
-                let child = build_path_tree(&group_docs, &format!("{name}/"));
+                let child = build_path_tree(&group_docs, &format!("{name}/"), styles);
                 items
                     .push(TreeItem::new(format!("{TREE_ITER_PREFIX}{name}"), name, child).unwrap());
             }
             if !unassigned.is_empty() {
-                let child = build_path_tree(&unassigned, "unassigned/");
+                let child = build_path_tree(&unassigned, "unassigned/", styles);
                 items.push(
                     TreeItem::new(
                         format!("{TREE_ITER_PREFIX}{UNASSIGNED_ITERATION_LABEL}"),
@@ -2696,35 +2704,64 @@ pub fn build_requirement_tree(
     }
 }
 
-/// Display label for a requirement document: optional priority badge, then tags.
-pub fn requirement_document_tree_label(doc: &RequirementDocumentMeta) -> String {
+/// Styled tree row for a requirement document.
+///
+/// Layout: optional priority, prefix-tag chips, title, then plain `#tag`
+/// suffixes and a `+N` count of tags that did not fit. Prefix tags come first
+/// so horizontal clipping on narrow panes cuts the title, never the badges.
+pub fn requirement_document_tree_line(
+    doc: &RequirementDocumentMeta,
+    styles: &BTreeMap<String, RequirementTagStyle>,
+) -> Line<'static> {
+    // Two badges fit on each side of a title; the rest stay one keystroke away in Tags….
+    const VISIBLE_PREFIX_TAGS: usize = 2;
+    const VISIBLE_SUFFIX_TAGS: usize = 2;
+    let style_of = |tag: &str| styles.get(tag).copied().unwrap_or_default();
     let title = if doc.title.trim().is_empty() {
         doc.path.as_str()
     } else {
         doc.title.as_str()
     };
-    let mut label = match doc.priority {
-        Some(priority) => format!("[{priority}] {title}"),
-        None => title.to_string(),
-    };
-    if !doc.tags.is_empty() {
-        // Two badges fit beside a title; the rest stay one keystroke away in Tags….
-        const VISIBLE_TAGS: usize = 2;
-        let mut tags = doc
-            .tags
-            .iter()
-            .take(VISIBLE_TAGS)
-            .map(|tag| format!("#{tag}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let hidden = doc.tags.len().saturating_sub(VISIBLE_TAGS);
-        if hidden > 0 {
-            tags.push_str(&format!(" +{hidden}"));
-        }
-        label.push_str("  ");
-        label.push_str(&tags);
+    let mut spans = Vec::new();
+    if let Some(priority) = doc.priority {
+        spans.push(Span::raw(format!("[{priority}] ")));
     }
-    label
+    // `tags` is a BTreeSet, so both groups are already sorted by name.
+    let (prefix, suffix): (Vec<&String>, Vec<&String>) =
+        doc.tags.iter().partition(|tag| style_of(tag).prefix);
+    for tag in prefix.iter().take(VISIBLE_PREFIX_TAGS) {
+        let bg = style_of(tag).color.map_or(theme::ACCENT, theme::tag_color);
+        spans.push(theme::chip(format!("#{tag}"), bg));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::raw(title.to_string()));
+    let shown_suffix: Vec<&String> = suffix.into_iter().take(VISIBLE_SUFFIX_TAGS).collect();
+    let hidden = doc.tags.len() - prefix.len().min(VISIBLE_PREFIX_TAGS) - shown_suffix.len();
+    if !shown_suffix.is_empty() || hidden > 0 {
+        spans.push(Span::raw("  "));
+    }
+    for (position, tag) in shown_suffix.iter().enumerate() {
+        if position > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let style = style_of(tag).color.map_or_else(Style::default, |color| {
+            Style::default().fg(theme::tag_color(color))
+        });
+        spans.push(Span::styled(format!("#{tag}"), style));
+    }
+    if hidden > 0 {
+        let gap = if shown_suffix.is_empty() { "" } else { " " };
+        spans.push(Span::raw(format!("{gap}+{hidden}")));
+    }
+    Line::from(spans)
+}
+
+/// Plain text of [`requirement_document_tree_line`], used for width measurement.
+pub fn requirement_document_tree_label(
+    doc: &RequirementDocumentMeta,
+    styles: &BTreeMap<String, RequirementTagStyle>,
+) -> String {
+    requirement_document_tree_line(doc, styles).to_string()
 }
 
 /// Status indicator for a test point row.
@@ -2793,6 +2830,8 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+    // Aliased because the page color budget counts raw color paths by substring.
+    use teshi_core::authoring::RequirementTagColor as TagHue;
     use teshi_core::authoring::{AuthoringArtifacts, RequirementDocumentIndex};
 
     fn preview_text(state: &AuthoringUiState) -> Vec<String> {
@@ -3004,6 +3043,41 @@ mod tests {
     }
 
     #[test]
+    fn external_tag_style_change_reloads_the_tree_styles() {
+        let store = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        let meta = teshi_engine::create_requirement_document(
+            store.path(),
+            "# Login\n",
+            None,
+            None,
+            &["ui".to_string()],
+            None,
+        )
+        .unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+
+        teshi_engine::update_requirement_tag_style(
+            store.path(),
+            "ui",
+            teshi_engine::RequirementTagStylePatch {
+                color: Some(Some(TagHue::Cyan)),
+                prefix: Some(true),
+            },
+        )
+        .unwrap();
+        state.last_store_check = None;
+        assert!(state.poll_external_store_changes().unwrap());
+        let index = &state.artifacts.as_ref().unwrap().index;
+        let doc = index.documents.iter().find(|d| d.id == meta.id).unwrap();
+        assert_eq!(
+            requirement_document_tree_label(doc, &index.tag_styles),
+            "#ui Login"
+        );
+    }
+
+    #[test]
     fn external_organization_refresh_preserves_dirty_markdown_and_reports_invalid_json() {
         use teshi_engine::organization::*;
         let store = tempdir().unwrap();
@@ -3075,7 +3149,8 @@ mod tests {
                 teshi_core::authoring::RequirementProjectStatus::Implemented,
             )),
         });
-        let (tree, labels) = organize::build_organization_tree(&index.documents, &org, project);
+        let (tree, labels) =
+            organize::build_organization_tree(&index.documents, &org, project, &index.tag_styles);
         assert_eq!(tree.len(), 3, "Inbox, the AI folder, and Saved queries");
         assert_eq!(tree[0].identifier(), organize::TREE_INBOX_NODE);
         assert_eq!(tree[2].identifier(), organize::TREE_QUERIES_NODE);
@@ -3096,6 +3171,96 @@ mod tests {
         assert_eq!(labels[query.identifier()], "Implemented (1)");
         assert_eq!(query.children()[0].identifier(), "req-doc:one");
         assert_eq!(labels["req-doc:one"], "One · implemented");
+    }
+
+    fn tagged_doc(tags: &[&str]) -> RequirementDocumentMeta {
+        let mut doc = RequirementDocumentMeta::new(
+            "doc",
+            "doc.md",
+            "Login",
+            teshi_core::authoring::DocumentRevision::new("r"),
+        );
+        doc.priority = Some(RequirementPriority::P1);
+        doc.tags = tags.iter().map(|tag| tag.to_string()).collect();
+        doc
+    }
+
+    fn tag_styles(
+        entries: &[(&str, Option<TagHue>, bool)],
+    ) -> BTreeMap<String, RequirementTagStyle> {
+        entries
+            .iter()
+            .map(|(tag, color, prefix)| {
+                (
+                    tag.to_string(),
+                    RequirementTagStyle {
+                        color: *color,
+                        prefix: *prefix,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tree_line_without_styles_keeps_plain_suffix_tags() {
+        let doc = tagged_doc(&["a", "b", "c"]);
+        assert_eq!(
+            requirement_document_tree_label(&doc, &BTreeMap::new()),
+            "[P1] Login  #a #b +1"
+        );
+    }
+
+    #[test]
+    fn tree_line_puts_prefix_tags_before_the_title_as_colored_chips() {
+        let doc = tagged_doc(&["auth", "login", "ui"]);
+        let styles = tag_styles(&[
+            ("ui", Some(TagHue::Red), true),
+            ("auth", None, true),
+            ("login", Some(TagHue::Green), false),
+        ]);
+        let line = requirement_document_tree_line(&doc, &styles);
+        assert_eq!(line.to_string(), "[P1] #auth #ui Login  #login");
+        let span = |text: &str| {
+            line.spans
+                .iter()
+                .find(|span| span.content == text)
+                .unwrap_or_else(|| panic!("missing span {text}: {line:?}"))
+                .style
+        };
+        assert_eq!(span("#ui").bg, Some(theme::ERROR), "colored prefix chip");
+        assert_eq!(
+            span("#auth").bg,
+            Some(theme::ACCENT),
+            "uncolored prefix chip"
+        );
+        assert_eq!(
+            span("#login").fg,
+            Some(theme::SUCCESS),
+            "colored suffix text"
+        );
+        assert_eq!(span("#login").bg, None, "suffix tags are not chips");
+    }
+
+    #[test]
+    fn tree_line_caps_prefix_tags_and_counts_the_overflow() {
+        let doc = tagged_doc(&["a", "b", "c", "d"]);
+        let styles = tag_styles(&[("a", None, true), ("b", None, true), ("c", None, true)]);
+        assert_eq!(
+            requirement_document_tree_label(&doc, &styles),
+            "[P1] #a #b Login  #d +1",
+            "the third prefix tag (sorted by name) joins the +N count"
+        );
+        let all_prefix = tag_styles(&[
+            ("a", None, true),
+            ("b", None, true),
+            ("c", None, true),
+            ("d", None, true),
+        ]);
+        assert_eq!(
+            requirement_document_tree_label(&doc, &all_prefix),
+            "[P1] #a #b Login  +2"
+        );
     }
 
     #[test]
@@ -3119,6 +3284,7 @@ mod tests {
                     teshi_core::authoring::DocumentRevision::new("r2"),
                 ),
             ],
+            ..Default::default()
         };
         let items = build_requirement_tree(
             &index,
@@ -3144,6 +3310,7 @@ mod tests {
                     "Req",
                     teshi_core::authoring::DocumentRevision::new("rev"),
                 )],
+                ..Default::default()
             },
             documents: vec![teshi_core::authoring::RequirementDocumentContent {
                 meta: RequirementDocumentMeta::new(
@@ -3517,6 +3684,7 @@ mod tests {
                 version: 2,
                 store_id: Some(store_id),
                 documents: vec![sprint.clone(), unassigned.clone()],
+                ..Default::default()
             },
             documents: vec![
                 teshi_core::authoring::RequirementDocumentContent {
@@ -3901,7 +4069,12 @@ mod tests {
             .find(|doc| doc.id == id)
             .unwrap();
         assert_eq!(meta.priority, Some(RequirementPriority::P1));
-        assert!(format!("{:?}", state.tree_items).contains("[P1] Priority"));
+        // The priority badge is its own span, so prefix-tag chips can sit before the title.
+        let tree = format!("{:?}", state.tree_items);
+        assert!(
+            tree.contains("[P1] ") && tree.contains("Priority"),
+            "{tree}"
+        );
         assert_eq!(
             teshi_engine::read_requirement_document(store.path(), &id)
                 .unwrap()

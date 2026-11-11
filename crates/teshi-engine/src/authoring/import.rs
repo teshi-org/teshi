@@ -615,6 +615,7 @@ mod tests {
             version: 1,
             store_id: None,
             documents: Vec::new(),
+            ..Default::default()
         };
         for (id, path, body) in docs {
             if let Some(parent) = req.join(path).parent() {

@@ -32,6 +32,10 @@ and never changes stored state.
   Space toggles, Enter on **New tag…** opens an inline field (Enter commits the name),
   and Enter on a tag row saves. Tags are flat, free-form, case-sensitive, and belong to
   the document itself, so they apply to every project and work in All projects scope.
+  On a tag row, `c` cycles its color (none, red, green, blue, yellow, magenta, cyan,
+  gray) and `f` toggles showing it as a badge before titles; Enter saves these display
+  settings together with the checked set. Display settings are global, like tags. Up to
+  two prefix badges show per row, sorted by name; the rest join the `+N` count.
 - **New folder…** creates the name below the selected folder (or at the root from
   Inbox). `Chat/Archive` creates nested folders.
 - **New requirement here** (or Ctrl+N with a folder selected) files the draft in that

@@ -1,6 +1,6 @@
 //! Document-id oriented requirement-store facade shared by CLI and other hosts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,10 @@ use anyhow::Context;
 use teshi_core::authoring::{
     normalize_iteration_name, normalize_tag_name, requirement_title,
     resolve_requirement_store_path, InvalidIterationName, InvalidRequirementPriority,
-    InvalidRequirementTitle, InvalidTagName, RequirementDocumentContent, RequirementDocumentIndex,
-    RequirementDocumentMeta, RequirementIterationFilter, RequirementPriority, RequirementStoreId,
+    InvalidRequirementTagColor, InvalidRequirementTitle, InvalidTagName,
+    RequirementDocumentContent, RequirementDocumentIndex, RequirementDocumentMeta,
+    RequirementIterationFilter, RequirementPriority, RequirementStoreId, RequirementTagColor,
+    RequirementTagStyle,
 };
 
 use super::store::{
@@ -90,6 +92,8 @@ pub enum RequirementStoreError {
     InvalidIterationName(InvalidIterationName),
     /// Tag name failed validation.
     InvalidTagName(InvalidTagName),
+    /// Tag color name is not one of the named colors.
+    InvalidTagColor(InvalidRequirementTagColor),
     /// Priority label failed validation.
     InvalidPriority(InvalidRequirementPriority),
     /// Markdown lacks a non-empty first-line H1 title.
@@ -121,6 +125,7 @@ impl RequirementStoreError {
             Self::RevisionConflict { .. } => "revision_conflict",
             Self::InvalidIterationName(_) => "invalid_iteration_name",
             Self::InvalidTagName(_) => "invalid_tag_name",
+            Self::InvalidTagColor(_) => "invalid_tag_color",
             Self::InvalidPriority(_) => "invalid_requirement_priority",
             Self::InvalidTitle(_) => "invalid_requirement_title",
             Self::PriorityConflict { .. } => "priority_conflict",
@@ -172,6 +177,7 @@ impl fmt::Display for RequirementStoreError {
             ),
             Self::InvalidIterationName(err) => write!(f, "{err}"),
             Self::InvalidTagName(err) => write!(f, "{err}"),
+            Self::InvalidTagColor(err) => write!(f, "{err}"),
             Self::InvalidPriority(err) => write!(f, "{err}"),
             Self::InvalidTitle(err) => write!(f, "{err}"),
             Self::PriorityConflict {
@@ -197,6 +203,7 @@ impl std::error::Error for RequirementStoreError {
         match self {
             Self::InvalidIterationName(err) => Some(err),
             Self::InvalidTagName(err) => Some(err),
+            Self::InvalidTagColor(err) => Some(err),
             Self::InvalidPriority(err) => Some(err),
             Self::InvalidTitle(err) => Some(err),
             Self::Io(err) => Some(err.as_ref()),
@@ -724,6 +731,119 @@ fn mutate_requirement_document_tags(
         for position in positions {
             edit(&mut index.documents[position].tags);
         }
+        write_requirement_index_unlocked(requirements_root, &index)
+            .map_err(RequirementStoreError::from)?;
+        Ok(index)
+    })
+}
+
+/// Field-wise change to one tag's display settings.
+///
+/// `None` keeps the stored value, so callers change only what they name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequirementTagStylePatch {
+    /// New color, where `Some(None)` removes the color.
+    pub color: Option<Option<RequirementTagColor>>,
+    /// New prefix setting.
+    pub prefix: Option<bool>,
+}
+
+/// Applies `patch` to the display settings of `tag` and returns the new index.
+///
+/// The tag does not have to be in use yet, so settings can be prepared before
+/// tagging documents. Settings equal to the default are removed from the index.
+/// Only the shared index is written; document revisions are untouched.
+///
+/// # Errors
+///
+/// Returns a store or invalid-tag error.
+pub fn update_requirement_tag_style(
+    requirements_root: &Path,
+    tag: &str,
+    patch: RequirementTagStylePatch,
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    let tag = normalize_tag_name(tag).map_err(RequirementStoreError::InvalidTagName)?;
+    mutate_requirement_tag_styles(requirements_root, |index| {
+        let mut style = index.tag_style(&tag);
+        if let Some(color) = patch.color {
+            style.color = color;
+        }
+        if let Some(prefix) = patch.prefix {
+            style.prefix = prefix;
+        }
+        store_tag_style(index, tag.clone(), style);
+    })
+}
+
+/// Restores the default suffix display of `tag`; unset tags are ignored.
+///
+/// # Errors
+///
+/// Returns a store or invalid-tag error.
+pub fn clear_requirement_tag_style(
+    requirements_root: &Path,
+    tag: &str,
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    let tag = normalize_tag_name(tag).map_err(RequirementStoreError::InvalidTagName)?;
+    mutate_requirement_tag_styles(requirements_root, |index| {
+        index.tag_styles.remove(&tag);
+    })
+}
+
+/// Replaces the display settings of every listed tag under one store lock.
+///
+/// Tags not listed keep their settings. All names are validated before any
+/// write, so one bad name leaves the store unchanged.
+///
+/// # Errors
+///
+/// Returns a store or invalid-tag error.
+pub fn set_requirement_tag_styles(
+    requirements_root: &Path,
+    styles: &[(String, RequirementTagStyle)],
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    let normalized = styles
+        .iter()
+        .map(|(tag, style)| {
+            normalize_tag_name(tag)
+                .map(|tag| (tag, *style))
+                .map_err(RequirementStoreError::InvalidTagName)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    mutate_requirement_tag_styles(requirements_root, |index| {
+        for (tag, style) in &normalized {
+            store_tag_style(index, tag.clone(), *style);
+        }
+    })
+}
+
+/// Reads the display settings of every tag that has non-default settings.
+///
+/// # Errors
+///
+/// Returns a store error when the index is missing or unreadable.
+pub fn read_requirement_tag_styles(
+    requirements_root: &Path,
+) -> Result<BTreeMap<String, RequirementTagStyle>, RequirementStoreError> {
+    Ok(require_initialized_index(requirements_root)?.tag_styles)
+}
+
+/// Records `style`, dropping default settings so the index lists only real changes.
+fn store_tag_style(index: &mut RequirementDocumentIndex, tag: String, style: RequirementTagStyle) {
+    if style.is_default() {
+        index.tag_styles.remove(&tag);
+    } else {
+        index.tag_styles.insert(tag, style);
+    }
+}
+
+fn mutate_requirement_tag_styles(
+    requirements_root: &Path,
+    edit: impl FnOnce(&mut RequirementDocumentIndex),
+) -> Result<RequirementDocumentIndex, RequirementStoreError> {
+    with_store_lock(requirements_root, || {
+        let mut index = require_initialized_index(requirements_root)?;
+        edit(&mut index);
         write_requirement_index_unlocked(requirements_root, &index)
             .map_err(RequirementStoreError::from)?;
         Ok(index)
@@ -1453,5 +1573,92 @@ mod tests {
             .unwrap()
             .tags
             .is_empty());
+    }
+
+    #[test]
+    fn tag_style_patch_changes_only_named_fields_and_keeps_revisions() {
+        let store = tempfile::tempdir().unwrap();
+        let before = seed_store(store.path());
+
+        let colored = update_requirement_tag_style(
+            store.path(),
+            " ui ",
+            RequirementTagStylePatch {
+                color: Some(Some(RequirementTagColor::Red)),
+                prefix: Some(true),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            colored.tag_style("ui"),
+            RequirementTagStyle {
+                color: Some(RequirementTagColor::Red),
+                prefix: true
+            }
+        );
+        let revisions = |index: &RequirementDocumentIndex| {
+            index
+                .documents
+                .iter()
+                .map(|doc| doc.revision.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(revisions(&colored), revisions(&before));
+
+        // A prefix-only patch keeps the color, and repeating it changes nothing.
+        let patch = RequirementTagStylePatch {
+            prefix: Some(false),
+            ..Default::default()
+        };
+        let first = update_requirement_tag_style(store.path(), "ui", patch).unwrap();
+        let second = update_requirement_tag_style(store.path(), "ui", patch).unwrap();
+        assert_eq!(first.tag_styles, second.tag_styles);
+        assert_eq!(second.tag_style("ui").color, Some(RequirementTagColor::Red));
+
+        // Removing the last non-default field drops the entry entirely.
+        let plain = update_requirement_tag_style(
+            store.path(),
+            "ui",
+            RequirementTagStylePatch {
+                color: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(plain.tag_styles.is_empty());
+    }
+
+    #[test]
+    fn clearing_and_batch_setting_tag_styles() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let styled = RequirementTagStyle {
+            color: Some(RequirementTagColor::Blue),
+            prefix: true,
+        };
+        let set = set_requirement_tag_styles(
+            store.path(),
+            &[("auth".into(), styled), ("ui".into(), styled)],
+        )
+        .unwrap();
+        assert_eq!(set.tag_styles.len(), 2);
+
+        let cleared = clear_requirement_tag_style(store.path(), "auth").unwrap();
+        assert!(cleared.tag_style("auth").is_default());
+        assert_eq!(cleared.tag_style("ui"), styled);
+        // Clearing an unset tag is not an error.
+        clear_requirement_tag_style(store.path(), "never-set").unwrap();
+
+        let invalid = set_requirement_tag_styles(
+            store.path(),
+            &[("ok".into(), styled), ("  ".into(), styled)],
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code(), "invalid_tag_name");
+        let after = require_initialized_index(store.path()).unwrap();
+        assert!(
+            after.tag_style("ok").is_default(),
+            "a bad name in the batch must leave every tag unchanged"
+        );
     }
 }
