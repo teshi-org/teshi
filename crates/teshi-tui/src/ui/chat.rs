@@ -741,8 +741,10 @@ pub(super) fn render_chat_panel(
             .unwrap_or_default();
         frame.render_widget(
             Paragraph::new(Line::styled(
-                activity_summary(
-                    &format!("Queued {count}: {preview} · /unqueue to edit · {state}"),
+                queue_summary(
+                    count,
+                    &preview,
+                    state,
                     inner.width.saturating_sub(1) as usize,
                 ),
                 fg(theme::WARNING),
@@ -1883,6 +1885,22 @@ fn activity_summary(text: &str, width: usize) -> String {
     result
 }
 
+/// Fits the queued-message line, clipping the message preview before the hints.
+///
+/// The trailing state tells the user how to resume a paused queue, so it must
+/// survive narrow chat panels; the preview is the least useful part.
+fn queue_summary(count: usize, preview: &str, state: &str, width: usize) -> String {
+    let prefix = format!("Queued {count}: ");
+    let tail = format!(" · /unqueue to edit · {state}");
+    let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+    let budget = width.saturating_sub(prefix.width() + tail.width());
+    // Without room for one preview cell plus its ellipsis, clip the whole line.
+    if budget < 2 {
+        return activity_summary(&format!("{prefix}{preview}{tail}"), width);
+    }
+    format!("{prefix}{}{tail}", activity_summary(&preview, budget))
+}
+
 /// Keep failure and interruption outcomes visible before clipping less useful details.
 fn fit_activity_header(prefix: &str, summary: &str, width: usize) -> String {
     let (body, tail) = summary.split(" · ").fold(
@@ -2753,6 +2771,24 @@ mod tests {
             tool_call_id: None,
             activity: None,
         }
+    }
+
+    #[test]
+    fn test_queue_summary_clips_the_preview_before_the_resume_hint() {
+        let hint = "send a message to resume";
+        let full = queue_summary(1, "KEEP_THIS_FOLLOWUP", hint, 200);
+        assert_eq!(
+            full,
+            "Queued 1: KEEP_THIS_FOLLOWUP · /unqueue to edit · send a message to resume"
+        );
+        let narrow = queue_summary(1, "KEEP_THIS_FOLLOWUP", hint, 60);
+        assert!(narrow.ends_with(hint), "hint survives: {narrow}");
+        assert!(narrow.starts_with("Queued 1: KE"), "{narrow}");
+        assert!(narrow.contains('…'), "preview is clipped: {narrow}");
+        assert!(narrow.width() <= 60, "{narrow}");
+        let tiny = queue_summary(1, "KEEP_THIS_FOLLOWUP", hint, 20);
+        assert_eq!(tiny.width(), 20, "too narrow for the hints: {tiny}");
+        assert!(tiny.starts_with("Queued 1:"), "{tiny}");
     }
 
     #[test]
