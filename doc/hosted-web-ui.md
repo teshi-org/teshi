@@ -63,6 +63,16 @@ Origin validation is intentionally exact.
 
 `/app/ui-manifest.json` declares the minimum nightly build sequence and control
 and preview protocol versions. An older CLI fails closed with an upgrade
-message; it does not select a historical UI. Existing `/api/v1/*` routes remain
+message; it does not select a historical UI.
+
+Local source builds (channel `local`, see `doc/development.md`) are also
+accepted when the schema and protocol versions match. Their build sequence is
+local Unix time and cannot be ordered against CI run identities, so they are
+instead required to have a UTC build timestamp no older than the manifest's
+`minimum_cli.build_timestamp`. This catches stale local installs, but not a
+fresh build of an old checkout; matching protocol versions remain the real
+contract. `stable` and `dev` builds are rejected. Both the daemon and the
+hosted page evaluate this rule, so a rule change reaches the browser only after
+the Pages bundle is redeployed. Existing `/api/v1/*` routes remain
 available during this first migration phase and are removed only by a separate
 reviewed change after hosted UI coverage is proven.

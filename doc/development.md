@@ -150,7 +150,8 @@ includes that local minute and offset, for example
 `local`; the manifest retains the full timestamp. Local builds do not perform
 automatic release checks. Rebuild locally for another local version, or explicitly
 choose `teshi update --channel stable` / `--channel nightly` to switch streams.
-Local identities are rejected by published release manifests.
+Local identities are rejected by published release manifests. The hosted Web UI
+does accept them when protocol versions match; see `doc/hosted-web-ui.md`.
 
 ## Testing
 
