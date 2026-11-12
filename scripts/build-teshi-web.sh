@@ -28,6 +28,8 @@ wasm-bindgen "$WASM" --target web --out-dir "$PKG_DIR"
 
 cp "$ROOT/apps/teshi-web/web/index.html" "$OUT_DIR/index.html"
 cp "$ROOT/apps/teshi-web/web/main.js" "$OUT_DIR/main.js"
+# Local E2E harness only; the hosted Pages deployment does not ship this module.
+cp "$ROOT/apps/teshi-web/web/e2e-launch.js" "$OUT_DIR/e2e-launch.js"
 
 # Keep Pages/static-host caches from serving an older entrypoint or WASM.
 sed -i "s#new URL('teshi_web_bg.wasm', import.meta.url)#new URL('teshi_web_bg.wasm?v=${CACHE_BUST}', import.meta.url)#" \
