@@ -22,6 +22,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Pull request runs check out the merge with main, so this tree lets
+      # Nightly reuse a green PR run when the merged main commit is identical.
+      # The marker carries no verdict; Nightly still requires the run to succeed.
+      - name: Record the tested source tree
+        id: tested-tree
+        shell: bash
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          mkdir -p "${RUNNER_TEMP}/tested-tree"
+          echo "${tree}" > "${RUNNER_TEMP}/tested-tree/tree.txt"
+          echo "tree=${tree}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload the tested source tree marker
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-tree-${{ steps.tested-tree.outputs.tree }}
+          path: ${{ runner.temp }}/tested-tree/tree.txt
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

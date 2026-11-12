@@ -48,8 +48,10 @@ sharded measurements rather than these initial weights.
    They run even when dependencies fail, and require successful preparation and
    every shard, exact inventories, complete replay evidence and actual files.
 4. Nightly continues consuming the success of the entire CI workflow for the
-   exact source SHA. Skipped, cancelled, missing and failed prerequisites cannot
-   unlock the platform gate.
+   exact source: the push run for the `main` commit, or the merged pull
+   request's run when its `tested-tree-<tree>` marker matches that commit's Git
+   tree. Skipped, cancelled, missing and failed prerequisites cannot unlock the
+   platform gate.
 
 Ownership checks require every integration-test module to occur exactly once.
 Compiled inventories additionally cover platform conditionals, unit-test targets,
