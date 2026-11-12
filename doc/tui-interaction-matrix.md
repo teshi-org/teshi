@@ -47,7 +47,7 @@ The action is shared by the keyboard and pointer paths: a pointer click changes 
 
 ## Layout and minimum-size checks
 
-The Requirements tree and linked panes keep independent horizontal offsets. The Markdown editor uses a source-aware soft-wrap map and therefore exposes vertical overflow without an editor horizontal bar. Explore columns expose horizontal bars only when their content exceeds the rendered column. Scrollbar geometry clamps zero-length tracks, one-cell tracks, and full-width thumbs; CJK and wide characters are measured in terminal cells while selections remain character-based.
+The Requirements tree wraps labels to the pane width instead of scrolling horizontally: an unselected row shows at most two rows and ends a longer label with `…`, while the selected row shows its whole label. The linked pane keeps its own horizontal offset. The Markdown editor uses a source-aware soft-wrap map and therefore exposes vertical overflow without an editor horizontal bar. Explore columns expose horizontal bars only when their content exceeds the rendered column. Scrollbar geometry clamps zero-length tracks, one-cell tracks, and full-width thumbs; CJK and wide characters are measured in terminal cells while selections remain character-based.
 
 Acceptance captures should be made after rendering at both the normal fixture size and the smallest supported terminal size. A direct action or handler unit test is useful for state semantics, but pointer acceptance must also use a real terminal or the runner's mouse adapter.
 

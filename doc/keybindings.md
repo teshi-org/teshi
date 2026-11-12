@@ -24,8 +24,10 @@ current modal layer. Requirements calls its Normal mode **Browse**.
 | `Ctrl+Q` or `:q` | Exit; the `^q 退出` control at the bottom-right of every tab is the clickable equivalent. `:q` is the host-safe route when a parent terminal also binds `Ctrl+Q`. `q` and `Ctrl+C` never exit, and Ctrl+C copies the selection |
 
 Pane chords do not steal text input or Requirements visual selections. Existing
-Tab/Shift+Tab and non-text column-navigation keys remain available. Layouts with
-no vertical neighbor ignore `Ctrl+W j/k` and `Ctrl+W Up/Down`.
+Tab/Shift+Tab and non-text column-navigation keys remain available. In
+Requirements, `Ctrl+W j/k` moves between the editor and the linked test points
+below it; layouts with no vertical neighbor ignore `Ctrl+W j/k` and
+`Ctrl+W Up/Down`.
 
 All five tab labels and the project header are clickable. Narrow terminals use
 Explore, Map, AI, Req, and Points labels. Wheels target the pane beneath the
@@ -61,10 +63,11 @@ work while the prompt is open, and a left click closes it.
 | Key | Action |
 |-----|--------|
 | `/` | Search Feature names, titles, and relative paths in the Features column; Enter keeps the filter, Esc clears it |
-| Enter, Left/Right | Toggle, collapse, or expand the selected Feature directory |
+| Enter | Toggle the selected Feature directory |
 | `j/k`, Down/Up | Select next/previous row |
-| `h/Left`, Shift+Tab | Previous column |
-| `l/Right` | Navigate right according to the selected column |
+| `h/Left` | In the Features column: collapse an open directory, otherwise select the parent directory. Elsewhere: previous column |
+| `l/Right` | In the Features column: expand a closed directory, step into the first child of an open one, or open a Feature's scenarios. Elsewhere: navigate right according to the selected column |
+| Shift+Tab | Previous column |
 | Tab | Next column |
 | Home/End, `gg/G` | First/last row |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Navigate approximately ten rows |
@@ -192,7 +195,7 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | Key | Action |
 |-----|--------|
 | `j/k`, Down/Up | Scroll vertically |
-| `h/l`, Left/Right | Scroll horizontally; on the AI tab `h` focuses the Chats sidebar when it is on screen |
+| `h/l`, Left/Right | Scroll horizontally; on the AI tab `h`/Left focus the Chats sidebar when it is on screen |
 | Alt+arrows | Scroll in the corresponding direction |
 | Ctrl+U / Ctrl+D | Scroll half a viewport up / down |
 | `gg/G`, Home/End | History top/bottom |
@@ -207,7 +210,7 @@ Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 `a` creates one, and `x` asks to close the current one (the Close button asks
 the same way; the closed conversation stays in the session list). `j/k` no
 longer switch Agents.
-**Ctrl+W h** (or plain `h` while the chat is in Normal mode) moves focus from
+**Ctrl+W h** (or plain `h`/Left while the chat is in Normal mode) moves focus from
 the chat to the Chats sidebar and **Ctrl+W l** moves back (the chord stops at
 the edges like other pane rows). A focused sidebar shows a highlighted border
 and `j/k` selects the previous/next conversation; `l`, Right, or Esc returns to
@@ -264,7 +267,8 @@ valid selections; changed streamed text or a different session clears them.
 |-----|--------|
 | `j/k`, Down/Up | Next/previous row, including folder and query rows |
 | `h`, Left | Collapse the selected row; press again to walk up to its parent |
-| `l`, Right | Expand the selected row; press again to step into its first child |
+| `l`, Right | Expand the selected row; press again to step into its first child; on a document, focus the editor |
+| `h/l`, Left/Right in linked test points | Previous/next pane |
 | Tab/BackTab, or Ctrl+W then `h/l` or Left/Right | Previous/next pane |
 | Home/End | First/last item |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Page through items |
@@ -283,8 +287,11 @@ valid selections; changed streamed text or a different session clears them.
 
 `h`/`l` and Left/Right work like the MindMap tree: one press collapses or expands
 the selected row, and repeating the key climbs to the parent or steps into the first
-child, so they walk the whole hierarchy. Change panes with Tab/BackTab or Ctrl+W then
-`h/l`/Left/Right. The tree reserves `g` for switching views, so use Home/End for its
+child, so they walk the whole hierarchy. On a document row `l` has nothing to
+expand and focuses the editor instead, keeping the open preview where it was. With
+the preview showing, plain `h/l` therefore walks tree, preview, and linked test
+points in both directions. Ctrl+W then `h/l`/Left/Right changes panes from any
+mode. The tree reserves `g` for switching views, so use Home/End for its
 boundaries. Priority changes preserve document order, Markdown, and unsaved text;
 existing documents remain unset. The tree title lists scope, view, iteration, and
 (in Current project) the completed filter. See `doc/requirement-organization.md` for
@@ -301,6 +308,8 @@ leaving the document. A new document opens directly in Insert.
 | Key | Action |
 |-----|--------|
 | `j/k`, Down/Up | Scroll one row |
+| `h/l`, Left/Right | Previous/next pane |
+| Ctrl+W then `j/k` or Down/Up | Linked test points below / editor above |
 | `gg/G`, Home/End | Scroll to top/bottom |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Page through rows |
 | `e` | Open the source in Browse without starting an edit |
