@@ -33,10 +33,19 @@ struct SearchFile {
     deleted: bool,
 }
 
+/// One visible tree row; the trailing `usize` is the row's tree depth.
 #[derive(Clone)]
 pub(crate) enum Row {
     Directory(String, usize),
-    File(usize, String, bool),
+    File(usize, String, bool, usize),
+}
+
+impl Row {
+    fn depth(&self) -> usize {
+        match self {
+            Row::Directory(_, depth) | Row::File(_, _, _, depth) => *depth,
+        }
+    }
 }
 
 impl App {
@@ -139,7 +148,7 @@ impl App {
                 Row::Directory(path, _) => {
                     directories.insert(path.clone(), position);
                 }
-                Row::File(index, _, deleted) => {
+                Row::File(index, _, deleted, _) => {
                     files.insert((*index, *deleted), position);
                     if !deleted
                         && let Some(catalog) = &self.lazy_features
@@ -158,7 +167,7 @@ impl App {
                     Row::Directory(path, depth) => {
                         4 + depth * 2 + path.rsplit('/').next().unwrap_or(path).width()
                     }
-                    Row::File(_, label, _) => 4 + label.width(),
+                    Row::File(_, label, _, _) => 4 + label.width(),
                 })
                 .max()
                 .unwrap_or(0),
@@ -272,6 +281,7 @@ impl App {
                             .unwrap_or(parts.last().unwrap_or(&""))
                     ),
                     *deleted,
+                    parts.len().saturating_sub(1),
                 ));
             }
         }
@@ -378,27 +388,74 @@ impl App {
                 self.commit_feature_browser_search();
                 true
             }
-            KeyCode::Enter | KeyCode::Left | KeyCode::Right => {
+            KeyCode::Enter => {
                 let Some(path) = self.feature_browser.directory.clone() else {
                     return false;
                 };
-                match event.code {
-                    KeyCode::Left => {
-                        self.feature_browser.expanded.remove(&path);
-                    }
-                    KeyCode::Right => {
-                        self.feature_browser.expanded.insert(path);
-                    }
-                    _ => {
-                        if !self.feature_browser.expanded.remove(&path) {
-                            self.feature_browser.expanded.insert(path);
-                        }
-                    }
+                if !self.feature_browser.expanded.remove(&path) {
+                    self.feature_browser.expanded.insert(path);
                 }
                 true
             }
+            // The second key of a Ctrl+W chord changes panes, not tree rows.
+            _ if self.pending_char == Some('w') => false,
+            KeyCode::Left => self.feature_browser_step_out(),
+            KeyCode::Char('h') if event.modifiers.is_empty() => self.feature_browser_step_out(),
+            KeyCode::Right => self.feature_browser_step_in(),
+            KeyCode::Char('l') if event.modifiers.is_empty() => self.feature_browser_step_in(),
             _ => false,
         }
+    }
+
+    /// Expands a collapsed directory, or selects the first child of an open one.
+    ///
+    /// Returns false on Feature rows so the shared keymap still moves focus to
+    /// the Scenario column.
+    fn feature_browser_step_in(&mut self) -> bool {
+        let Some(path) = self.feature_browser.directory.clone() else {
+            return false;
+        };
+        self.pending_char = None;
+        if self.feature_directory_collapsed(&path) {
+            self.feature_browser.expanded.insert(path);
+            return true;
+        }
+        let rows = self.feature_browser_rows();
+        if let Some(row) = self.feature_browser_selected_row()
+            && rows
+                .get(row + 1)
+                .is_some_and(|child| child.depth() > rows[row].depth())
+        {
+            self.explore_set_feature_row(row + 1);
+        }
+        true
+    }
+
+    /// Collapses an open directory, or selects the parent of the current row.
+    ///
+    /// Returns false for top-level collapsed rows so the key keeps its column
+    /// navigation meaning.
+    fn feature_browser_step_out(&mut self) -> bool {
+        if let Some(path) = self.feature_browser.directory.clone()
+            && self.feature_browser_filter_query().is_empty()
+            && self.feature_browser.expanded.remove(&path)
+        {
+            self.pending_char = None;
+            return true;
+        }
+        let Some(row) = self.feature_browser_selected_row() else {
+            return false;
+        };
+        let rows = self.feature_browser_rows();
+        let depth = rows[row].depth();
+        // Rows are emitted depth-first, so every row between a directory and
+        // one of its descendants is deeper than that directory.
+        let Some(parent) = rows[..row].iter().rposition(|item| item.depth() < depth) else {
+            return false;
+        };
+        self.pending_char = None;
+        self.explore_set_feature_row(parent);
+        true
     }
 }
 
@@ -434,7 +491,7 @@ mod tests {
         assert_eq!(app.feature_browser_selected_row(), Some(3));
         app.feature_browser.query = "added".into();
         let rows = app.feature_browser_rows();
-        assert!(matches!(rows.last(), Some(Row::File(0, _, false))));
+        assert!(matches!(rows.last(), Some(Row::File(0, _, false, _))));
     }
 
     #[test]
@@ -543,7 +600,7 @@ mod tests {
         let rows = app.feature_browser_rows();
         assert_eq!(rows.len(), 2);
         assert!(matches!(&rows[0], Row::Directory(path, 0) if path == "auth"));
-        assert!(matches!(&rows[1], Row::File(_, name, false) if name == "root"));
+        assert!(matches!(&rows[1], Row::File(_, name, false, 0) if name == "root"));
     }
 
     #[test]
@@ -590,7 +647,7 @@ mod tests {
         app.poll_feature_browser_search();
         let rows = app.feature_browser_rows();
         assert_eq!(rows.len(), 4);
-        assert!(matches!(rows.last(), Some(Row::File(0, _, false))));
+        assert!(matches!(rows.last(), Some(Row::File(0, _, false, _))));
         app.explore_set_feature_row(3);
         assert_eq!(app.explore_selected_feature, 0);
         app.handle_feature_browser_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -598,5 +655,77 @@ mod tests {
         app.handle_feature_browser_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.feature_browser.query.is_empty());
         assert_eq!(app.feature_browser_rows().len(), 5);
+    }
+
+    #[test]
+    fn test_hl_and_arrows_walk_tree_levels_identically() {
+        for (out, into) in [
+            (KeyCode::Char('h'), KeyCode::Char('l')),
+            (KeyCode::Left, KeyCode::Right),
+        ] {
+            let mut app = App::from_args().unwrap();
+            app.active_tab = MainTab::Explore;
+            app.explore_focus = ColumnFocus::Feature;
+            app.project.features = vec![
+                teshi_core::gherkin::parse_feature("Feature: Alpha", "suite/alpha.feature".into()),
+                teshi_core::gherkin::parse_feature(
+                    "Feature: Beta",
+                    "suite/nested/beta.feature".into(),
+                ),
+            ];
+            app.git_status = Default::default();
+            let press = |app: &mut App, code| {
+                app.handle_feature_browser_key(KeyEvent::new(code, KeyModifiers::NONE))
+            };
+            app.explore_set_feature_row(0);
+
+            assert!(
+                press(&mut app, into),
+                "{into:?} expands a collapsed directory"
+            );
+            assert_eq!(app.feature_browser_rows().len(), 3);
+            assert!(
+                press(&mut app, into),
+                "{into:?} steps into an open directory"
+            );
+            assert_eq!(app.feature_browser_selected_row(), Some(1));
+            assert_eq!(app.explore_selected_feature, 0);
+            assert!(
+                !press(&mut app, into),
+                "{into:?} on a Feature falls through to the Scenario column"
+            );
+
+            assert!(press(&mut app, out), "{out:?} selects the parent directory");
+            assert_eq!(app.feature_browser.directory.as_deref(), Some("suite"));
+
+            app.explore_set_feature_row(2);
+            assert!(press(&mut app, into), "{into:?} expands a nested directory");
+            assert!(
+                press(&mut app, into),
+                "{into:?} steps into the nested directory"
+            );
+            assert_eq!(app.explore_selected_feature, 1);
+            assert!(press(&mut app, out));
+            assert_eq!(
+                app.feature_browser.directory.as_deref(),
+                Some("suite/nested")
+            );
+            assert!(press(&mut app, out), "{out:?} collapses an open directory");
+            assert_eq!(app.feature_browser_rows().len(), 3);
+            assert!(press(&mut app, out));
+            assert_eq!(app.feature_browser.directory.as_deref(), Some("suite"));
+            assert!(press(&mut app, out));
+            assert_eq!(app.feature_browser_rows().len(), 1);
+            assert!(
+                !press(&mut app, out),
+                "{out:?} on a collapsed top-level row keeps column navigation"
+            );
+
+            app.pending_char = Some('w');
+            assert!(
+                !press(&mut app, into),
+                "{into:?} completes the Ctrl+W chord instead of expanding"
+            );
+        }
     }
 }

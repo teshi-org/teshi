@@ -2884,6 +2884,61 @@ mod tests {
     }
 
     #[test]
+    fn test_hovering_an_image_row_leaves_the_pixel_cells_untouched() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        let shown = project.path().join("shown.png");
+        image::RgbaImage::from_pixel(200, 80, image::Rgba([1, 2, 3, 255]))
+            .save(&shown)
+            .unwrap();
+        let mut picker = ratatui_image::picker::Picker::from_fontsize((10, 20));
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+        app.inline_images.set_picker(Some(picker));
+        app.agents[0].messages_mut().push(message(
+            AiRole::User,
+            &format!("look @{}", shown.display()),
+            None,
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut draw = |app: &mut App| {
+            app.inline_images.begin_frame();
+            terminal
+                .draw(|frame| crate::ui::render(frame, app))
+                .unwrap()
+                .buffer
+                .clone()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let area = loop {
+            draw(&mut app);
+            app.inline_images.poll();
+            if let Some(area) = app.inline_images.pixel_areas().next() {
+                break area;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the image never decoded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let idle = draw(&mut app);
+
+        app.mouse_position = Some((area.x, area.y));
+        let hovered = draw(&mut app);
+
+        assert!(
+            area.positions().all(|cell| idle[cell] == hovered[cell]),
+            "the hover tint must not touch cells under the pixels"
+        );
+        let beside = ratatui::layout::Position::new(area.right(), area.y);
+        assert_ne!(
+            idle[beside].bg, hovered[beside].bg,
+            "the rest of the hovered row still answers the pointer"
+        );
+    }
+
+    #[test]
     fn test_draft_placeholders_get_hitboxes_on_every_row_they_touch() {
         let (mut app, project, _store) = activity_test_app();
         let path = project.path().join("draft.png");

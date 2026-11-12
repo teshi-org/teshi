@@ -293,6 +293,14 @@ impl InlineImages {
         !self.frame.is_empty() || !self.painted.is_empty()
     }
 
+    /// Screen cells this frame covers with Sixel or iTerm2 pixels.
+    ///
+    /// Anything drawn into these cells after [`Self::place`] withholds the
+    /// whole placement for the frame, so pointer tints must leave them alone.
+    pub fn pixel_areas(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.frame.iter().map(|slot| slot.area)
+    }
+
     /// Forget what is on screen after the terminal was cleared.
     pub fn forget_painted(&mut self) {
         self.painted.clear();

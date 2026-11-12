@@ -407,12 +407,21 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
         !tree_contains(&after_tree, "Req 01"),
         "tree did not scroll: {after_tree}"
     );
+    // Tree labels wrap to the pane width, so there is nothing to scroll sideways.
     terminal.scroll_at(2, 5, false, true).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
     capture(&terminal, "requirements-tree-horizontal-wheel");
     let horizontal = terminal.screen().unwrap();
-    assert_ne!(
-        after_tree, horizontal,
-        "Shift+wheel did not scroll tree horizontally"
+    let tree_pane = |screen: &str| -> Vec<String> {
+        screen
+            .lines()
+            .filter_map(|line| line.split('│').nth(1).map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(
+        tree_pane(&after_tree),
+        tree_pane(&horizontal),
+        "Shift+wheel moved the wrapped tree sideways"
     );
     terminal.scroll_at(45, 5, false, false).unwrap();
     capture(&terminal, "requirements-editor-wheel");

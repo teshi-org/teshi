@@ -1152,9 +1152,9 @@ impl Action {
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::AiScrollDown)
                 }
-                // h steps into the Chat sidebar when it is on screen; otherwise
-                // it keeps pairing with l for horizontal transcript scrolling.
-                (KeyCode::Char('h'), KeyModifiers::NONE)
+                // h/Left step into the Chat sidebar when it is on screen;
+                // otherwise they pair with l/Right for horizontal scrolling.
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE)
                     if context.active_tab == MainTab::Ai && context.ai_sidebar_visible =>
                 {
                     Some(Self::FocusPrevColumn)
@@ -1242,6 +1242,14 @@ impl Action {
                         }
                         (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                             Some(Self::MoveDown)
+                        }
+                        // The preview has no cursor to move sideways, so h/l
+                        // change panes like other read-only browse surfaces.
+                        (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                            Some(Self::FocusPrevColumn)
+                        }
+                        (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                            Some(Self::FocusNextColumn)
                         }
                         (KeyCode::Home, _) => Some(Self::NavigateFirst),
                         (KeyCode::End, _) => Some(Self::NavigateLast),
@@ -1419,6 +1427,18 @@ impl Action {
                 };
             }
             return match (event.code, event.modifiers) {
+                // The linked test point list has no horizontal motion, so h/l
+                // change panes there instead of reaching the tree commands.
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE)
+                    if context.requirements_focus == RequirementsFocus::LinkedTestPoints =>
+                {
+                    Some(Self::FocusPrevColumn)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE)
+                    if context.requirements_focus == RequirementsFocus::LinkedTestPoints =>
+                {
+                    Some(Self::FocusNextColumn)
+                }
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::ReqTreeCollapse)
                 }
@@ -2082,10 +2102,10 @@ mod tests {
     }
 
     #[test]
-    fn test_blurred_chat_h_enters_visible_sidebar_or_scrolls_left() {
+    fn test_blurred_chat_h_and_left_enter_visible_sidebar_or_scroll_left() {
         let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
-        for (tab, visible, h_action) in [
+        for (tab, visible, expected) in [
             (MainTab::Ai, true, Action::FocusPrevColumn),
             (MainTab::Ai, false, Action::AiScrollLeft),
             (MainTab::MindMap, true, Action::AiScrollLeft),
@@ -2094,16 +2114,14 @@ mod tests {
                 ai_sidebar_visible: visible,
                 ..chat_context(tab, MindMapFocus::AiPanel, false)
             };
-            assert_eq!(
-                Action::from_key_event(h, context),
-                Some(h_action),
-                "{tab:?} sidebar visible={visible}"
-            );
-            assert_eq!(
-                Action::from_key_event(left, context),
-                Some(Action::AiScrollLeft),
-                "{tab:?}: Left keeps scrolling the transcript"
-            );
+            for key in [h, left] {
+                assert_eq!(
+                    Action::from_key_event(key, context),
+                    Some(expected.clone()),
+                    "{tab:?} sidebar visible={visible} key={:?}",
+                    key.code
+                );
+            }
         }
     }
 
@@ -3050,6 +3068,49 @@ mod tests {
     }
 
     #[test]
+    fn test_requirements_linked_test_points_use_h_l_for_panes() {
+        let tree = requirements_tree_context();
+        let linked = KeyContext {
+            requirements_focus: RequirementsFocus::LinkedTestPoints,
+            ..tree
+        };
+        for (code, linked_action, tree_action) in [
+            (
+                KeyCode::Char('h'),
+                Action::FocusPrevColumn,
+                Action::ReqTreeCollapse,
+            ),
+            (
+                KeyCode::Left,
+                Action::FocusPrevColumn,
+                Action::ReqTreeCollapse,
+            ),
+            (
+                KeyCode::Char('l'),
+                Action::FocusNextColumn,
+                Action::ReqTreeExpand,
+            ),
+            (
+                KeyCode::Right,
+                Action::FocusNextColumn,
+                Action::ReqTreeExpand,
+            ),
+        ] {
+            let event = KeyEvent::new(code, KeyModifiers::NONE);
+            assert_eq!(
+                Action::from_key_event(event, linked),
+                Some(linked_action),
+                "linked {code:?}"
+            );
+            assert_eq!(
+                Action::from_key_event(event, tree),
+                Some(tree_action),
+                "tree {code:?} keeps folding"
+            );
+        }
+    }
+
+    #[test]
     fn requirements_preview_and_normal_mode_switch_views_without_stealing_vim_keys() {
         use crate::authoring_tab::RequirementsEditorMode;
         let key = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
@@ -3069,6 +3130,19 @@ mod tests {
             (key('j'), preview, Some(Action::MoveDown)),
             (key('k'), preview, Some(Action::MoveUp)),
             (key('G'), preview, Some(Action::NavigateLast)),
+            (key('h'), preview, Some(Action::FocusPrevColumn)),
+            (key('l'), preview, Some(Action::FocusNextColumn)),
+            (
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                preview,
+                Some(Action::FocusPrevColumn),
+            ),
+            (
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                preview,
+                Some(Action::FocusNextColumn),
+            ),
+            (key('h'), normal, Some(Action::MoveLeft)),
             (key('x'), preview, None),
             (key('p'), preview, None),
             (esc, preview, None),
