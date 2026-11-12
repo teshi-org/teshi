@@ -157,16 +157,54 @@ pub struct UiManifest {
     pub nightly_upgrade_url: String,
 }
 
+/// Release channel of source builds produced from a local checkout.
+const LOCAL_CHANNEL: &str = "local";
+
 impl UiCompatibility {
+    /// Whether this UI may talk to a daemon with the given build identity.
+    ///
+    /// Schema and protocol versions must always match exactly. Builds on the
+    /// manifest's channel must reach `minimum_build_sequence`. Local source
+    /// builds are also accepted, but their sequence is a local Unix time that
+    /// cannot be ordered against CI run identities, so they are gated on a
+    /// build timestamp no older than the minimum CLI's. Any other channel
+    /// (`stable`, `dev`) is rejected.
     pub fn supports(&self, daemon: &CliBuildIdentity) -> bool {
-        self.manifest_schema == MANIFEST_SCHEMA_VERSION
+        let protocol_matches = self.manifest_schema == MANIFEST_SCHEMA_VERSION
             && self.control_protocol == CONTROL_PROTOCOL_VERSION
-            && self.preview_protocol == PREVIEW_PROTOCOL_VERSION
-            && self.minimum_build_sequence > 0
-            && daemon.build_sequence >= self.minimum_build_sequence
-            && daemon.build_sequence > 0
+            && self.preview_protocol == PREVIEW_PROTOCOL_VERSION;
+        if !protocol_matches || self.minimum_build_sequence == 0 || daemon.build_sequence == 0 {
+            return false;
+        }
+        if daemon.channel == LOCAL_CHANNEL {
+            return match (
+                utc_timestamp(&daemon.build_timestamp),
+                utc_timestamp(&self.minimum_cli.build_timestamp),
+            ) {
+                (Some(built), Some(minimum)) => built >= minimum,
+                _ => false,
+            };
+        }
+        daemon.build_sequence >= self.minimum_build_sequence
             && daemon.channel == self.minimum_cli.channel
     }
+}
+
+/// Accept only canonical `YYYY-MM-DDTHH:MM:SSZ` timestamps.
+///
+/// Both CI and local builds emit this exact shape, which makes lexical
+/// comparison equivalent to chronological comparison.
+fn utc_timestamp(value: &str) -> Option<&str> {
+    let bytes = value.as_bytes();
+    let canonical = bytes.len() == 20
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            10 => *byte == b'T',
+            13 | 16 => *byte == b':',
+            19 => *byte == b'Z',
+            _ => byte.is_ascii_digit(),
+        });
+    canonical.then_some(value)
 }
 
 impl From<UiManifest> for UiCompatibility {
@@ -233,6 +271,61 @@ mod tests {
         let mut stable = identity(10);
         stable.channel = "stable".into();
         assert!(!compatibility(10).supports(&stable));
+        let mut dev = identity(10);
+        dev.channel = "dev".into();
+        assert!(!compatibility(10).supports(&dev));
+    }
+
+    fn local(timestamp: &str, sequence: u64) -> CliBuildIdentity {
+        CliBuildIdentity {
+            channel: "local".into(),
+            build_timestamp: timestamp.into(),
+            ..identity(sequence)
+        }
+    }
+
+    #[test]
+    fn test_local_build_compatibility_uses_build_timestamp() {
+        // The minimum CLI was built at 2026-09-09T00:00:00Z with sequence 10^10;
+        // local sequences are Unix seconds and therefore always smaller.
+        let ui = compatibility(10_000_000_000);
+        let cases = [
+            (
+                "2026-11-11T07:52:00Z",
+                1_794_383_520,
+                true,
+                "newer local build",
+            ),
+            ("2026-09-09T00:00:00Z", 1_788_912_000, true, "same instant"),
+            (
+                "2026-09-08T23:59:59Z",
+                1_788_911_999,
+                false,
+                "older local build",
+            ),
+            ("2026-11-11T07:52:00Z", 0, false, "incomplete identity"),
+            (
+                "2026-11-11T15:52:00+08:00",
+                1_794_383_520,
+                false,
+                "non-UTC form",
+            ),
+            ("", 1_794_383_520, false, "missing timestamp"),
+        ];
+        for (timestamp, sequence, expected, label) in cases {
+            assert_eq!(
+                ui.supports(&local(timestamp, sequence)),
+                expected,
+                "{label}: {timestamp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_local_build_still_requires_matching_protocol() {
+        let mut ui = compatibility(10);
+        ui.control_protocol = CONTROL_PROTOCOL_VERSION + 1;
+        assert!(!ui.supports(&local("2026-11-11T07:52:00Z", 1_794_383_520)));
     }
 
     #[test]
