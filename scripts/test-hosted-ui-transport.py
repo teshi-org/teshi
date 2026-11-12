@@ -19,6 +19,12 @@ WEB_SOURCE = (ROOT / "apps" / "teshi-web" / "src" / "lib.rs").read_text(
 WEB_LOADER = (ROOT / "apps" / "teshi-web" / "web" / "main.js").read_text(
     encoding="utf-8"
 )
+WEB_E2E_LOADER = (ROOT / "apps" / "teshi-web" / "web" / "e2e-launch.js").read_text(
+    encoding="utf-8"
+)
+# Mirrors the forbidden-marker scan the Pages deploy runs over `public/app`,
+# which ships `index.html` and `main.js` but not the local E2E module.
+HOSTED_FORBIDDEN_MARKERS = re.compile(r"port=[^& ]*token=|X-Teshi-Token|/api/v1/")
 WEB_INDEX = (ROOT / "apps" / "teshi-web" / "web" / "index.html").read_text(
     encoding="utf-8"
 )
@@ -166,19 +172,35 @@ def main() -> int:
 
     # The hosted production client must not call the legacy REST surface. The
     # local ?e2e=1 harness may mint its own ephemeral session exactly once;
-    # that bootstrap is not a hosted business workflow.
+    # that bootstrap is not a hosted business workflow and lives in a module
+    # the Pages bundle does not ship.
     forbid(WEB_SOURCE, "/api/v1/", "hosted UI business REST request")
-    api_fetches = re.findall(r'fetch\(\s*["\']([^"\']+)', WEB_LOADER)
-    if api_fetches != ["/api/v1/sessions"]:
+    for name, text in (("index.html", WEB_INDEX), ("main.js", WEB_LOADER)):
+        marker = HOSTED_FORBIDDEN_MARKERS.search(text)
+        if marker:
+            raise SystemExit(
+                f"hosted {name} contains a forbidden launch/auth/REST marker: "
+                f"{marker.group(0)}"
+            )
+    loader_fetches = re.findall(r'fetch\(\s*["\']([^"\']+)', WEB_LOADER)
+    if loader_fetches:
         raise SystemExit(
-            "unexpected hosted loader HTTP endpoints: " + ", ".join(api_fetches)
+            "unexpected hosted loader HTTP endpoints: " + ", ".join(loader_fetches)
         )
-    bootstrap_start = WEB_LOADER.find("async function ensureLocalE2eLaunchFragment")
-    bootstrap_end = WEB_LOADER.find("\n}\n\ntry {", bootstrap_start)
-    bootstrap = WEB_LOADER[bootstrap_start:bootstrap_end]
-    require(bootstrap, 'url.searchParams.get("e2e") !== "1"', "local E2E bootstrap gate")
-    require(bootstrap, 'url.hostname', "local E2E loopback gate")
-    require(bootstrap, 'method: "POST"', "local E2E session bootstrap")
+    gate_start = WEB_LOADER.find("async function prepareLocalE2eLaunch")
+    gate_end = WEB_LOADER.find("\n}\n", gate_start)
+    gate = WEB_LOADER[gate_start:gate_end] if gate_start >= 0 else ""
+    require(gate, 'url.searchParams.get("e2e") !== "1"', "local E2E bootstrap gate")
+    require(gate, "url.hostname", "local E2E loopback gate")
+    require(gate, 'import("./e2e-launch.js")', "gated local E2E module import")
+    if WEB_LOADER.count("e2e-launch.js") != 1:
+        raise SystemExit("hosted loader must reference the local E2E module only behind its gate")
+    e2e_fetches = re.findall(r'fetch\(\s*["\']([^"\']+)', WEB_E2E_LOADER)
+    if e2e_fetches != ["/api/v1/sessions"]:
+        raise SystemExit(
+            "unexpected local E2E loader HTTP endpoints: " + ", ".join(e2e_fetches)
+        )
+    require(WEB_E2E_LOADER, 'method: "POST"', "local E2E session bootstrap")
     require(
         SESSION_SOURCE,
         "Role::HostedWebUi => false",

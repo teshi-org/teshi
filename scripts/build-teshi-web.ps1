@@ -44,6 +44,8 @@ $MainJs = $MainJs.Replace(
     "teshi_web_bg.wasm?v=$CacheBust"
 )
 Set-Content -Path (Join-Path $OutDir "main.js") -Value $MainJs -NoNewline
+# Local E2E harness only; the hosted Pages deployment does not ship this module.
+Copy-Item (Join-Path $Root "apps\teshi-web\web\e2e-launch.js") (Join-Path $OutDir "e2e-launch.js")
 
 $IndexHtml = Get-Content -Raw (Join-Path $Root "apps\teshi-web\web\index.html")
 $IndexHtml = $IndexHtml.Replace(
