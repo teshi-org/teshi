@@ -651,6 +651,35 @@ fn separate_backends_keep_configuration_isolated() {
     );
 }
 
+#[test]
+fn test_shutdown_of_a_wedged_agent_with_a_blocked_prompt_write_completes() {
+    let mut backend = backend("stalled_stdin");
+    backend.connect_acp().unwrap();
+    wait_controls(&backend, |s| s.ready);
+    backend.start().unwrap();
+    // Larger than any pipe buffer, so the write parks until the agent reads.
+    let restored_history = "x".repeat(8 * 1024 * 1024);
+    backend
+        .submit_turn(
+            None,
+            vec![ChatMessage::text("user", restored_history.as_str())],
+            None,
+        )
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    backend.request_shutdown();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while backend.shutdown_pending() {
+        backend.poll_shutdown();
+        assert!(
+            Instant::now() < deadline,
+            "a wedged agent kept the backend in the stopping state"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(backend.start().is_ok(), "the conversation must reconnect");
+}
+
 /// Waits for the fixture's first streamed chunk so the turn is in flight.
 fn wait_for_first_chunk(backend: &mut AgentBackendRuntime) {
     let deadline = Instant::now() + Duration::from_secs(5);

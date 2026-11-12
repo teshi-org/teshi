@@ -357,13 +357,19 @@ impl AcpAgentBackend {
                         .enable_all()
                         .build();
                     match runtime {
-                        Ok(runtime) => runtime.block_on(run_worker(
-                            config,
-                            commands_rx,
-                            events_tx,
-                            controls,
-                            servers,
-                        )),
+                        Ok(runtime) => {
+                            runtime.block_on(run_worker(
+                                config,
+                                commands_rx,
+                                events_tx,
+                                controls,
+                                servers,
+                            ));
+                            // Windows child pipes do I/O on blocking threads. A
+                            // pipe still held by an escaped descendant must not
+                            // keep this worker, and the conversation, stopping.
+                            runtime.shutdown_timeout(SHUTDOWN_RETRY_BUDGET);
+                        }
                         Err(error) => {
                             let _ = events_tx.send(AgentBackendEvent::Failed(format!(
                                 "ACP runtime initialization failed: {error}"
