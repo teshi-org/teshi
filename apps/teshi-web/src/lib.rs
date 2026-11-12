@@ -11,11 +11,12 @@ use teshi_ui::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, AppShell, BackendFuture,
     BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget, GherkinEditorBackend,
     LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
-    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
+    ModelProfileSnapshot, ModelProfileUpdate, ShellSurface, WinAppPreview, bind_llm_config_keys,
 };
 use teshi_web_protocol::{
     CONTROL_PROTOCOL_VERSION, Channel, CliBuildIdentity, ClientHello, ClientMessage, ErrorCode,
-    PREVIEW_PROTOCOL_VERSION, ServerMessage, UiCompatibility, UiManifest,
+    PREVIEW_PROTOCOL_VERSION, ServerMessage, UiCompatibility, UiManifest, is_replay_file_name,
+    is_replay_run_id,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -35,7 +36,25 @@ struct LaunchState {
     token: String,
 }
 
-fn parse_launch_state() -> Result<LaunchState, String> {
+/// Replay capture a launcher (for example the TUI screenshot viewer) asked
+/// the page to open on its Run surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewLink {
+    run_id: String,
+    file: Option<String>,
+}
+
+/// Reads an optional capture link; malformed values are ignored rather than
+/// failing startup, so a bad link still opens the default page.
+fn parse_review_link(run: Option<String>, shot: Option<String>) -> Option<ReviewLink> {
+    let run_id = run.filter(|run| is_replay_run_id(run))?;
+    Some(ReviewLink {
+        run_id,
+        file: shot.filter(|shot| is_replay_file_name(shot)),
+    })
+}
+
+fn parse_launch_state() -> Result<(LaunchState, Option<ReviewLink>), String> {
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_string())?;
     let location = window.location();
     let hash = location
@@ -65,6 +84,7 @@ fn parse_launch_state() -> Result<LaunchState, String> {
     {
         return Err("launch token contains unsupported characters".into());
     }
+    let review = parse_review_link(params.get("run"), params.get("shot"));
 
     // The fragment never needs to be sent back to teshi.org. Remove it before
     // any normal startup/fetch work so it cannot become a referrer or history
@@ -78,7 +98,7 @@ fn parse_launch_state() -> Result<LaunchState, String> {
         .map_err(|error| format!("read browser history: {error:?}"))?
         .replace_state_with_url(&JsValue::NULL, "", Some(clean_url))
         .map_err(|error| format!("remove launch fragment: {error:?}"))?;
-    Ok(LaunchState { port, token })
+    Ok((LaunchState { port, token }, review))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1039,7 +1059,7 @@ impl ApiRunBackend for WasmBackend {
 #[wasm_bindgen]
 pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    let launch = parse_launch_state().map_err(|error| JsValue::from_str(&error))?;
+    let (launch, review) = parse_launch_state().map_err(|error| JsValue::from_str(&error))?;
     let control = ControlClient::new(launch);
     gpui_platform::web_init();
 
@@ -1087,6 +1107,14 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
                     cx,
                 )
             });
+            if let Some(link) = review.clone() {
+                shell.update(cx, |shell, cx| {
+                    shell.show_surface(ShellSurface::Run, Some(window), cx);
+                    shell.api_run().update(cx, |view, cx| {
+                        view.open_capture_public(link.run_id, link.file, cx);
+                    });
+                });
+            }
             *shell_for_window.borrow_mut() = Some(shell.clone());
             shell
         }) {

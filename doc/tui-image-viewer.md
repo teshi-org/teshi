@@ -41,7 +41,7 @@ open, because `o` hands the file to the operating system's default opener.
 | `h` / `l` | Pan horizontally |
 | Up / Down in fit view | Previous / next captured step |
 | `o` | Open the original in the operating system's viewer |
-| `w`, `Web [w]` | Open the hosted Web UI. Starts the project daemon when none is listening; later presses reuse it |
+| `w`, `Web [w]` | Open the shown capture in the hosted Web UI's Run page. Starts the project daemon when none is listening; later presses reuse it |
 | `i` / Esc, `Close [Esc]` | Close immediately, including during loading |
 
 100 percent is measured in the terminal graphics protocol's virtual pixels;

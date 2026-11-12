@@ -190,6 +190,35 @@ impl UiCompatibility {
     }
 }
 
+/// Whether `id` names a replay run a launch link may target.
+///
+/// Run ids are canonical lowercase UUIDs, or `legacy` for history recorded
+/// before per-run directories. Launchers and the hosted page both gate links
+/// on this; the daemon still resolves the run inside the open project.
+pub fn is_replay_run_id(id: &str) -> bool {
+    id == "legacy"
+        || (id.len() == 36
+            && id.bytes().enumerate().all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+            }))
+}
+
+/// Whether `name` is a screenshot file name a launch link may carry.
+///
+/// Only a bare name of `[A-Za-z0-9._-]` (never `.` or `..`) qualifies, so a
+/// link needs no percent-encoding and stays inert in shells such as
+/// `cmd /C start`, where `%` would expand variables. The daemon still checks
+/// that the file belongs to the linked run.
+pub fn is_replay_file_name(name: &str) -> bool {
+    (1..=255).contains(&name.len())
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// Accept only canonical `YYYY-MM-DDTHH:MM:SSZ` timestamps.
 ///
 /// Both CI and local builds emit this exact shape, which makes lexical
@@ -318,6 +347,38 @@ mod tests {
                 expected,
                 "{label}: {timestamp}"
             );
+        }
+    }
+
+    #[test]
+    fn test_replay_link_parts_accept_only_canonical_values() {
+        let runs = [
+            ("legacy", true),
+            ("11111111-1111-4111-8111-111111111111", true),
+            ("11111111-1111-4111-8111-11111111111A", false),
+            ("11111111111141118111111111111111", false),
+            ("../legacy", false),
+            ("", false),
+        ];
+        for (id, expected) in runs {
+            assert_eq!(is_replay_run_id(id), expected, "run id {id:?}");
+        }
+        let long = "a".repeat(256);
+        let files = [
+            ("0b1c2d3e-aaaa-4bbb-8ccc-0123456789ab.png", true),
+            ("frame_1.jpg", true),
+            (".", false),
+            ("..", false),
+            ("a/b.png", false),
+            ("a\\b.png", false),
+            ("step 1.png", false),
+            ("100%.png", false),
+            ("a&b.png", false),
+            ("", false),
+            (long.as_str(), false),
+        ];
+        for (name, expected) in files {
+            assert_eq!(is_replay_file_name(name), expected, "file name {name:?}");
         }
     }
 

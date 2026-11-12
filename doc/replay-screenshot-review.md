@@ -5,6 +5,13 @@ event to inspect its image, source step, scenario, outcome, and capture time.
 Use **Enlarge image** to open a larger preview and **Close enlarged preview**
 to return to the same step. **Refresh** reloads scenarios and run history.
 
+A launch fragment may carry `run=<id>` and optionally `shot=<file>`; the TUI
+screenshot viewer's `w` key sends the capture it is showing. The page then
+opens on the Run surface with that run and step selected. A capture still
+being recorded is selected once it appears; a file that is not part of the run
+is reported in the screenshot detail. Malformed values are ignored, and the
+daemon still checks that the run and file belong to the open project.
+
 New runs store evidence under the tested project's
 `.teshi/logs/replay-screenshots/<run-id>/`. `run.json` is published atomically
 after each event; images remain associated with their original run and step.

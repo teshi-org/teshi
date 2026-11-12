@@ -150,7 +150,11 @@ for limits and validation.
 Terminals without an image protocol (kitty, sixel or iTerm2) show the capture
 path instead of the picture; `o` still works there. `w` (or the `Web [w]`
 control on the viewer's top border) instead opens the hosted Web UI in the host
-browser to review the replay captures there. The first activation checks the
+browser on its Run page, with the shown capture's run and step already
+selected. The run id and file name travel in the launch fragment next to the
+token and are removed from the address bar on load. A file name outside
+`[A-Za-z0-9._-]` opens its run without selecting a step, and a standalone chat
+or requirement image opens the default page. The first activation checks the
 project daemon and starts one on loopback when none is listening; a later
 activation reuses that process. Each activation mints a fresh hosted session
 and opens the resulting Pages URL. The full URL is also copied to the clipboard

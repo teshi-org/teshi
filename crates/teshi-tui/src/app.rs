@@ -8258,15 +8258,29 @@ impl App {
         }
     }
 
-    /// Opens the hosted Web UI in the host browser.
+    /// Opens the hosted Web UI in the host browser on the shown capture.
     ///
     /// The first activation starts the project daemon when none is listening.
     /// A second activation while that start is still running is ignored; once
     /// the daemon is up, later activations reuse it. The address is always
     /// surfaced as plain text, so a failed browser launch still leaves a URL.
+    /// A standalone image has no replay run, so it opens the default page.
     fn open_replay_web_ui(&mut self) {
-        self.web_review.request(&self.project.root_dir);
+        let target = self.current_review_target();
+        self.web_review.request(&self.project.root_dir, target);
         self.publish_web_review_notice();
+    }
+
+    /// The replay capture shown in the viewer, as a Web review link target.
+    fn current_review_target(&self) -> Option<crate::web_review::ReviewTarget> {
+        self.screenshot
+            .refs
+            .get(self.screenshot.index)
+            .filter(|shot| shot.image_path.is_none())
+            .map(|shot| crate::web_review::ReviewTarget {
+                run_id: shot.run_id.clone(),
+                file: shot.file.clone(),
+            })
     }
 
     /// Completes a background Web review launch and opens its address.
@@ -22455,6 +22469,39 @@ Feature: B
         assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!app.screenshot.visible);
         assert!(!app.screenshot.loading);
+    }
+
+    #[test]
+    fn test_web_review_targets_the_capture_shown_in_the_viewer() {
+        let mut app = editor_test_app();
+        let capture = |file: &str| crate::image_view::ScreenshotRef {
+            run_id: "11111111-1111-4111-8111-111111111111".into(),
+            file: file.into(),
+            scenario: String::new(),
+            step_text: String::new(),
+            step_line: None,
+            captured_at: String::new(),
+            status: "passed".into(),
+            image_path: None,
+        };
+        app.screenshot.refs = vec![
+            capture("first.png"),
+            capture("second.png"),
+            crate::image_view::ScreenshotRef::image(PathBuf::from("chat.png")),
+        ];
+        app.screenshot.index = 1;
+        assert_eq!(
+            app.current_review_target(),
+            Some(crate::web_review::ReviewTarget {
+                run_id: "11111111-1111-4111-8111-111111111111".into(),
+                file: "second.png".into(),
+            })
+        );
+        // A standalone image belongs to no run, so it links no capture.
+        app.screenshot.index = 2;
+        assert_eq!(app.current_review_target(), None);
+        app.screenshot.refs.clear();
+        assert_eq!(app.current_review_target(), None);
     }
 
     /// Writes one replay run whose captures cover the given steps in order.
