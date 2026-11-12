@@ -250,8 +250,10 @@ pub struct AuthoringUiState {
     last_store_check: Option<Instant>,
     /// Draft document and the folder it was created in, filed on its first save.
     draft_folder: Option<(String, String)>,
-    /// Visible labels of tree nodes whose label is not derivable from the node ID.
-    pub tree_labels: HashMap<String, String>,
+    /// Styled label of every tree node by identifier, kept beside `tree_items`
+    /// because the tree widget does not expose item text and rendering rewraps
+    /// labels to the pane width.
+    pub tree_labels: HashMap<String, Line<'static>>,
     pub tree_items: Vec<TreeItem<'static, String>>,
     pub tree_state: TreeState<String>,
     pub focus: RequirementsFocus,
@@ -279,7 +281,8 @@ pub struct AuthoringUiState {
     preview: RequirementPreview,
     /// Width used by the most recent editor wrap map.
     pub editor_wrap_width: usize,
-    /// Horizontal offsets for the tree, editor, and linked test points.
+    /// Horizontal offsets for the tree, editor, and linked test points. The tree
+    /// wraps its labels, so its entry stays `0`.
     pub horizontal_scroll: [usize; 3],
     /// Cursor position at the previous render, used to follow keyboard navigation.
     pub rendered_cursor: Option<(usize, usize)>,
@@ -1100,16 +1103,14 @@ impl AuthoringUiState {
             if self.group_mode == RequirementGroupMode::Path {
                 self.rebuild_folders_tree(&project);
             } else {
-                self.tree_labels.clear();
-                self.tree_items = build_requirement_tree(
+                (self.tree_items, self.tree_labels) = build_requirement_tree(
                     &index,
                     &self.iteration_filter,
                     RequirementGroupMode::Iteration,
                 );
             }
         } else {
-            self.tree_labels.clear();
-            self.tree_items =
+            (self.tree_items, self.tree_labels) =
                 build_requirement_tree(&index, &self.iteration_filter, self.group_mode);
         }
         let visible = visible_document_ids(&index, &self.iteration_filter);
@@ -2067,6 +2068,17 @@ impl AuthoringUiState {
         };
     }
 
+    /// Moves focus between the editor and the linked test points stacked
+    /// below it; the tree has no vertical neighbor and keeps focus.
+    pub fn focus_vertical_pane(&mut self, down: bool) {
+        self.exit_insert_mode();
+        self.focus = match (self.focus, down) {
+            (RequirementsFocus::Editor, true) => RequirementsFocus::LinkedTestPoints,
+            (RequirementsFocus::LinkedTestPoints, false) => RequirementsFocus::Editor,
+            (focus, _) => focus,
+        };
+    }
+
     pub fn move_linked_selection(&mut self, delta: isize) {
         let count = self.filtered_linked_test_points().len();
         if count == 0 {
@@ -2606,6 +2618,7 @@ fn build_path_tree(
     documents: &[RequirementDocumentMeta],
     dir_prefix: &str,
     styles: &BTreeMap<String, RequirementTagStyle>,
+    labels: &mut HashMap<String, Line<'static>>,
 ) -> Vec<TreeItem<'static, String>> {
     #[derive(Default)]
     struct DirNode {
@@ -2634,6 +2647,7 @@ fn build_path_tree(
         node: &DirNode,
         dir_prefix: &str,
         styles: &BTreeMap<String, RequirementTagStyle>,
+        labels: &mut HashMap<String, Line<'static>>,
     ) -> Vec<TreeItem<'static, String>> {
         let mut items = Vec::new();
         for (name, child) in node.children.iter() {
@@ -2643,26 +2657,34 @@ fn build_path_tree(
                 format!("{path}/{name}")
             };
             let id = format!("{TREE_DIR_PREFIX}{dir_prefix}{child_path}");
-            let child_items = dir_to_items(child_path, child, dir_prefix, styles);
+            let child_items = dir_to_items(child_path, child, dir_prefix, styles, labels);
+            labels.insert(id.clone(), Line::from(name.clone()));
             items.push(TreeItem::new(id, name.clone(), child_items).unwrap());
         }
         for doc in &node.documents {
             let label = requirement_document_tree_line(doc, styles);
             let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
+            labels.insert(id.clone(), label.clone());
             items.push(TreeItem::new(id, label, Vec::new()).unwrap());
         }
         items
     }
 
-    dir_to_items(String::new(), &root, dir_prefix, styles)
+    dir_to_items(String::new(), &root, dir_prefix, styles, labels)
 }
 
 /// Builds folder/document tree items from indexed paths after applying filter/group.
+///
+/// Also returns each node's styled label by identifier, which the renderer
+/// rewraps to the pane width.
 pub fn build_requirement_tree(
     index: &teshi_core::authoring::RequirementDocumentIndex,
     filter: &RequirementIterationFilter,
     group: RequirementGroupMode,
-) -> Vec<TreeItem<'static, String>> {
+) -> (
+    Vec<TreeItem<'static, String>>,
+    HashMap<String, Line<'static>>,
+) {
     let docs: Vec<RequirementDocumentMeta> = index
         .documents
         .iter()
@@ -2670,8 +2692,9 @@ pub fn build_requirement_tree(
         .cloned()
         .collect();
     let styles = &index.tag_styles;
-    match group {
-        RequirementGroupMode::Path => build_path_tree(&docs, "", styles),
+    let mut labels = HashMap::new();
+    let items = match group {
+        RequirementGroupMode::Path => build_path_tree(&docs, "", styles, &mut labels),
         RequirementGroupMode::Iteration => {
             let mut named: std::collections::BTreeMap<String, Vec<RequirementDocumentMeta>> =
                 std::collections::BTreeMap::new();
@@ -2684,31 +2707,30 @@ pub fn build_requirement_tree(
             }
             let mut items = Vec::new();
             for (name, group_docs) in named {
-                let child = build_path_tree(&group_docs, &format!("{name}/"), styles);
-                items
-                    .push(TreeItem::new(format!("{TREE_ITER_PREFIX}{name}"), name, child).unwrap());
+                let child = build_path_tree(&group_docs, &format!("{name}/"), styles, &mut labels);
+                let id = format!("{TREE_ITER_PREFIX}{name}");
+                labels.insert(id.clone(), Line::from(name.clone()));
+                items.push(TreeItem::new(id, name, child).unwrap());
             }
             if !unassigned.is_empty() {
-                let child = build_path_tree(&unassigned, "unassigned/", styles);
+                let child = build_path_tree(&unassigned, "unassigned/", styles, &mut labels);
+                let id = format!("{TREE_ITER_PREFIX}{UNASSIGNED_ITERATION_LABEL}");
+                labels.insert(id.clone(), Line::from(UNASSIGNED_ITERATION_LABEL));
                 items.push(
-                    TreeItem::new(
-                        format!("{TREE_ITER_PREFIX}{UNASSIGNED_ITERATION_LABEL}"),
-                        UNASSIGNED_ITERATION_LABEL.to_string(),
-                        child,
-                    )
-                    .unwrap(),
+                    TreeItem::new(id, UNASSIGNED_ITERATION_LABEL.to_string(), child).unwrap(),
                 );
             }
             items
         }
-    }
+    };
+    (items, labels)
 }
 
 /// Styled tree row for a requirement document.
 ///
 /// Layout: optional priority, prefix-tag chips, title, then plain `#tag`
 /// suffixes and a `+N` count of tags that did not fit. Prefix tags come first
-/// so horizontal clipping on narrow panes cuts the title, never the badges.
+/// so the row limit on narrow panes truncates the title, never the badges.
 pub fn requirement_document_tree_line(
     doc: &RequirementDocumentMeta,
     styles: &BTreeMap<String, RequirementTagStyle>,
@@ -2756,8 +2778,9 @@ pub fn requirement_document_tree_line(
     Line::from(spans)
 }
 
-/// Plain text of [`requirement_document_tree_line`], used for width measurement.
-pub fn requirement_document_tree_label(
+/// Plain text of [`requirement_document_tree_line`], for assertions.
+#[cfg(test)]
+pub(crate) fn requirement_document_tree_label(
     doc: &RequirementDocumentMeta,
     styles: &BTreeMap<String, RequirementTagStyle>,
 ) -> String {
@@ -3156,10 +3179,10 @@ mod tests {
         assert_eq!(tree[2].identifier(), organize::TREE_QUERIES_NODE);
         assert_eq!(tree[0].children().len(), 1);
         assert_eq!(tree[0].children()[0].identifier(), "req-doc:two");
-        assert_eq!(labels["req-dir:inbox"], "Inbox (1)");
+        assert_eq!(labels["req-dir:inbox"].to_string(), "Inbox (1)");
         assert_eq!(tree[1].children().len(), 1, "AI only lists its subfolder");
         assert_eq!(
-            labels[tree[1].identifier()],
+            labels[tree[1].identifier()].to_string(),
             "AI (0)",
             "parents do not aggregate"
         );
@@ -3168,9 +3191,9 @@ mod tests {
             "req-doc:one"
         );
         let query = &tree[2].children()[0];
-        assert_eq!(labels[query.identifier()], "Implemented (1)");
+        assert_eq!(labels[query.identifier()].to_string(), "Implemented (1)");
         assert_eq!(query.children()[0].identifier(), "req-doc:one");
-        assert_eq!(labels["req-doc:one"], "One · implemented");
+        assert_eq!(labels["req-doc:one"].to_string(), "One · implemented");
     }
 
     fn tagged_doc(tags: &[&str]) -> RequirementDocumentMeta {
@@ -3286,12 +3309,18 @@ mod tests {
             ],
             ..Default::default()
         };
-        let items = build_requirement_tree(
+        let (items, labels) = build_requirement_tree(
             &index,
             &RequirementIterationFilter::All,
             RequirementGroupMode::Path,
         );
         assert!(!items.is_empty());
+        assert!(
+            items
+                .iter()
+                .all(|item| labels.contains_key(item.identifier())),
+            "every root node has a label to wrap"
+        );
         assert_eq!(index.documents.len(), 2);
     }
 

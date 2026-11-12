@@ -148,7 +148,7 @@ fn project_views_link_existing_sources_and_create_project_owned_documents() {
     terminal.expect_text("# Document 1", true, 10000).unwrap();
     terminal.key("Ctrl+s").unwrap();
     wait_for_project_document(&project, &store, "doc-1");
-    terminal.expect_text("Document 1 *", false, 10000).unwrap();
+    terminal.expect_text("Requirement *", false, 10000).unwrap();
 
     if let Some(artifacts) = std::env::var_os("TESHI_REQUIREMENT_PROJECT_ARTIFACTS") {
         let dir = std::path::PathBuf::from(artifacts);

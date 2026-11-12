@@ -27,6 +27,9 @@ use crate::{
     permission::{PermissionDecision, PermissionHost, PermissionOption, PermissionPolicy},
 };
 
+/// Longest wait for `session/cancel` to reach an agent that may not be reading.
+const CANCEL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpLifecycle {
     Created,
@@ -596,17 +599,31 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         Ok(completion)
     }
 
+    /// Ask the agent to stop the running turn.
+    ///
+    /// Delivery is bounded: a wedged agent that stops reading stdin leaves an
+    /// earlier write parked on the shared writer, and the caller is usually the
+    /// only consumer of the event channel. Waiting without a limit would park
+    /// the caller for as long as the agent stays wedged.
+    ///
+    /// # Errors
+    /// Returns `Timeout` when the notification cannot be delivered in time, or
+    /// `ProcessExited` when the agent's input is already closed.
     pub async fn cancel(&self, session: &AcpSession) -> AcpResult<()> {
         if !self.prompt_running.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let notify_result = self
-            .peer
-            .notify("session/cancel", json!({ "sessionId": session.id }))
-            .await;
-        cancel_pending_permissions(&self.pending_permissions).await;
-        let _ = self.events.send(AcpEvent::Cancelled).await;
-        notify_result
+        tokio::time::timeout(CANCEL_DELIVERY_TIMEOUT, async {
+            let notify_result = self
+                .peer
+                .notify("session/cancel", json!({ "sessionId": session.id }))
+                .await;
+            cancel_pending_permissions(&self.pending_permissions).await;
+            let _ = self.events.send(AcpEvent::Cancelled).await;
+            notify_result
+        })
+        .await
+        .map_err(|_| AcpError::Timeout(CANCEL_DELIVERY_TIMEOUT))?
     }
 
     pub async fn shutdown(&mut self) -> AcpResult<()> {
@@ -617,11 +634,19 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         self.set_state(AcpLifecycle::ShuttingDown).await;
         self.peer.fail_all(AcpError::Cancelled).await;
         cancel_pending_permissions(&self.pending_permissions).await;
-        let _ = self.peer.close().await;
+        // Closing needs the writer, which a write blocked on a wedged agent
+        // holds until the agent dies. Kill instead of waiting for that agent.
+        let closed = tokio::time::timeout(self.config.shutdown_timeout, self.peer.close())
+            .await
+            .is_ok();
         if let Some(child) = &mut self.child {
-            match tokio::time::timeout(self.config.shutdown_timeout, child.wait()).await {
-                Ok(Ok(_)) => {}
-                _ => terminate_child(child).await,
+            if !closed {
+                terminate_child(child).await;
+            } else {
+                match tokio::time::timeout(self.config.shutdown_timeout, child.wait()).await {
+                    Ok(Ok(_)) => {}
+                    _ => terminate_child(child).await,
+                }
             }
         }
         // The container outlives the primary process, so a graceful agent exit

@@ -148,6 +148,9 @@ for line in sys.stdin:
                     {"id": "ask", "name": "Ask before changes"},
                     {"id": "auto", "name": "Auto approve changes"}]}
             send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+            if mode == "stalled_stdin":
+                # A wedged agent: alive, but never reads Teshi's next write.
+                time.sleep(600)
             if mode == "settings_idle":
                 model = "b"
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": {"sessionUpdate": "config_option_update", "configOptions": config_options()}}})

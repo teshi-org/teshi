@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use ratatui::text::Line;
 use teshi_core::authoring::{
     RequirementDocumentMeta, RequirementGroupMode, RequirementProjectFilter,
     RequirementProjectStatus, RequirementTagColor, RequirementTagStyle, normalize_tag_name,
@@ -952,13 +953,16 @@ impl AuthoringUiState {
 /// Builds Inbox, manual folders, and the Saved queries group.
 ///
 /// Folders list only direct members; parents never aggregate descendants. The returned
-/// map holds each node's visible label for width measurement.
+/// map holds each node's styled label, which the renderer rewraps to the pane width.
 pub(super) fn build_organization_tree(
     docs: &[RequirementDocumentMeta],
     org: &RequirementOrganization,
     project: &str,
     styles: &BTreeMap<String, RequirementTagStyle>,
-) -> (Vec<TreeItem<'static, String>>, HashMap<String, String>) {
+) -> (
+    Vec<TreeItem<'static, String>>,
+    HashMap<String, Line<'static>>,
+) {
     let mut builder = OrganizationTreeBuilder {
         docs,
         org,
@@ -993,7 +997,7 @@ struct OrganizationTreeBuilder<'a> {
     org: &'a RequirementOrganization,
     project: &'a str,
     styles: &'a BTreeMap<String, RequirementTagStyle>,
-    labels: HashMap<String, String>,
+    labels: HashMap<String, Line<'static>>,
 }
 
 impl OrganizationTreeBuilder<'_> {
@@ -1008,7 +1012,7 @@ impl OrganizationTreeBuilder<'_> {
         if !state.is_empty() {
             line.push_span(state);
         }
-        self.labels.insert(id.clone(), line.to_string());
+        self.labels.insert(id.clone(), line.clone());
         TreeItem::new_leaf(id, line)
     }
 
@@ -1018,7 +1022,7 @@ impl OrganizationTreeBuilder<'_> {
         label: String,
         children: Vec<TreeItem<'static, String>>,
     ) -> TreeItem<'static, String> {
-        self.labels.insert(id.clone(), label.clone());
+        self.labels.insert(id.clone(), Line::from(label.clone()));
         // Children are distinct collections plus distinct document IDs, so identifiers are unique.
         TreeItem::new(id, label, children).expect("unique requirement tree children")
     }

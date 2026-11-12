@@ -104,6 +104,13 @@ pub(crate) const EDITOR_SELECTION_BG: Color = Color::Rgb(0x5F, 0x5F, 0x87);
 pub(crate) const CURRENT_LINE_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
 /// Overlay and toast surface.
 pub(crate) const OVERLAY_BG: Color = Color::Rgb(0x3A, 0x3A, 0x3A);
+/// Confirmation dialog surface, matching iCode's `surface`: a dark card that
+/// lets the border, title and buttons carry the hierarchy.
+pub(crate) const DIALOG_BG: Color = Color::Rgb(0x1C, 0x1C, 0x1C);
+/// Resting fill of a warning button (iCode `warning-muted`).
+pub(crate) const WARNING_MUTED: Color = Color::Rgb(0xD7, 0x87, 0x5F);
+/// Resting fill of a destructive button (iCode `error-muted`).
+pub(crate) const ERROR_MUTED: Color = Color::Rgb(0xD7, 0x5F, 0x5F);
 /// Gherkin string literals.
 pub(crate) const SYNTAX_STRING: Color = Color::Rgb(0xD7, 0xAF, 0x87);
 
@@ -120,6 +127,100 @@ pub(crate) fn panel_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Bloc
 /// Popup chrome; the caller must clear the destination before rendering.
 pub(crate) fn popup_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
     panel_block(title, true).style(Style::default().bg(OVERLAY_BG))
+}
+
+/// Confirmation dialog chrome: a quiet border on the dark dialog surface, or a
+/// warning border when the decision is destructive. The caller clears first.
+pub(crate) fn dialog_block<'a>(title: impl Into<Line<'a>>, warning: bool) -> Block<'a> {
+    let (border, title_fg) = if warning {
+        (WARNING, WARNING)
+    } else {
+        (BORDER, PRIMARY)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border))
+        .title(title)
+        .title_style(Style::default().fg(title_fg).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(DIALOG_BG).fg(FG))
+}
+
+/// Semantic role of a dialog button, mirroring iCode's button variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonTone {
+    /// The constructive choice, such as Save or Close.
+    Primary,
+    /// The cautious way out, such as Cancel or Keep running.
+    Warning,
+    /// The irreversible choice, such as Delete or Quit with unsaved changes.
+    Danger,
+    /// A secondary edit that keeps the dialog open, such as Toggle or Color.
+    Neutral,
+}
+
+/// Fill of a dialog button. The focused button, the one Enter or the arrow
+/// selection activates, uses the full semantic color; others rest muted.
+pub(crate) fn button_fill(tone: ButtonTone, focused: bool) -> Color {
+    match (tone, focused) {
+        (ButtonTone::Primary, false) => PRIMARY_MUTED,
+        (ButtonTone::Primary, true) => PRIMARY,
+        (ButtonTone::Warning, false) => WARNING_MUTED,
+        (ButtonTone::Warning, true) => WARNING,
+        (ButtonTone::Danger, false) => ERROR_MUTED,
+        (ButtonTone::Danger, true) => ERROR,
+        (ButtonTone::Neutral, false) => SELECTION_INACTIVE_BG,
+        (ButtonTone::Neutral, true) => BORDER,
+    }
+}
+
+/// Label style of a dialog button: dark bold text on semantic fills, and the
+/// default foreground on the gray neutral fill where dark text would vanish.
+pub(crate) fn button_style(tone: ButtonTone, focused: bool) -> Style {
+    let fg = if tone == ButtonTone::Neutral {
+        FG
+    } else {
+        CHIP_FG
+    };
+    Style::default()
+        .bg(button_fill(tone, focused))
+        .fg(fg)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Text field bar in a dialog form; the focused field takes the quiet purple
+/// surface so the field that receives typing is visible without a border.
+pub(crate) fn input_style(focused: bool) -> Style {
+    Style::default()
+        .bg(if focused { CHAT_CHIP_BG } else { BLOCK_BG })
+        .fg(FG)
+}
+
+/// Recolors a cell under a modal backdrop, like iCode's 40% background veil.
+///
+/// RGB colors are blended toward the dialog surface. A default (`Reset`)
+/// foreground is treated as [`FG`]; a default background stays the terminal's
+/// own so the backdrop never paints the terminal background. Other colors are
+/// returned unchanged and the caller dims them with a modifier.
+pub(crate) fn backdrop_color(color: Color, foreground: bool) -> Option<Color> {
+    /// Share of the original color that survives the veil, in percent.
+    const KEEP: u16 = 60;
+    let blend = |channel: u8, base: u8| {
+        ((u16::from(channel) * KEEP + u16::from(base) * (100 - KEEP)) / 100) as u8
+    };
+    let Color::Rgb(base_r, base_g, base_b) = DIALOG_BG else {
+        return None;
+    };
+    match color {
+        Color::Rgb(r, g, b) => Some(Color::Rgb(
+            blend(r, base_r),
+            blend(g, base_g),
+            blend(b, base_b),
+        )),
+        Color::Reset if foreground => backdrop_color(FG, true),
+        Color::Reset => Some(Color::Reset),
+        _ => None,
+    }
 }
 
 /// Extends a selected option's fill across its row, including styled metadata.

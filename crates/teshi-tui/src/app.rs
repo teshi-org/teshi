@@ -320,6 +320,26 @@ impl AgentThread {
         });
     }
 
+    /// Requests shutdown of every owned backend and returns those that still
+    /// hold live workers or processes.
+    ///
+    /// Dropping a live ACP backend joins its worker, so a closed conversation
+    /// hands these to the app for non-blocking reaping instead.
+    fn into_live_backends(self) -> Vec<teshi_agent_runtime::backend::AgentBackendRuntime> {
+        let Self {
+            backend,
+            mut retiring_backends,
+            ..
+        } = self;
+        retiring_backends.push(backend);
+        retiring_backends.retain_mut(|backend| {
+            backend.request_shutdown();
+            backend.poll_shutdown();
+            backend.shutdown_pending()
+        });
+        retiring_backends
+    }
+
     /// Startup backend fallback notice, retained until an explicit selection.
     pub fn selection_warning(&self) -> Option<&str> {
         self.selection_warning.as_deref()
@@ -1206,6 +1226,9 @@ pub struct App {
     pub agents: Vec<AgentThread>,
     pub selected_agent: usize,
     pub next_agent_id: usize,
+    /// Backends of closed conversations that are still releasing workers or
+    /// processes. They stay project-owned until the shutdown polls reap them.
+    closed_agent_backends: Vec<teshi_agent_runtime::backend::AgentBackendRuntime>,
     /// Active exploration session state (None = not exploring).
     pub explore_state: Option<ExploreState>,
     /// Approval mode for agent tool calls (Manual / Auto / Bypass).
@@ -1603,29 +1626,21 @@ pub enum ClickableRegion {
     ProjectControl {
         rect: ratatui::layout::Rect,
     },
-    /// Quit confirmation "Yes" button.
+    /// Quit confirmation "Yes" button, including its half-block edges.
     QuitConfirmYes {
-        row_y: u16,
-        col_x: u16,
-        col_right: u16,
+        rect: ratatui::layout::Rect,
     },
-    /// Quit confirmation "No" button.
+    /// Quit confirmation "No" button, including its half-block edges.
     QuitConfirmNo {
-        row_y: u16,
-        col_x: u16,
-        col_right: u16,
+        rect: ratatui::layout::Rect,
     },
-    /// Interrupt confirmation "Interrupt" button.
+    /// Interrupt confirmation "Interrupt" button, including its half-block edges.
     AiInterruptConfirm {
-        row_y: u16,
-        col_x: u16,
-        col_right: u16,
+        rect: ratatui::layout::Rect,
     },
-    /// Interrupt confirmation "Continue" button.
+    /// Interrupt confirmation "Continue" button, including its half-block edges.
     AiInterruptContinue {
-        row_y: u16,
-        col_x: u16,
-        col_right: u16,
+        rect: ratatui::layout::Rect,
     },
 }
 
@@ -1672,6 +1687,15 @@ impl App {
             || self.explore_state.is_some()
             || self.generation_stage != teshi_agent::pipeline::GenerationStage::Idle
             || self.agents.iter().any(agent_busy)
+            || !self.closed_agent_backends.is_empty()
+    }
+
+    /// Reaps closed conversations' backends that have exited; never blocks.
+    fn poll_closed_agent_backends(&mut self) {
+        self.closed_agent_backends.retain_mut(|backend| {
+            backend.poll_shutdown();
+            backend.shutdown_pending()
+        });
     }
 
     /// Start a safe project switch. Preparation is detached from the active
@@ -2128,6 +2152,7 @@ impl App {
         for agent in &mut self.agents {
             agent.poll_shutdown();
         }
+        self.poll_closed_agent_backends();
         if !self.agent().shutdown_pending()
             && let Some((agent_id, stamp, session, legacy)) = self.pending_session_restore.take()
             && self.agent().id == agent_id
@@ -2540,6 +2565,7 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            closed_agent_backends: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -2683,6 +2709,7 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            closed_agent_backends: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -2883,6 +2910,7 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            closed_agent_backends: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -3215,7 +3243,7 @@ impl App {
         use crate::feature_browser::Row;
         match self.feature_browser_rows().get(row).cloned() {
             Some(Row::Directory(path, _)) => self.feature_browser.directory = Some(path),
-            Some(Row::File(index, _, deleted)) => {
+            Some(Row::File(index, _, deleted, _)) => {
                 self.feature_browser.directory = None;
                 if deleted {
                     self.explore_set_deleted_feature(index);
@@ -4088,6 +4116,7 @@ impl App {
     /// Apply backend progress to the TUI and provide Teshi's host tools.
     /// The backend owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
+        self.poll_closed_agent_backends();
         for agent in &mut self.agents {
             agent.poll_shutdown();
             if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
@@ -4473,6 +4502,7 @@ impl App {
     /// Whether any agent backend still owns resources after a shutdown request.
     pub fn agent_shutdown_pending(&self) -> bool {
         self.agents.iter().any(AgentThread::shutdown_pending)
+            || !self.closed_agent_backends.is_empty()
     }
 
     /// Reaps agent resources that already exited; never blocks on live work.
@@ -4480,6 +4510,7 @@ impl App {
         for agent in &mut self.agents {
             agent.poll_shutdown();
         }
+        self.poll_closed_agent_backends();
     }
 
     fn poll_acp_host_tools(&mut self, agent_idx: usize) {
@@ -9173,10 +9204,13 @@ impl App {
                 self.focus_visible_pane(false);
             }
             Action::FocusPaneDown | Action::FocusPaneUp => {
-                // The current main layouts are either a horizontal pane row
-                // or a single pane.  Keep the action explicit so Ctrl-W j/k
-                // is consumed as a documented no-op where no vertical
-                // neighbor exists, instead of becoming editor input.
+                // Requirements stacks linked test points under the editor.
+                // Elsewhere Ctrl-W j/k stays a documented no-op where no
+                // vertical neighbor exists, instead of becoming editor input.
+                if self.active_tab == MainTab::Requirements {
+                    self.authoring_ui
+                        .focus_vertical_pane(matches!(action, Action::FocusPaneDown));
+                }
                 self.quit_pending_confirm = false;
             }
             Action::ExploreRight => {
@@ -10234,7 +10268,26 @@ impl App {
                 if self.active_tab == MainTab::Requirements
                     && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Tree
                 {
-                    self.authoring_ui.expand_tree_selection();
+                    let selected_doc = self
+                        .authoring_ui
+                        .tree_state
+                        .selected()
+                        .last()
+                        .and_then(|id| id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX))
+                        .map(str::to_owned);
+                    // A document row has nothing to expand, so `l` steps into
+                    // the editor. The already open document keeps its preview
+                    // scroll instead of being reloaded the way Enter does.
+                    match selected_doc {
+                        Some(doc_id)
+                            if self.authoring_ui.selected_document_id.as_deref()
+                                == Some(doc_id.as_str()) =>
+                        {
+                            self.authoring_ui.focus_next_column();
+                        }
+                        Some(_) => return self.handle_action(Action::ReqTreeActivate),
+                        None => self.authoring_ui.expand_tree_selection(),
+                    }
                 }
             }
             Action::ReqEditIteration => {
@@ -10961,9 +11014,19 @@ impl App {
                 if self.agents.len() <= 1 {
                     self.status = "Cannot close the last agent".to_string();
                 } else {
-                    self.save_sessions(true)?;
-                    let name = self.agents[self.selected_agent].title.clone();
-                    self.agents.remove(self.selected_agent);
+                    // Only the closing conversation needs a final checkpoint;
+                    // the others keep their periodic saves.
+                    let root = crate::session::Session::storage_dir();
+                    let model = self.active_model_label.clone();
+                    self.agents[self.selected_agent].save_session_to(
+                        &root,
+                        &self.project.root_dir,
+                        model,
+                    )?;
+                    let closed = self.agents.remove(self.selected_agent);
+                    let name = closed.title.clone();
+                    self.closed_agent_backends
+                        .extend(closed.into_live_backends());
                     if self.selected_agent >= self.agents.len() {
                         self.selected_agent = self.agents.len().saturating_sub(1);
                     }
@@ -12594,12 +12657,7 @@ impl App {
                     ui.focus = focus;
                     if pane == 0 {
                         let previous = ui.tree_state.selected().to_vec();
-                        ui.tree_state.click_at(ratatui::layout::Position::new(
-                            pos.x.saturating_add(
-                                ui.horizontal_scroll[0].min(u16::MAX as usize) as u16
-                            ),
-                            pos.y,
-                        ));
+                        ui.tree_state.click_at(pos);
                         if let Some(id) = ui.tree_state.selected().last().cloned() {
                             // The widget only toggles an already selected row; folders must
                             // toggle on the first click as well, without loading a document.
@@ -13062,35 +13120,11 @@ impl App {
                         return Some(region);
                     }
                 }
-                ClickableRegion::QuitConfirmYes {
-                    row_y,
-                    col_x,
-                    col_right,
-                } => {
-                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
-                        return Some(region);
-                    }
-                }
-                ClickableRegion::QuitConfirmNo {
-                    row_y,
-                    col_x,
-                    col_right,
-                } => {
-                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
-                        return Some(region);
-                    }
-                }
-                ClickableRegion::AiInterruptConfirm {
-                    row_y,
-                    col_x,
-                    col_right,
-                }
-                | ClickableRegion::AiInterruptContinue {
-                    row_y,
-                    col_x,
-                    col_right,
-                } => {
-                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                ClickableRegion::QuitConfirmYes { rect }
+                | ClickableRegion::QuitConfirmNo { rect }
+                | ClickableRegion::AiInterruptConfirm { rect }
+                | ClickableRegion::AiInterruptContinue { rect } => {
+                    if rect.contains(*pos) {
                         return Some(region);
                     }
                 }
@@ -14776,6 +14810,69 @@ mod tests {
     }
 
     #[test]
+    fn test_requirements_preview_pane_navigation_reaches_every_pane() {
+        use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
+        let (mut app, _project, _store) = requirements_test_app();
+        app.authoring_ui.enter_preview();
+
+        for (action, expected) in [
+            (Action::FocusPaneDown, RequirementsFocus::LinkedTestPoints),
+            (Action::FocusPaneDown, RequirementsFocus::LinkedTestPoints),
+            (Action::FocusPaneUp, RequirementsFocus::Editor),
+            (Action::FocusPaneUp, RequirementsFocus::Editor),
+            (Action::FocusPrevColumn, RequirementsFocus::Tree),
+            (Action::FocusPaneDown, RequirementsFocus::Tree),
+            (Action::FocusNextColumn, RequirementsFocus::Editor),
+        ] {
+            app.handle_action(action.clone()).unwrap();
+            assert_eq!(app.authoring_ui.focus, expected, "after {action:?}");
+            assert_eq!(
+                app.authoring_ui.editor_mode,
+                RequirementsEditorMode::Preview,
+                "changing panes keeps the preview after {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_requirements_h_l_walk_tree_preview_and_linked_panes() {
+        use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
+        let (mut app, _project, _store) = requirements_test_app();
+        app.authoring_ui.enter_preview();
+        app.authoring_ui.focus = RequirementsFocus::Tree;
+        assert!(
+            app.authoring_ui
+                .tree_state
+                .selected()
+                .last()
+                .is_some_and(|id| id.starts_with(crate::authoring_tab::TREE_DOC_PREFIX)),
+            "the open document is selected in the tree"
+        );
+        app.authoring_ui.preview_scroll = 3;
+
+        for (action, expected) in [
+            (Action::ReqTreeExpand, RequirementsFocus::Editor),
+            (Action::FocusNextColumn, RequirementsFocus::LinkedTestPoints),
+            (Action::FocusNextColumn, RequirementsFocus::LinkedTestPoints),
+            (Action::FocusPrevColumn, RequirementsFocus::Editor),
+            (Action::FocusPrevColumn, RequirementsFocus::Tree),
+            (Action::ReqTreeExpand, RequirementsFocus::Editor),
+        ] {
+            app.handle_action(action.clone()).unwrap();
+            assert_eq!(app.authoring_ui.focus, expected, "after {action:?}");
+            assert_eq!(
+                app.authoring_ui.editor_mode,
+                RequirementsEditorMode::Preview,
+                "pane changes keep the preview after {action:?}"
+            );
+        }
+        assert_eq!(
+            app.authoring_ui.preview_scroll, 3,
+            "stepping into the open document does not reload it"
+        );
+    }
+
+    #[test]
     fn test_requirements_view_switch_keeps_unsaved_edits_without_prompting() {
         use crate::authoring_tab::{RequirementsEditorMode, RequirementsOverlay};
         let (mut app, _project, _store) = requirements_test_app();
@@ -14876,6 +14973,69 @@ mod tests {
             "the last conversation reports instead of asking"
         );
         assert_eq!(app.status, "Cannot close the last agent");
+    }
+
+    #[test]
+    fn test_agent_close_returns_before_the_acp_process_exits() {
+        use teshi_agent_runtime::backend::AcpBackendConfig;
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.handle_action(Action::AgentNew).unwrap();
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+        let command = teshi_acp::AcpAgentCommand {
+            program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+            args: vec![script.display().to_string(), "stalled_stdin".into()],
+            cwd: app.find_project_dir().to_path_buf(),
+            env: std::collections::HashMap::new(),
+        };
+        let mut config = AcpBackendConfig::new(command);
+        // The wedged fixture ignores shutdown, so the client waits out this
+        // timeout before killing it; a blocking close would wait as long.
+        config.client.shutdown_timeout = Duration::from_secs(2);
+        app.agents[0].backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Acp,
+            1,
+        );
+        app.agents[0].backend.configure_acp(config).unwrap();
+        app.agents[0].backend.connect_acp().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !app.agents[0]
+            .backend
+            .acp_controls()
+            .is_some_and(|controls| controls.ready)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ACP fixture never became ready"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        app.handle_action(Action::AgentSelect(0)).unwrap();
+
+        let started = std::time::Instant::now();
+        app.handle_action(Action::AgentClose).unwrap();
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(app.agents.len(), 1, "the conversation leaves at once");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "closing blocked the UI for {elapsed:?}"
+        );
+        assert!(
+            app.agent_shutdown_pending(),
+            "the closed backend is still reaped in the background"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while app.agent_shutdown_pending() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the closed backend was never reaped"
+            );
+            app.poll_llm_events();
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -19917,7 +20077,10 @@ mod tests {
                 .unwrap();
         let chat = org.folder_id("AI/Chat").unwrap();
         assert_eq!(org.document_folders("doc-1"), [chat].into());
-        assert_eq!(app.authoring_ui.tree_labels["req-dir:inbox"], "Inbox (0)");
+        assert_eq!(
+            app.authoring_ui.tree_labels["req-dir:inbox"].to_string(),
+            "Inbox (0)"
+        );
 
         select_requirement_row(&mut app, "req-doc:doc-1");
         app.handle_action(Action::ReqActionMenu).unwrap();
@@ -19931,7 +20094,10 @@ mod tests {
             "{}",
             app.status
         );
-        assert_eq!(app.authoring_ui.tree_labels["req-dir:inbox"], "Inbox (1)");
+        assert_eq!(
+            app.authoring_ui.tree_labels["req-dir:inbox"].to_string(),
+            "Inbox (1)"
+        );
     }
 
     #[test]
@@ -20074,7 +20240,7 @@ mod tests {
             app.authoring_ui
                 .tree_labels
                 .values()
-                .any(|label| label == "Open (1)")
+                .any(|label| label.to_string() == "Open (1)")
         );
     }
 
@@ -21732,6 +21898,7 @@ mod tests {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            closed_agent_backends: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -21944,6 +22111,7 @@ Feature: B
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            closed_agent_backends: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,

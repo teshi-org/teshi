@@ -25,7 +25,11 @@ use teshi_core::gherkin_lang::{
 use teshi_core::highlight::{HighlightKind, highlight_line_spans};
 
 pub(crate) mod chat;
+mod dialog;
 mod pointer_controls;
+
+use dialog::{Dialog, DialogButton, FormDialog, FormField, ListDialog};
+use theme::ButtonTone;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
 const MAIN_TABS: &[(MainTab, &str)] = &[
@@ -728,7 +732,13 @@ fn paint_hover(frame: &mut Frame<'_>, area: Rect) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buffer[(x, y)];
-            cell.bg = theme::hover_fill(cell.bg);
+            // Half-block button edges carry the button color in the glyph;
+            // lifting their cell background would tint the dialog around them.
+            if matches!(cell.symbol(), "▄" | "▀") {
+                cell.fg = theme::hover_fill(cell.fg);
+            } else {
+                cell.bg = theme::hover_fill(cell.bg);
+            }
         }
     }
 }
@@ -756,6 +766,10 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
             | ClickableRegion::Tab { rect, .. }
             | ClickableRegion::ProjectRecent { rect, .. }
             | ClickableRegion::ProjectOpenPath { rect, .. }
+            | ClickableRegion::QuitConfirmYes { rect }
+            | ClickableRegion::QuitConfirmNo { rect }
+            | ClickableRegion::AiInterruptConfirm { rect }
+            | ClickableRegion::AiInterruptContinue { rect }
             | ClickableRegion::ExploreHorizontalScrollbar { rect, .. } => *rect,
             ClickableRegion::ExploreFeature {
                 row_y,
@@ -797,7 +811,18 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
         };
         if rect.contains((x, y).into()) {
             let visible = rect.intersection(frame.area());
-            paint_hover(frame, visible);
+            // A tinted cell under inline pixels makes the whole image drop out
+            // of the frame, so image rows answer the pointer only around it.
+            let pixels: Vec<Rect> = app.inline_images.pixel_areas().collect();
+            if pixels.iter().any(|area| area.intersects(visible)) {
+                for position in visible.positions() {
+                    if !pixels.iter().any(|area| area.contains(position)) {
+                        paint_hover(frame, Rect::new(position.x, position.y, 1, 1));
+                    }
+                }
+            } else {
+                paint_hover(frame, visible);
+            }
             break;
         }
     }
@@ -810,56 +835,169 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
     // Closing a conversation saves it first, so it stays resumable and the
     // prompt must not claim the loss is permanent.
     let closing = request.action == Action::AgentClose;
-    let (title, verb, consequence, confirm) = if closing {
+    let (title, verb, consequence, confirm, tone) = if closing {
         (
             "Confirm close",
             "Close",
             "Its history stays available in the session list.",
-            "Close [Enter/y] ",
+            "Close [Enter/y]",
+            ButtonTone::Primary,
         )
     } else {
         (
             "Confirm deletion",
             "Delete",
             "This cannot be undone.",
-            "Delete [Enter/y] ",
+            "Delete [Enter/y]",
+            ButtonTone::Danger,
         )
     };
-    let height = if request.error.is_some() { 10 } else { 7 };
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(60) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        area.width.min(60),
-        area.height.min(height),
-    );
-    frame.render_widget(Clear, popup);
-    let block = theme::popup_block(title);
-    let [body, footer] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
-    frame.render_widget(block, popup);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "{verb} {}?\n{consequence}{}",
-            request.label,
-            request.error.map_or_else(String::new, |error| format!(
-                "\n\nCould not {}: {error}",
-                verb.to_lowercase()
-            ))
-        ))
-        .wrap(ratatui::widgets::Wrap { trim: false }),
-        body,
-    );
-    render_action_bar(
+    let mut body = vec![
+        dialog_question(format!("{verb} {}?", request.label)),
+        Line::styled(consequence, theme::muted()),
+    ];
+    if let Some(error) = request.error {
+        body.push(Line::raw(""));
+        body.push(Line::styled(
+            format!("Could not {}: {error}", verb.to_lowercase()),
+            Style::default().fg(theme::ERROR),
+        ));
+    }
+    render_confirm_dialog(
         frame,
         app,
-        footer,
-        "",
-        &[
-            (confirm, Action::DeleteConfirm),
-            ("Cancel [Esc/n]", Action::DeleteCancel),
-        ],
-        true,
+        area,
+        Dialog {
+            title,
+            warning: !closing,
+            body,
+            buttons: vec![
+                DialogButton {
+                    label: confirm,
+                    tone,
+                    focused: true,
+                },
+                DialogButton {
+                    label: "Cancel [Esc/n]",
+                    tone: ButtonTone::Warning,
+                    focused: false,
+                },
+            ],
+        },
+        &[Action::DeleteConfirm, Action::DeleteCancel],
     );
+}
+
+/// The bold question that opens a confirmation message.
+fn dialog_question(text: String) -> Line<'static> {
+    Line::styled(
+        text,
+        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// A destructive confirmation whose Enter-activated first button deletes and
+/// whose second button cancels with `Esc`.
+fn delete_dialog<'a>(title: &'a str, body: Vec<Line<'a>>, confirm: &'a str) -> Dialog<'a> {
+    Dialog {
+        title,
+        warning: true,
+        body,
+        buttons: vec![
+            DialogButton {
+                label: confirm,
+                tone: ButtonTone::Danger,
+                focused: true,
+            },
+            DialogButton {
+                label: "Cancel [Esc]",
+                tone: ButtonTone::Warning,
+                focused: false,
+            },
+        ],
+    }
+}
+
+/// Renders a picker whose rows select their option index and whose buttons
+/// dispatch `actions`, in order.
+fn render_picker_dialog(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    dialog: ListDialog<'_>,
+    actions: &[Action],
+) {
+    let targets = dialog.render(frame, area);
+    for (index, rect) in targets.rows {
+        app.clickable_regions
+            .push(ClickableRegion::RequirementFilterOption { rect, index });
+    }
+    register_dialog_buttons(app, targets.buttons, actions);
+}
+
+/// Style of a picker row; the dialog extends the selected fill across the row.
+fn picker_row_style(selected: bool) -> Style {
+    if selected {
+        theme::selected_row(true)
+    } else {
+        Style::default()
+    }
+}
+
+fn picker_row(text: String, selected: bool) -> Line<'static> {
+    Line::styled(text, picker_row_style(selected))
+}
+
+/// The Enter-activated button of a picker.
+fn confirm_button(label: &str) -> DialogButton<'_> {
+    DialogButton {
+        label,
+        tone: ButtonTone::Primary,
+        focused: true,
+    }
+}
+
+/// The `Esc` way out of a picker.
+fn cancel_button(label: &str) -> DialogButton<'_> {
+    DialogButton {
+        label,
+        tone: ButtonTone::Warning,
+        focused: false,
+    }
+}
+
+/// A picker edit that keeps the dialog open.
+fn neutral_button(label: &str) -> DialogButton<'_> {
+    DialogButton {
+        label,
+        tone: ButtonTone::Neutral,
+        focused: false,
+    }
+}
+
+fn register_dialog_buttons(app: &mut App, rects: Vec<Rect>, actions: &[Action]) {
+    for (rect, action) in rects.into_iter().zip(actions) {
+        // A clipped button is not an actionable control.
+        if !rect.is_empty() {
+            app.clickable_regions.push(ClickableRegion::ActionButton {
+                rect,
+                action: action.clone(),
+                modal: true,
+            });
+        }
+    }
+}
+
+/// Renders a confirmation dialog whose buttons dispatch `actions`, in order.
+fn render_confirm_dialog(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    dialog: Dialog<'_>,
+    actions: &[Action],
+) {
+    let rects = dialog.render(frame, area);
+    register_dialog_buttons(app, rects, actions);
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1306,7 +1444,7 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                             },
                             path.rsplit('/').next().unwrap_or(path)
                         ),
-                        Row::File(index, label, deleted) => {
+                        Row::File(index, label, deleted, _) => {
                             let status = if *deleted {
                                 app.git_status.deleted[*index].file_status
                             } else {
@@ -1358,7 +1496,7 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .take(content.height as usize)
     {
         let region = match item {
-            Row::File(index, _, true) => ClickableRegion::ExploreDeletedFeature {
+            Row::File(index, _, true, _) => ClickableRegion::ExploreDeletedFeature {
                 deleted_idx: *index,
                 row_y: content.y + (row - offset) as u16,
                 col_x: content.x,
@@ -4363,100 +4501,36 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 /// Render the quit confirmation popup panel.
 fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_w = area.width.min(40);
-    let panel_h = 7;
-    let panel_x = (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
-
-    frame.render_widget(Clear, panel_area);
-
-    let block = theme::popup_block(" Quit Teshi? ");
-    let inner = block.inner(panel_area);
-    frame.render_widget(block, panel_area);
-
-    let inner_w = inner.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Centered message
-    let msg = if app.dirty {
+    let message = if app.dirty {
         "You have unsaved changes, quit anyway?"
     } else {
         "Quit Teshi and return to the shell?"
     };
-    let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
-    lines.push(Line::styled(
-        format!("{}{}", " ".repeat(msg_pad), msg),
-        Style::default().fg(theme::FG),
-    ));
-    lines.push(Line::raw(""));
-
-    // Symmetric button row: "  [Yes]    [No]  " (20 chars)
-    let btn_row = inner.y + 2;
-    let btn_sep = "    "; // 4 chars gap
-    // Total: "  " + btn_text + btn_sep + btn_text + "  " = 2+6+4+6+2 = 20
-    let btn_line_total = 20usize;
-    let btn_left_pad = (inner_w.saturating_sub(btn_line_total)) / 2;
-    let col_yes_start = inner.x + btn_left_pad as u16 + 2;
-    let col_no_start = col_yes_start + 6 + 4; // after Yes + separator
-
-    // Check hover states and keyboard focus
-    let yes_hovered = app
-        .mouse_position
-        .is_some_and(|(mx, my)| my == btn_row && mx >= col_yes_start && mx < col_yes_start + 6);
-    let no_hovered = app
-        .mouse_position
-        .is_some_and(|(mx, my)| my == btn_row && mx >= col_no_start && mx < col_no_start + 6);
-
-    // Keyboard selection always shows a focused button (mouse hover overrides)
-    let yes_focused = app.quit_panel_selection == 0;
-    let no_focused = app.quit_panel_selection == 1;
-
-    // Register clickable regions
-    app.clickable_regions.push(ClickableRegion::QuitConfirmYes {
-        row_y: btn_row,
-        col_x: col_yes_start,
-        col_right: col_yes_start + 6,
-    });
-    app.clickable_regions.push(ClickableRegion::QuitConfirmNo {
-        row_y: btn_row,
-        col_x: col_no_start,
-        col_right: col_no_start + 6,
-    });
-
-    let yes_style = if yes_focused {
-        theme::selected_row(true)
-    } else {
-        theme::chip("", theme::ERROR).style
-    };
-    let yes_style = if yes_hovered {
-        yes_style.add_modifier(Modifier::REVERSED)
-    } else {
-        yes_style
-    };
-    let no_style = if no_focused {
-        theme::selected_row(true)
-    } else {
-        theme::chip("", theme::BORDER).style
-    };
-    let no_style = if no_hovered {
-        no_style.add_modifier(Modifier::REVERSED)
-    } else {
-        no_style
-    };
-
-    let btn_line = Line::from(vec![
-        Span::raw(" ".repeat(btn_left_pad)),
-        Span::raw("  "),
-        Span::styled(" [Yes] ", yes_style),
-        Span::raw(btn_sep),
-        Span::styled(" [No] ", no_style),
-        Span::raw("  "),
-    ]);
-    lines.push(btn_line);
-
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    // The arrow keys move the selection that Enter activates.
+    let rects = Dialog {
+        title: "Quit Teshi?",
+        warning: app.dirty,
+        body: vec![dialog_question(message.to_string())],
+        buttons: vec![
+            DialogButton {
+                label: "[Yes]",
+                tone: ButtonTone::Danger,
+                focused: app.quit_panel_selection == 0,
+            },
+            DialogButton {
+                label: "[No]",
+                tone: ButtonTone::Warning,
+                focused: app.quit_panel_selection == 1,
+            },
+        ],
+    }
+    .render(frame, area);
+    if let [yes, no] = rects[..] {
+        app.clickable_regions
+            .push(ClickableRegion::QuitConfirmYes { rect: yes });
+        app.clickable_regions
+            .push(ClickableRegion::QuitConfirmNo { rect: no });
+    }
 }
 
 /// Render the "interrupt the current run" confirmation popup.
@@ -4464,89 +4538,33 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// Mirrors the host agent's own prompt: the turn is only cut when the user
 /// confirms, and the ACP session behind it is kept either way.
 fn render_interrupt_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_w = area.width.min(56);
-    let panel_h = 8;
-    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
-
-    frame.render_widget(Clear, panel_area);
-
-    let block = theme::popup_block(" Interrupt the current run? ");
-    let inner = block.inner(panel_area);
-    frame.render_widget(block, panel_area);
-
-    let inner_w = inner.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for text in [
-        "The turn ends; the session and its answer are kept.",
-        "Enter/y interrupt · Esc/n keep running",
-    ] {
-        let pad = inner_w.saturating_sub(text.chars().count()) / 2;
-        lines.push(Line::styled(
-            format!("{}{}", " ".repeat(pad), text),
-            Style::default().fg(theme::FG),
-        ));
+    let rects = Dialog {
+        title: "Interrupt the current run?",
+        warning: false,
+        body: vec![
+            dialog_question("The turn ends; the session and its answer are kept.".to_string()),
+            Line::styled("Enter/y interrupt · Esc/n keep running", theme::muted()),
+        ],
+        buttons: vec![
+            DialogButton {
+                label: "[Interrupt]",
+                tone: ButtonTone::Danger,
+                focused: app.ai_interrupt_selection == 0,
+            },
+            DialogButton {
+                label: "[Continue]",
+                tone: ButtonTone::Warning,
+                focused: app.ai_interrupt_selection == 1,
+            },
+        ],
     }
-    lines.push(Line::raw(""));
-
-    let btn_row = inner.y + 3;
-    let btn_sep = "    ";
-    let btn_line_total = 13 + btn_sep.len() + 12;
-    let btn_left_pad = inner_w.saturating_sub(btn_line_total) / 2;
-    let col_interrupt_start = inner.x + btn_left_pad as u16;
-    let col_continue_start = col_interrupt_start + 13 + btn_sep.len() as u16;
-
-    let interrupt_hovered = app.mouse_position.is_some_and(|(mx, my)| {
-        my == btn_row && mx >= col_interrupt_start && mx < col_interrupt_start + 13
-    });
-    let continue_hovered = app.mouse_position.is_some_and(|(mx, my)| {
-        my == btn_row && mx >= col_continue_start && mx < col_continue_start + 12
-    });
-
-    app.clickable_regions
-        .push(ClickableRegion::AiInterruptConfirm {
-            row_y: btn_row,
-            col_x: col_interrupt_start,
-            col_right: col_interrupt_start + 13,
-        });
-    app.clickable_regions
-        .push(ClickableRegion::AiInterruptContinue {
-            row_y: btn_row,
-            col_x: col_continue_start,
-            col_right: col_continue_start + 12,
-        });
-
-    let interrupt_style = if app.ai_interrupt_selection == 0 {
-        theme::selected_row(true)
-    } else {
-        theme::chip("", theme::ERROR).style
-    };
-    let interrupt_style = if interrupt_hovered {
-        interrupt_style.add_modifier(Modifier::REVERSED)
-    } else {
-        interrupt_style
-    };
-    let continue_style = if app.ai_interrupt_selection == 1 {
-        theme::selected_row(true)
-    } else {
-        theme::chip("", theme::BORDER).style
-    };
-    let continue_style = if continue_hovered {
-        continue_style.add_modifier(Modifier::REVERSED)
-    } else {
-        continue_style
-    };
-
-    lines.push(Line::from(vec![
-        Span::raw(" ".repeat(btn_left_pad)),
-        Span::styled(" [Interrupt] ", interrupt_style),
-        Span::raw(btn_sep),
-        Span::styled(" [Continue] ", continue_style),
-    ]));
-
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    .render(frame, area);
+    if let [interrupt, keep] = rects[..] {
+        app.clickable_regions
+            .push(ClickableRegion::AiInterruptConfirm { rect: interrupt });
+        app.clickable_regions
+            .push(ClickableRegion::AiInterruptContinue { rect: keep });
+    }
 }
 
 /// Render the approval mode selection popup panel.
@@ -5370,70 +5388,39 @@ fn render_requirements_tree(
         return;
     }
     let viewport = requirement_viewport(area);
-    let visible = ui.tree_state.flatten(&ui.tree_items);
-    let height = visible.len();
-    let width = visible
+    let wrap = RequirementTreeWrap {
+        labels: &ui.tree_labels,
+        selected: ui.tree_state.selected(),
+        opened: ui.tree_state.opened(),
+        width: viewport.width as usize,
+        max_rows: viewport.height as usize,
+    };
+    let wrapped = wrap.items(&ui.tree_items, &mut Vec::new());
+    let heights: Vec<usize> = ui
+        .tree_state
+        .flatten(&wrapped)
         .iter()
-        .map(|node| {
-            let id = node.item.identifier();
-            let label_width = if let Some(label) = ui.tree_labels.get(id) {
-                UnicodeWidthStr::width(label.as_str())
-            } else if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
-                ui.artifacts
-                    .as_ref()
-                    .and_then(|a| {
-                        let doc = a.index.documents.iter().find(|d| d.id == doc_id)?;
-                        Some(UnicodeWidthStr::width(
-                            crate::authoring_tab::requirement_document_tree_label(
-                                doc,
-                                &a.index.tag_styles,
-                            )
-                            .as_str(),
-                        ))
-                    })
-                    .unwrap_or(0)
-            } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
-                UnicodeWidthStr::width(name)
-            } else {
-                UnicodeWidthStr::width(
-                    id.rsplit('/')
-                        .next()
-                        .unwrap_or(id)
-                        .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX),
-                )
-            };
-            node.depth() * 2 + 2 + label_width
-        })
-        .max()
-        .unwrap_or(0)
-        .min(u16::MAX.saturating_sub(inner.x) as usize);
-    ui.horizontal_scroll[0] =
-        ui.horizontal_scroll[0].min(width.saturating_sub(viewport.width as usize));
-    // Render at full width so clipping does not discard text before horizontal scrolling.
-    let wide = Rect::new(
-        viewport.x,
-        viewport.y,
-        width.max(viewport.width as usize) as u16,
-        viewport.height,
-    );
-    let mut buffer = ratatui::buffer::Buffer::empty(wide);
-    let tree = Tree::new(&ui.tree_items)
+        .map(|node| node.item.height())
+        .collect();
+    // Tree offsets count items, not rows: the furthest offset is the first item
+    // from which every remaining row fits, so the scroll extent is that offset
+    // plus one viewport.
+    let max_start = last_fitting_start(&heights, viewport.height as usize);
+    ui.horizontal_scroll[0] = 0;
+    let tree = Tree::new(&wrapped)
         .expect("requirement tree")
         .highlight_style(theme::selected_row(focused));
-    ratatui::widgets::StatefulWidget::render(tree, wide, &mut buffer, &mut ui.tree_state);
-    for y in viewport.y..viewport.bottom() {
-        for x in 0..viewport.width {
-            frame.buffer_mut()[(viewport.x + x, y)] =
-                buffer[(viewport.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
-        }
-    }
+    frame.render_stateful_widget(tree, viewport, &mut ui.tree_state);
     render_requirement_scrollbars(
         frame,
         ui,
         0,
         area,
-        (width, height),
-        (ui.horizontal_scroll[0], ui.tree_state.get_offset()),
+        (
+            viewport.width as usize,
+            max_start + viewport.height as usize,
+        ),
+        (0, ui.tree_state.get_offset()),
     );
 
     let diag_lines: Vec<Line> = ui
@@ -5462,6 +5449,109 @@ fn render_requirements_tree(
     }
 }
 
+/// Rows an unselected requirement tree label may wrap to before it is truncated.
+const REQUIREMENT_TREE_LABEL_ROWS: usize = 2;
+
+/// Rewraps requirement tree labels to the pane width for one frame.
+///
+/// The selected row shows its whole label (up to one viewport, so the widget can
+/// always keep it in view); every other row stops at
+/// [`REQUIREMENT_TREE_LABEL_ROWS`].
+struct RequirementTreeWrap<'a> {
+    labels: &'a std::collections::HashMap<String, Line<'static>>,
+    selected: &'a [String],
+    opened: &'a std::collections::HashSet<Vec<String>>,
+    /// Viewport columns, including the indent and the folder marker.
+    width: usize,
+    max_rows: usize,
+}
+
+impl RequirementTreeWrap<'_> {
+    fn items(
+        &self,
+        items: &[tui_tree_widget::TreeItem<'static, String>],
+        path: &mut Vec<String>,
+    ) -> Vec<tui_tree_widget::TreeItem<'static, String>> {
+        items
+            .iter()
+            .map(|item| {
+                let id = item.identifier();
+                path.push(id.clone());
+                // The widget draws two columns of indent per level plus a two-column marker.
+                let width = self.width.saturating_sub(path.len() * 2).max(1);
+                let rows = if path.as_slice() == self.selected {
+                    self.max_rows
+                } else {
+                    REQUIREMENT_TREE_LABEL_ROWS.min(self.max_rows)
+                };
+                let label = self
+                    .labels
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| Line::from(id.clone()));
+                // Rows under a closed node are never drawn, so they keep their unwrapped text.
+                let children = if self.opened.contains(path) {
+                    self.items(item.children(), path)
+                } else {
+                    item.children().to_vec()
+                };
+                path.pop();
+                tui_tree_widget::TreeItem::new(
+                    id.clone(),
+                    wrap_tree_label(label, width, rows),
+                    children,
+                )
+                .unwrap_or_else(|_| item.clone())
+            })
+            .collect()
+    }
+}
+
+/// Wraps a tree label into at most `max_rows` rows of `width` columns, ending
+/// a truncated label with `…`.
+fn wrap_tree_label(label: Line<'static>, width: usize, max_rows: usize) -> Text<'static> {
+    let mut rows = chat::wrap_line_to_width(label, width);
+    if rows.len() > max_rows.max(1) {
+        rows.truncate(max_rows.max(1));
+        if let Some(last) = rows.pop() {
+            let budget = width.saturating_sub(1).min(u16::MAX as usize) as u16;
+            let mut kept = truncate_line_to_cols(trim_line_end(last), budget);
+            kept.push_span(Span::raw("…"));
+            rows.push(kept);
+        }
+    }
+    Text::from(rows)
+}
+
+/// Drops trailing whitespace that wrapping leaves at a break point.
+fn trim_line_end(mut line: Line<'static>) -> Line<'static> {
+    while let Some(span) = line.spans.last_mut() {
+        let trimmed = span.content.trim_end();
+        if trimmed.is_empty() {
+            line.spans.pop();
+            continue;
+        }
+        if trimmed.len() != span.content.len() {
+            span.content = trimmed.to_string().into();
+        }
+        break;
+    }
+    line
+}
+
+/// First item index from which all remaining item heights fit in `rows`.
+fn last_fitting_start(heights: &[usize], rows: usize) -> usize {
+    let mut used = 0usize;
+    for (index, height) in heights.iter().enumerate().rev() {
+        used += height;
+        if used > rows {
+            // A last item taller than the viewport still scrolls to itself.
+            return (index + 1).min(heights.len() - 1);
+        }
+    }
+    0
+}
+
 fn render_requirements_editor(
     frame: &mut Frame<'_>,
     ui: &mut crate::authoring_tab::AuthoringUiState,
@@ -5469,18 +5559,20 @@ fn render_requirements_editor(
     focused: bool,
     images: Option<&mut crate::image_view::InlineImages>,
 ) {
-    let title = ui
-        .current_document_meta()
-        .map(|m| m.title.clone())
-        .unwrap_or_else(|| "Source".to_string());
-    let priority = ui.current_document_meta().and_then(|meta| meta.priority);
+    let meta = ui.current_document_meta();
+    let priority = meta.and_then(|meta| meta.priority);
     let missing = ui.current_document_missing();
-    let display_title = if missing {
-        format!("{title} (missing file)")
-    } else if ui.buffer_dirty {
-        format!("{title} *")
+    // The document title is the body's H1, which the editor and preview already
+    // show; repeat it only when the body cannot be shown.
+    let label = if meta.is_some() {
+        "Requirement"
     } else {
-        title
+        "Source"
+    };
+    let display_title = match meta {
+        Some(meta) if missing => format!("{} (missing file)", meta.title),
+        _ if ui.buffer_dirty => format!("{label} *"),
+        _ => label.to_string(),
     };
     let (mode, mode_color) = match ui.editor_mode {
         crate::authoring_tab::RequirementsEditorMode::Preview => ("[PREVIEW]", theme::SUCCESS),
@@ -5938,68 +6030,19 @@ fn render_requirements_linked(
     );
 }
 
-/// Centers a `width` x `height` popup in `area`, shrinking it to fit.
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
-/// Draws clickable popup controls on the second-to-last row of `panel`.
-fn render_overlay_footer(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    panel: Rect,
-    controls: &[(&str, Action)],
-) {
-    render_action_bar(
-        frame,
-        app,
-        Rect::new(
-            panel.x + 1,
-            panel.bottom().saturating_sub(2),
-            panel.width.saturating_sub(2),
-            1,
-        ),
-        "",
-        controls,
-        true,
-    );
-}
-
-/// One labeled text field; the focused field shows a block cursor.
-fn form_input_line<'a>(
+/// A dialog field editing `input`; only the focused field draws the caret.
+fn form_field<'a>(
     label: &'a str,
     input: &'a crate::authoring_tab::LineInput,
     focused: bool,
-) -> Line<'a> {
-    let label_style = if focused {
-        Style::default().fg(theme::PRIMARY)
-    } else {
-        theme::muted()
-    };
-    let mut spans = vec![Span::styled(format!("{label}: "), label_style)];
-    if !focused {
-        spans.push(Span::raw(input.text()));
-        return Line::from(spans);
-    }
+) -> FormField<'a> {
     let (before, after) = input.split_at_cursor();
-    let mut rest = after.chars();
-    let under = rest.next().map_or(" ".to_string(), String::from);
-    spans.extend([
-        Span::raw(before),
-        Span::styled(
-            under,
-            Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
-        ),
-        Span::raw(rest.as_str()),
-    ]);
-    Line::from(spans)
+    FormField {
+        label,
+        before,
+        after,
+        focused,
+    }
 }
 
 fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -6012,77 +6055,53 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
     match &app.authoring_ui.overlay {
         RequirementsOverlay::None => {}
         RequirementsOverlay::Unsaved { .. } => {
-            let width = area.width.min(60);
-            let height = area.height.min(7);
-            let panel = Rect::new(
-                area.x + area.width.saturating_sub(width) / 2,
-                area.y + area.height.saturating_sub(height) / 2,
-                width,
-                height,
-            );
             let title = app
                 .authoring_ui
                 .current_document_meta()
-                .map(|doc| doc.title.as_str())
-                .unwrap_or("Requirement");
-            frame.render_widget(Clear, panel);
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::raw(format!("{title} has unsaved changes.")),
-                    Line::raw(""),
-                    Line::raw(""),
-                ])
-                .wrap(ratatui::widgets::Wrap { trim: false })
-                .block(theme::popup_block(" Unsaved requirement ")),
-                panel,
-            );
-            render_action_bar(
+                .map_or("Requirement", |doc| doc.title.as_str());
+            let body = vec![dialog_question(format!("{title} has unsaved changes."))];
+            // Enter has no meaning here, so no button is shown as focused.
+            render_confirm_dialog(
                 frame,
                 app,
-                Rect::new(
-                    panel.x + 1,
-                    panel.bottom().saturating_sub(2),
-                    panel.width.saturating_sub(2),
-                    1,
-                ),
-                "",
+                area,
+                Dialog {
+                    title: "Unsaved requirement",
+                    warning: false,
+                    body,
+                    buttons: vec![
+                        DialogButton {
+                            label: "[S] Save",
+                            tone: ButtonTone::Primary,
+                            focused: false,
+                        },
+                        DialogButton {
+                            label: "[D] Discard",
+                            tone: ButtonTone::Danger,
+                            focused: false,
+                        },
+                        DialogButton {
+                            label: "[Esc] Cancel",
+                            tone: ButtonTone::Warning,
+                            focused: false,
+                        },
+                    ],
+                },
                 &[
-                    (" [S] Save", Action::OverlayInsert('s')),
-                    (" [D] Discard", Action::OverlayInsert('d')),
-                    (" [Esc] Cancel", Action::OverlayCancel),
+                    Action::OverlayInsert('s'),
+                    Action::OverlayInsert('d'),
+                    Action::OverlayCancel,
                 ],
-                true,
             );
         }
         RequirementsOverlay::FilterPicker { selection } => {
-            let options = app.authoring_ui.filter_picker_options();
-            let panel_w = area.width.min(48);
-            let panel_h = (options.len() as u16 + 4).min(area.height.min(16));
-            let panel_area = Rect::new(
-                (area.width.saturating_sub(panel_w)) / 2,
-                (area.height.saturating_sub(panel_h)) / 2,
-                panel_w,
-                panel_h,
-            );
-            frame.render_widget(Clear, panel_area);
-            let visible = panel_area.height.saturating_sub(4) as usize;
-            let start = selection.saturating_sub(visible.saturating_sub(1));
-            let lines: Vec<Line> = options
+            let selection = *selection;
+            let rows = app
+                .authoring_ui
+                .filter_picker_options()
                 .iter()
                 .enumerate()
-                .skip(start)
-                .take(visible)
-                .map(|(i, filter)| {
-                    app.clickable_regions
-                        .push(ClickableRegion::RequirementFilterOption {
-                            rect: Rect::new(
-                                panel_area.x + 1,
-                                panel_area.y + 1 + (i - start) as u16,
-                                panel_area.width.saturating_sub(2),
-                                1,
-                            ),
-                            index: i,
-                        });
+                .map(|(index, filter)| {
                     let label = match filter {
                         teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
                         teshi_core::authoring::RequirementIterationFilter::Unassigned => {
@@ -6092,31 +6111,21 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                             name.clone()
                         }
                     };
-                    let style = if i == *selection {
-                        theme::selected_row(true)
-                    } else {
-                        Style::default()
-                    };
-                    Line::styled(format!("  {label}"), style)
+                    picker_row(format!(" {label}"), index == selection)
                 })
                 .collect();
-            frame.render_widget(
-                Paragraph::new(theme::popup_rows(lines, panel_area.width.saturating_sub(2)))
-                    .block(theme::popup_block(" Filter iteration ")),
-                panel_area,
-            );
-            render_action_bar(
+            render_picker_dialog(
                 frame,
                 app,
-                Rect::new(
-                    panel_area.x + 1,
-                    panel_area.bottom().saturating_sub(2),
-                    panel_area.width.saturating_sub(2),
-                    1,
-                ),
-                "",
-                &[(" Cancel [Esc]", Action::OverlayCancel)],
-                true,
+                area,
+                ListDialog {
+                    title: "Filter iteration",
+                    rows,
+                    selected: selection,
+                    notes: Vec::new(),
+                    buttons: vec![cancel_button("Cancel [Esc]")],
+                },
+                &[Action::OverlayCancel],
             );
         }
         RequirementsOverlay::ActionMenu { target, selection } => {
@@ -6128,52 +6137,33 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 .map(|item| UnicodeWidthStr::width(item.label))
                 .max()
                 .unwrap_or(0);
-            let content_width = (label_width + 12).max(UnicodeWidthStr::width(title.as_str()) + 2);
-            let panel = centered_rect(
-                area,
-                (content_width as u16 + 2).clamp(32, 64),
-                items.len() as u16 + 4,
-            );
-            frame.render_widget(Clear, panel);
-            let lines = items
+            let rows = items
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    app.clickable_regions
-                        .push(ClickableRegion::RequirementFilterOption {
-                            rect: Rect::new(
-                                panel.x + 1,
-                                panel.y + 1 + index as u16,
-                                panel.width.saturating_sub(2),
-                                1,
-                            ),
-                            index,
-                        });
-                    let style = if index == selection {
-                        theme::selected_row(true)
-                    } else {
-                        Style::default()
-                    };
+                    let style = picker_row_style(index == selection);
                     let pad = label_width - UnicodeWidthStr::width(item.label);
                     Line::from(vec![
-                        Span::styled(format!("  {}{}  ", item.label, " ".repeat(pad)), style),
+                        Span::styled(format!(" {}{}   ", item.label, " ".repeat(pad)), style),
                         Span::styled(item.hint, style.patch(theme::muted())),
                     ])
                 })
                 .collect();
-            frame.render_widget(
-                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
-                    .block(theme::popup_block(title)),
-                panel,
-            );
-            render_overlay_footer(
+            render_picker_dialog(
                 frame,
                 app,
-                panel,
-                &[
-                    (" Select [Enter]", Action::OverlayConfirm),
-                    (" Close [Esc]", Action::OverlayCancel),
-                ],
+                area,
+                ListDialog {
+                    title: &title,
+                    rows,
+                    selected: selection,
+                    notes: Vec::new(),
+                    buttons: vec![
+                        confirm_button("Select [Enter]"),
+                        cancel_button("Close [Esc]"),
+                    ],
+                },
+                &[Action::OverlayConfirm, Action::OverlayCancel],
             );
         }
         RequirementsOverlay::FolderPicker {
@@ -6188,65 +6178,49 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 .as_ref()
                 .and_then(|a| a.index.documents.iter().find(|d| &d.id == document_id))
                 .map_or(document_id.clone(), |d| d.title.clone());
-            let rows = options.len().max(1) as u16;
-            let panel = centered_rect(area, 64, rows + 6);
-            frame.render_widget(Clear, panel);
-            let visible = (panel.height.saturating_sub(6) as usize).max(1);
-            let start = selection.saturating_sub(visible.saturating_sub(1));
-            let mut lines: Vec<Line> = if options.is_empty() {
-                vec![Line::styled(
-                    "  No folders yet. Close, select Inbox, and choose New folder….",
+            let rows = options
+                .iter()
+                .enumerate()
+                .map(|(index, (id, path))| {
+                    let mark = if checked.contains(id) { "[x]" } else { "[ ]" };
+                    picker_row(format!(" {mark} {path}"), index == *selection)
+                })
+                .collect();
+            let mut notes = Vec::new();
+            if options.is_empty() {
+                notes.push(Line::styled(
+                    "No folders yet. Close, select Inbox, and choose New folder….",
                     theme::muted(),
-                )]
-            } else {
-                options
-                    .iter()
-                    .enumerate()
-                    .skip(start)
-                    .take(visible)
-                    .map(|(index, (id, path))| {
-                        app.clickable_regions
-                            .push(ClickableRegion::RequirementFilterOption {
-                                rect: Rect::new(
-                                    panel.x + 1,
-                                    panel.y + 1 + (index - start) as u16,
-                                    panel.width.saturating_sub(2),
-                                    1,
-                                ),
-                                index,
-                            });
-                        let style = if index == *selection {
-                            theme::selected_row(true)
-                        } else {
-                            Style::default()
-                        };
-                        let mark = if checked.contains(id) { "[x]" } else { "[ ]" };
-                        Line::styled(format!("  {mark} {path}"), style)
-                    })
-                    .collect()
-            };
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
+                ));
+            }
+            notes.push(Line::styled(
                 if checked.is_empty() {
-                    "  No folder checked: the requirement is listed in Inbox."
+                    "No folder checked: the requirement is listed in Inbox."
                 } else {
-                    "  The requirement is listed in every checked folder."
+                    "The requirement is listed in every checked folder."
                 },
                 theme::muted(),
             ));
-            frame.render_widget(
-                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
-                    .block(theme::popup_block(format!(" Folders of {title} "))),
-                panel,
-            );
-            render_overlay_footer(
+            let title = format!("Folders of {title}");
+            render_picker_dialog(
                 frame,
                 app,
-                panel,
+                area,
+                ListDialog {
+                    title: &title,
+                    rows,
+                    selected: *selection,
+                    notes,
+                    buttons: vec![
+                        neutral_button("Toggle [Space]"),
+                        confirm_button("Save [Enter]"),
+                        cancel_button("Cancel [Esc]"),
+                    ],
+                },
                 &[
-                    (" Toggle [Space]", Action::OverlayInsert(' ')),
-                    (" Save [Enter]", Action::OverlayConfirm),
-                    (" Cancel [Esc]", Action::OverlayCancel),
+                    Action::OverlayInsert(' '),
+                    Action::OverlayConfirm,
+                    Action::OverlayCancel,
                 ],
             );
         }
@@ -6265,33 +6239,11 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 .as_ref()
                 .and_then(|a| a.index.documents.iter().find(|d| &d.id == document_id))
                 .map_or(document_id.clone(), |d| d.title.clone());
-            let rows = (options.len() + 1).max(1) as u16;
-            let panel = centered_rect(area, 64, rows + 6);
-            frame.render_widget(Clear, panel);
-            let visible = (panel.height.saturating_sub(6) as usize).max(1);
-            let start = selection.saturating_sub(visible.saturating_sub(1));
-            let mut lines: Vec<Line> = if options.is_empty() {
-                vec![Line::styled("  No tags yet.", theme::muted())]
-            } else {
-                Vec::new()
-            };
-            lines.extend(options.iter().enumerate().skip(start).take(visible).map(
-                |(index, tag)| {
-                    app.clickable_regions
-                        .push(ClickableRegion::RequirementFilterOption {
-                            rect: Rect::new(
-                                panel.x + 1,
-                                panel.y + 1 + (index - start) as u16,
-                                panel.width.saturating_sub(2),
-                                1,
-                            ),
-                            index,
-                        });
-                    let style = if index == *selection {
-                        theme::selected_row(true)
-                    } else {
-                        Style::default()
-                    };
+            let mut rows: Vec<Line> = options
+                .iter()
+                .enumerate()
+                .map(|(index, tag)| {
+                    let style = picker_row_style(index == *selection);
                     let mark = if checked.contains(tag) { "[x]" } else { "[ ]" };
                     let tag_style = styles.get(tag).copied().unwrap_or_default();
                     // Preview the tree rendering: a chip before titles, colored text after.
@@ -6305,7 +6257,7 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                         }
                         (false, None) => Span::raw(label),
                     };
-                    let mut spans = vec![Span::raw(format!("  {mark} ")), tag_span];
+                    let mut spans = vec![Span::raw(format!(" {mark} ")), tag_span];
                     if !tag_style.is_default() {
                         let color = tag_style.color.map_or("no color", |color| color.as_str());
                         let position = if tag_style.prefix {
@@ -6319,93 +6271,91 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                         ));
                     }
                     Line::from(spans).style(style)
-                },
-            ));
-            let new_row = options.len();
-            let new_index = new_row.saturating_sub(start);
-            app.clickable_regions
-                .push(ClickableRegion::RequirementFilterOption {
-                    rect: Rect::new(
-                        panel.x + 1,
-                        panel.y + 1 + new_index as u16,
-                        panel.width.saturating_sub(2),
-                        1,
-                    ),
-                    index: new_row,
-                });
-            let new_style = if new_row == *selection {
-                theme::selected_row(true)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::styled(
+                })
+                .collect();
+            // The trailing row adds a tag; its index is `options.len()`.
+            rows.push(picker_row(
                 match new_tag {
-                    Some(buffer) => format!("  New tag: {buffer}"),
-                    None => "  ＋ New tag…".to_string(),
+                    Some(buffer) => format!(" New tag: {buffer}"),
+                    None => " ＋ New tag…".to_string(),
                 },
-                new_style,
+                options.len() == *selection,
             ));
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "  Tags belong to the document, so every project sees the same set.",
+            let mut notes = Vec::new();
+            if options.is_empty() {
+                notes.push(Line::styled("No tags yet.", theme::muted()));
+            }
+            notes.push(Line::styled(
+                "Tags belong to the document, so every project sees the same set.",
                 theme::muted(),
             ));
-            frame.render_widget(
-                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
-                    .block(theme::popup_block(format!(" Tags of {title} "))),
-                panel,
-            );
-            let footer: &[(&str, Action)] = if new_tag.is_some() {
-                &[
-                    (" Add [Enter]", Action::OverlayConfirm),
-                    (" Cancel [Esc]", Action::OverlayCancel),
-                ]
+            let (buttons, actions) = if new_tag.is_some() {
+                (
+                    vec![confirm_button("Add [Enter]"), cancel_button("Cancel [Esc]")],
+                    vec![Action::OverlayConfirm, Action::OverlayCancel],
+                )
             } else {
-                &[
-                    (" Toggle [Space]", Action::OverlayInsert(' ')),
-                    (" Color [c]", Action::OverlayInsert('c')),
-                    (" Front [f]", Action::OverlayInsert('f')),
-                    (" Save [Enter]", Action::OverlayConfirm),
-                    (" Cancel [Esc]", Action::OverlayCancel),
-                ]
+                (
+                    vec![
+                        neutral_button("Toggle [Space]"),
+                        neutral_button("Color [c]"),
+                        neutral_button("Front [f]"),
+                        confirm_button("Save [Enter]"),
+                        cancel_button("Cancel [Esc]"),
+                    ],
+                    vec![
+                        Action::OverlayInsert(' '),
+                        Action::OverlayInsert('c'),
+                        Action::OverlayInsert('f'),
+                        Action::OverlayConfirm,
+                        Action::OverlayCancel,
+                    ],
+                )
             };
-            render_overlay_footer(frame, app, panel, footer);
+            let title = format!("Tags of {title}");
+            render_picker_dialog(
+                frame,
+                app,
+                area,
+                ListDialog {
+                    title: &title,
+                    rows,
+                    selected: *selection,
+                    notes,
+                    buttons,
+                },
+                &actions,
+            );
         }
         RequirementsOverlay::OrganizationForm(form) => {
             use crate::authoring_tab::OrganizationForm;
-            let (title, mut lines, query) = match form {
+            let (title, fields, notes, query) = match form {
                 OrganizationForm::NewFolder {
                     parent_path, name, ..
                 } => (
                     parent_path
                         .as_ref()
-                        .map_or(" New folder ".to_string(), |parent| {
-                            format!(" New subfolder in {parent} ")
+                        .map_or("New folder".to_string(), |parent| {
+                            format!("New subfolder in {parent}")
                         }),
-                    vec![
-                        form_input_line("Name", name, true),
-                        Line::raw(""),
-                        Line::styled(
-                            "Use / to create nested folders, e.g. Chat/Archive.",
-                            theme::muted(),
-                        ),
-                    ],
+                    vec![form_field("Name", name, true)],
+                    vec![Line::styled(
+                        "Use / to create nested folders, e.g. Chat/Archive.",
+                        theme::muted(),
+                    )],
                     false,
                 ),
                 OrganizationForm::Rename { query, name, .. } => (
                     if *query {
-                        " Rename saved query ".to_string()
+                        "Rename saved query".to_string()
                     } else {
-                        " Rename folder ".to_string()
+                        "Rename folder".to_string()
                     },
-                    vec![
-                        form_input_line("Name", name, true),
-                        Line::raw(""),
-                        Line::styled(
-                            "Requirements and queries keep their references.",
-                            theme::muted(),
-                        ),
-                    ],
+                    vec![form_field("Name", name, true)],
+                    vec![Line::styled(
+                        "Requirements and queries keep their references.",
+                        theme::muted(),
+                    )],
                     false,
                 ),
                 OrganizationForm::Query {
@@ -6414,63 +6364,60 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     condition,
                     condition_focused,
                 } => {
-                    let preview = match app.authoring_ui.query_form_preview() {
-                        Some(Ok(count)) => Line::styled(
+                    let mut notes = match app.authoring_ui.query_form_preview() {
+                        Some(Ok(count)) => vec![Line::styled(
                             if count == 1 {
                                 "Matches 1 requirement".to_string()
                             } else {
                                 format!("Matches {count} requirements")
                             },
                             Style::default().fg(theme::SUCCESS),
-                        ),
-                        Some(Err(error)) => {
-                            Line::styled(format!("! {error}"), Style::default().fg(theme::ERROR))
-                        }
-                        None => Line::raw(""),
+                        )],
+                        Some(Err(error)) => vec![Line::styled(
+                            format!("! {error}"),
+                            Style::default().fg(theme::ERROR),
+                        )],
+                        None => Vec::new(),
                     };
+                    notes.extend(
+                        [
+                            "Fields: status, priority, iteration, title, folder",
+                            "& = and, | = or, ! = not; & binds tighter than |",
+                            "Example: status=planned & priority=P1 | folder=AI/Chat",
+                        ]
+                        .map(|help| Line::styled(help, theme::muted())),
+                    );
                     (
                         if query_id.is_some() {
-                            " Edit saved query ".to_string()
+                            "Edit saved query".to_string()
                         } else {
-                            " New saved query ".to_string()
+                            "New saved query".to_string()
                         },
                         vec![
-                            form_input_line("Name     ", name, !condition_focused),
-                            form_input_line("Condition", condition, *condition_focused),
-                            preview,
-                            Line::raw(""),
-                            Line::styled(
-                                "Fields: status, priority, iteration, title, folder",
-                                theme::muted(),
-                            ),
-                            Line::styled(
-                                "& = and, | = or, ! = not; & binds tighter than |",
-                                theme::muted(),
-                            ),
-                            Line::styled(
-                                "Example: status=planned & priority=P1 | folder=AI/Chat",
-                                theme::muted(),
-                            ),
+                            form_field("Name", name, !condition_focused),
+                            form_field("Condition", condition, *condition_focused),
                         ],
+                        notes,
                         true,
                     )
                 }
             };
-            lines.insert(0, Line::raw(""));
-            let panel = centered_rect(area, 72, lines.len() as u16 + 4);
-            frame.render_widget(Clear, panel);
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(theme::popup_block(title)),
-                panel,
-            );
-            let mut controls = vec![(" Save [Enter]", Action::OverlayConfirm)];
+            let mut buttons = vec![confirm_button("Save [Enter]")];
+            let mut actions = vec![Action::OverlayConfirm];
             if query {
-                controls.push((" Next field [Tab]", Action::OverlayMoveDown));
+                buttons.push(neutral_button("Next field [Tab]"));
+                actions.push(Action::OverlayMoveDown);
             }
-            controls.push((" Cancel [Esc]", Action::OverlayCancel));
-            render_overlay_footer(frame, app, panel, &controls);
+            buttons.push(cancel_button("Cancel [Esc]"));
+            actions.push(Action::OverlayCancel);
+            let rects = FormDialog {
+                title: &title,
+                fields,
+                notes,
+                buttons,
+            }
+            .render(frame, area);
+            register_dialog_buttons(app, rects, &actions);
         }
         RequirementsOverlay::RemoveCollection {
             name,
@@ -6478,172 +6425,99 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             inbox_returns,
             ..
         } => {
-            let (title, lines) = if *query {
+            let (title, body) = if *query {
                 (
-                    " Delete saved query ",
+                    "Delete saved query",
                     vec![
-                        Line::raw(format!("Delete saved query '{name}'?")),
-                        Line::raw("Requirements are not changed."),
+                        dialog_question(format!("Delete saved query '{name}'?")),
+                        Line::styled("Requirements are not changed.", theme::muted()),
                     ],
                 )
             } else {
                 (
-                    " Delete folder ",
+                    "Delete folder",
                     vec![
-                        Line::raw(format!("Delete folder '{name}' and its subfolders?")),
-                        Line::raw(match inbox_returns {
-                            0 => "No requirement returns to Inbox.".to_string(),
-                            1 => "1 requirement returns to Inbox.".to_string(),
-                            n => format!("{n} requirements return to Inbox."),
-                        }),
-                        Line::raw("Requirement documents are never deleted."),
+                        dialog_question(format!("Delete folder '{name}' and its subfolders?")),
+                        Line::styled(
+                            match inbox_returns {
+                                0 => "No requirement returns to Inbox.".to_string(),
+                                1 => "1 requirement returns to Inbox.".to_string(),
+                                n => format!("{n} requirements return to Inbox."),
+                            },
+                            theme::muted(),
+                        ),
+                        Line::styled("Requirement documents are never deleted.", theme::muted()),
                     ],
                 )
             };
-            let panel = centered_rect(area, 64, lines.len() as u16 + 4);
-            frame.render_widget(Clear, panel);
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(theme::popup_block(title)),
-                panel,
-            );
-            render_overlay_footer(
+            render_confirm_dialog(
                 frame,
                 app,
-                panel,
-                &[
-                    (" Delete [Enter]", Action::OverlayConfirm),
-                    (" Cancel [Esc]", Action::OverlayCancel),
-                ],
+                area,
+                delete_dialog(title, body, "Delete [Enter]"),
+                &[Action::OverlayConfirm, Action::OverlayCancel],
             );
         }
         RequirementsOverlay::IterationEdit { buffer } => {
-            let panel_w = area.width.min(56);
-            let panel_h = 5.min(area.height);
-            let panel_area = Rect::new(
-                (area.width.saturating_sub(panel_w)) / 2,
-                (area.height.saturating_sub(panel_h)) / 2,
-                panel_w,
-                panel_h,
-            );
-            frame.render_widget(Clear, panel_area);
-            frame.render_widget(
-                Paragraph::new(format!("Iteration: {buffer}"))
-                    .block(theme::popup_block(" Set iteration (empty = Unassigned) ")),
-                panel_area,
-            );
-            render_action_bar(
-                frame,
-                app,
-                Rect::new(
-                    panel_area.x + 1,
-                    panel_area.bottom().saturating_sub(2),
-                    panel_area.width.saturating_sub(2),
-                    1,
-                ),
-                "",
-                &[
-                    (" Confirm [Enter]", Action::OverlayConfirm),
-                    (" Cancel [Esc]", Action::OverlayCancel),
+            // The iteration buffer only grows or shrinks at its end.
+            let rects = FormDialog {
+                title: "Set iteration",
+                fields: vec![FormField {
+                    label: "Iteration",
+                    before: buffer,
+                    after: "",
+                    focused: true,
+                }],
+                notes: vec![Line::styled(
+                    "Leave it empty to mark the requirement Unassigned.",
+                    theme::muted(),
+                )],
+                buttons: vec![
+                    confirm_button("Confirm [Enter]"),
+                    cancel_button("Cancel [Esc]"),
                 ],
-                true,
-            );
+            }
+            .render(frame, area);
+            register_dialog_buttons(app, rects, &[Action::OverlayConfirm, Action::OverlayCancel]);
         }
         RequirementsOverlay::PriorityEdit { selection, .. } => {
-            let options = [
-                "Unset".to_string(),
-                "P0".to_string(),
-                "P1".to_string(),
-                "P2".to_string(),
-                "P3".to_string(),
-            ];
-            let panel_w = area.width.min(36);
-            let panel_h = (options.len() as u16 + 4).min(area.height);
-            let panel_area = Rect::new(
-                (area.width.saturating_sub(panel_w)) / 2,
-                (area.height.saturating_sub(panel_h)) / 2,
-                panel_w,
-                panel_h,
-            );
-            frame.render_widget(Clear, panel_area);
-            let lines = options
+            let rows = ["Unset", "P0", "P1", "P2", "P3"]
                 .iter()
                 .enumerate()
-                .map(|(index, label)| {
-                    app.clickable_regions
-                        .push(ClickableRegion::RequirementFilterOption {
-                            rect: Rect::new(
-                                panel_area.x + 1,
-                                panel_area.y + 1 + index as u16,
-                                panel_area.width.saturating_sub(2),
-                                1,
-                            ),
-                            index,
-                        });
-                    let style = if index == *selection {
-                        theme::selected_row(true)
-                    } else {
-                        Style::default()
-                    };
-                    Line::styled(format!("  {label}"), style)
-                })
-                .collect::<Vec<_>>();
-            frame.render_widget(
-                Paragraph::new(theme::popup_rows(lines, panel_area.width.saturating_sub(2)))
-                    .block(theme::popup_block(" Requirement priority ")),
-                panel_area,
-            );
-            render_action_bar(
+                .map(|(index, label)| picker_row(format!(" {label}"), index == *selection))
+                .collect();
+            render_picker_dialog(
                 frame,
                 app,
-                Rect::new(
-                    panel_area.x + 1,
-                    panel_area.bottom().saturating_sub(2),
-                    panel_area.width.saturating_sub(2),
-                    1,
-                ),
-                "",
-                &[(" Cancel [Esc]", Action::OverlayCancel)],
-                true,
+                area,
+                ListDialog {
+                    title: "Requirement priority",
+                    rows,
+                    selected: *selection,
+                    notes: Vec::new(),
+                    buttons: vec![cancel_button("Cancel [Esc]")],
+                },
+                &[Action::OverlayCancel],
             );
         }
         RequirementsOverlay::DeleteConfirmation { document_id, title } => {
-            let panel_w = area.width.min(72);
-            let panel_h = 7.min(area.height);
-            let panel_area = Rect::new(
-                (area.width.saturating_sub(panel_w)) / 2,
-                (area.height.saturating_sub(panel_h)) / 2,
-                panel_w,
-                panel_h,
-            );
-            frame.render_widget(Clear, panel_area);
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::raw(format!("Delete requirement '{title}' ({document_id})?")),
-                    Line::raw("This removes it from the global requirement library."),
-                    Line::raw("Linked test points stay and become missing-source links."),
-                    Line::raw(""),
-                ])
-                .wrap(ratatui::widgets::Wrap { trim: false })
-                .block(theme::popup_block(" Delete requirement ")),
-                panel_area,
-            );
-            render_action_bar(
+            let body = vec![
+                dialog_question(format!("Delete requirement '{title}' ({document_id})?")),
+                Line::styled(
+                    "This removes it from the global requirement library.",
+                    theme::muted(),
+                ),
+                Line::styled(
+                    "Linked test points stay and become missing-source links.",
+                    theme::muted(),
+                ),
+            ];
+            render_confirm_dialog(
                 frame,
                 app,
-                Rect::new(
-                    panel_area.x + 1,
-                    panel_area.bottom().saturating_sub(2),
-                    panel_area.width.saturating_sub(2),
-                    1,
-                ),
-                "",
-                &[
-                    (" Confirm [Enter]", Action::OverlayConfirm),
-                    (" Cancel [Esc]", Action::OverlayCancel),
-                ],
-                true,
+                area,
+                delete_dialog("Delete requirement", body, "Confirm [Enter]"),
+                &[Action::OverlayConfirm, Action::OverlayCancel],
             );
         }
     }
@@ -7848,6 +7722,35 @@ Feature: Rule only
     }
 
     #[test]
+    fn test_requirements_editor_shows_document_title_only_in_body() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.create_document("req.md", "Login flow").unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("terminal");
+        for mode in [
+            crate::authoring_tab::RequirementsEditorMode::Insert,
+            crate::authoring_tab::RequirementsEditorMode::Preview,
+        ] {
+            ui.editor_mode = mode;
+            terminal
+                .draw(|frame| {
+                    super::render_requirements_editor(frame, &mut ui, frame.area(), true, None)
+                })
+                .expect("render");
+            let buffer = terminal.backend().buffer();
+            let rows = (0..8)
+                .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>();
+            let screen = rows.join("\n");
+            assert!(rows[0].contains("Requirement *"), "{screen}");
+            assert_eq!(
+                screen.matches("Login flow").count(),
+                1,
+                "the H1 title must not be repeated in the panel border: {screen}"
+            );
+        }
+    }
+
+    #[test]
     fn requirement_bars_highlight_on_hover_and_while_grabbed() {
         let mut ui = crate::authoring_tab::AuthoringUiState::empty();
         ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
@@ -7962,30 +7865,104 @@ Feature: Rule only
         assert_eq!(ui.linked_scroll, 0);
     }
 
-    #[test]
-    fn requirements_tree_scrollbars_track_expanded_rows() {
-        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+    fn long_label_tree(ui: &mut crate::authoring_tab::AuthoringUiState, count: usize) {
         ui.discovered = true;
-        ui.tree_items = (0..10)
-            .map(|i| {
-                tui_tree_widget::TreeItem::new_leaf(
-                    format!("req-iter:long-iteration-{i}"),
-                    format!("long-iteration-{i}"),
-                )
+        ui.tree_items.clear();
+        ui.tree_labels.clear();
+        for i in 0..count {
+            let id = format!("req-iter:long-iteration-{i}");
+            let label = format!("long-iteration-{i}");
+            ui.tree_labels.insert(id.clone(), Line::from(label.clone()));
+            ui.tree_items
+                .push(tui_tree_widget::TreeItem::new_leaf(id, label));
+        }
+    }
+
+    fn tree_screen_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn requirements_tree_wraps_labels_instead_of_scrolling_horizontally() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        long_label_tree(&mut ui, 10);
         ui.horizontal_scroll[0] = 5;
+        // Nine content columns leave seven for the label after the folder marker.
         let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
         terminal
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
             .expect("render");
-        assert!(ui.scroll_limits[0][0] > 0);
-        assert_eq!(ui.scroll_limits[0][1], 6);
+        assert_eq!(ui.scroll_limits[0][0], 0, "wrapped labels never overflow");
+        assert_eq!(ui.horizontal_scroll[0], 0);
+        assert!(ui.pane_bars[0][0].is_none());
+        // Ten two-row items in four rows: the last two items fit from offset 8.
+        assert_eq!(ui.scroll_limits[0][1], 8);
+        let rows = tree_screen_rows(&terminal);
+        assert!(rows[1].contains("long-it"), "{rows:#?}");
+        assert!(rows[2].contains("eratio…"), "{rows:#?}");
         ui.tree_items.clear();
         terminal
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
             .expect("render");
         assert_eq!(ui.scroll_limits[0], [0, 0]);
+    }
+
+    #[test]
+    fn requirements_tree_selected_row_shows_whole_label() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        long_label_tree(&mut ui, 2);
+        ui.tree_state
+            .select(vec!["req-iter:long-iteration-0".to_string()]);
+        let mut terminal = Terminal::new(TestBackend::new(12, 8)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        let rows = tree_screen_rows(&terminal);
+        assert!(rows[1].contains("long-it"), "{rows:#?}");
+        assert!(rows[2].contains("eration"), "{rows:#?}");
+        assert!(rows[3].contains("-0"), "{rows:#?}");
+        assert!(rows[4].contains("long-it"), "next item follows: {rows:#?}");
+        assert!(!rows.concat().contains("eration-0…"));
+        // A click on a continuation row selects the wrapped item it belongs to.
+        assert_eq!(
+            ui.tree_state
+                .rendered_at(ratatui::layout::Position::new(4, 3))
+                .map(<[String]>::to_vec),
+            Some(vec!["req-iter:long-iteration-0".to_string()])
+        );
+    }
+
+    #[test]
+    fn wrap_tree_label_hangs_cjk_and_truncates_with_ellipsis() {
+        let text = super::wrap_tree_label(Line::from("登录 失败 后锁定账户并提示用户"), 6, 2);
+        let rows: Vec<String> = text.lines.iter().map(|line| line.to_string()).collect();
+        assert_eq!(rows, ["登录 ", "失败…"]);
+        let whole = super::wrap_tree_label(Line::from("short"), 6, 2);
+        assert_eq!(whole.lines.len(), 1);
+    }
+
+    #[test]
+    fn last_fitting_start_counts_item_heights() {
+        let cases: [(&[usize], usize, usize); 4] = [
+            (&[], 4, 0),
+            (&[1, 1, 1], 4, 0),
+            (&[2, 2, 2, 2], 4, 2),
+            (&[1, 1, 5], 4, 2),
+        ];
+        for (heights, rows, expected) in cases {
+            assert_eq!(
+                super::last_fitting_start(heights, rows),
+                expected,
+                "heights {heights:?} in {rows} rows"
+            );
+        }
     }
 
     #[test]
