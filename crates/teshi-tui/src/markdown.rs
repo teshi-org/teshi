@@ -337,7 +337,7 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
                 .saturating_add(CODE_COPY_LABEL.width());
     out.push(surface_line(top));
 
-    for code in code_lines {
+    for code in align_box_diagrams(code_lines) {
         out.push(surface_line(vec![
             Span::styled(CODE_LEFT_PAD, surface),
             Span::styled(code, code_style),
@@ -354,6 +354,77 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
             copy_label,
         }],
     })
+}
+
+/// Box-drawing glyphs that may open a line of a hand-drawn box diagram.
+const BOX_LEFT_EDGES: [char; 6] = ['┌', '├', '└', '│', '╭', '╰'];
+/// Box-drawing glyphs that may close a line of a hand-drawn box diagram.
+const BOX_RIGHT_EDGES: [char; 6] = ['┐', '┤', '┘', '│', '╮', '╯'];
+
+/// Re-aligns the right border of box diagrams drawn inside code blocks.
+///
+/// Models routinely miscount display width (a CJK glyph takes two cells), so
+/// one row of a `┌─┐ │ │ └─┘` box ends a few cells past or short of the
+/// others. Only complete boxes are touched: a run of lines that all open and
+/// close with box glyphs, starting at a top corner and ending at a bottom
+/// corner. Shorter rows grow to the widest one; rules extend their `─` and
+/// content rows get spaces before the closing `│`. This is display-only: the
+/// copied source keeps the original text.
+fn align_box_diagrams(mut lines: Vec<String>) -> Vec<String> {
+    let is_box_line = |line: &str| {
+        let trimmed = line.trim();
+        let mut chars = trimmed.chars();
+        let first = chars.next();
+        let last = chars.next_back();
+        matches!((first, last), (Some(l), Some(r)) if BOX_LEFT_EDGES.contains(&l) && BOX_RIGHT_EDGES.contains(&r))
+    };
+    let starts_with = |line: &str, corners: &[char]| {
+        line.trim_start()
+            .chars()
+            .next()
+            .is_some_and(|c| corners.contains(&c))
+    };
+
+    let mut start = 0;
+    while start < lines.len() {
+        if !is_box_line(&lines[start]) || !starts_with(&lines[start], &['┌', '╭']) {
+            start += 1;
+            continue;
+        }
+        let end = start
+            + lines[start..]
+                .iter()
+                .take_while(|line| is_box_line(line))
+                .count();
+        // The run must close with a bottom corner; anything else is a partial
+        // drawing whose intended width cannot be inferred.
+        let Some(bottom) = lines[start..end]
+            .iter()
+            .rposition(|line| starts_with(line, &['└', '╰']))
+            .map(|offset| start + offset)
+        else {
+            start = end;
+            continue;
+        };
+        let run = &mut lines[start..=bottom];
+        for line in run.iter_mut() {
+            line.truncate(line.trim_end().len());
+        }
+        let target = run.iter().map(|line| line.width()).max().unwrap_or(0);
+        for line in run.iter_mut() {
+            let missing = target.saturating_sub(line.width());
+            if missing == 0 {
+                continue;
+            }
+            let Some((edge_at, edge)) = line.char_indices().next_back() else {
+                continue;
+            };
+            let filler = if edge == '│' { ' ' } else { '─' };
+            line.insert_str(edge_at, &filler.to_string().repeat(missing));
+        }
+        start = bottom + 1;
+    }
+    lines
 }
 
 fn try_heading(text: &str) -> Option<SingleLineResult> {
@@ -1439,6 +1510,48 @@ mod tests {
         }
         assert_eq!(code_block_source(text, 1).as_deref(), Some("echo hi"));
         assert_eq!(code_block_source(text, 2), None);
+    }
+
+    #[test]
+    fn misaligned_box_diagram_in_code_block_is_realigned_for_display() {
+        // A real model reply: the title row overshoots the frame and the CJK
+        // row is two cells wide because each glyph was counted as one cell.
+        let diagram = "\
+┌──────────────┐
+│ Teshi · Browser [Run] │
+├──────────────┤
+│   当前页面内容   │
+└──────────────┘";
+        let text = format!("```text\n{diagram}\n```");
+        let (lines, blocks) = render_markdown_width_with_code_blocks(&text, 0);
+        let rows: Vec<String> = lines[1..lines.len() - 1]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let widths: Vec<usize> = rows.iter().map(|row| row.width()).collect();
+        assert!(
+            widths.iter().all(|width| *width == widths[0]),
+            "every box row ends at the same column: {rows:#?}"
+        );
+        assert!(rows[0].trim_end().ends_with("─┐"), "{}", rows[0]);
+        assert!(rows[3].trim_end().ends_with(" │"), "{}", rows[3]);
+        assert_eq!(blocks[0].source, diagram, "copy keeps the original text");
+    }
+
+    #[test]
+    fn code_without_a_complete_box_is_left_untouched() {
+        let cases = [
+            // No bottom corner: the intended width is unknown.
+            "┌────┐\n│ a long row │",
+            // Pipes in ordinary code are not box glyphs.
+            "let a = b | c;\nlet long_name = d | e;",
+            // Already aligned.
+            "┌───┐\n│ a │\n└───┘",
+        ];
+        for case in cases {
+            let lines = align_box_diagrams(case.lines().map(str::to_string).collect());
+            assert_eq!(lines.join("\n"), case);
+        }
     }
 
     #[test]
