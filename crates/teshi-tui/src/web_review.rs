@@ -17,10 +17,37 @@ use anyhow::{Context, Result, ensure};
 use teshi_engine::{
     DaemonManifest, DaemonManifestExt, remove_daemon_manifest_if_matches, spawn_daemon_background,
 };
+use teshi_web_protocol::{is_replay_file_name, is_replay_run_id};
 
 /// Canonical hosted Web UI entrypoint. Keep in sync with the daemon's
 /// `HOSTED_WEB_ORIGIN` and its trusted-origin allowlist.
 const HOSTED_WEB_ORIGIN: &str = "https://teshi-org.github.io/app/";
+
+/// The replay capture the hosted page should open on launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewTarget {
+    /// Replay run identity: a canonical UUID or `legacy`.
+    pub run_id: String,
+    /// Screenshot file name inside that run.
+    pub file: String,
+}
+
+impl ReviewTarget {
+    /// Fragment suffix for this target, or empty when the run id is unusable.
+    ///
+    /// The URL passes through `cmd /C start` on Windows, so only names that
+    /// need no percent-encoding are linked; any other file still opens its run.
+    fn fragment(&self) -> String {
+        if !is_replay_run_id(&self.run_id) {
+            return String::new();
+        }
+        if is_replay_file_name(&self.file) {
+            format!("&run={}&shot={}", self.run_id, self.file)
+        } else {
+            format!("&run={}", self.run_id)
+        }
+    }
+}
 
 /// A freshly minted hosted Web UI address and the daemon port it targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,9 +104,12 @@ impl LaunchState {
     }
 
     /// Starts a launch for `project_root`, or keeps the one already in flight.
-    pub(crate) fn request(&mut self, project_root: &Path) {
+    ///
+    /// `target` selects the capture the page opens on; `None` lands on the
+    /// page's default surface.
+    pub(crate) fn request(&mut self, project_root: &Path, target: Option<ReviewTarget>) {
         let root = project_root.to_path_buf();
-        self.request_with(|| begin(&root));
+        self.request_with(|| begin(&root, target));
     }
 
     /// Records `start` unless a launch is already running.
@@ -113,11 +143,11 @@ impl LaunchState {
 ///
 /// The click handler returns immediately so the viewer can show progress, and
 /// so a second click observes the in-flight launch instead of racing a spawn.
-fn begin(project_root: &Path) -> PendingLaunch {
+fn begin(project_root: &Path, target: Option<ReviewTarget>) -> PendingLaunch {
     let root = project_root.to_path_buf();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = tx.send(prepare(&root));
+        let _ = tx.send(prepare(&root, target.as_ref()));
     });
     PendingLaunch { rx }
 }
@@ -126,16 +156,17 @@ fn begin(project_root: &Path) -> PendingLaunch {
 ///
 /// A live daemon is reused. When none is listening, this starts one and waits
 /// until its manifest is reachable. A new hosted session supersedes any
-/// previously opened hosted page.
+/// previously opened hosted page. With a `target`, the page opens that run's
+/// capture on its Run surface.
 ///
 /// # Errors
 /// Returns an error when the daemon cannot be started, the session request
 /// fails, or its response does not carry a well-formed token.
-pub fn prepare(project_root: &Path) -> Result<ReviewLaunch> {
+pub fn prepare(project_root: &Path, target: Option<&ReviewTarget>) -> Result<ReviewLaunch> {
     let (port, started_daemon) = ensure_project_daemon(project_root)?;
     let token = mint_session(port)?;
     Ok(ReviewLaunch {
-        url: hosted_url(port, &token),
+        url: hosted_url(port, &token, target),
         port,
         started_daemon,
     })
@@ -197,10 +228,12 @@ fn retire_stale_manifest(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Composes the hosted launch URL; the token stays in the fragment so it is
-/// never sent to the Pages origin as part of the request line.
-fn hosted_url(port: u16, token: &str) -> String {
-    format!("{HOSTED_WEB_ORIGIN}#port={port}&token={token}")
+/// Composes the hosted launch URL; the token and capture target stay in the
+/// fragment so they are never sent to the Pages origin as part of the request
+/// line.
+fn hosted_url(port: u16, token: &str, target: Option<&ReviewTarget>) -> String {
+    let target = target.map(ReviewTarget::fragment).unwrap_or_default();
+    format!("{HOSTED_WEB_ORIGIN}#port={port}&token={token}{target}")
 }
 
 /// Asks the local daemon to mint a `hosted_web_ui` session.
@@ -276,8 +309,9 @@ pub fn open_in_browser(url: &str) -> Result<()> {
 }
 
 /// Only open an address this module produced. The exact
-/// `#port=<digits>&token=<token>` shape keeps the token confined to the
-/// fragment rather than relying on a permissive character allowlist.
+/// `#port=<digits>&token=<token>[&run=<id>[&shot=<name>]]` shape keeps the
+/// token confined to the fragment rather than relying on a permissive
+/// character allowlist.
 fn is_safe_url(url: &str) -> bool {
     let Some(fragment) = url.strip_prefix(HOSTED_WEB_ORIGIN) else {
         return false;
@@ -285,10 +319,24 @@ fn is_safe_url(url: &str) -> bool {
     let Some(rest) = fragment.strip_prefix("#port=") else {
         return false;
     };
-    let Some((port, token)) = rest.split_once("&token=") else {
+    let Some((port, rest)) = rest.split_once("&token=") else {
         return false;
     };
-    !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) && is_safe_token(token)
+    let (token, target) = match rest.split_once("&run=") {
+        Some((token, target)) => (token, Some(target)),
+        None => (rest, None),
+    };
+    let target_ok = match target {
+        None => true,
+        Some(target) => match target.split_once("&shot=") {
+            Some((run, shot)) => is_replay_run_id(run) && is_replay_file_name(shot),
+            None => is_replay_run_id(target),
+        },
+    };
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && is_safe_token(token)
+        && target_ok
 }
 
 fn is_termux() -> bool {
@@ -337,9 +385,18 @@ fn spawn_browser(url: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    const RUN: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn target(run_id: &str, file: &str) -> ReviewTarget {
+        ReviewTarget {
+            run_id: run_id.into(),
+            file: file.into(),
+        }
+    }
+
     #[test]
     fn test_hosted_url_keeps_token_inside_fragment() {
-        let url = hosted_url(20253, "tk_abc123-XYZ");
+        let url = hosted_url(20253, "tk_abc123-XYZ", None);
         assert_eq!(
             url,
             "https://teshi-org.github.io/app/#port=20253&token=tk_abc123-XYZ"
@@ -349,7 +406,46 @@ mod tests {
 
     #[test]
     fn test_hosted_url_uses_the_manifest_port() {
-        assert!(hosted_url(43123, "tk_abc123456789").contains("#port=43123&"));
+        assert!(hosted_url(43123, "tk_abc123456789", None).contains("#port=43123&"));
+    }
+
+    #[test]
+    fn test_hosted_url_links_the_selected_capture_inside_the_fragment() {
+        let url = hosted_url(9, "tk_abc123456789", Some(&target(RUN, "frame-1.png")));
+        assert_eq!(
+            url,
+            format!(
+                "https://teshi-org.github.io/app/#port=9&token=tk_abc123456789&run={RUN}&shot=frame-1.png"
+            )
+        );
+        assert!(is_safe_url(&url), "{url}");
+        let legacy = hosted_url(9, "tk_abc123456789", Some(&target("legacy", "a.png")));
+        assert!(legacy.ends_with("&run=legacy&shot=a.png"), "{legacy}");
+        assert!(is_safe_url(&legacy), "{legacy}");
+    }
+
+    #[test]
+    fn test_hosted_url_degrades_unsafe_targets() {
+        let cases = [
+            // An unlinkable file name still opens its run.
+            (target(RUN, "step 1.png"), format!("&run={RUN}")),
+            (target(RUN, "100%.png"), format!("&run={RUN}")),
+            (target(RUN, ".."), format!("&run={RUN}")),
+            // An unknown run identity drops the whole target.
+            (target("../etc", "a.png"), String::new()),
+            (
+                target("AAAAAAAA-1111-4111-8111-111111111111", "a.png"),
+                String::new(),
+            ),
+        ];
+        for (target, suffix) in cases {
+            let url = hosted_url(9, "tk_abc123456789", Some(&target));
+            assert!(
+                url.ends_with(&format!("token=tk_abc123456789{suffix}")),
+                "{target:?}: {url}"
+            );
+            assert!(is_safe_url(&url), "{target:?}: {url}");
+        }
     }
 
     #[test]
@@ -367,10 +463,14 @@ mod tests {
             "https://example.com/#port=1&token=abc",
             "https://teshi-org.github.io/app/#port=1&token=abc&whoami",
             "https://teshi-org.github.io/evil/#port=1&token=abc",
+            "https://teshi-org.github.io/app/#port=1&token=abc&run=../x",
+            "https://teshi-org.github.io/app/#port=1&token=abc&run=legacy&shot=a%20b",
+            "https://teshi-org.github.io/app/#port=1&token=abc&run=legacy&shot=a&whoami",
+            "https://teshi-org.github.io/app/#port=1&token=abc&run=legacy&shot=",
         ] {
             assert!(!is_safe_url(url), "{url:?}");
         }
-        assert!(is_safe_url(&hosted_url(20253, "tk_abc123456789")));
+        assert!(is_safe_url(&hosted_url(20253, "tk_abc123456789", None)));
     }
 
     #[test]
@@ -455,7 +555,7 @@ mod tests {
         assert_eq!(state.notice(), Some("Web review is already starting"));
         assert!(state.poll().is_none());
         tx.send(Ok(ReviewLaunch {
-            url: hosted_url(9, "tk_abc"),
+            url: hosted_url(9, "tk_abc", None),
             port: 9,
             started_daemon: true,
         }))

@@ -22,6 +22,13 @@ fn capture_key(event: &Value) -> String {
     .to_string()
 }
 
+/// A run capture requested by an external link, applied once its run loads.
+#[derive(Debug, Clone)]
+struct CaptureLink {
+    run_id: String,
+    file: Option<String>,
+}
+
 /// Lists project scenarios, starts a run, and shows step/exchange trees.
 pub struct ApiRunView {
     backend: SharedApiRunBackend,
@@ -41,6 +48,7 @@ pub struct ApiRunView {
     enlarged: bool,
     revision: u64,
     evidence_summary: String,
+    pending_link: Option<CaptureLink>,
 }
 
 impl ApiRunView {
@@ -66,6 +74,7 @@ impl ApiRunView {
             enlarged: false,
             revision: 0,
             evidence_summary: String::new(),
+            pending_link: None,
         };
         view.reload_scenarios(cx);
         view
@@ -96,6 +105,23 @@ impl ApiRunView {
     /// Open a known replay identity, for example from an external host link.
     pub fn open_replay_public(&mut self, id: String, cx: &mut Context<Self>) {
         self.open_run(id, cx);
+    }
+
+    /// Open `run_id` and select its capture named `file`, from an external link.
+    ///
+    /// The link is applied after the scenario list and history reload, so it
+    /// does not race the initial load. It stays pending until the run's events
+    /// arrive; a capture still being recorded is selected once it appears. A
+    /// run or file that does not exist reports that in the screenshot detail.
+    /// Opening another run first discards the link.
+    pub fn open_capture_public(
+        &mut self,
+        run_id: String,
+        file: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_link = Some(CaptureLink { run_id, file });
+        self.reload_scenarios(cx);
     }
 
     /// Number of screenshot outcomes available for step selection.
@@ -216,10 +242,50 @@ impl ApiRunView {
                         view.status = format!("Failed to list scenarios: {error}").into();
                     }
                 }
+                if let Some(link) = view.pending_link.as_ref() {
+                    let run_id = link.run_id.clone();
+                    view.open_run(run_id, cx);
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Selects the linked capture once its run's events are loaded.
+    ///
+    /// A running replay may not have published the capture yet, so the link
+    /// stays pending until the run settles.
+    fn apply_pending_link(&mut self, running: bool, cx: &mut Context<Self>) {
+        let Some(link) = self.pending_link.as_ref() else {
+            return;
+        };
+        if self.active_run.as_deref() != Some(link.run_id.as_str()) {
+            return;
+        }
+        let Some(file) = link.file.clone() else {
+            self.pending_link = None;
+            return;
+        };
+        let event = self
+            .events
+            .iter()
+            .find(|event| {
+                event.type_name == "step_screenshot"
+                    && event.payload["screenshot_file"].as_str() == Some(file.as_str())
+            })
+            .map(|event| event.payload.clone());
+        match event {
+            Some(event) => {
+                self.pending_link = None;
+                self.select_screenshot(event, cx);
+            }
+            None if !running => {
+                self.pending_link = None;
+                self.screenshot_detail = format!("Screenshot {file} is not part of this run.");
+            }
+            None => {}
+        }
     }
 
     fn run_selected(&mut self, cx: &mut Context<Self>) {
@@ -280,6 +346,13 @@ impl ApiRunView {
     }
 
     fn open_run(&mut self, id: String, cx: &mut Context<Self>) {
+        if self
+            .pending_link
+            .as_ref()
+            .is_some_and(|link| link.run_id != id)
+        {
+            self.pending_link = None;
+        }
         self.revision += 1;
         let revision = self.revision;
         self.active_run = Some(id.clone());
@@ -335,10 +408,12 @@ impl ApiRunView {
                                     view.evidence_summary.push_str(&format!("\n{feature}: required {}, saved {}, failed {}, not executed {}, missing {}",counts.required,counts.saved,counts.failed,counts.not_executed,counts.missing));
                                 }
                                 view.events.extend(teshi_core::replay_evidence::missing_capture_rows(&events).into_iter().map(|payload|ApiRunEventDto{type_name:"step_screenshot".into(),payload}));
+                                view.apply_pending_link(snapshot["status"] == "running", cx);
                                 cx.notify();
                                 status == "running"
                             }
                             Err(error) => {
+                                view.pending_link = None;
                                 view.screenshot = None;
                                 view.selected_step = None;
                                 view.selected_capture_key = None;
@@ -1041,6 +1116,72 @@ mod tests {
         assert_eq!(state["image_ready"], false);
         assert!(state["run_id"].is_null());
         assert!(state["step_id"].is_null());
+        cx.quit();
+    }
+
+    #[test]
+    fn test_capture_link_opens_the_linked_run_and_screenshot() {
+        use crate::replay_fixture::{ReplayFixtureBackend, ReplayFixtureMode};
+        use gpui::TestAppContext;
+        use std::rc::Rc;
+        let mut cx = TestAppContext::single();
+        cx.skip_drawing();
+        let backend = ReplayFixtureBackend::default();
+        backend.reset(ReplayFixtureMode::Failed);
+        let earlier = backend.seed_run();
+        backend.seed_run();
+        let hosted = backend.clone();
+        let window = cx.add_window(move |window, cx| ApiRunView::new(Rc::new(hosted), window, cx));
+        let view = window.root(&mut cx).unwrap();
+        // Linking before the constructor's load settles must not drop either.
+        let file = format!("{earlier}-step2.png");
+        view.update(&mut cx, |view, cx| {
+            view.open_capture_public(earlier.clone(), Some(file.clone()), cx)
+        });
+        cx.run_until_parked();
+        let state = cx.read(|cx| view.read(cx).screenshot_state());
+        assert_eq!(state["run_id"], earlier.as_str(), "{state}");
+        assert_eq!(state["image_file"], file.as_str(), "{state}");
+        assert_eq!(state["image_ready"], true, "{state}");
+        assert_eq!(state["step_status"], "failed", "{state}");
+        assert_eq!(state["history_count"], 2, "{state}");
+        assert!(
+            !cx.read(|cx| view.read(cx).scenario_list_text()).is_empty(),
+            "the scenario list still loads"
+        );
+        cx.quit();
+    }
+
+    #[test]
+    fn test_capture_link_reports_a_screenshot_missing_from_its_run() {
+        use crate::replay_fixture::{ReplayFixtureBackend, ReplayFixtureMode};
+        use gpui::TestAppContext;
+        use std::rc::Rc;
+        let mut cx = TestAppContext::single();
+        cx.skip_drawing();
+        let backend = ReplayFixtureBackend::default();
+        backend.reset(ReplayFixtureMode::Success);
+        let run = backend.seed_run();
+        let hosted = backend.clone();
+        let window = cx.add_window(move |window, cx| ApiRunView::new(Rc::new(hosted), window, cx));
+        let view = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        view.update(&mut cx, |view, cx| {
+            view.open_capture_public(run.clone(), Some("other.png".into()), cx)
+        });
+        cx.run_until_parked();
+        let state = cx.read(|cx| view.read(cx).screenshot_state());
+        assert_eq!(state["run_id"], run.as_str(), "{state}");
+        assert_eq!(state["image_ready"], false, "{state}");
+        let detail = state["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("other.png is not part of this run"),
+            "{detail}"
+        );
+        // The link is spent: a later reload does not reopen it.
+        view.update(&mut cx, |view, cx| view.reload_scenarios_public(cx));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| view.read(cx).screenshot_state())["run_id"].is_null());
         cx.quit();
     }
 

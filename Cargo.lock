@@ -7499,6 +7499,7 @@ dependencies = [
  "teshi-core",
  "teshi-engine",
  "teshi-update",
+ "teshi-web-protocol",
  "tokio",
  "toml 0.8.23",
  "tracing",
