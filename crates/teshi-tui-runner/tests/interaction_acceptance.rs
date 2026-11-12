@@ -860,7 +860,9 @@ fn normal_tabs_place_navigation_left_and_details_vertically_right() {
         (
             "4",
             "Current project ·",
-            "Req 01 extended",
+            // The editor border names the pane, not the document: the H1 in the
+            // body carries the title, so a title-based anchor would find the body.
+            "Requirement [planned]",
             "Linked test points",
         ),
         (
