@@ -220,19 +220,19 @@ Pure functions operating on `EditorBuffer` for BDD-aware editing:
 | `highlight_mindmap_nodes` | Applies color highlights by step text pattern | No |
 | `apply_mindmap_filter` | Filters the mind-map tree by step name | No |
 | `get_feature_content` | Returns raw file content | No |
-| `submit_requirements` | Stores requirement sources in the confirmed store/iteration scope; advances to Generating Test Points | No |
+| `submit_requirements` | Stores requirement sources in the confirmed store/iteration scope; advances to Generating Test Points (Strict) or Scenario Planning (Direct) | No |
 | `list_requirement_documents` | Lists documents in the active generation source scope from the local store | No |
 | `read_requirement_document` | Reads one in-scope requirement Markdown document on demand | No |
-| `propose_test_points` | Persists Proposed test points; pauses for human review | No (review gate) |
-| `generate_plan` | Accepts plan only for approved, resolved test-point IDs | No |
-| `insert_scenario` | Inserts a scenario block; embeds `@teshi-tp:<id>` tags | **Yes** |
+| `propose_test_points` | Persists Proposed test points; pauses for human review (Strict policy only) | No (review gate, Strict) |
+| `generate_plan` | Strict: accepts a plan only for approved, resolved test-point IDs. Direct: accepts empty/omitted `test_point_ids` | No |
+| `insert_scenario` | Inserts a scenario block; embeds `@teshi-tp:<id>` tags when IDs exist | **Yes** |
 | `update_step` | Replaces a step line | **Yes** |
 
 ### Execution flow
 
 `execute_tool(app, name, args, tool_call_id)` dispatches to the matching implementation. Mutation tools return `ToolResult::Queued { change }` instead of applying directly. The change is applied only after user confirmation via `accept_agent_change()`.
 
-Test-point review is a separate hard gate: `ApprovalMode::{Auto, Bypass}` cannot approve test points or advance Reviewing → Planning.
+Human test-point review is an optional policy. **Strict** (default) keeps the hard gate: `ApprovalMode::{Auto, Bypass}` cannot approve test points or advance Reviewing → Planning. **Direct** (user-authorized no review) skips test-point persistence and the gate entirely, is persisted in `generation-state.json` with its authorization basis, and never fabricates approvals or `@teshi-tp` tags. Prompt injection, stage guidance, tool descriptions, and validation are all mode-aware.
 
 ---
 

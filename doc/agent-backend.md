@@ -47,10 +47,13 @@ feature files, running tests, and browser actions. The TUI currently adapts
 those calls to the host. A future external agent may receive equivalent
 capabilities through a separate bridge.
 
-Teshi Workflow owns stages and the mandatory human test-point review gate.
-Tool execution updates the workflow stage before the backend receives the
+Teshi Workflow owns stages and the human test-point review gate, which is
+policy-driven. Under the default **Strict** policy the gate is mandatory; under
+the **Direct** (user-authorized no-review) policy the workflow never enters the
+`ReviewingTestPoints` gate stage, so the backend sees no review pause. Tool
+execution updates the workflow stage before the backend receives the
 continuation facts. `WaitingForPermission` concerns whether an operation may
-run; `WaitingForHumanReview` concerns the product's required review. These
+run; `WaitingForHumanReview` concerns the required review under Strict. These
 states are separate. Auto or bypass permission mode cannot approve test
 points. This boundary lets another frontend use the same backend event and
 decision vocabulary while retaining the same workflow rules.
