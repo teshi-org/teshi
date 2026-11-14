@@ -5384,7 +5384,20 @@ fn render_requirements_tree(
 
     if ui.tree_items.is_empty() {
         ui.scroll_limits[0] = [0, 0];
-        frame.render_widget(Paragraph::new("No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project").wrap(ratatui::widgets::Wrap { trim: false }).style(Style::default().fg(theme::MUTED)), inner);
+        let message = if ui.search_active || !ui.search_query.is_empty() {
+            format!(
+                "No requirements match /{}\nEsc: clear search   Enter: keep filter",
+                ui.search_query
+            )
+        } else {
+            "No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project".to_string()
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(Style::default().fg(theme::MUTED)),
+            inner,
+        );
         return;
     }
     let viewport = requirement_viewport(area);

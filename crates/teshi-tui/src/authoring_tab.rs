@@ -7,8 +7,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::app::{App, MainTab};
 use crate::theme;
 use anyhow::{Context, Result};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
@@ -33,6 +35,9 @@ pub const TREE_DIR_PREFIX: &str = "req-dir:";
 pub const TREE_DOC_PREFIX: &str = "req-doc:";
 /// Tree node id prefix for iteration group nodes.
 pub const TREE_ITER_PREFIX: &str = "req-iter:";
+
+/// Delay before a typed tree search rebuilds the requirement tree.
+const REQUIREMENT_SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// Input mode for the Markdown pane, independent of Explore.
 ///
@@ -306,6 +311,13 @@ pub struct AuthoringUiState {
     pub project_filter: teshi_core::authoring::RequirementProjectFilter,
     pub group_mode: RequirementGroupMode,
     pub overlay: RequirementsOverlay,
+    /// Live text typed into the tree's `/` search.
+    pub search_query: String,
+    /// Whether the tree is capturing keys as search input.
+    pub search_active: bool,
+    /// Query whose filtered tree is displayed; committed after the debounce.
+    applied_search_query: String,
+    pending_search: Option<Instant>,
     undo_stack: Vec<RequirementsEditSnapshot>,
     redo_stack: Vec<RequirementsEditSnapshot>,
     yank_register: String,
@@ -323,6 +335,12 @@ impl AuthoringUiState {
         index
             .documents
             .retain(|doc| doc.matches_project_filter(&self.project_filter));
+        let query = self.applied_search_query.trim().to_lowercase();
+        if !query.is_empty() {
+            index
+                .documents
+                .retain(|doc| requirement_matches_search(doc, &query));
+        }
         index
     }
 
@@ -917,6 +935,10 @@ impl AuthoringUiState {
             project_filter: teshi_core::authoring::RequirementProjectFilter::All,
             group_mode: RequirementGroupMode::Path,
             overlay: RequirementsOverlay::None,
+            search_query: String::new(),
+            search_active: false,
+            applied_search_query: String::new(),
+            pending_search: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             yank_register: String::new(),
@@ -1090,15 +1112,24 @@ impl AuthoringUiState {
     /// Rebuilds the requirement tree from the current index, filter, and group mode.
     pub fn rebuild_tree(&mut self) {
         let mut index = self.project_filtered_index();
-        if let teshi_core::authoring::RequirementProjectFilter::Project(project) =
-            &self.project_filter
-        {
-            let project = project.clone();
+        let project = match &self.project_filter {
+            teshi_core::authoring::RequirementProjectFilter::Project(project) => {
+                Some(project.clone())
+            }
+            _ => None,
+        };
+        if let Some(project) = &project {
             index.documents.retain(|d| {
                 self.show_completed
-                    || d.projects.get(&project)
+                    || d.projects.get(project)
                         == Some(&teshi_core::authoring::RequirementProjectStatus::Planned)
             });
+        }
+        let searching = !self.applied_search_query.trim().is_empty();
+        if searching {
+            (self.tree_items, self.tree_labels) =
+                build_search_results(&index, &self.iteration_filter);
+        } else if let Some(project) = project {
             // Path grouping in project scope is replaced by the project's own folders.
             if self.group_mode == RequirementGroupMode::Path {
                 self.rebuild_folders_tree(&project);
@@ -1149,6 +1180,32 @@ impl AuthoringUiState {
             if !keep_group_row {
                 self.tree_state.select(Vec::new());
             }
+        }
+    }
+
+    /// Commits the typed query and rebuilds the tree with it applied.
+    fn commit_requirement_search(&mut self) {
+        self.pending_search = None;
+        self.applied_search_query = self.search_query.clone();
+        self.rebuild_tree();
+    }
+
+    /// Defers a rebuild until typing pauses, or clears it immediately.
+    fn schedule_requirement_search(&mut self) {
+        if self.search_query.trim().is_empty() {
+            self.commit_requirement_search();
+        } else {
+            self.pending_search = Some(Instant::now());
+        }
+    }
+
+    /// Applies a debounced query from the main loop.
+    pub(crate) fn poll_search(&mut self) {
+        if self
+            .pending_search
+            .is_some_and(|at| at.elapsed() >= REQUIREMENT_SEARCH_DEBOUNCE)
+        {
+            self.commit_requirement_search();
         }
     }
 
@@ -2566,6 +2623,39 @@ fn visible_document_ids(
         .collect()
 }
 
+/// Case-insensitive substring match over the requirement fields a user can see:
+/// title, relative path, and stable document id. `query` is already lowercased.
+fn requirement_matches_search(doc: &RequirementDocumentMeta, query: &str) -> bool {
+    doc.title.to_lowercase().contains(query)
+        || doc.path.to_lowercase().contains(query)
+        || doc.id.to_lowercase().contains(query)
+}
+
+/// Flat document rows for an active search, so every match stays visible even
+/// when its folder or iteration group is collapsed.
+fn build_search_results(
+    index: &teshi_core::authoring::RequirementDocumentIndex,
+    filter: &RequirementIterationFilter,
+) -> (
+    Vec<TreeItem<'static, String>>,
+    HashMap<String, Line<'static>>,
+) {
+    let styles = &index.tag_styles;
+    let mut labels = HashMap::new();
+    let items = index
+        .documents
+        .iter()
+        .filter(|doc| doc.matches_iteration_filter(filter))
+        .map(|doc| {
+            let label = requirement_document_tree_line(doc, styles);
+            let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
+            labels.insert(id.clone(), label.clone());
+            TreeItem::new(id, label, Vec::new()).unwrap()
+        })
+        .collect();
+    (items, labels)
+}
+
 /// Finds a complete hierarchy path for a stable tree node identity.
 pub(crate) fn find_tree_path(
     items: &[TreeItem<'static, String>],
@@ -2846,6 +2936,95 @@ pub fn requirements_footer_line(
         Span::raw(" "),
         Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
     ])
+}
+
+/// Requirements tree text search, mirroring the Explore Feature search state
+/// machine: `/` starts typing, Enter keeps the filter, Esc clears it.
+impl App {
+    pub(crate) fn handle_requirement_search_key(&mut self, event: KeyEvent) -> bool {
+        if self.active_tab != MainTab::Requirements
+            || self.authoring_ui.focus != RequirementsFocus::Tree
+            || self.authoring_ui.overlay_active()
+            || self.pending_delete.is_some()
+            || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
+            || self.command_line.is_some()
+            || self.auth_panel_active
+            || self.model_panel_active
+            || self.session_panel_active
+            || self.approval_panel_active
+            || self.agent_profile_panel_active
+            || self.change_summary_visible
+            || self.scenario_dropdown_open
+            || self.step_keyword_picker.is_some()
+            || self.step_input_active
+            || self.generation_scope_prompt.is_some()
+            || self.has_external_change_prompt()
+            || self.has_agent_change_prompt()
+            || self.has_acp_permission_prompt()
+            || !matches!(
+                self.project_switch.overlay,
+                crate::project_context::SwitchOverlay::None
+            )
+        {
+            return false;
+        }
+        if self.authoring_ui.search_active {
+            // Control chords stay global (Ctrl+Q quits, Ctrl+S saves) rather
+            // than becoming query text.
+            if event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return false;
+            }
+            match event.code {
+                KeyCode::Esc => {
+                    self.authoring_ui.search_query.clear();
+                    self.authoring_ui.search_active = false;
+                }
+                KeyCode::Enter => self.authoring_ui.search_active = false,
+                KeyCode::Backspace => {
+                    self.authoring_ui.search_query.pop();
+                }
+                KeyCode::Char(ch) => self.authoring_ui.search_query.push(ch),
+                KeyCode::Up | KeyCode::Down => return false,
+                _ => return true,
+            }
+            if matches!(event.code, KeyCode::Esc | KeyCode::Enter) {
+                self.authoring_ui.commit_requirement_search();
+            } else {
+                self.authoring_ui.schedule_requirement_search();
+            }
+            return true;
+        }
+        match event.code {
+            KeyCode::Char('/') if event.modifiers.is_empty() => {
+                self.authoring_ui.search_active = true;
+                true
+            }
+            KeyCode::Esc if !self.authoring_ui.search_query.is_empty() => {
+                self.authoring_ui.search_query.clear();
+                self.authoring_ui.commit_requirement_search();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn paste_requirement_search(&mut self, text: &str) {
+        for ch in text.chars() {
+            if !self
+                .handle_requirement_search_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn poll_requirement_search(&mut self) {
+        self.authoring_ui.poll_search();
+    }
 }
 
 #[cfg(test)]
@@ -3755,6 +3934,114 @@ mod tests {
         });
         state.rebuild_tree();
         state
+    }
+
+    #[test]
+    fn tree_search_filters_by_title_path_and_id_then_clears() {
+        with_isolated_app_data(|| {
+            let mut state = sample_authoring_state();
+            state.search_query = "LOGIN".into();
+            state.commit_requirement_search();
+            assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
+            assert_eq!(state.tree_items.len(), 1, "flat rows expose nested matches");
+
+            state.search_query = "overview.md".into();
+            state.commit_requirement_search();
+            assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
+
+            state.search_query = "doc-open".into();
+            state.commit_requirement_search();
+            assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
+
+            state.search_query = "nothing-matches".into();
+            state.commit_requirement_search();
+            assert!(state.tree_items.is_empty());
+            assert!(state.selected_document_id.is_none());
+
+            state.search_query.clear();
+            state.commit_requirement_search();
+            assert_eq!(state.project_filtered_index().documents.len(), 2);
+        });
+    }
+
+    #[test]
+    fn tree_search_key_flow_matches_explore() {
+        with_isolated_app_data(|| {
+            let mut app = App::from_args().unwrap();
+            app.active_tab = MainTab::Requirements;
+            app.authoring_ui = sample_authoring_state();
+
+            assert!(app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE
+            )));
+            assert!(app.authoring_ui.search_active);
+            app.paste_requirement_search("log");
+            assert_eq!(app.authoring_ui.search_query, "log");
+            // Debounce keeps the previous filter until the poll commits the query.
+            assert_eq!(app.authoring_ui.project_filtered_index().documents.len(), 2);
+            app.authoring_ui.pending_search = Some(Instant::now() - REQUIREMENT_SEARCH_DEBOUNCE);
+            app.poll_requirement_search();
+            assert_eq!(app.authoring_ui.tree_items.len(), 1);
+            assert_eq!(
+                app.authoring_ui.selected_document_id.as_deref(),
+                Some("doc-sprint")
+            );
+
+            assert!(
+                app.handle_requirement_search_key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE
+                ))
+            );
+            assert!(!app.authoring_ui.search_active, "Enter leaves input mode");
+            assert_eq!(
+                app.authoring_ui.tree_items.len(),
+                1,
+                "Enter keeps the filter"
+            );
+
+            assert!(
+                app.handle_requirement_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            );
+            assert!(
+                app.authoring_ui.search_query.is_empty(),
+                "Esc clears the filter"
+            );
+            assert_eq!(app.authoring_ui.project_filtered_index().documents.len(), 2);
+        });
+    }
+
+    #[test]
+    fn tree_search_ignores_keys_outside_the_requirements_tree() {
+        with_isolated_app_data(|| {
+            let mut app = App::from_args().unwrap();
+            app.authoring_ui = sample_authoring_state();
+
+            app.active_tab = MainTab::Explore;
+            assert!(!app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE
+            )));
+            assert!(!app.authoring_ui.search_active);
+
+            app.active_tab = MainTab::Requirements;
+            app.authoring_ui.focus = RequirementsFocus::Editor;
+            assert!(!app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE
+            )));
+            assert!(!app.authoring_ui.search_active);
+        });
+    }
+
+    #[test]
+    fn tree_status_title_shows_query_and_idle_hint() {
+        let mut state = AuthoringUiState::empty();
+        assert!(state.tree_status_title().contains("[/] Search"));
+        state.search_active = true;
+        state.search_query = "login".into();
+        assert!(state.tree_status_title().starts_with("/login"));
     }
 
     #[test]
