@@ -202,6 +202,18 @@ pub fn title_matches_language(title: &str, language: TitleLanguage) -> bool {
     }
 }
 
+/// Whether an automatic title may cost a model call at all.
+///
+/// Every scripted harness (the TUI runner and its acceptance tests) drives a
+/// deterministic fixture model: an extra completion would consume a scripted
+/// turn and rename the conversation in the middle of a text assertion, so the
+/// harness sets `TESHI_NO_CHAT_TITLES` (see `title_enabled` in
+/// `terminal_title` for the same reasoning about the window title).
+fn titles_enabled() -> bool {
+    std::env::var_os("TESHI_NO_CHAT_TITLES").is_none()
+        && std::env::var_os("TESHI_TUI_RUNNER").is_none()
+}
+
 /// Start a title completion for `transcript`, keeping `existing` when the model
 /// decides the topic has not changed.
 pub fn start_job(
@@ -210,7 +222,7 @@ pub fn start_job(
     language: TitleLanguage,
     existing: Option<&str>,
 ) -> Option<TitleJob> {
-    if transcript.trim().is_empty() {
+    if transcript.trim().is_empty() || !titles_enabled() {
         return None;
     }
     let mut config = config;

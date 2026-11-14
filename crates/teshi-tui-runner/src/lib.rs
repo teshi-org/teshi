@@ -90,11 +90,20 @@ impl Terminal {
                 );
             }
         }
+        let mut environment = config.env;
+        // An automatic conversation title costs one extra model call and
+        // renames the conversation. Scripted fixtures count turns and assert on
+        // labels, so the harness keeps titles off unless a test opts in.
+        if !environment
+            .iter()
+            .any(|(key, _)| key == "TESHI_NO_CHAT_TITLES")
+        {
+            environment.push(("TESHI_NO_CHAT_TITLES".into(), "1".into()));
+        }
         let mut terminal = Self {
             session: Session::new("teshi-tui"),
             process_id: None,
-            frame_receipt: config
-                .env
+            frame_receipt: environment
                 .iter()
                 .rev()
                 .find(|(key, _)| key == "TESHI_TEST_FRAME_PATH")
@@ -111,7 +120,7 @@ impl Terminal {
                     .to_string_lossy()
                     .into_owned()
             }),
-            env: config.env,
+            env: environment,
             cols: config.cols,
             rows: config.rows,
             backend: defaults.backend,

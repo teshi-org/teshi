@@ -466,6 +466,8 @@ fn footer_and_threads(narrow: bool) {
         assert_eq!(accepted(&trace), before + 2, "expected one turn per thread");
     } else {
         fixture.click(&terminal, "New [a]", "new-first");
+        // The chat sidebar row, the composer's member/title segment and the
+        // conversation's own header line all name the open conversation.
         assert_eq!(
             terminal
                 .screen()
@@ -473,7 +475,7 @@ fn footer_and_threads(narrow: bool) {
                 .lines()
                 .filter(|line| line.contains("Agent 1"))
                 .count(),
-            2
+            3
         );
         terminal.write("THREAD_SECOND").unwrap();
         fixture.click(&terminal, "New [a]", "new-second");
