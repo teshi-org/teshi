@@ -97,11 +97,17 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     let start = app.selected_agent.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
     for (index, agent) in app.agents.iter().enumerate().skip(start).take(rows) {
-        let (dot, color) = match agent.status {
-            AiStatus::Waiting => ("●", theme::WARNING),
-            AiStatus::AwaitingApproval => ("◆", theme::PRIMARY),
-            AiStatus::Error => ("●", theme::ERROR),
-            AiStatus::Idle => ("○", theme::MUTED),
+        // A finished answer nobody has read yet outranks the idle dot: it is
+        // the only cue that a conversation other than the visible one is done.
+        let (dot, color) = if agent.unseen_completion {
+            ("●", theme::SUCCESS)
+        } else {
+            match agent.status {
+                AiStatus::Waiting => ("●", theme::WARNING),
+                AiStatus::AwaitingApproval => ("◆", theme::PRIMARY),
+                AiStatus::Error => ("●", theme::ERROR),
+                AiStatus::Idle => ("○", theme::MUTED),
+            }
         };
         let mut spans = vec![
             Span::styled(format!(" {dot} "), Style::default().fg(color)),

@@ -8,6 +8,7 @@ mod authoring_tab;
 mod bdd_nav;
 mod chat_images;
 mod chat_state;
+mod chat_title;
 mod cli;
 mod config;
 mod diff;
@@ -50,6 +51,7 @@ use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -407,6 +409,7 @@ pub fn run() -> Result<()> {
                     if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                         continue;
                     }
+                    app.acknowledge_visible_conversation();
                     if app.handle_acp_controls_key(key_event) {
                         continue;
                     }
@@ -484,6 +487,9 @@ pub fn run() -> Result<()> {
                     }
                 }
                 Event::Mouse(mouse_event) => {
+                    if matches!(mouse_event.kind, MouseEventKind::Down(_)) {
+                        app.acknowledge_visible_conversation();
+                    }
                     app.handle_mouse_event(
                         mouse_event.kind,
                         mouse_event.column,

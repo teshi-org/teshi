@@ -64,10 +64,7 @@ fn run_step(world: &mut World, kind: StepKeywordType, step: &BddStep) -> Result<
 }
 
 fn handle_project_given(text: &str) -> Result<bool> {
-    if text == "project A owns the sample requirements" || text == "项目 A 关联样例需求" {
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(text == "project A owns the sample requirements" || text == "项目 A 关联样例需求")
 }
 
 fn handle_project_when(world: &mut World, text: &str) -> Result<bool> {

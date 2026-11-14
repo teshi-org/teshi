@@ -40,6 +40,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("copy", "Copy last N assistant responses to clipboard"),
     ("details", "Expand or collapse thinking and tool details"),
     ("unqueue", "Restore the latest queued message for editing"),
+    (
+        "rename",
+        "Rename this conversation (/rename --clear to reset)",
+    ),
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("project", "Open or switch the active project"),
@@ -283,6 +287,21 @@ pub struct AgentThread {
     /// Kept on the thread rather than derived from the live status so every
     /// finished answer keeps its completion cue as the conversation continues.
     pub completed_answers: std::collections::BTreeSet<usize>,
+    /// A turn finished while this conversation was off screen and the user has
+    /// not looked at it since. Cleared as soon as the AI tab shows it, so the
+    /// sidebar dot and the terminal title can count waiting-to-be-read answers.
+    pub unseen_completion: bool,
+    /// Title the model generated after a finished turn. Replaced on later
+    /// turns and outranked by an agent-published or custom title.
+    pub generated_title: Option<String>,
+    /// Title published by the external ACP agent. While set, the client stops
+    /// generating its own title for this conversation.
+    pub agent_title: Option<String>,
+    /// Title set with `/rename`. While set, automatic refreshes are paused.
+    pub custom_title: Option<String>,
+    /// The single in-flight automatic title completion, if any. New turns and
+    /// manual renames cancel it so a stale result can never overwrite a label.
+    pub(crate) title_job: Option<crate::chat_title::TitleJob>,
     saved_session: Option<crate::session::Session>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
@@ -379,6 +398,111 @@ impl AgentThread {
         }
     }
 
+    /// Whether an automatic title refresh is allowed for this conversation.
+    ///
+    /// A manual rename or an agent-published title owns the label; generating
+    /// over either would silently discard the user's or the agent's choice.
+    pub(crate) fn allows_auto_title(&self) -> bool {
+        self.custom_title.is_none() && self.agent_title.is_none()
+    }
+
+    /// Apply the label precedence: custom > agent > generated > first user line.
+    pub(crate) fn refresh_display_title(&mut self) {
+        let derived = self
+            .custom_title
+            .clone()
+            .or_else(|| self.agent_title.clone())
+            .or_else(|| self.generated_title.clone())
+            .or_else(|| self.first_message_title());
+        // An empty conversation with no title source keeps its default name
+        // rather than a label borrowed from the session it replaced.
+        self.title = derived.unwrap_or_else(|| format!("Agent {}", self.id + 1));
+    }
+
+    fn first_message_title(&self) -> Option<String> {
+        let first = self
+            .messages()
+            .iter()
+            .find(|message| message.role == AiRole::User)?;
+        let line = first.content.lines().next().unwrap_or("").trim();
+        if line.is_empty() {
+            return None;
+        }
+        Some(line.chars().take(30).collect())
+    }
+
+    /// Drop the in-flight automatic title, if any, so its result is discarded.
+    pub(crate) fn cancel_title_job(&mut self) {
+        if let Some(job) = self.title_job.take() {
+            job.cancel();
+        }
+    }
+
+    /// Poll the automatic title without blocking and adopt a finished one.
+    pub(crate) fn poll_title_job(&mut self) {
+        let Some(mut job) = self.title_job.take() else {
+            return;
+        };
+        match job.poll() {
+            crate::chat_title::PollResult::Pending => {
+                self.title_job = Some(job);
+            }
+            crate::chat_title::PollResult::Done(title) => {
+                // A blank result means the model produced nothing usable; the
+                // incumbent title stays instead of being cleared.
+                if title.is_empty() || self.generated_title.as_deref() == Some(title.as_str()) {
+                    return;
+                }
+                self.generated_title = Some(title);
+                self.refresh_display_title();
+            }
+            // Title generation is a side call: a failure leaves the fallback
+            // label in place and must not surface as a chat error.
+            crate::chat_title::PollResult::Failed => {}
+            // The model translated a Chinese conversation into English. Drop a
+            // matching incumbent too, so the Chinese first-message label
+            // replaces it instead of freezing the wrong language in place.
+            crate::chat_title::PollResult::Rejected => {
+                self.drop_title_in_wrong_language();
+            }
+        }
+    }
+
+    /// Clear a generated title written in a different language than the
+    /// conversation. Returns true when a label was dropped.
+    fn drop_title_in_wrong_language(&mut self) -> bool {
+        let language = crate::chat_title::conversation_language(self.messages());
+        let mismatched = self
+            .generated_title
+            .as_deref()
+            .is_some_and(|title| !crate::chat_title::title_matches_language(title, language));
+        if mismatched {
+            self.generated_title = None;
+            self.refresh_display_title();
+        }
+        mismatched
+    }
+
+    /// Adopt a title published by the external agent; `None` clears it.
+    pub(crate) fn apply_agent_title(&mut self, title: Option<String>) {
+        self.agent_title = title;
+        self.cancel_title_job();
+        self.refresh_display_title();
+    }
+
+    /// Apply a manual rename. The caller validates that `title` is non-blank.
+    pub(crate) fn set_custom_title(&mut self, title: String) {
+        self.custom_title = Some(title);
+        self.cancel_title_job();
+        self.refresh_display_title();
+    }
+
+    /// Remove the manual rename and fall back to the generated/agent title.
+    pub(crate) fn clear_custom_title(&mut self) {
+        self.custom_title = None;
+        self.refresh_display_title();
+    }
+
     pub fn new(id: usize, title: &str) -> Self {
         // Unit tests opt in with an isolated root; never write user preferences.
         let root = if cfg!(test) {
@@ -469,6 +593,11 @@ impl AgentThread {
             last_stop_detail: None,
             member_dir: None,
             completed_answers: Default::default(),
+            unseen_completion: false,
+            generated_title: None,
+            agent_title: None,
+            custom_title: None,
+            title_job: None,
             saved_session: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
@@ -522,6 +651,11 @@ impl AgentThread {
             // A turn can finish without touching the transcript: the final
             // answer is already streamed in, only its mark is new.
             &self.completed_answers,
+            // Title changes never touch the transcript either, so they must
+            // participate in the snapshot or a fresh title would be skipped.
+            &self.generated_title,
+            &self.agent_title,
+            &self.custom_title,
         ))?;
         if snapshot == self.last_session_snapshot {
             return Ok(());
@@ -543,6 +677,9 @@ impl AgentThread {
         session.acp_agent_id = self.selected_acp_id.clone();
         session.member_dir = self.member_dir.clone();
         session.completed_answers = self.completed_answers.iter().copied().collect();
+        session.generated_title = self.generated_title.clone();
+        session.agent_title = self.agent_title.clone();
+        session.custom_title = self.custom_title.clone();
         session.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -1999,16 +2136,39 @@ impl App {
         let descriptions = self
             .agents
             .iter()
-            .map(|agent| (agent.id, agent.title.clone(), agent.profile_id.clone()))
+            .map(|agent| {
+                (
+                    agent.id,
+                    agent.title.clone(),
+                    agent.profile_id.clone(),
+                    agent.generated_title.clone(),
+                    agent.agent_title.clone(),
+                    agent.custom_title.clone(),
+                )
+            })
             .collect::<Vec<_>>();
         self.agents = descriptions
             .into_iter()
-            .map(|(id, title, profile_id)| {
-                let mut agent =
-                    AgentThread::new_with_selection(id, &title, Some(root.to_path_buf()));
-                agent.profile_id = profile_id;
-                agent
-            })
+            .map(
+                |(id, title, profile_id, generated, agent_title, custom_title)| {
+                    let mut agent =
+                        AgentThread::new_with_selection(id, &title, Some(root.to_path_buf()));
+                    agent.profile_id = profile_id;
+                    agent.generated_title = generated;
+                    agent.agent_title = agent_title;
+                    agent.custom_title = custom_title;
+                    // Keep the stored label without inventing one: with no
+                    // title source the carried-over title stays as-is, exactly
+                    // as before titles were tracked.
+                    if agent.generated_title.is_some()
+                        || agent.agent_title.is_some()
+                        || agent.custom_title.is_some()
+                    {
+                        agent.refresh_display_title();
+                    }
+                    agent
+                },
+            )
             .collect();
         if self.agents.is_empty() {
             self.agents.push(AgentThread::new_with_selection(
@@ -4115,11 +4275,47 @@ impl App {
 
     /// Apply backend progress to the TUI and provide Teshi's host tools.
     /// The backend owns model events, conversation records, and continuation.
+    /// Start the single automatic title completion for a finished turn.
+    ///
+    /// Newest-wins: any earlier refresh is cancelled first, and a missing model
+    /// configuration silently leaves the fallback label in place.
+    fn start_title_refresh(&mut self, agent_idx: usize) {
+        // A title generated before a language fix (or by an earlier model) may
+        // be in the wrong language; clear it so this refresh starts fresh
+        // instead of being asked to preserve it.
+        self.agents[agent_idx].drop_title_in_wrong_language();
+        let (transcript, language, existing) = {
+            let agent = &self.agents[agent_idx];
+            if !agent.allows_auto_title() {
+                return;
+            }
+            (
+                crate::chat_title::conversation_transcript(agent.messages()),
+                crate::chat_title::conversation_language(agent.messages()),
+                agent.generated_title.clone(),
+            )
+        };
+        if transcript.is_empty() {
+            return;
+        }
+        let config = match crate::llm::effective_config() {
+            Ok(config) if !config.api_key.trim().is_empty() => config,
+            _ => return,
+        };
+        self.agents[agent_idx].cancel_title_job();
+        self.agents[agent_idx].title_job =
+            crate::chat_title::start_job(config, transcript, language, existing.as_deref());
+    }
+
     pub fn poll_llm_events(&mut self) {
         self.poll_closed_agent_backends();
         for agent in &mut self.agents {
             agent.poll_shutdown();
             if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
+                // A live turn owns the conversation again, so the previous
+                // answer is no longer "finished and unread" (a queued follow-up
+                // or a retry would otherwise keep the green dot while running).
+                agent.unseen_completion = false;
                 let start = agent.task_started.get_or_insert_with(Instant::now);
                 agent.task_elapsed = start.elapsed();
             } else if let Some(start) = agent.task_started.take() {
@@ -4194,6 +4390,9 @@ impl App {
                             });
                         }
                         self.agents[i].status = AiStatus::Idle;
+                        // Only a normal turn leaves an answer to be read; an
+                        // interrupted one is reported as a status message.
+                        self.agents[i].unseen_completion = completed_normally;
                         self.agents[i].tool_status = None;
                         // The agent finished without waiting for an answer.
                         self.agents[i].pending_acp_permission = None;
@@ -4206,6 +4405,11 @@ impl App {
                             } else {
                                 format!("AI response received ({model})")
                             };
+                        }
+                        // A cancelled, failed or truncated turn has no settled
+                        // topic to name, so only a normal finish refreshes it.
+                        if completed_normally {
+                            self.start_title_refresh(i);
                         }
                     }
                     Ok(Some(AgentBackendEvent::ToolActivity {
@@ -4384,6 +4588,11 @@ impl App {
                             None => title,
                         });
                     }
+                    Ok(Some(AgentBackendEvent::SessionTitle { title })) => {
+                        // The agent owns its label: adopt it, and stop any
+                        // automatic refresh so the two never fight.
+                        self.agents[i].apply_agent_title(title);
+                    }
                     Ok(Some(AgentBackendEvent::PermissionRequest {
                         request_id,
                         options,
@@ -4429,6 +4638,11 @@ impl App {
                 }
             }
         }
+        // A finished automatic title changes the label shown in the panel and
+        // the sidebar; the per-tick checkpoint in the run loop persists it.
+        for i in 0..self.agents.len() {
+            self.agents[i].poll_title_job();
+        }
         for i in 0..self.agents.len() {
             if self.agents[i].status == AiStatus::Idle
                 && self.agents[i].chat.queue_ready
@@ -4460,6 +4674,24 @@ impl App {
             )
         {
             self.ai_interrupt_confirm = false;
+        }
+    }
+
+    /// Marks the conversation on screen as read, driven by user input rather
+    /// than by what is merely painted.
+    ///
+    /// A turn that lands in the chat the user is already watching still leaves
+    /// a green dot: the answer can arrive while their eyes are elsewhere, so
+    /// only an actual key press or click while the conversation is displayed
+    /// clears the mark.
+    pub fn acknowledge_visible_conversation(&mut self) {
+        let visible = self.active_tab == MainTab::Ai
+            || (self.active_tab == MainTab::MindMap && self.mindmap_ai_panel_visible);
+        if !visible {
+            return;
+        }
+        if let Some(agent) = self.agents.get_mut(self.selected_agent) {
+            agent.unseen_completion = false;
         }
     }
 
@@ -4961,6 +5193,9 @@ impl App {
         self.agents[agent_idx].chat.last_activity = Some(Instant::now());
         self.agents[agent_idx].task_started = Some(Instant::now());
         self.agents[agent_idx].scroll_offset = 0;
+        // The turn is accepted, so a refresh for the previous transcript is
+        // now stale; cancel it before the new user line changes the history.
+        self.agents[agent_idx].cancel_title_job();
         self.agents[agent_idx].messages_mut().push(AiChatMessage {
             role: AiRole::User,
             content: user_msg.clone(),
@@ -4970,18 +5205,8 @@ impl App {
             source: None,
             activity: None,
         });
-        if self.agents[agent_idx].title.starts_with("Agent ") {
-            let name = crate::chat_images::collapse_mentions(&user_msg, &self.project.root_dir)
-                .0
-                .chars()
-                .take(30)
-                .collect::<String>()
-                .trim()
-                .to_string();
-            if !name.is_empty() {
-                self.agents[agent_idx].title = name;
-            }
-        }
+        // Until a title source exists, the first user line names the thread.
+        self.agents[agent_idx].refresh_display_title();
         self.agents[agent_idx].status = AiStatus::Waiting;
         self.agents[agent_idx].partial_response_mut().clear();
         self.agents[agent_idx].pending_acp_permission = None;
@@ -5947,14 +6172,16 @@ impl App {
     }
 
     pub fn poll_external_feature_changes(&mut self) {
-        if self.external_change_prompt.is_some() {
-            return;
-        }
         if self.last_external_check.elapsed() < Duration::from_millis(1000) {
             return;
         }
         self.last_external_check = Instant::now();
+        // Requirement folders are a project-scoped view of their own file, unrelated to the
+        // Feature buffer the prompt asks about, so they keep syncing while it is open.
         self.authoring_ui.poll_organization_changes();
+        if self.external_change_prompt.is_some() {
+            return;
+        }
 
         // Index-based runner events and pending agent edits must retain their targets.
         if self.runner_rx.is_some() || !self.pending_agent_changes.is_empty() {
@@ -14128,6 +14355,37 @@ impl App {
             self.status = "Thinking and tool details toggled".into();
             return Ok(());
         }
+        if command == "rename" {
+            self.status = "Usage: /rename <title> · /rename --clear".into();
+            return Ok(());
+        }
+        if let Some(argument) = command.strip_prefix("rename ") {
+            // Split on the first word so `/rename  --clear` (extra spaces) is
+            // still the reset command rather than a title named "--clear".
+            let argument = argument.trim();
+            if argument == "--clear" {
+                if self.agent().custom_title.is_none() {
+                    self.status = "No custom conversation title to clear".into();
+                } else {
+                    self.agent_mut().clear_custom_title();
+                    self.save_sessions(true)?;
+                    self.status = format!("Conversation title reset to '{}'", self.agent().title);
+                }
+                return Ok(());
+            }
+            if argument.is_empty() {
+                self.status = "Conversation title cannot be empty".into();
+                return Ok(());
+            }
+            let title: String = argument
+                .chars()
+                .take(crate::chat_title::TITLE_MAX_CHARS)
+                .collect();
+            self.agent_mut().set_custom_title(title.clone());
+            self.save_sessions(true)?;
+            self.status = format!("Conversation renamed to '{title}'");
+            return Ok(());
+        }
         if command == "unqueue" {
             if !self.agent().input.is_empty() {
                 self.status =
@@ -14361,11 +14619,13 @@ impl App {
         self.agent_mut().tool_status = None;
         self.agent_mut().scroll_offset = 0;
         let id = self.agent().id;
-        let title = self.agent().title.clone();
         let profile_id = self.agent().profile_id.clone();
         let member_dir = self.agent().member_dir.clone();
         let root = self.agent().selection_root.clone();
-        *self.agent_mut() = AgentThread::new_with_selection(id, &title, root);
+        // A new session starts unnamed: the previous title described a
+        // conversation this one does not continue.
+        self.agent_mut().cancel_title_job();
+        *self.agent_mut() = AgentThread::new_with_selection(id, &format!("Agent {}", id + 1), root);
         self.agent_mut().profile_id = profile_id;
         self.agent_mut().member_dir = member_dir;
         self.status = "New session started".to_string();
@@ -14617,6 +14877,11 @@ impl App {
             ..Default::default()
         };
         agent.completed_answers = session.completed_answers.iter().copied().collect();
+        agent.generated_title = session.generated_title.clone();
+        agent.agent_title = session.agent_title.clone();
+        agent.custom_title = session.custom_title.clone();
+        agent.cancel_title_job();
+        agent.refresh_display_title();
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
         agent.tool_status = None;
@@ -15549,6 +15814,89 @@ mod tests {
         assert_eq!(
             app.agent().messages().last().map(|m| m.content.as_str()),
             Some("[cancelled]")
+        );
+    }
+
+    #[test]
+    fn a_finished_answer_stays_unread_until_the_user_acts_on_it() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "First",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents.push(AgentThread::new_with_backend(
+            1,
+            "Second",
+            teshi_agent::backend::AgentBackendKind::Native,
+        ));
+        app.agents[0].unseen_completion = true;
+        app.agents[1].unseen_completion = true;
+
+        // Merely redrawing the AI tab must not eat the mark, even on the
+        // conversation that is on screen: the answer can land unnoticed.
+        app.active_tab = MainTab::Ai;
+        app.selected_agent = 0;
+        app.poll_llm_events();
+        assert!(app.agents[0].unseen_completion);
+
+        // Input while that conversation is displayed clears only its own mark.
+        app.acknowledge_visible_conversation();
+        assert!(!app.agents[0].unseen_completion);
+        assert!(
+            app.agents[1].unseen_completion,
+            "another conversation keeps its unread mark"
+        );
+
+        // Off the tab there is nothing on screen to acknowledge.
+        app.active_tab = MainTab::Explore;
+        app.acknowledge_visible_conversation();
+        assert!(app.agents[1].unseen_completion);
+
+        // Selecting the second conversation reads it.
+        app.active_tab = MainTab::Ai;
+        app.selected_agent = 1;
+        app.acknowledge_visible_conversation();
+        assert!(!app.agents[1].unseen_completion);
+    }
+
+    #[test]
+    fn the_mindmap_side_panel_reads_the_conversation_it_shows() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "First",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.active_tab = MainTab::MindMap;
+        app.agents[0].unseen_completion = true;
+
+        // A hidden panel shows nothing, so the answer stays unread.
+        app.mindmap_ai_panel_visible = false;
+        app.acknowledge_visible_conversation();
+        assert!(app.agents[0].unseen_completion);
+
+        app.mindmap_ai_panel_visible = true;
+        app.acknowledge_visible_conversation();
+        assert!(!app.agents[0].unseen_completion);
+    }
+
+    #[test]
+    fn a_running_turn_clears_the_previous_unread_mark() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "First",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0].unseen_completion = true;
+        app.active_tab = MainTab::Explore;
+
+        app.poll_llm_events();
+        assert!(
+            !app.agents[0].unseen_completion,
+            "a queued follow-up must not keep the green dot while running"
         );
     }
 
@@ -17984,6 +18332,92 @@ mod tests {
             "{}",
             app.status
         );
+    }
+
+    #[test]
+    fn test_chat_title_shows_the_conversation_label_before_the_session_id() {
+        let (mut app, _project, _store) = session_id_title_app();
+        app.agent_mut().generated_title = Some("Fix login timeout".into());
+        app.agent_mut().refresh_display_title();
+        let rows = render_rows(&mut app, 120);
+        let row = rows
+            .iter()
+            .find(|row| row.contains("AI Chat"))
+            .expect("header row");
+        assert!(row.contains("Fix login timeout"), "{row}");
+        assert!(row.contains("Session:"), "{row}");
+    }
+
+    #[test]
+    fn chat_title_precedence_puts_custom_over_agent_and_generated() {
+        let (mut app, _project, _store) = session_id_title_app();
+        let agent = app.agent_mut();
+        agent.generated_title = Some("Generated".into());
+        agent.refresh_display_title();
+        assert_eq!(agent.title, "Generated");
+        assert!(agent.allows_auto_title());
+
+        agent.apply_agent_title(Some("Agent title".into()));
+        assert_eq!(agent.title, "Agent title");
+        assert!(!agent.allows_auto_title());
+
+        agent.set_custom_title("Manual".into());
+        assert_eq!(agent.title, "Manual");
+        agent.clear_custom_title();
+        assert_eq!(agent.title, "Agent title");
+
+        agent.apply_agent_title(None);
+        assert_eq!(agent.title, "Generated");
+        assert!(agent.allows_auto_title());
+    }
+
+    #[test]
+    fn a_generated_title_in_the_wrong_language_is_dropped() {
+        let (mut app, _project, _store) = session_id_title_app();
+        app.agent_mut().messages_mut().push(AiChatMessage {
+            role: AiRole::User,
+            content: "修复登录接口的超时问题".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        app.agent_mut().generated_title = Some("Fix login timeout".into());
+        app.agent_mut().refresh_display_title();
+        assert_eq!(app.agent().title, "Fix login timeout");
+
+        assert!(app.agent_mut().drop_title_in_wrong_language());
+        assert!(app.agent().generated_title.is_none());
+        assert_eq!(app.agent().title, "修复登录接口的超时问题");
+    }
+
+    #[test]
+    fn rename_sets_a_custom_title_and_clear_restores_the_generated_one() {
+        let (mut app, _project, _store) = session_id_title_app();
+        app.agent_mut().generated_title = Some("Generated".into());
+        app.agent_mut().refresh_display_title();
+
+        app.execute_slash_command("rename Manual title").unwrap();
+        assert_eq!(app.agent().title, "Manual title");
+        assert_eq!(app.agent().custom_title.as_deref(), Some("Manual title"));
+        assert!(!app.agent().allows_auto_title());
+
+        // Extra whitespace still means reset, not a title named "--clear".
+        app.execute_slash_command("rename   --clear").unwrap();
+        assert_eq!(app.agent().title, "Generated");
+        assert!(app.agent().custom_title.is_none());
+        assert!(app.agent().allows_auto_title());
+    }
+
+    #[test]
+    fn rename_without_a_title_keeps_the_current_label() {
+        let (mut app, _project, _store) = session_id_title_app();
+        app.agent_mut().set_custom_title("Keep me".into());
+        app.execute_slash_command("rename").unwrap();
+        assert_eq!(app.agent().title, "Keep me");
+        assert_eq!(app.agent().custom_title.as_deref(), Some("Keep me"));
+        assert!(app.status.contains("Usage"));
     }
 
     #[test]
@@ -22396,6 +22830,37 @@ Feature: B
         assert!(app.dirty);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn requirement_folders_refresh_while_an_external_change_prompt_is_open() {
+        use teshi_engine::organization::*;
+        let (mut app, project, store) = requirements_test_app();
+        let identity = teshi_engine::ensure_requirement_project(project.path()).unwrap();
+        app.authoring_ui.set_project_filter(
+            teshi_core::authoring::RequirementProjectFilter::Project(identity.id.clone()),
+        );
+        assert!(app.authoring_ui.folders_view_active());
+        app.external_change_prompt = Some(super::ExternalChangePrompt {
+            feature_idx: 0,
+            path: project.path().join("sample.feature"),
+            disk_stamp: None,
+        });
+
+        let mut org = RequirementOrganization::default();
+        let folder = org.ensure_folder("External").unwrap();
+        save_requirement_organization(store.path(), &identity.id, &org).unwrap();
+
+        app.last_external_check = Instant::now() - Duration::from_secs(2);
+        app.poll_external_feature_changes();
+
+        assert!(
+            app.authoring_ui
+                .tree_labels
+                .contains_key(&format!("req-dir:collection:{folder}")),
+            "folder changes must sync while the Feature prompt is open"
+        );
+        assert!(app.external_change_prompt.is_some());
     }
 
     #[test]

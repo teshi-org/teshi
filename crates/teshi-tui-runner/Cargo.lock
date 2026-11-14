@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-core"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "chrono",
  "serde",

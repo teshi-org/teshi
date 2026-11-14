@@ -7269,7 +7269,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-agent-runtime"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7287,7 +7287,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-browser-broker"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7309,7 +7309,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-cli"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -7328,7 +7328,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-core"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "chrono",
  "serde",
@@ -7467,7 +7467,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-tui"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "anyhow",
  "arboard",
@@ -7521,7 +7521,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-update"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "chrono",
  "flate2",
@@ -7545,7 +7545,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-update-helper"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "clap",
  "serde_json",
@@ -7556,7 +7556,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-update-ui"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "gpui",
  "teshi-core",

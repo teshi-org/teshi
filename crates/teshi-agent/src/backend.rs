@@ -97,6 +97,12 @@ pub enum AgentBackendEvent {
         status: Option<String>,
         details: ToolActivityInfo,
     },
+    /// The external agent published a title for this session, or cleared it
+    /// with `None`. An agent-published title owns the conversation label, so
+    /// the client must stop generating its own.
+    SessionTitle {
+        title: Option<String>,
+    },
     /// A transient failure ended the turn's latest attempt and the backend
     /// will retry after `delay`. The turn is still running: a terminal
     /// `Completed` or `Failed` event follows unless the user cancels.

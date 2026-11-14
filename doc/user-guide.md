@@ -64,6 +64,15 @@ Slash helpers:
 
 - `/generate` — confirm the requirement-library source scope, then start requirements gathering
 - `/continue` — continue generation after approving test points (same as `c` on the Test Points tab)
+- `/rename <title>` — set a custom conversation title; automatic titles pause while it is set
+- `/rename --clear` — drop the custom title and resume automatic titles
+
+Conversation titles are generated after a normally finished turn: the panel header, the chat
+sidebar and `/sessions` show the same label. An ACP agent's `session_info_update` title outranks the
+generated one, and a manual `/rename` outranks both. Cancelled or failed turns never rename the
+conversation. Titles follow the language of the user's messages: a Chinese conversation gets a
+Chinese title, and a pure-English title returned for a Chinese conversation is discarded in favour
+of the first-message label.
 
 The AI tab is hidden when no LLM credentials are configured. Press `m` to manage shared model profiles, or type `/auth` for a status overview. From the shell, use `teshi auth login` (same store as Desktop Settings).
 

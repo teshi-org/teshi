@@ -35,8 +35,12 @@ enum Outcome {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Activity {
+    /// Every conversation in the AI tab, including idle ones nobody is
+    /// waiting for.
     total: usize,
     running: usize,
+    /// Finished turns whose answer is not on screen yet.
+    unseen: usize,
     approval: usize,
     failed: usize,
 }
@@ -48,6 +52,9 @@ impl Activity {
             ..Self::default()
         };
         for agent in &app.agents {
+            if agent.unseen_completion {
+                activity.unseen += 1;
+            }
             match agent.status {
                 AiStatus::Waiting => activity.running += 1,
                 AiStatus::AwaitingApproval => activity.approval += 1,
@@ -56,6 +63,13 @@ impl Activity {
             }
         }
         activity
+    }
+
+    /// Conversations the user is being asked to look at: still running, or
+    /// finished with an unread answer. Idle ones nobody waits for are left out,
+    /// so the count never grows just because a conversation stays open.
+    fn tracked(self) -> usize {
+        self.running + self.unseen
     }
 
     fn active(self) -> bool {
@@ -195,11 +209,18 @@ fn compose(identity: &str, activity: Activity, outcome: Outcome, mark: &str) -> 
         format!("teshi · {identity}")
     };
 
-    if activity.running > 0 {
-        let mut title = if activity.total > 1 {
+    if activity.tracked() > 0 {
+        // The numerator is what the user owes a look at, so the badge never
+        // claims progress that is already read: two running conversations read
+        // `0/2`, one of them finishing unread reads `1/2`, reading it `0/1`.
+        let mut title = if activity.running == 0 {
+            // Nothing runs, so a `N/M running` count would be a lie.
+            format!("{mark} {base} · {} unread", activity.unseen)
+        } else if activity.tracked() > 1 || activity.unseen > 0 {
             format!(
                 "{mark} {base} · {}/{} running",
-                activity.running, activity.total
+                activity.unseen,
+                activity.tracked()
             )
         } else {
             format!("{mark} {base}")
@@ -270,7 +291,13 @@ mod tests {
             running,
             approval,
             failed,
+            ..Activity::default()
         }
+    }
+
+    fn with_unseen(mut activity: Activity, unseen: usize) -> Activity {
+        activity.unseen = unseen;
+        activity
     }
 
     #[test]
@@ -286,13 +313,51 @@ mod tests {
     }
 
     #[test]
-    fn running_title_animates_and_aggregates() {
-        let first = compose("proj", activity(3, 1, 0, 0), Outcome::None, "⠋");
+    fn running_title_animates_and_counts_tracked_agents() {
+        let first = compose("proj", activity(3, 2, 0, 0), Outcome::None, "⠋");
         assert!(first.starts_with('⠋'));
-        assert!(first.contains("1/3 running"));
+        assert!(first.contains("0/2 running"));
         assert_ne!(
             first,
-            compose("proj", activity(3, 1, 0, 0), Outcome::None, "⠙")
+            compose("proj", activity(3, 2, 0, 0), Outcome::None, "⠙")
+        );
+    }
+
+    #[test]
+    fn unread_answers_are_the_numerator() {
+        // One conversation finished unread while another still runs.
+        assert_eq!(
+            compose(
+                "proj",
+                with_unseen(activity(3, 1, 0, 0), 1),
+                Outcome::None,
+                "⠋"
+            ),
+            "⠋ teshi · proj · 1/2 running"
+        );
+        // Reading it leaves only the running conversation.
+        assert_eq!(
+            compose("proj", activity(3, 1, 0, 0), Outcome::None, "⠋"),
+            "⠋ teshi · proj"
+        );
+        // A lone unread answer still has to surface, with no running count to
+        // inflate it.
+        assert_eq!(
+            compose(
+                "proj",
+                with_unseen(activity(1, 0, 0, 0), 1),
+                Outcome::None,
+                "⠋"
+            ),
+            "⠋ teshi · proj · 1 unread"
+        );
+    }
+
+    #[test]
+    fn idle_conversations_stay_out_of_the_denominator() {
+        assert_eq!(
+            compose("proj", activity(9, 2, 0, 0), Outcome::None, "⠋"),
+            "⠋ teshi · proj · 0/2 running"
         );
     }
 
@@ -323,8 +388,8 @@ mod tests {
     #[test]
     fn running_with_approval_mentions_both() {
         assert_eq!(
-            compose("proj", activity(3, 1, 1, 0), Outcome::None, "⠋"),
-            "⠋ teshi · proj · 1/3 running, 1 waiting"
+            compose("proj", activity(3, 2, 1, 0), Outcome::None, "⠋"),
+            "⠋ teshi · proj · 0/2 running, 1 waiting"
         );
     }
 

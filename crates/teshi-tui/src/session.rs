@@ -43,6 +43,16 @@ pub struct Session {
         deserialize_with = "completed_answers_compat"
     )]
     pub completed_answers: Vec<usize>,
+    /// Title produced by the automatic naming call after a finished turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_title: Option<String>,
+    /// Title published by the external ACP agent; outranks the generated one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_title: Option<String>,
+    /// Title set by the user with `/rename`; outranks every automatic source
+    /// and pauses further automatic refreshes while set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
 }
 
 fn completed_answers_compat<'de, D>(deserializer: D) -> Result<Vec<usize>, D::Error>
@@ -62,8 +72,22 @@ where
 }
 
 impl Session {
-    /// Human-readable title: the first user line, or a short session id.
+    /// Human-readable title.
+    ///
+    /// A manual rename wins, then the agent's own title, then the generated
+    /// one. Sessions without any stored title keep the historical behavior:
+    /// the first user line, or a short session id.
     pub fn display_title(&self) -> String {
+        if let Some(title) = self
+            .custom_title
+            .as_deref()
+            .or(self.agent_title.as_deref())
+            .or(self.generated_title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            return title.to_string();
+        }
         let first = self
             .messages
             .iter()
@@ -121,6 +145,9 @@ impl Session {
             member_dir: None,
             pending_messages: Default::default(),
             completed_answers: Vec::new(),
+            generated_title: None,
+            agent_title: None,
+            custom_title: None,
         }
     }
 
@@ -168,6 +195,47 @@ mod tests {
     use std::sync::Mutex;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn display_title_prefers_custom_then_agent_then_generated() {
+        let mut session: super::Session = serde_json::from_value(serde_json::json!({
+            "id": "titled", "created_at": "1", "updated_at": "1", "model_label": null,
+            "message_count": 1, "messages": [{
+                "role": "User", "content": "first question", "tool_calls": null,
+                "tool_call_id": null, "reasoning_content": null, "source": null
+            }]
+        }))
+        .unwrap();
+        assert_eq!(session.display_title(), "first question");
+
+        session.generated_title = Some("Generated".into());
+        assert_eq!(session.display_title(), "Generated");
+
+        session.agent_title = Some("Agent title".into());
+        assert_eq!(session.display_title(), "Agent title");
+
+        session.custom_title = Some("Manual".into());
+        assert_eq!(session.display_title(), "Manual");
+
+        // Clearing the manual title falls back to the next source, not the
+        // first user line.
+        session.custom_title = None;
+        assert_eq!(session.display_title(), "Agent title");
+        session.agent_title = None;
+        assert_eq!(session.display_title(), "Generated");
+    }
+
+    #[test]
+    fn legacy_sessions_without_titles_still_load() {
+        let session: super::Session = serde_json::from_value(serde_json::json!({
+            "id": "old", "created_at": "1", "updated_at": "1", "model_label": null,
+            "message_count": 0, "messages": []
+        }))
+        .unwrap();
+        assert!(session.generated_title.is_none());
+        assert!(session.agent_title.is_none());
+        assert!(session.custom_title.is_none());
+    }
 
     #[test]
     fn legacy_sessions_without_metadata_remain_readable() {
