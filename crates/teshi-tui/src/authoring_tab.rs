@@ -3193,7 +3193,32 @@ mod tests {
         let query = &tree[2].children()[0];
         assert_eq!(labels[query.identifier()].to_string(), "Implemented (1)");
         assert_eq!(query.children()[0].identifier(), "req-doc:one");
-        assert_eq!(labels["req-doc:one"].to_string(), "One · implemented");
+        assert_eq!(labels["req-doc:one"].to_string(), "✓ One");
+        assert_eq!(labels["req-doc:two"].to_string(), "Two");
+    }
+
+    #[test]
+    fn organization_tree_marks_verified_documents_ahead_of_the_title() {
+        use teshi_engine::organization::*;
+        let project = "project-a";
+        let mut doc = RequirementDocumentMeta::new(
+            "one",
+            "one.md",
+            "One",
+            teshi_core::authoring::DocumentRevision::new("r1"),
+        );
+        doc.projects.insert(
+            project.into(),
+            teshi_core::authoring::RequirementProjectStatus::Verified,
+        );
+        let index = RequirementDocumentIndex {
+            documents: vec![doc],
+            ..Default::default()
+        };
+        let org = RequirementOrganization::default();
+        let (_, labels) =
+            organize::build_organization_tree(&index.documents, &org, project, &index.tag_styles);
+        assert_eq!(labels["req-doc:one"].to_string(), "✓✓ One");
     }
 
     fn tagged_doc(tags: &[&str]) -> RequirementDocumentMeta {

@@ -6,7 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use ratatui::text::Line;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     RequirementDocumentMeta, RequirementGroupMode, RequirementProjectFilter,
     RequirementProjectStatus, RequirementTagColor, RequirementTagStyle, normalize_tag_name,
@@ -20,6 +21,7 @@ use tui_tree_widget::TreeItem;
 use super::{
     AuthoringUiState, RequirementsOverlay, TREE_DOC_PREFIX, requirement_document_tree_line,
 };
+use crate::theme;
 
 /// Tree node of the implicit Inbox (documents without a manual folder).
 pub const TREE_INBOX_NODE: &str = "req-dir:inbox";
@@ -1002,15 +1004,18 @@ struct OrganizationTreeBuilder<'a> {
 
 impl OrganizationTreeBuilder<'_> {
     fn leaf(&mut self, doc: &RequirementDocumentMeta) -> TreeItem<'static, String> {
-        let state = match doc.projects.get(self.project) {
-            Some(RequirementProjectStatus::Implemented) => " · implemented",
-            Some(RequirementProjectStatus::Verified) => " · verified",
-            _ => "",
+        // Delivery state leads the row: a narrow tree truncates the tail first, and the
+        // suffix this replaced was unreadable once the title filled the pane.
+        let marker = match doc.projects.get(self.project) {
+            Some(RequirementProjectStatus::Implemented) => Some("✓ "),
+            Some(RequirementProjectStatus::Verified) => Some("✓✓ "),
+            _ => None,
         };
         let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
         let mut line = requirement_document_tree_line(doc, self.styles);
-        if !state.is_empty() {
-            line.push_span(state);
+        if let Some(marker) = marker {
+            line.spans
+                .insert(0, Span::styled(marker, Style::default().fg(theme::SUCCESS)));
         }
         self.labels.insert(id.clone(), line.clone());
         TreeItem::new_leaf(id, line)
