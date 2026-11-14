@@ -5947,14 +5947,16 @@ impl App {
     }
 
     pub fn poll_external_feature_changes(&mut self) {
-        if self.external_change_prompt.is_some() {
-            return;
-        }
         if self.last_external_check.elapsed() < Duration::from_millis(1000) {
             return;
         }
         self.last_external_check = Instant::now();
+        // Requirement folders are a project-scoped view of their own file, unrelated to the
+        // Feature buffer the prompt asks about, so they keep syncing while it is open.
         self.authoring_ui.poll_organization_changes();
+        if self.external_change_prompt.is_some() {
+            return;
+        }
 
         // Index-based runner events and pending agent edits must retain their targets.
         if self.runner_rx.is_some() || !self.pending_agent_changes.is_empty() {
@@ -22396,6 +22398,37 @@ Feature: B
         assert!(app.dirty);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn requirement_folders_refresh_while_an_external_change_prompt_is_open() {
+        use teshi_engine::organization::*;
+        let (mut app, project, store) = requirements_test_app();
+        let identity = teshi_engine::ensure_requirement_project(project.path()).unwrap();
+        app.authoring_ui.set_project_filter(
+            teshi_core::authoring::RequirementProjectFilter::Project(identity.id.clone()),
+        );
+        assert!(app.authoring_ui.folders_view_active());
+        app.external_change_prompt = Some(super::ExternalChangePrompt {
+            feature_idx: 0,
+            path: project.path().join("sample.feature"),
+            disk_stamp: None,
+        });
+
+        let mut org = RequirementOrganization::default();
+        let folder = org.ensure_folder("External").unwrap();
+        save_requirement_organization(store.path(), &identity.id, &org).unwrap();
+
+        app.last_external_check = Instant::now() - Duration::from_secs(2);
+        app.poll_external_feature_changes();
+
+        assert!(
+            app.authoring_ui
+                .tree_labels
+                .contains_key(&format!("req-dir:collection:{folder}")),
+            "folder changes must sync while the Feature prompt is open"
+        );
+        assert!(app.external_change_prompt.is_some());
     }
 
     #[test]
