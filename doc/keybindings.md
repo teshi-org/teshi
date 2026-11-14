@@ -446,6 +446,7 @@ Agent mode settings and Teshi approval modes remain separate controls.
 | `/copy`, `/copy N` | Copy the latest / last N completed nonempty assistant answers |
 | `/copy-code [N]` | Copy block N (default 1) from the last assistant answer |
 | `/details` | Toggle full thinking and tool details |
+| `/rename <title>`, `/rename --clear` | Set a custom conversation title / drop it and resume automatic titles |
 | `/models` | Native model profiles or ACP model settings |
 | `/sessions`, `/sessions legacy` | Project conversations / explicitly unassigned legacy history |
 | `/project`, `/project <directory>` | Project picker / direct project switch |

@@ -1459,6 +1459,31 @@ fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>, mu
                     content: content.into(),
                 })
         }
+        AcpEvent::SessionUpdate(value)
+            if value
+                .get("update")
+                .unwrap_or(&value)
+                .get("sessionUpdate")
+                .and_then(serde_json::Value::as_str)
+                == Some("session_info_update") =>
+        {
+            // Only a present `title` speaks about the label: an update that
+            // merely refreshes `updatedAt` must leave it alone. A null title
+            // clears the agent label so the client's own title can return.
+            let update = value.get("update").unwrap_or(&value);
+            match update.get("title") {
+                Some(serde_json::Value::String(title)) => {
+                    let title = title.trim();
+                    (!title.is_empty()).then(|| AgentBackendEvent::SessionTitle {
+                        title: Some(title.to_string()),
+                    })
+                }
+                Some(serde_json::Value::Null) => {
+                    Some(AgentBackendEvent::SessionTitle { title: None })
+                }
+                _ => None,
+            }
+        }
         AcpEvent::Error(error) => Some(AgentBackendEvent::Failed(format!(
             "ACP protocol error: {error}"
         ))),

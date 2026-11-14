@@ -202,6 +202,10 @@ fn pump_turn(backend: &mut AgentBackendRuntime, started: Instant, deadline: Inst
                             "  [{ms}ms] RETRY : {attempt}/{max_attempts} in {delay:?}: {reason}"
                         );
                     }
+                    AgentBackendEvent::SessionTitle { title } => match title {
+                        Some(title) => println!("  [{ms}ms] TITLE : {title}"),
+                        None => println!("  [{ms}ms] TITLE : cleared"),
+                    },
                     AgentBackendEvent::Ignored => {}
                 }
             }

@@ -8,6 +8,7 @@ mod authoring_tab;
 mod bdd_nav;
 mod chat_images;
 mod chat_state;
+mod chat_title;
 mod cli;
 mod config;
 mod diff;

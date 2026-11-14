@@ -799,6 +799,23 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
         " AI Chat ",
         fg(theme::FG).add_modifier(Modifier::BOLD),
     ));
+    // The conversation title is the panel's identity, but the session ID must
+    // stay copyable on narrow panels: reserve its room before fitting the
+    // title, and truncate the title with an ellipsis when they compete.
+    let conversation = app.agent().title.clone();
+    let id_reserve = app
+        .agent()
+        .session_id()
+        .map(|id| id.width() + " · ".width() + 1)
+        .unwrap_or(0)
+        .min(room);
+    let title_room = room.saturating_sub(title.width() + id_reserve);
+    if !conversation.is_empty() && title_room > " · …".width() {
+        let text = super::truncate_str(&conversation, title_room - " · ".width());
+        title.push_span(Span::styled("· ", muted()));
+        title.push_span(Span::styled(text, fg(theme::FG)));
+        title.push_span(Span::raw(" "));
+    }
     if let Some(id) = app.agent().session_id().map(str::to_owned) {
         let used = title.width();
         let id_with_gap = id.width() + " ".width();
