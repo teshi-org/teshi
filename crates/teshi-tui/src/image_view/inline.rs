@@ -21,6 +21,7 @@ use ratatui::backend::Backend;
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::Picker;
+use unicode_width::UnicodeWidthStr;
 
 use super::pipeline::{self, Encoded, Prepared};
 use super::viewport::{ViewState, Viewport};
@@ -348,24 +349,18 @@ impl InlineImages {
             }
         }
         if !stale.is_empty() {
-            let cells: Vec<(u16, u16, Cell)> = stale
-                .iter()
-                .flat_map(|area| area.positions())
-                .filter_map(|position| {
-                    buffer
-                        .cell(position)
-                        .map(|cell| (position.x, position.y, cell.clone()))
-                })
-                .collect();
+            let cells = repair_cells(buffer, &stale);
             backend.write_all(b"\x1b7")?;
             backend.draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))?;
             backend.write_all(b"\x1b8")?;
-            // Placements that overlap a repaired area must be drawn again.
+            // Placements under any repainted cell must be drawn again. A wide
+            // glyph at a repair's edge reaches one column past the stale area.
             for painted in &mut kept {
-                if stale
-                    .iter()
-                    .any(|area| !area.intersection(painted.slot.area).is_empty())
-                {
+                let area = painted.slot.area;
+                if cells.iter().any(|(x, y, cell)| {
+                    let width = cell.symbol().width().max(1) as u16;
+                    area.intersects(Rect::new(*x, *y, width, 1))
+                }) {
                     painted.next_tile = 0;
                 }
             }
@@ -396,6 +391,43 @@ fn snapshot(buffer: &Buffer, area: Rect) -> Vec<Cell> {
     area.positions()
         .filter_map(|position| buffer.cell(position).cloned())
         .collect()
+}
+
+/// The cells that repaint `areas` from `buffer`, in the order a backend draws.
+///
+/// The backend prints consecutive cells without moving the cursor, and a
+/// wide glyph already advances it by its full width. Its trailing cells are
+/// therefore left out, as Ratatui's own diff does: printing them as well
+/// shifts the rest of the row right, onto cells the next diff believes blank.
+/// A row that starts inside a wide glyph is widened to repaint that glyph.
+fn repair_cells(buffer: &Buffer, areas: &[Rect]) -> Vec<(u16, u16, Cell)> {
+    let mut cells = Vec::new();
+    for area in areas {
+        for y in area.top()..area.bottom() {
+            let mut x = area.left();
+            if let Some(lead) = x.checked_sub(1)
+                && buffer
+                    .cell((lead, y))
+                    .is_some_and(|cell| !cell.skip && cell.symbol().width() > 1)
+            {
+                x = lead;
+            }
+            let mut covered = 0;
+            while x < area.right() {
+                let Some(cell) = buffer.cell((x, y)) else {
+                    break;
+                };
+                if covered > 0 {
+                    covered -= 1;
+                } else if !cell.skip {
+                    cells.push((x, y, cell.clone()));
+                    covered = cell.symbol().width().saturating_sub(1);
+                }
+                x += 1;
+            }
+        }
+    }
+    cells
 }
 
 fn tile_count(slot: &Slot) -> usize {
@@ -675,6 +707,118 @@ mod tests {
         assert!(
             again.contains("\x1bP"),
             "the pixels return once the popup is gone: {again:?}"
+        );
+    }
+
+    #[test]
+    fn test_repair_skips_wide_glyph_trailing_cells() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 2));
+        buffer.set_string(0, 0, "生成ab", ratatui::style::Style::default());
+        buffer.set_string(0, 1, "x生", ratatui::style::Style::default());
+        let drawn = |areas: &[Rect]| {
+            repair_cells(&buffer, areas)
+                .into_iter()
+                .map(|(x, y, cell)| (x, y, cell.symbol().to_string()))
+                .collect::<Vec<_>>()
+        };
+        let cell = |x, y, symbol: &str| (x, y, symbol.to_string());
+
+        assert_eq!(
+            drawn(&[Rect::new(0, 0, 6, 1)]),
+            [
+                cell(0, 0, "生"),
+                cell(2, 0, "成"),
+                cell(4, 0, "a"),
+                cell(5, 0, "b")
+            ],
+            "a trailing cell printed after its glyph shifts the row right"
+        );
+        assert_eq!(
+            drawn(&[Rect::new(1, 0, 2, 1)]),
+            [cell(0, 0, "生"), cell(2, 0, "成")],
+            "a row starting inside a wide glyph repaints the whole glyph"
+        );
+        assert_eq!(
+            drawn(&[Rect::new(2, 1, 2, 1)]),
+            [cell(1, 1, "生"), cell(3, 1, " ")]
+        );
+    }
+
+    /// Draws `text` and then `places`, and returns what [`InlineImages::finish_frame`]
+    /// wrote after the frame.
+    fn draw_frame(
+        images: &mut InlineImages,
+        terminal: &mut ratatui::Terminal<TestBackend>,
+        text: &[(u16, u16, &str)],
+        places: &[(&Path, (u16, u16), Rect)],
+    ) -> String {
+        images.begin_frame();
+        let completed = terminal
+            .draw(|frame| {
+                for (x, y, line) in text {
+                    frame
+                        .buffer_mut()
+                        .set_string(*x, *y, *line, ratatui::style::Style::default());
+                }
+                for (path, size, area) in places {
+                    images.place(frame, path, *size, *area, 0);
+                }
+            })
+            .unwrap();
+        let buffer = completed.buffer.clone();
+        let mut output = Vec::new();
+        let mut sink = Sink {
+            inner: TestBackend::new(buffer.area.width, buffer.area.height),
+            output: &mut output,
+        };
+        images.finish_frame(&mut sink, &buffer, false).unwrap();
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    #[test]
+    fn test_repair_of_a_moved_image_never_prints_wide_glyph_trailing_cells() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut images, path) = sixel_images(dir.path());
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(20, 6)).unwrap();
+        let old = (path.as_path(), (8, 2), Rect::new(1, 1, 8, 2));
+        draw_frame(&mut images, &mut terminal, &[], &[old]);
+        wait_ready(&mut images);
+        draw_frame(&mut images, &mut terminal, &[], &[old]);
+        let moved = (path.as_path(), (8, 2), Rect::new(1, 3, 8, 2));
+        let repaired = draw_frame(&mut images, &mut terminal, &[(0, 1, "x生成文字")], &[moved]);
+        assert!(
+            repaired.contains("[1,1]生[3,1]成[5,1]文[7,1]字"),
+            "each glyph is repainted at its own column: {repaired:?}"
+        );
+        for trailing in ["[2,1]", "[4,1]", "[6,1]", "[8,1]"] {
+            assert!(
+                !repaired.contains(trailing),
+                "{trailing} would shift the row right: {repaired:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_repair_widened_into_a_kept_image_redraws_that_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut images, path) = sixel_images(dir.path());
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(20, 6)).unwrap();
+        // The glyph at column 1 sits in the kept image and reaches into the
+        // stale one, so repairing the stale image repaints column 1 as well.
+        let text = [(0, 1, "x生")];
+        let kept = (path.as_path(), (2, 1), Rect::new(0, 1, 2, 1));
+        let stale = (path.as_path(), (8, 2), Rect::new(2, 1, 8, 2));
+        draw_frame(&mut images, &mut terminal, &text, &[kept, stale]);
+        wait_ready(&mut images);
+        let shown = draw_frame(&mut images, &mut terminal, &text, &[kept, stale]);
+        assert!(shown.contains("\x1b[2;1H\x1bP"), "{shown:?}");
+        assert!(!images.is_busy());
+
+        let repaired = draw_frame(&mut images, &mut terminal, &text, &[kept]);
+        assert!(repaired.contains("[1,1]生"), "{repaired:?}");
+        assert!(
+            repaired.contains("\x1b[2;1H\x1bP"),
+            "the kept image under the repainted glyph is drawn again: {repaired:?}"
         );
     }
 
