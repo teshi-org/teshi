@@ -351,6 +351,7 @@ pub fn run() -> Result<()> {
         app.poll_lazy_features();
         app.poll_git_status();
         app.poll_feature_browser_search();
+        app.poll_requirement_search();
         app.poll_external_feature_changes();
         app.poll_external_requirement_changes();
         app.poll_status_message_expiry();
@@ -435,6 +436,9 @@ pub fn run() -> Result<()> {
                         continue;
                     }
                     if app.handle_feature_browser_key(key_event) {
+                        continue;
+                    }
+                    if app.handle_requirement_search_key(key_event) {
                         continue;
                     }
                     if let Some(action) = Action::from_key_event(
@@ -536,6 +540,12 @@ pub fn run() -> Result<()> {
                     for ch in text.chars().filter(|ch| !ch.is_control()) {
                         app.handle_action(Action::ModelPanelFormInsert(ch))?;
                     }
+                }
+                Event::Paste(text)
+                    if app.active_tab == crate::app::MainTab::Requirements
+                        && app.authoring_ui.search_active =>
+                {
+                    app.paste_requirement_search(&text);
                 }
                 Event::Paste(text) if app.active_tab == crate::app::MainTab::Requirements => {
                     if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor

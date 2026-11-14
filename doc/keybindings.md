@@ -62,7 +62,7 @@ work while the prompt is open, and a left click closes it.
 
 | Key | Action |
 |-----|--------|
-| `/` | Search Feature names, titles, and relative paths in the Features column; Enter keeps the filter, Esc clears it |
+| `/` | Search Feature names, titles, and relative paths in the Features column; the title shows `/query` with a block caret (Left/Right/Home/End move it, Delete removes forward); Enter keeps the filter, Esc clears it |
 | Enter | Toggle the selected Feature directory |
 | `j/k`, Down/Up | Select next/previous row |
 | `h/Left` | In the Features column: collapse an open directory, otherwise select the parent directory. Elsewhere: previous column |
@@ -272,6 +272,7 @@ valid selections; changed streamed text or a different session clears them.
 | Tab/BackTab, or Ctrl+W then `h/l` or Left/Right | Previous/next pane |
 | Home/End | First/last item |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Page through items |
+| `/` | Search requirement titles, relative paths, and ids; the title shows `/query` with a block caret (Left/Right/Home/End move it, Delete removes forward); Enter keeps the filter, Esc clears it |
 | Enter | Expand/collapse a folder or query; open a requirement in the editor |
 | Space | Action menu for the selected row (folders, tags, queries, membership, and the keys below) |
 | Ctrl+N | New requirement; with a folder selected, it is filed there on first save |
@@ -295,7 +296,14 @@ mode. The tree reserves `g` for switching views, so use Home/End for its
 boundaries. Priority changes preserve document order, Markdown, and unsaved text;
 existing documents remain unset. The tree title lists scope, view, iteration, and
 (in Current project) the completed filter. See `doc/requirement-organization.md` for
-the action menu.
+the action menu. `/` filters the tree by a case-insensitive substring over each
+document's title, relative path, and id (mirroring the Explore Feature search);
+matches are shown as a flat list so a collapsed folder never hides one. The tree
+title shows the live query with a block caret while you type — the same caret the
+`: ` prompt and dialog fields draw — and advertises `[/] Search` when idle. Left/
+Right/Home/End move the caret and Delete removes forward, so a query can be edited
+mid-string. Typing debounces the rebuild, Enter keeps the filter for navigation,
+and Esc clears it.
 
 ### Markdown Preview
 

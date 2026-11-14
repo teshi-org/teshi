@@ -9,10 +9,11 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, ColumnFocus, MainTab};
+use crate::authoring_tab::{CursorMotion, LineInput};
 
 #[derive(Default)]
 pub(crate) struct FeatureBrowser {
-    pub(crate) query: String,
+    pub(crate) query: LineInput,
     pub(crate) searching: bool,
     applied_query: String,
     pending_search: Option<Instant>,
@@ -52,23 +53,23 @@ impl App {
     fn feature_browser_filter_query(&self) -> &str {
         if self.feature_browser.pending_search.is_some() {
             &self.feature_browser.applied_query
-        } else if self.feature_browser.query.trim().is_empty() {
+        } else if self.feature_browser.query.text().trim().is_empty() {
             ""
         } else {
-            &self.feature_browser.query
+            self.feature_browser.query.text()
         }
     }
 
     fn commit_feature_browser_search(&mut self) {
         self.feature_browser.pending_search = None;
-        self.feature_browser.applied_query = self.feature_browser.query.clone();
+        self.feature_browser.applied_query = self.feature_browser.query.text().to_string();
         if self.explore_selected_feature_row().is_none() {
             self.explore_set_feature_row(0);
         }
     }
 
     fn schedule_feature_browser_search(&mut self) {
-        if self.feature_browser.query.trim().is_empty() {
+        if self.feature_browser.query.text().trim().is_empty() {
             self.commit_feature_browser_search();
         } else {
             self.feature_browser.pending_search = Some(Instant::now());
@@ -86,7 +87,7 @@ impl App {
     }
 
     pub(crate) fn paste_feature_browser_search(&mut self, text: &str) {
-        for ch in text.chars() {
+        for ch in text.chars().filter(|ch| !ch.is_control()) {
             if !self
                 .handle_feature_browser_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
             {
@@ -352,39 +353,51 @@ impl App {
             return false;
         }
         if self.feature_browser.searching {
+            // Control chords are commands, not query text. Leave input mode
+            // before handing them to the keymap so a following chord key or a
+            // focus change never sees a stale search state.
+            if event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                self.feature_browser.searching = false;
+                self.commit_feature_browser_search();
+                return false;
+            }
             match event.code {
                 KeyCode::Esc => {
-                    self.feature_browser.query.clear();
+                    self.feature_browser.query = LineInput::default();
                     self.feature_browser.searching = false;
                 }
                 KeyCode::Enter => self.feature_browser.searching = false,
-                KeyCode::Backspace => {
-                    self.feature_browser.query.pop();
-                }
-                KeyCode::Char(ch)
-                    if !event
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    self.feature_browser.query.push(ch)
-                }
+                KeyCode::Backspace => self.feature_browser.query.backspace(),
+                KeyCode::Delete => self.feature_browser.query.delete(),
+                KeyCode::Left => self.feature_browser.query.move_cursor(CursorMotion::Left),
+                KeyCode::Right => self.feature_browser.query.move_cursor(CursorMotion::Right),
+                KeyCode::Home => self.feature_browser.query.move_cursor(CursorMotion::Home),
+                KeyCode::End => self.feature_browser.query.move_cursor(CursorMotion::End),
+                KeyCode::Char(ch) => self.feature_browser.query.insert(ch),
                 KeyCode::Up | KeyCode::Down => return false,
                 _ => return true,
             }
-            if matches!(event.code, KeyCode::Esc | KeyCode::Enter) {
-                self.commit_feature_browser_search();
-            } else {
-                self.schedule_feature_browser_search();
+            match event.code {
+                KeyCode::Esc | KeyCode::Enter => self.commit_feature_browser_search(),
+                KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_) => {
+                    self.schedule_feature_browser_search()
+                }
+                // Cursor motion only moves the caret; the query is unchanged.
+                _ => {}
             }
             return true;
         }
         match event.code {
             KeyCode::Char('/') if event.modifiers.is_empty() => {
                 self.feature_browser.searching = true;
+                self.feature_browser.query.move_cursor(CursorMotion::End);
                 true
             }
-            KeyCode::Esc if !self.feature_browser.query.is_empty() => {
-                self.feature_browser.query.clear();
+            KeyCode::Esc if !self.feature_browser.query.text().is_empty() => {
+                self.feature_browser.query = LineInput::default();
                 self.commit_feature_browser_search();
                 true
             }
@@ -479,17 +492,17 @@ mod tests {
         assert_eq!(app.feature_browser_selected_row(), Some(1));
         app.feature_browser.expanded.insert("a".into());
         assert_eq!(app.feature_browser_selected_row(), Some(2));
-        app.feature_browser.query = "ONE".into();
+        app.feature_browser.query = LineInput::new("ONE");
         assert_eq!(app.feature_browser_selected_row(), None);
         app.feature_browser.directory = Some("a".into());
         assert_eq!(app.feature_browser_selected_row(), Some(0));
         app.feature_browser.directory = None;
-        app.feature_browser.query.clear();
+        app.feature_browser.query = LineInput::default();
         let catalog = app.lazy_features.as_mut().unwrap();
         catalog.paths.insert(0, root.path().join("a/added.feature"));
         catalog.revision += 1;
         assert_eq!(app.feature_browser_selected_row(), Some(3));
-        app.feature_browser.query = "added".into();
+        app.feature_browser.query = LineInput::new("added");
         let rows = app.feature_browser_rows();
         assert!(matches!(rows.last(), Some(Row::File(0, _, false, _))));
     }
@@ -532,7 +545,7 @@ mod tests {
         let initial = app.feature_browser_rows();
         app.feature_browser.searching = true;
         app.paste_feature_browser_search("auth");
-        assert_eq!(app.feature_browser.query, "auth");
+        assert_eq!(app.feature_browser.query.text(), "auth");
         assert!(Rc::ptr_eq(&initial, &app.feature_browser_rows()));
         app.poll_feature_browser_search();
         assert!(Rc::ptr_eq(&initial, &app.feature_browser_rows()));
@@ -567,7 +580,7 @@ mod tests {
         app.project.features[0].name = "Renamed".into();
         let renamed = app.feature_browser_rows();
         assert!(!Rc::ptr_eq(&initial, &renamed));
-        app.feature_browser.query = "Renamed".into();
+        app.feature_browser.query = LineInput::new("Renamed");
         let filtered = app.feature_browser_rows();
         assert_eq!(
             filtered
@@ -577,7 +590,7 @@ mod tests {
             1
         );
         assert!(Rc::ptr_eq(&filtered, &app.feature_browser_rows()));
-        app.feature_browser.query.clear();
+        app.feature_browser.query = LineInput::default();
         app.feature_browser.expanded.remove("features");
         assert_eq!(app.feature_browser_rows().len(), 1);
     }
@@ -653,7 +666,7 @@ mod tests {
         app.handle_feature_browser_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.feature_browser.searching);
         app.handle_feature_browser_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.feature_browser.query.is_empty());
+        assert!(app.feature_browser.query.text().is_empty());
         assert_eq!(app.feature_browser_rows().len(), 5);
     }
 

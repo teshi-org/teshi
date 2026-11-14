@@ -1155,8 +1155,29 @@ fn capture_badge(count: usize) -> Span<'static> {
     )
 }
 
-fn explore_block(title: &str, focused: bool) -> Block<'_> {
+fn explore_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
     theme::panel_block(title, focused)
+}
+
+/// `/query` spans for a search title, with a block caret at the cursor while
+/// the field is active. Uses the same caret colors as the `:` prompt and form
+/// fields so an active search reads as a focused input rather than static text.
+fn search_query_spans(query: &crate::authoring_tab::LineInput, active: bool) -> Vec<Span<'static>> {
+    let (before, after) = query.split_at_cursor();
+    let mut spans = vec![Span::raw("/".to_string())];
+    if active {
+        spans.push(Span::raw(before.to_string()));
+        let mut rest = after.chars();
+        let under = rest.next().map_or_else(|| " ".to_string(), String::from);
+        spans.push(Span::styled(
+            under,
+            Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
+        ));
+        spans.push(Span::raw(rest.as_str().to_string()));
+    } else {
+        spans.push(Span::raw(format!("{before}{after}")));
+    }
+    spans
 }
 
 fn feature_display_name(path: &std::path::Path) -> String {
@@ -1373,19 +1394,18 @@ fn input_with_cursor(text: &str, cursor: usize, width: u16) -> String {
 fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::feature_browser::Row;
     let focused = app.explore_focus == ColumnFocus::Feature;
-    let mut title = if app.feature_browser.searching || !app.feature_browser.query.is_empty() {
-        format!("Features /{}", app.feature_browser.query)
+    let searching = app.feature_browser.searching;
+    let mut title = if searching || !app.feature_browser.query.text().is_empty() {
+        let mut spans = vec![Span::raw("Features ".to_string())];
+        spans.extend(search_query_spans(&app.feature_browser.query, searching));
+        Line::from(spans)
+    } else if let Some(catalog) = &app.lazy_features {
+        Line::from(format!(
+            "Features ({}) [/] File search",
+            catalog.paths.len()
+        ))
     } else {
-        if app.lazy_features.is_some() {
-            format!(
-                "Features ({}) [/] File search",
-                app.lazy_features
-                    .as_ref()
-                    .map_or(0, |catalog| catalog.paths.len())
-            )
-        } else {
-            "Features [/] Search".to_string()
-        }
+        Line::from("Features [/] Search".to_string())
     };
     if app.features_loading() {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -1395,9 +1415,12 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .as_millis()
             / 100) as usize;
         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        title.push_str(&format!(" {} Loading...", spinner[frame % spinner.len()]));
+        title.spans.push(Span::raw(format!(
+            " {} Loading...",
+            spinner[frame % spinner.len()]
+        )));
     }
-    let block = explore_block(&title, focused);
+    let block = explore_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -5349,13 +5372,25 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Requirements tree title: an active `/` search shows the query with a caret,
+/// otherwise the idle hint. Both mirror the Explore Features column.
+fn requirement_tree_title(ui: &crate::authoring_tab::AuthoringUiState) -> Line<'static> {
+    if ui.search_active || !ui.search_query.text().is_empty() {
+        let mut spans = search_query_spans(&ui.search_query, ui.search_active);
+        spans.push(Span::raw(format!(" · {}", ui.tree_status_title())));
+        Line::from(spans)
+    } else {
+        Line::from(format!("{} · [/] Search", ui.tree_status_title()))
+    }
+}
+
 fn render_requirements_tree(
     frame: &mut Frame<'_>,
     ui: &mut crate::authoring_tab::AuthoringUiState,
     area: Rect,
     focused: bool,
 ) {
-    let block = theme::panel_block(ui.tree_status_title(), focused);
+    let block = theme::panel_block(requirement_tree_title(ui), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -5384,7 +5419,20 @@ fn render_requirements_tree(
 
     if ui.tree_items.is_empty() {
         ui.scroll_limits[0] = [0, 0];
-        frame.render_widget(Paragraph::new("No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project").wrap(ratatui::widgets::Wrap { trim: false }).style(Style::default().fg(theme::MUTED)), inner);
+        let message = if ui.search_active || !ui.search_query.text().is_empty() {
+            format!(
+                "No requirements match /{}\nEsc: clear search   Enter: keep filter",
+                ui.search_query.text()
+            )
+        } else {
+            "No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project".to_string()
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(Style::default().fg(theme::MUTED)),
+            inner,
+        );
         return;
     }
     let viewport = requirement_viewport(area);
@@ -7986,6 +8034,47 @@ Feature: Rule only
                 "row {y} runs into the scrollbar"
             );
         }
+    }
+
+    #[test]
+    fn requirement_search_title_paints_a_block_caret() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.discovered = true;
+        ui.search_active = true;
+        ui.search_query = crate::authoring_tab::LineInput::new("lo");
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        let buffer = terminal.backend().buffer();
+        let caret = (0..80)
+            .find(|x| buffer[(*x, 0)].bg == crate::theme::CURSOR_BG)
+            .expect("an active requirement search draws a caret");
+        assert_eq!(
+            buffer[(caret, 0)].symbol(),
+            " ",
+            "the caret trails the query"
+        );
+    }
+
+    #[test]
+    fn explore_search_title_paints_a_block_caret() {
+        let mut app = App::from_args().expect("app init");
+        app.feature_browser.searching = true;
+        app.feature_browser.query = crate::authoring_tab::LineInput::new("lo");
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_explore_features(frame, &mut app, frame.area()))
+            .expect("render");
+        let buffer = terminal.backend().buffer();
+        let caret = (0..80)
+            .find(|x| buffer[(*x, 0)].bg == crate::theme::CURSOR_BG)
+            .expect("an active Explore search draws a caret");
+        assert_eq!(
+            buffer[(caret, 0)].symbol(),
+            " ",
+            "the caret trails the query"
+        );
     }
 
     #[test]
