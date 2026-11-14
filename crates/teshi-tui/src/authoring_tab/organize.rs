@@ -267,11 +267,7 @@ impl AuthoringUiState {
                 " · Pending only"
             });
         }
-        if self.search_active || !self.search_query.is_empty() {
-            format!("/{} · {title}", self.search_query)
-        } else {
-            format!("{title} · [/] Search")
-        }
+        title
     }
 
     /// Toggles visibility of implemented and verified requirements.

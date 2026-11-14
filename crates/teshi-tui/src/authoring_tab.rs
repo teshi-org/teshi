@@ -311,8 +311,8 @@ pub struct AuthoringUiState {
     pub project_filter: teshi_core::authoring::RequirementProjectFilter,
     pub group_mode: RequirementGroupMode,
     pub overlay: RequirementsOverlay,
-    /// Live text typed into the tree's `/` search.
-    pub search_query: String,
+    /// Live text typed into the tree's `/` search, with an editable caret.
+    pub search_query: LineInput,
     /// Whether the tree is capturing keys as search input.
     pub search_active: bool,
     /// Query whose filtered tree is displayed; committed after the debounce.
@@ -935,7 +935,7 @@ impl AuthoringUiState {
             project_filter: teshi_core::authoring::RequirementProjectFilter::All,
             group_mode: RequirementGroupMode::Path,
             overlay: RequirementsOverlay::None,
-            search_query: String::new(),
+            search_query: LineInput::default(),
             search_active: false,
             applied_search_query: String::new(),
             pending_search: None,
@@ -1186,13 +1186,13 @@ impl AuthoringUiState {
     /// Commits the typed query and rebuilds the tree with it applied.
     fn commit_requirement_search(&mut self) {
         self.pending_search = None;
-        self.applied_search_query = self.search_query.clone();
+        self.applied_search_query = self.search_query.text().to_string();
         self.rebuild_tree();
     }
 
     /// Defers a rebuild until typing pauses, or clears it immediately.
     fn schedule_requirement_search(&mut self) {
-        if self.search_query.trim().is_empty() {
+        if self.search_query.text().trim().is_empty() {
             self.commit_requirement_search();
         } else {
             self.pending_search = Some(Instant::now());
@@ -2984,31 +2984,52 @@ impl App {
             }
             match event.code {
                 KeyCode::Esc => {
-                    self.authoring_ui.search_query.clear();
+                    self.authoring_ui.search_query = LineInput::default();
                     self.authoring_ui.search_active = false;
                 }
                 KeyCode::Enter => self.authoring_ui.search_active = false,
-                KeyCode::Backspace => {
-                    self.authoring_ui.search_query.pop();
-                }
-                KeyCode::Char(ch) => self.authoring_ui.search_query.push(ch),
+                KeyCode::Backspace => self.authoring_ui.search_query.backspace(),
+                KeyCode::Delete => self.authoring_ui.search_query.delete(),
+                KeyCode::Left => self
+                    .authoring_ui
+                    .search_query
+                    .move_cursor(CursorMotion::Left),
+                KeyCode::Right => self
+                    .authoring_ui
+                    .search_query
+                    .move_cursor(CursorMotion::Right),
+                KeyCode::Home => self
+                    .authoring_ui
+                    .search_query
+                    .move_cursor(CursorMotion::Home),
+                KeyCode::End => self
+                    .authoring_ui
+                    .search_query
+                    .move_cursor(CursorMotion::End),
+                KeyCode::Char(ch) => self.authoring_ui.search_query.insert(ch),
                 KeyCode::Up | KeyCode::Down => return false,
                 _ => return true,
             }
-            if matches!(event.code, KeyCode::Esc | KeyCode::Enter) {
-                self.authoring_ui.commit_requirement_search();
-            } else {
-                self.authoring_ui.schedule_requirement_search();
+            match event.code {
+                KeyCode::Esc | KeyCode::Enter => self.authoring_ui.commit_requirement_search(),
+                KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_) => {
+                    self.authoring_ui.schedule_requirement_search()
+                }
+                // Cursor motion only moves the caret; the query is unchanged.
+                _ => {}
             }
             return true;
         }
         match event.code {
             KeyCode::Char('/') if event.modifiers.is_empty() => {
                 self.authoring_ui.search_active = true;
+                self.authoring_ui
+                    .search_query
+                    .move_cursor(CursorMotion::End);
                 true
             }
-            KeyCode::Esc if !self.authoring_ui.search_query.is_empty() => {
-                self.authoring_ui.search_query.clear();
+            KeyCode::Esc if !self.authoring_ui.search_query.text().is_empty() => {
+                self.authoring_ui.search_query = LineInput::default();
                 self.authoring_ui.commit_requirement_search();
                 true
             }
@@ -3944,25 +3965,25 @@ mod tests {
     fn tree_search_filters_by_title_path_and_id_then_clears() {
         with_isolated_app_data(|| {
             let mut state = sample_authoring_state();
-            state.search_query = "LOGIN".into();
+            state.search_query = LineInput::new("LOGIN");
             state.commit_requirement_search();
             assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
             assert_eq!(state.tree_items.len(), 1, "flat rows expose nested matches");
 
-            state.search_query = "overview.md".into();
+            state.search_query = LineInput::new("overview.md");
             state.commit_requirement_search();
             assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
 
-            state.search_query = "doc-open".into();
+            state.search_query = LineInput::new("doc-open");
             state.commit_requirement_search();
             assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
 
-            state.search_query = "nothing-matches".into();
+            state.search_query = LineInput::new("nothing-matches");
             state.commit_requirement_search();
             assert!(state.tree_items.is_empty());
             assert!(state.selected_document_id.is_none());
 
-            state.search_query.clear();
+            state.search_query = LineInput::default();
             state.commit_requirement_search();
             assert_eq!(state.project_filtered_index().documents.len(), 2);
         });
@@ -3981,7 +4002,7 @@ mod tests {
             )));
             assert!(app.authoring_ui.search_active);
             app.paste_requirement_search("log");
-            assert_eq!(app.authoring_ui.search_query, "log");
+            assert_eq!(app.authoring_ui.search_query.text(), "log");
             // Debounce keeps the previous filter until the poll commits the query.
             assert_eq!(app.authoring_ui.project_filtered_index().documents.len(), 2);
             app.authoring_ui.pending_search = Some(Instant::now() - REQUIREMENT_SEARCH_DEBOUNCE);
@@ -4009,7 +4030,7 @@ mod tests {
                 app.handle_requirement_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             );
             assert!(
-                app.authoring_ui.search_query.is_empty(),
+                app.authoring_ui.search_query.text().is_empty(),
                 "Esc clears the filter"
             );
             assert_eq!(app.authoring_ui.project_filtered_index().documents.len(), 2);
@@ -4036,13 +4057,14 @@ mod tests {
                 KeyModifiers::CONTROL
             )));
             assert!(!app.authoring_ui.search_active);
-            assert_eq!(app.authoring_ui.search_query, "log");
+            assert_eq!(app.authoring_ui.search_query.text(), "log");
             assert!(!app.handle_requirement_search_key(KeyEvent::new(
                 KeyCode::Char('x'),
                 KeyModifiers::NONE
             )));
             assert_eq!(
-                app.authoring_ui.search_query, "log",
+                app.authoring_ui.search_query.text(),
+                "log",
                 "plain keys are no longer query text"
             );
         });
@@ -4059,7 +4081,33 @@ mod tests {
                 KeyModifiers::NONE
             )));
             app.paste_requirement_search("lo\ngin");
-            assert_eq!(app.authoring_ui.search_query, "login");
+            assert_eq!(app.authoring_ui.search_query.text(), "login");
+        });
+    }
+
+    #[test]
+    fn tree_search_caret_moves_and_edits_in_the_middle() {
+        with_isolated_app_data(|| {
+            let mut app = App::from_args().unwrap();
+            app.active_tab = MainTab::Requirements;
+            app.authoring_ui = sample_authoring_state();
+            let press = |app: &mut App, code| {
+                app.handle_requirement_search_key(KeyEvent::new(code, KeyModifiers::NONE))
+            };
+            assert!(press(&mut app, KeyCode::Char('/')));
+            app.paste_requirement_search("ac");
+            // Left then an inserted key edits before the tail.
+            assert!(press(&mut app, KeyCode::Left));
+            assert!(press(&mut app, KeyCode::Char('b')));
+            assert_eq!(app.authoring_ui.search_query.text(), "abc");
+            // Home then Delete removes the first character.
+            assert!(press(&mut app, KeyCode::Home));
+            assert!(press(&mut app, KeyCode::Delete));
+            assert_eq!(app.authoring_ui.search_query.text(), "bc");
+            // End then Backspace removes the last character.
+            assert!(press(&mut app, KeyCode::End));
+            assert!(press(&mut app, KeyCode::Backspace));
+            assert_eq!(app.authoring_ui.search_query.text(), "b");
         });
     }
 
@@ -4087,12 +4135,14 @@ mod tests {
     }
 
     #[test]
-    fn tree_status_title_shows_query_and_idle_hint() {
+    fn tree_status_title_is_plain_status_only() {
+        // Search chrome (query text and the `[/] Search` hint) is composed by
+        // the renderer so it can draw a caret; the status string stays plain.
         let mut state = AuthoringUiState::empty();
-        assert!(state.tree_status_title().contains("[/] Search"));
+        assert!(!state.tree_status_title().contains("[/] Search"));
         state.search_active = true;
-        state.search_query = "login".into();
-        assert!(state.tree_status_title().starts_with("/login"));
+        state.search_query = LineInput::new("login");
+        assert!(!state.tree_status_title().contains("login"));
     }
 
     #[test]
