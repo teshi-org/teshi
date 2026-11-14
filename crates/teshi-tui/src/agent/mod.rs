@@ -668,7 +668,12 @@ pub(crate) fn validate_insert_scenario_traceability(
     scenario_name: &str,
     test_point_ids: &[String],
 ) -> Result<()> {
-    if test_point_ids.is_empty() {
+    // Direct (no-review) scenarios may carry no test-point IDs, so no
+    // `@teshi-tp:<id>` tags are emitted. Strict still requires approved IDs.
+    // When Direct IDs are empty, the plan-membership check below still applies
+    // (an empty plan and an empty request match), which blocks invented IDs.
+    if test_point_ids.is_empty() && app.review_policy != teshi_agent::pipeline::ReviewPolicy::Direct
+    {
         anyhow::bail!("insert_scenario requires at least one approved test_point_id");
     }
     let unique_ids: HashSet<&str> = test_point_ids.iter().map(String::as_str).collect();
@@ -1527,6 +1532,15 @@ fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Re
     }
 
     app.pipeline_requirement = Some(requirement);
+    // Strict proposes test points for human review; Direct (user-authorized
+    // no-review) skips that persistence and goes straight to planning.
+    if app.review_policy == teshi_agent::pipeline::ReviewPolicy::Direct {
+        app.generation_stage = teshi_agent::pipeline::GenerationStage::Planning;
+        app.persist_generation_state()?;
+        return Ok(
+            "Requirements collected. The active policy is Direct (no human review): call `generate_plan` directly. `test_point_ids` may be empty or omitted; do not propose test points, invent IDs, or fabricate approvals.".into(),
+        );
+    }
     app.generation_stage = teshi_agent::pipeline::GenerationStage::GeneratingTestPoints;
     app.persist_generation_state()?;
 
@@ -1601,6 +1615,13 @@ fn parse_source_refs(
 // ── propose_test_points ───────────────────────────────────────────────────────
 
 fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    // Direct (no-review) generation must not persist test points or create an
+    // approval gate; the user authorized going straight to planning.
+    if app.review_policy == teshi_agent::pipeline::ReviewPolicy::Direct {
+        anyhow::bail!(
+            "Direct (no-review) generation does not persist test points; call `generate_plan` directly instead of `propose_test_points`"
+        );
+    }
     generation_is_paused(app)?;
     reload_requirement_store(app)?;
     if app.pipeline_requirement.is_none()
@@ -1949,7 +1970,7 @@ fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<S
             | teshi_agent::pipeline::GenerationStage::Idle
     ) {
         anyhow::bail!(
-            "generate_plan is blocked until human approval advances the pipeline to Planning (current stage: {})",
+            "generate_plan is blocked until the pipeline reaches Planning (current stage: {})",
             app.generation_stage.label()
         );
     }
@@ -2963,6 +2984,75 @@ mod pipeline_gate_tests {
             .expect("plan after approval");
         assert!(ok.contains("Plan accepted"));
         assert_eq!(app.generation_stage, GenerationStage::Writing);
+    }
+
+    #[test]
+    fn direct_policy_generates_feature_without_persisted_test_points() {
+        use teshi_agent::pipeline::ReviewPolicy;
+        let (mut app, _dir) = app_in_temp_project();
+        app.review_policy = ReviewPolicy::Direct;
+
+        // Gathering advances straight to Planning under Direct (no gate stage).
+        let submit = app
+            .execute_tool(
+                "submit_requirements",
+                r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+                "tc-1",
+                0,
+            )
+            .unwrap();
+        assert!(submit.contains("Direct"));
+        assert_eq!(app.generation_stage, GenerationStage::Planning);
+
+        // Direct must not persist test points: propose_test_points is refused.
+        let err = app
+            .execute_tool(
+                "propose_test_points",
+                r#"{"test_points":[{"id":"tp-x","title":"t","objective":"o","hierarchy_path":["A"]}]}"#,
+                "tc-2",
+                0,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("does not persist test points"));
+        assert!(
+            app.authoring_ui
+                .artifacts
+                .as_ref()
+                .is_none_or(|a| a.test_points.test_points.is_empty())
+        );
+
+        // A plan with empty/omitted test_point_ids is accepted.
+        let plan_ok = app
+            .execute_tool(
+                "generate_plan",
+                r#"{"features":[{"file_name":"sample.feature","feature_name":"Sample","scenarios":[{"name":"Login","steps":["Given x","When y","Then z"]}]}]}"#,
+                "tc-3",
+                0,
+            )
+            .unwrap();
+        assert!(plan_ok.contains("Plan accepted"));
+        assert_eq!(app.generation_stage, GenerationStage::Writing);
+
+        // Writing embeds no @teshi-tp tags and fabricates no approvals.
+        let file_path = app.project.features[0]
+            .file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let args = format!(
+            r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x","When y","Then z"]}}"#
+        );
+        app.execute_tool("insert_scenario", &args, "tc-4", 0)
+            .unwrap();
+        let pending = &app.pending_agent_changes[0];
+        match &pending.mutation {
+            crate::app::AgentMutation::InsertAfterLine { text, .. } => {
+                assert!(!text.contains("@teshi-tp:"));
+                assert!(text.contains("Scenario: Login"));
+            }
+            _ => panic!("expected InsertAfterLine"),
+        }
     }
 
     #[test]

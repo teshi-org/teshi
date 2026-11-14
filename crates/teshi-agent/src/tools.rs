@@ -149,7 +149,7 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                     },
                     "test_point_ids": {
                         "type": "array",
-                        "description": "Approved test-point IDs this scenario realizes; encoded as @teshi-tp:<id> tags",
+                        "description": "Approved test-point IDs this scenario realizes; encoded as @teshi-tp:<id> tags. Required under Strict review, optional (empty) under Direct no-review.",
                         "items": {
                             "type": "string"
                         }
@@ -380,12 +380,14 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "submit_requirements".into(),
-            description: "Submit gathered requirements for a new feature and advance to \
-                          test-point generation. Provide source_refs for persisted requirement \
-                          documents/ranges in the active store/iteration scope and/or \
-                          scenario_descriptions for pasted conversational text. Conversational \
-                          text is not a requirement-library source. Call this after gathering \
-                          enough information. The system fills store_id and document_revision."
+            description: "Submit gathered requirements for a new feature and advance to the \
+                          next phase (test-point proposal under the Strict review policy, or \
+                          Scenario Planning under the Direct no-review policy). Provide \
+                          source_refs for persisted requirement documents/ranges in the active \
+                          store/iteration scope and/or scenario_descriptions for pasted \
+                          conversational text. Conversational text is not a requirement-library \
+                          source. Call this after gathering enough information. The system fills \
+                          store_id and document_revision."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -442,9 +444,11 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "propose_test_points".into(),
             description: "Propose non-Gherkin test points from submitted requirements and \
-                          persist them as Proposed for mandatory human review. Do not include \
-                          Given/When/Then steps. After a successful call the agent loop pauses \
-                          until the user approves test points and continues generation."
+                          persist them as Proposed for human review (Strict review policy). Do \
+                          not include Given/When/Then steps. In Strict mode the agent loop then \
+                          pauses until the user approves test points and continues generation. \
+                          Under the Direct no-review policy this tool is not used; call \
+                          generate_plan directly instead."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -509,10 +513,12 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "generate_plan".into(),
-            description: "Submit a complete scenario plan based on approved test points. \
-                          Call this ONLY after human approval advances the pipeline to Planning. \
-                          Every scenario must include test_point_ids referencing approved, \
-                          resolved test points."
+            description: "Submit a complete scenario plan. Under the Strict review policy, \
+                          call it only after human approval advances the pipeline to Planning and \
+                          every scenario must reference approved, resolved test points via \
+                          test_point_ids. Under the Direct no-review policy, call it directly \
+                          after gathering; test_point_ids may be empty or omitted, and must not \
+                          be fabricated."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -543,10 +549,10 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                                             "test_point_ids": {
                                                 "type": "array",
                                                 "items": { "type": "string" },
-                                                "description": "Approved test-point IDs this scenario realizes"
+                                                "description": "Approved test-point IDs this scenario realizes; may be empty or omitted under the Direct no-review policy"
                                             }
                                         },
-                                        "required": ["name", "steps", "test_point_ids"]
+                                        "required": ["name", "steps"]
                                     }
                                 }
                             },
@@ -847,15 +853,18 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_plan_requires_test_point_ids_on_scenarios() {
+    fn test_generate_plan_allows_omitting_test_point_ids_in_direct_mode() {
         let tools = get_all_tools();
         let plan = tools.iter().find(|t| t.name == "generate_plan").unwrap();
-        let scenario_required =
-            plan.parameters["properties"]["features"]["items"]["properties"]["scenarios"]["items"]
-                ["required"]
-                .as_array()
-                .unwrap();
-        assert!(scenario_required.iter().any(|v| v == "test_point_ids"));
+        let scenario =
+            &plan.parameters["properties"]["features"]["items"]["properties"]["scenarios"]["items"];
+        // test_point_ids stays a documented property...
+        assert!(scenario["properties"]["test_point_ids"].is_object());
+        // ...but is no longer required, so Direct (no-review) plans may omit it.
+        let scenario_required = scenario["required"].as_array().unwrap();
+        assert!(!scenario_required.iter().any(|v| v == "test_point_ids"));
+        assert!(scenario_required.iter().any(|v| v == "name"));
+        assert!(scenario_required.iter().any(|v| v == "steps"));
     }
 
     #[test]
