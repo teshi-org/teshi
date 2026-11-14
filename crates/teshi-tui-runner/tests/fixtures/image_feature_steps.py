@@ -313,7 +313,7 @@ def main():
     EVENT_LOG = root / "binding-events.ndjson"
     captures = Path(request["meta"].get("evidence_run_directory", str(root / "captures")))
     (root / "request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
-    emit("start_run", total=len(request["cases"]))
+    emit("start_run", total=len(request["cases"]), protocol_version=1, capabilities=["steps"])
     failed = 0
     for case in request["cases"]:
         emit("start_case", case_id=case["id"], name=case["scenario"])

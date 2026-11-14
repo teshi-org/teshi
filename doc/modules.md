@@ -374,7 +374,7 @@ Subcommands:
 - `teshi [PATH]` — TUI; no PATH recursively scans `./features`, selecting the system UI language directory when language subdirectories exist. Explicit directory paths use the same localized `features` rule; `-R`/`--recursive` scans the entire target directory with background discovery. See [startup rules](cli-usage.md#open-files-tui).
 - `teshi web [--project]` — hosted browser GUI with loopback daemon WebSockets
 - `teshi desktop [--project]` — spawn native `teshi-desktop`
-- `teshi run [PATH] [--scenario] [--runner-cmd] [--runner-cwd]` — headless BDD runs
+- `teshi run [PATH] [--scenario] [--explain [--json]] [--runner-cmd] [--runner-cwd]` — headless BDD runs routed by `[[runners]]`
 - `teshi auth login [--provider]` — create/update a shared model profile + API key
 - `teshi auth list` — list profiles (keys masked)
 - `teshi auth remove <provider>` — clear API key on matching profile(s)

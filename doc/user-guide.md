@@ -174,21 +174,23 @@ doc-48 leaves the policy's configuration level, default, scope, and revocation t
 
 ## External Test Runner
 
-The `teshi run` subcommand executes BDD feature files against a configurable NDJSON-based runner.
+The `teshi run` subcommand executes BDD feature files through runners declared in `teshi.toml`. Each scenario must match exactly one `[[runners]]` rule, so one project can mix the built-in API dispatch, the TUI runner and your own adapters.
 
 ```bash
 teshi run tests/features/editor.feature
+teshi run --explain tests/features/     # which runner handles each scenario
 ```
-
-Configure the runner command in `teshi.toml`:
 
 ```toml
-[runner]
-command = "cargo"
+[[runners]]
+name = "editor"
+cmd = "cargo"
 args = ["run", "--bin", "teshi-runner"]
+[runners.match]
+paths = ["tests/features/**/*.feature"]
 ```
 
-Test results stream back as NDJSON lines and are displayed inline in the Explore tab with status colors per scenario and step.
+External runners speak NDJSON protocol v1 and must open with a `start_run` handshake. Results are displayed inline in the Explore tab with status colors per scenario and step; scenarios whose target was unavailable show as **Blocked** rather than failed. See [runner-protocol.md](runner-protocol.md).
 
 See [CLI & Config](cli-usage.md) for more runner options. Requirement CLI control-plane E2E uses this same protocol (`@cli` files in `features/en-US/` or `features/zh-CN/` + `teshi-requirement-cli-runner`).
 

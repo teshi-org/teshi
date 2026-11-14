@@ -49,5 +49,14 @@ fn main() -> Result<()> {
         return runtime.block_on(teshi_daemon::run_client(command.options));
     }
 
-    teshi_tui::run()
+    match teshi_tui::run() {
+        // Blocked-only runs get a dedicated exit code so CI can tell an
+        // unavailable target apart from a failing assertion.
+        Err(error) if error.is::<teshi_tui::RunBlocked>() => {
+            eprintln!("Error: {error}");
+            drop(_update_participant);
+            std::process::exit(teshi_tui::RUN_BLOCKED_EXIT_CODE);
+        }
+        result => result,
+    }
 }

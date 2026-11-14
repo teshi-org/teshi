@@ -88,7 +88,7 @@ def main():
     request = json.loads(sys.stdin.readline())
     cases = request["cases"]
     root = Path(request["meta"]["project_root"])
-    emit({"type": "start_run", "total": len(cases)})
+    emit({"type": "start_run", "total": len(cases), "protocol_version": 1, "capabilities": []})
     passed = failed = 0
     for case in cases:
         case_id, name = case["id"], case["scenario"]

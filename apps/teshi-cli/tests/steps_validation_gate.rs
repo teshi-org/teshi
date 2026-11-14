@@ -143,12 +143,12 @@ fn directory_run_validates_only_the_selected_directory() {
         .output()
         .expect("run selected directory");
 
-    // A zero exit without NDJSON completion cannot satisfy execution/evidence
+    // A zero exit without the v1 handshake cannot satisfy execution/evidence
     // acceptance. It still proves the selected directory reached its runner.
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("runner_exit code=Some(0) success=false"),
+        stdout.contains("exited before the protocol v1 handshake"),
         "{stdout}"
     );
     let history = teshi_engine::replay_evidence::list_replay_runs(project.path()).unwrap();

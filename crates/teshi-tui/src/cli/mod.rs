@@ -11,6 +11,7 @@ pub mod install_skill;
 pub mod locator_verify;
 pub mod mcp;
 pub(crate) mod replay_plan;
+pub(crate) mod replay_protocol;
 pub mod replay_screenshots;
 pub mod requirements;
 pub mod steps;
@@ -153,18 +154,24 @@ pub enum Command {
         /// Specific scenario name to run
         #[arg(long)]
         scenario: Option<String>,
-        /// Runner binary / command
+        /// Ad-hoc protocol v1 runner for every selected scenario, bypassing [[runners]]
         #[arg(long)]
         runner_cmd: Option<String>,
         /// Runner additional arguments (repeatable)
         #[arg(long, allow_hyphen_values = true)]
         runner_arg: Option<Vec<String>>,
-        /// Runner working directory
+        /// Runner working directory, relative to the project root
         #[arg(long)]
         runner_cwd: Option<String>,
         /// Write a persistent Feature/Scenario result report as JSON
         #[arg(long, value_name = "PATH")]
         report: Option<String>,
+        /// Show which [[runners]] rule each scenario routes to, without running
+        #[arg(long)]
+        explain: bool,
+        /// Print --explain output as JSON
+        #[arg(long, requires = "explain")]
+        json: bool,
         /// Deprecated alias for positional `PATH`
         #[arg(long, hide = true)]
         feature: Option<String>,
@@ -1423,6 +1430,10 @@ pub struct BrowserReplayArgs {
     pub yes: bool,
     #[command(flatten)]
     pub target: BrowserTargetArgs,
+    /// Report this replay as runner protocol case events for CASE_ID on
+    /// stdout (used by the `builtin = "browser"` runner); progress goes to stderr
+    #[arg(long, value_name = "CASE_ID", hide = true)]
+    pub emit_runner_protocol: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2052,6 +2063,9 @@ pub struct WinAppReplayArgs {
     /// Feature path relative to project root; defaults to active step feature
     #[arg(long)]
     pub feature: Option<String>,
+    /// Replay one named scenario, including its background and all source steps
+    #[arg(long)]
+    pub scenario: Option<String>,
     /// Only replay bindings up to this source line
     #[arg(long)]
     pub until_line: Option<usize>,
@@ -2077,6 +2091,10 @@ pub struct WinAppReplayArgs {
     /// Explicitly permit physical input and focus changes in foreground mode
     #[arg(long)]
     pub allow_interactive_input: bool,
+    /// Report this replay as runner protocol case events for CASE_ID on
+    /// stdout (used by the `builtin = "winapp"` runner); progress goes to stderr
+    #[arg(long, value_name = "CASE_ID", hide = true)]
+    pub emit_runner_protocol: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2212,6 +2230,7 @@ impl Command {
             runner_args: runner_arg.unwrap_or_default(),
             runner_cwd: runner_cwd.map(PathBuf::from),
             report_path: report.map(PathBuf::from),
+            ..Default::default()
         }
     }
 }

@@ -19,7 +19,7 @@ use crate::editor_buffer::EditorBuffer;
 pub use crate::diff::{ChangeKind, DiffLine};
 use crate::keymap::Action;
 use crate::mindmap;
-use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
+use crate::runner::{self, RunCase, RunEvent};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -858,6 +858,8 @@ pub enum RunStatus {
     Passed,
     Failed,
     Skipped,
+    /// The target was unavailable, so the scenario could not be judged.
+    Blocked,
 }
 
 #[derive(Debug, Clone)]
@@ -918,12 +920,13 @@ fn empty_running_detail(case_id: String) -> CaseDetail {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RunSummary {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub blocked: usize,
 }
 
 /// UI state for the step-keyword list opened by editing a keyword prefix.
@@ -1306,7 +1309,8 @@ pub struct App {
     explore_captures: HashMap<(usize, usize), crate::image_view::CaptureEntry>,
     undo_stack: Vec<(EditorBuffer, usize, usize)>,
     redo_stack: Vec<(EditorBuffer, usize, usize)>,
-    pub runner_config: Option<RunnerConfig>,
+    /// Project `[[runners]]` routing, or the configuration error shown on run.
+    pub run_routes: Result<teshi_engine::run_routing::RunRoutes, String>,
     runner_rx: Option<Receiver<RunEvent>>,
     runner_cancel: Option<Sender<()>>,
     last_external_check: Instant,
@@ -1490,7 +1494,7 @@ struct PreparedProjectContext {
     file_path: Option<PathBuf>,
     authoring_ui: crate::authoring_tab::AuthoringUiState,
     test_points_ui: crate::test_points_tab::TestPointsUiState,
-    runner_config: Option<RunnerConfig>,
+    run_routes: Result<teshi_engine::run_routing::RunRoutes, String>,
     agent_registry: teshi_agent::registry::AgentRegistry,
 }
 
@@ -1989,7 +1993,7 @@ impl App {
         self.tree_panel_rect = None;
         self.preview_panel_rect = None;
         self.dirty = false;
-        self.runner_config = prepared.runner_config;
+        self.run_routes = prepared.run_routes;
         self.runner_rx = None;
         self.runner_cancel = None;
         self.pending_agent_changes.clear();
@@ -2110,7 +2114,7 @@ impl App {
         );
         let mut test_points_ui = crate::test_points_tab::TestPointsUiState::empty();
         test_points_ui.rebuild_tree(authoring_ui.artifacts.as_ref());
-        let runner_config = runner::load_optional_runner_config_for_project(root, None)
+        let run_routes = runner::prepare_project_routes(root)
             .with_context(|| format!("load runner configuration for {}", root.display()))?;
         Ok(PreparedProjectContext {
             lazy_features,
@@ -2127,7 +2131,7 @@ impl App {
             file_path,
             authoring_ui,
             test_points_ui,
-            runner_config,
+            run_routes,
             agent_registry: teshi_agent::registry::AgentRegistry::load(Some(root)),
         })
     }
@@ -2685,7 +2689,7 @@ impl App {
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
+            run_routes: runner::load_project_routes(&project_root),
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
@@ -2909,7 +2913,7 @@ impl App {
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
+            run_routes: runner::load_project_routes(&project_root),
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
@@ -3110,7 +3114,7 @@ impl App {
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
+            run_routes: runner::load_project_routes(&project_root),
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
@@ -7359,9 +7363,7 @@ impl App {
             RunEvent::StartRun { total, .. } => {
                 self.explore_run_summary = Some(RunSummary {
                     total: total.unwrap_or(0),
-                    passed: 0,
-                    failed: 0,
-                    skipped: 0,
+                    ..RunSummary::default()
                 });
             }
             RunEvent::StartCase { case_id, .. } => {
@@ -7474,6 +7476,29 @@ impl App {
                     }
                 }
             }
+            RunEvent::CaseBlocked {
+                case_id,
+                reason,
+                category,
+            } => {
+                if let Some(key) = self.explore_case_map.get(&case_id).copied() {
+                    self.explore_case_status.insert(key, RunStatus::Blocked);
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
+                    detail.status = RunStatus::Blocked;
+                    detail.duration_ms = None;
+                    detail.message = Some(runner::blocked_message(
+                        reason.as_deref(),
+                        category.as_deref(),
+                    ));
+                    detail.stack = None;
+                    if let Some(summary) = self.explore_run_summary.as_mut() {
+                        summary.blocked = summary.blocked.saturating_add(1);
+                    }
+                }
+            }
             RunEvent::Log { case_id, message } => {
                 if let Some(case_id) = case_id
                     && let Some(key) = self.explore_case_map.get(&case_id).copied()
@@ -7531,15 +7556,21 @@ impl App {
                 passed,
                 failed,
                 skipped,
+                blocked,
             } => {
-                let total = passed + failed + skipped;
+                let total = passed + failed + skipped + blocked;
                 self.explore_run_summary = Some(RunSummary {
                     total,
                     passed,
                     failed,
                     skipped,
+                    blocked,
                 });
-                self.status = format!("Run complete: {passed} passed, {failed} failed");
+                self.status = if blocked > 0 {
+                    format!("Run complete: {passed} passed, {failed} failed, {blocked} blocked")
+                } else {
+                    format!("Run complete: {passed} passed, {failed} failed")
+                };
                 // Captures of this run belong to the Explore markers as soon
                 // as it ends, without waiting for the viewer to open.
                 self.refresh_capture_index();
@@ -7599,7 +7630,13 @@ impl App {
                 }
             }
             RunEvent::RunnerExit { success, .. } => {
-                if !success {
+                // A failed or blocked result already explains an unsuccessful
+                // exit; only an otherwise clean run needs the generic error.
+                let explained = self
+                    .explore_run_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.failed > 0 || summary.blocked > 0);
+                if !success && !explained {
                     self.status = "Runner exited with error".to_string();
                 }
                 self.runner_rx = None;
@@ -7608,6 +7645,9 @@ impl App {
                 self.status = format!("Runner error: {message}");
                 self.runner_rx = None;
             }
+            // Runner-specific events (for example Examples rows) are not
+            // rendered by Explore.
+            RunEvent::Other(_) => {}
         }
         self.quit_pending_confirm = false;
     }
@@ -7639,73 +7679,35 @@ impl App {
             self.status = "No scenarios to run".to_string();
             return;
         }
+        // Routing is validated before any state changes, so an unroutable
+        // selection leaves the previous results visible.
+        let case_ids: Vec<String> = cases.iter().map(|case| case.id.clone()).collect();
+        let total = cases.len();
+        let started = runner::start_routed_run(&self.project.root_dir, &self.run_routes, cases);
+        let (rx, cancel) = match started {
+            Ok(started) => started,
+            Err(err) => {
+                let message = format!("{err:#}");
+                let first_line = message.lines().next().unwrap_or_default();
+                self.status = format!("Run not started: {first_line}");
+                return;
+            }
+        };
         self.reset_explore_run_state();
         self.explore_run_summary = Some(RunSummary {
-            total: cases.len(),
-            passed: 0,
-            failed: 0,
-            skipped: 0,
+            total,
+            ..RunSummary::default()
         });
-        for case in &cases {
-            if let Some((fi, si)) = parse_case_key(&case.id) {
-                self.explore_case_map.insert(case.id.clone(), (fi, si));
+        for case_id in case_ids {
+            if let Some((fi, si)) = parse_case_key(&case_id) {
+                self.explore_case_map.insert(case_id, (fi, si));
                 self.explore_case_status
                     .insert((fi, si), RunStatus::Running);
             }
         }
-        let needs_dispatch = self.explore_cases_need_dispatch(&cases);
-        let started = if needs_dispatch {
-            runner::spawn_teshi_dispatch_with_control(self.project.root_dir.clone(), cases)
-        } else {
-            let Some(config) = self
-                .runner_config
-                .clone()
-                .or_else(|| runner::all_tui_cases(&cases).then(|| runner::tui_runner_config(None)))
-            else {
-                self.status = "Runner not configured (teshi.toml or TESHI_RUNNER_CMD)".to_string();
-                return;
-            };
-            let request = RunRequest {
-                command: "run".to_string(),
-                cases,
-                meta: HashMap::from([(
-                    "project_root".into(),
-                    self.project.root_dir.to_string_lossy().into_owned(),
-                )]),
-            };
-            runner::spawn_runner_with_control(config, request)
-        };
-        match started {
-            Ok((rx, cancel)) => {
-                self.runner_rx = Some(rx);
-                self.runner_cancel = Some(cancel);
-                self.status = if needs_dispatch {
-                    "API/mixed run started".to_string()
-                } else {
-                    "Run started".to_string()
-                };
-            }
-            Err(err) => {
-                self.status = format!("Failed to start runner: {err}");
-            }
-        }
-    }
-
-    fn explore_cases_need_dispatch(&self, cases: &[RunCase]) -> bool {
-        cases.iter().any(|case| {
-            let Some((fi, si)) = parse_case_key(&case.id) else {
-                return false;
-            };
-            let Some(feature) = self.project.features.get(fi) else {
-                return false;
-            };
-            let Some(scenario) = feature.scenario_at(si) else {
-                return false;
-            };
-            teshi_engine::mode_uses_teshi_dispatch(teshi_core::scenario_engine_mode(
-                feature, scenario,
-            ))
-        })
+        self.runner_rx = Some(rx);
+        self.runner_cancel = Some(cancel);
+        self.status = "Run started".to_string();
     }
 
     fn build_explore_cases(&self) -> Vec<RunCase> {
@@ -16377,6 +16379,16 @@ mod tests {
         }
     }
 
+    fn project_runner_names(app: &App) -> Vec<String> {
+        app.run_routes
+            .as_ref()
+            .expect("project routes")
+            .rules()
+            .iter()
+            .map(|rule| rule.name.clone())
+            .collect()
+    }
+
     fn project_switch_app() -> (App, tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
         let project_a = tempdir().unwrap();
         let project_b = tempdir().unwrap();
@@ -16394,12 +16406,12 @@ mod tests {
         .unwrap();
         fs::write(
             project_a.path().join("teshi.toml"),
-            "[runner]\ncmd = \"project-a-runner\"\n",
+            "[[runners]]\nname = \"project-a\"\ncmd = \"project-a-runner\"\n[runners.match]\ntags = [\"@a\"]\n",
         )
         .unwrap();
         fs::write(
             project_b.path().join("teshi.toml"),
-            "[runner]\ncmd = \"project-b-runner\"\n",
+            "[[runners]]\nname = \"project-b\"\ncmd = \"project-b-runner\"\n[runners.match]\ntags = [\"@b\"]\n",
         )
         .unwrap();
         let mut app = App::from_file(
@@ -16594,10 +16606,7 @@ mod tests {
             project_b.path().join("b.feature")
         );
         assert_eq!(app.requirements_root, store.path());
-        assert_eq!(
-            app.runner_config.as_ref().map(|config| config.cmd.as_str()),
-            Some("project-b-runner")
-        );
+        assert_eq!(project_runner_names(&app), vec!["project-b"]);
         assert_eq!(
             app.project_switch.active.identity,
             teshi_engine::ProjectIdentity::new(project_b.path()).unwrap()
@@ -16951,7 +16960,7 @@ mod tests {
         );
         assert!(app.runner_rx.is_none());
         assert!(app.runner_cancel.is_none());
-        assert_eq!(app.runner_config.as_ref().unwrap().cmd, "project-b-runner");
+        assert_eq!(project_runner_names(&app), vec!["project-b"]);
     }
 
     #[test]
@@ -20138,7 +20147,7 @@ mod tests {
         fs::write(root.path().join("outside.feature"), body).unwrap();
         fs::write(
             root.path().join("teshi.toml"),
-            "[runner]\ncmd = 'fixture'\ncwd = 'work'\n",
+            "[[runners]]\nname = 'fixture'\ncmd = 'fixture'\ncwd = 'work'\n[runners.match]\npaths = ['features/**']\n",
         )
         .unwrap();
         let config = crate::config::AppConfig {
@@ -20169,9 +20178,14 @@ mod tests {
             app.project.features[0].file_path,
             root.path().join("features/deep/in.feature")
         );
-        assert_eq!(
-            app.runner_config.as_ref().unwrap().cwd,
-            Some(root.path().join("work"))
+        let routes = app.run_routes.as_ref().expect("project routes");
+        assert!(
+            matches!(
+                &routes.rules()[0].kind,
+                teshi_engine::run_routing::RunnerKind::External { cwd: Some(cwd), .. }
+                    if *cwd == root.path().join("work")
+            ),
+            "runner cwd must resolve below the project root: {routes:?}"
         );
     }
 
@@ -22292,7 +22306,7 @@ mod tests {
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: None,
+            run_routes: Ok(Default::default()),
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
@@ -22505,7 +22519,7 @@ Feature: B
             explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: None,
+            run_routes: Ok(Default::default()),
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),

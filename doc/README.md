@@ -8,6 +8,7 @@ Terminal-first BDD editor with AI assistance, mind-map navigation, and external 
 - [CLI & Configuration](cli-usage.md) — Commands, flags, config files, env vars
 - [Installation](installation.md) — Windows setup.exe, MSI, portable zip, building from source
 - [Keybindings](keybindings.md) — Navigation, editing, structural editing shortcuts
+- [Runner Routing & Protocol](runner-protocol.md) — `[[runners]]` routing, protocol v1 handshake, blocked status, exit codes
 - [Architecture](architecture.md) — System overview, data flow, and module dependency graph
 - [Module Reference](modules.md) — Detailed breakdown of every source module
 - [Development Guide](development.md) — Building, testing, contributing, and code conventions

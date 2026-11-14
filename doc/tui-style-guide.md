@@ -26,7 +26,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 |---|---|---|
 | PRIMARY | #AF87FF | Brand, focus, headings, links |
 | PRIMARY_MUTED | #875FAF | Quiet rails |
-| SECONDARY | #5F5FAF | Rules, metadata syntax |
+| SECONDARY | #5F5FAF | Rules, metadata syntax, blocked runs |
 | ACCENT | #FF87D7 | User/input emphasis, tags |
 | SUCCESS | #5FFF87 | Passed, added |
 | WARNING | #FFAF5F | Running, modified, status messages |

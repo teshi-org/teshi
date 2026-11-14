@@ -33,7 +33,7 @@ impl Fixture {
         fs::write(
             project.join("teshi.toml"),
             format!(
-                "[runner]\ncmd = {}\nargs = {}\ncwd = \".\"\n",
+                "[[runners]]\nname = \"pointer\"\ncmd = {}\nargs = {}\ncwd = \".\"\n[runners.match]\npaths = [\"**\"]\n",
                 serde_json::to_string(&python).unwrap(),
                 serde_json::to_string(&[runner, trace.clone()]).unwrap()
             ),

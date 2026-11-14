@@ -149,10 +149,13 @@ def launch(root: Path, teshi: str, *, mode: str, cols: int, rows: int) -> dict:
             )
             runner_fixture = ROOT / "crates/teshi-tui-runner/tests/fixtures/project_switch_runner.py"
             (project_path / "teshi.toml").write_text(
-                "[runner]\n"
+                "[[runners]]\n"
+                f"name = {json.dumps(runner_name)}\n"
                 f"cmd = {json.dumps(sys.executable)}\n"
                 f"args = {json.dumps([str(runner_fixture), 'runner', name, str(project_path / 'runner-evidence')])}\n"
-                'cwd = "."\n',
+                'cwd = "."\n'
+                "[runners.match]\n"
+                'paths = ["sample.feature"]\n',
                 encoding="utf-8",
             )
         app_data = root / "app-data"
@@ -234,6 +237,11 @@ def launch(root: Path, teshi: str, *, mode: str, cols: int, rows: int) -> dict:
             ]
         )
     elif mode == "editor":
+        # Pressing `r` runs through [[runners]]; sidecars never select a runner implicitly.
+        (project / "teshi.toml").write_text(
+            '[[runners]]\nname = "tui"\nbuiltin = "tui"\n[runners.match]\npaths = ["**"]\n',
+            encoding="utf-8",
+        )
         generic = Path(teshi).with_name(
             "teshi-tui-runner" + (".exe" if os.name == "nt" else "")
         )
@@ -909,25 +917,31 @@ def main() -> int:
         print(f"unsupported TUI Feature: {original_feature.name}", file=sys.stderr)
         return 2
     if key_name == "tui_codebuddy_live_conversation.feature" and os.environ.get("TESHI_CODEBUDDY_LIVE") != "1":
-        emit({"type": "start_run", "total": len(cases)})
+        emit({"type": "start_run", "total": len(cases), "protocol_version": 1, "capabilities": ["blocked"]})
         for case in cases:
             emit({"type": "start_case", "case_id": case["id"], "name": case["scenario"]})
-            emit({"type": "case_skipped", "case_id": case["id"], "reason": "blocked: live CodeBuddy credentials are not enabled"})
-        emit({"type": "end_run", "passed": 0, "failed": 0, "skipped": len(cases)})
+            emit({
+                "type": "case_blocked", "case_id": case["id"],
+                "reason": "live CodeBuddy credentials are not enabled",
+                "category": "credentials_unavailable",
+            })
+        emit({"type": "end_run", "passed": 0, "failed": 0, "skipped": 0, "blocked": len(cases)})
         return 0
 
-    teshi = os.environ.get("TESHI_SELF_TEST_BIN")
+    # `teshi run` exports TESHI_BIN (the binary that started this runner).
+    teshi = os.environ.get("TESHI_SELF_TEST_BIN") or os.environ.get("TESHI_BIN")
     if not teshi:
-        print("TESHI_SELF_TEST_BIN is required", file=sys.stderr)
+        print("TESHI_SELF_TEST_BIN or TESHI_BIN is required", file=sys.stderr)
         return 2
-    generic = os.environ.get("TESHI_GENERIC_TUI_RUNNER")
+    generic = os.environ.get("TESHI_GENERIC_TUI_RUNNER") or os.environ.get("TESHI_TUI_RUNNER")
     if not generic:
         candidate = Path(teshi).with_name("teshi-tui-runner" + (".exe" if os.name == "nt" else ""))
         generic = str(candidate)
     canonical_path = ROOT / "features/en-US" / key_name
     canonical_source = canonical_path.read_text(encoding="utf-8")
 
-    emit({"type": "start_run", "total": len(cases)})
+    # Step events from the generic TUI runner are forwarded unchanged.
+    emit({"type": "start_run", "total": len(cases), "protocol_version": 1, "capabilities": ["steps"]})
     failed = 0
     for case in cases:
         with tempfile.TemporaryDirectory(prefix="teshi-tui-feature-", dir=os.environ.get("TESHI_FEATURE_TEMP")) as name:

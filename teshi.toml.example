@@ -1,4 +1,35 @@
-# Copy to teshi.toml and set cmd to your NDJSON runner binary.
-# Override with environment variable TESHI_RUNNER_CMD if preferred.
-[runner]
-cmd = "runner"
+# Copy to teshi.toml. Every scenario selected by `teshi run` or the TUI `r` key
+# must match exactly one [[runners]] rule; otherwise the run is rejected before
+# anything starts. Check routing with `teshi run --explain`.
+#
+# A rule declares either `builtin` (dispatch | tui | browser | winapp | manual) or an
+# external `cmd` that speaks runner protocol v1 (see doc/runner-protocol.md).
+# Matching uses the effective tags (Feature + Scenario) and/or `/`-separated
+# path globs relative to this file's directory; `exclude_tags` and
+# `exclude_paths` let a broad rule yield to a narrower one.
+
+[[runners]]
+name = "api"
+builtin = "dispatch"
+[runners.match]
+tags = ["@api"]
+
+[[runners]]
+name = "terminal"
+builtin = "tui"
+[runners.match]
+tags = ["@tui"]
+
+[[runners]]
+name = "web"
+builtin = "browser"
+[runners.match]
+tags = ["@web-ui"]
+
+[[runners]]
+name = "pytest"
+cmd = "python"
+args = ["-m", "my_runner"]
+cwd = "."
+[runners.match]
+paths = ["features/backend/**/*.feature"]

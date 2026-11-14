@@ -494,6 +494,9 @@ class World(TerminalWorld):
         if text == "project A has a stalled synchronous dispatch":
             (self.project / "sample.feature").write_text(
                 '@api\nFeature: project-a\n  Scenario: Ready\n    When [API] I wait for the controlled service\n', encoding="utf-8")
+            (self.project / "teshi.toml").write_text(
+                '[[runners]]\nname = "api"\nbuiltin = "dispatch"\n[runners.match]\ntags = ["@api"]\n',
+                encoding="utf-8")
             fixture = Path(__file__).with_name("project_dispatch_fixture.py")
             self.dispatch = subprocess.Popen([sys.executable, str(fixture), str(self.root)],
                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -576,7 +579,7 @@ class World(TerminalWorld):
 
 def main():
     request = json.load(sys.stdin)
-    emit("start_run", total=len(request["cases"]))
+    emit("start_run", total=len(request["cases"]), protocol_version=1, capabilities=["steps"])
     failed = 0
     for case in request["cases"]:
         world = World(request, case)

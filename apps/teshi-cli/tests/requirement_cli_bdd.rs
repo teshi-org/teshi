@@ -127,8 +127,15 @@ fn run_locale(locale: &str) {
         combined.contains("end_run"),
         "{locale}: teshi run did not emit end_run.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(
-        combined.contains("end_run passed=44 failed=0 skipped=0"),
+    let summary = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "end_run");
+    assert_eq!(
+        summary
+            .as_ref()
+            .map(|s| (&s["passed"], &s["failed"], &s["skipped"])),
+        Some((&44.into(), &0.into(), &0.into())),
         "{locale}: requirement CLI E2E failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(

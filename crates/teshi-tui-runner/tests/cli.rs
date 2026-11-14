@@ -56,11 +56,28 @@ fn cli(root: &Path) -> Command {
     command
 }
 
-fn events(output: &Output) -> Vec<Value> {
+/// Routes every Feature in the fixture project to the builtin TUI runner.
+fn route_to_builtin_tui(root: &Path) {
+    std::fs::write(
+        root.join("teshi.toml"),
+        "[[runners]]\nname = \"tui\"\nbuiltin = \"tui\"\n[runners.match]\npaths = [\"*.feature\"]\n",
+    )
+    .unwrap();
+}
+
+/// Runner protocol v1 events printed by `teshi tui` and `teshi run`.
+fn parse_events(output: &Output) -> Vec<Value> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn end_run(events: &[Value]) -> &Value {
+    events
+        .iter()
+        .find(|e| e["type"] == "end_run")
+        .expect("end_run event")
 }
 
 #[test]
@@ -76,102 +93,137 @@ fn outline_rows_reach_the_public_cli_with_parent_failure_and_row_totals() {
     bindings["steps"][1]["actions"][0]["text"] = json!("<expected>");
     bindings["steps"][1]["actions"][0]["timeout_ms"] = json!(100);
     std::fs::write(sidecar, serde_json::to_vec(&bindings).unwrap()).unwrap();
-    for command in ["tui", "run"] {
-        let output = cli(root.path())
-            .args([command, "sample.feature", "--scenario", "Rows"])
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        let events = events(&output);
-        let rows: Vec<_> = events
-            .iter()
-            .filter(|e| e["type"] == "end_example")
-            .collect();
-        assert_eq!(rows.len(), 3, "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(rows[2]["status"], "passed");
-        let summary = events.iter().find(|e| e["type"] == "end_run").unwrap();
-        assert_eq!(summary["examples_passed"], 2);
-        assert_eq!(summary["examples_failed"], 1);
-        assert_eq!(summary["failed"], 1);
-    }
+    let output = cli(root.path())
+        .args(["tui", "sample.feature", "--scenario", "Rows"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let events = parse_events(&output);
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "end_example")
+        .collect();
+    assert_eq!(rows.len(), 3, "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(rows[2]["status"], "passed");
+    let summary = events.iter().find(|e| e["type"] == "end_run").unwrap();
+    assert_eq!(summary["examples_passed"], 2);
+    assert_eq!(summary["examples_failed"], 1);
+    assert_eq!(summary["failed"], 1);
+
+    route_to_builtin_tui(root.path());
+    let output = cli(root.path())
+        .args(["run", "sample.feature", "--scenario", "Rows"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let events = parse_events(&output);
+    let summary = end_run(&events);
+    assert_eq!(
+        (summary["passed"].clone(), summary["failed"].clone()),
+        (json!(0), json!(1))
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "end_example"),
+        "runner-specific events are forwarded unchanged"
+    );
 }
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn selected_scenario_uses_relative_feature_path_and_excludes_failure() {
     let (root, _) = setup();
-    for command in ["tui", "run"] {
-        let output = cli(root.path())
-            .args([command, "sample.feature", "--scenario", "Pass"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let events = events(&output);
-        assert_eq!(events.first().unwrap()["total"], 1);
-        assert_eq!(events.last().unwrap()["passed"], 1);
-        assert!(!events.iter().any(|event| event["name"] == "Fail"));
-    }
+    let output = cli(root.path())
+        .args(["tui", "sample.feature", "--scenario", "Pass"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output);
+    assert_eq!(events.first().unwrap()["total"], 1);
+    assert_eq!(events.last().unwrap()["passed"], 1);
+    assert!(!events.iter().any(|event| event["name"] == "Fail"));
+
+    route_to_builtin_tui(root.path());
+    let output = cli(root.path())
+        .args(["run", "sample.feature", "--scenario", "Pass"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output);
+    assert_eq!(events[0]["type"], "start_run");
+    assert_eq!(events[0]["protocol_version"], 1);
+    assert_eq!(events[0]["total"], 1);
+    assert_eq!(end_run(&events)["passed"], 1);
+    assert_eq!(events.last().unwrap()["type"], "runner_exit");
+    assert!(!events.iter().any(|event| event["name"] == "Fail"));
 }
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn failed_case_produces_nonzero_cli_exit_and_readable_screen_attachment() {
     let (root, _) = setup();
-    for command in ["tui", "run"] {
-        let output = cli(root.path())
-            .args([command, "sample.feature", "--scenario", "Fail"])
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        let events = events(&output);
-        let failure = events
+    let output = cli(root.path())
+        .args(["tui", "sample.feature", "--scenario", "Fail"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let events = parse_events(&output);
+    let failure = events
+        .iter()
+        .find(|event| event["type"] == "case_failed")
+        .unwrap();
+    let path = failure["error"]["attachments"][0]["path"].as_str().unwrap();
+    let screen = std::fs::read_to_string(path).unwrap();
+    assert!(
+        screen.contains("cli-fixture-ready"),
+        "failure={failure}, screen={screen:?}"
+    );
+    assert_eq!(events.last().unwrap()["failed"], 1);
+
+    route_to_builtin_tui(root.path());
+    let output = cli(root.path())
+        .args(["run", "sample.feature", "--scenario", "Fail"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        parse_events(&output)
             .iter()
-            .find(|event| event["type"] == "case_failed")
-            .unwrap();
-        let path = failure["error"]["attachments"][0]["path"].as_str().unwrap();
-        let screen = std::fs::read_to_string(path).unwrap();
-        assert!(
-            screen.contains("cli-fixture-ready"),
-            "{command}: failure={failure}, screen={screen:?}"
-        );
-        assert_eq!(events.last().unwrap()["failed"], 1);
-    }
+            .any(|e| e["type"] == "case_failed")
+    );
 }
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
-fn explicit_cli_and_environment_runners_take_precedence_and_propagate_failure() {
+fn explicit_and_routed_runners_propagate_failure() {
     let (root, _) = setup();
     let runner = env!("CARGO_BIN_EXE_teshi-tui-runner");
     for scenario in ["Pass", "Fail"] {
-        for environment in [false, true] {
-            let mut command = cli(root.path());
-            command
-                .args(["run", "sample.feature", "--scenario", scenario])
-                .env("TESHI_TUI_RUNNER", "runner-that-must-not-start");
-            if environment {
-                command.env("TESHI_RUNNER_CMD", runner);
-            } else {
-                command.args(["--runner-cmd", runner]);
-            }
-            let output = command.output().unwrap();
-            assert_eq!(
-                output.status.success(),
-                scenario == "Pass",
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("runner_exit"));
-        }
+        let output = cli(root.path())
+            .args(["run", "sample.feature", "--scenario", scenario])
+            .args(["--runner-cmd", runner])
+            .env("TESHI_TUI_RUNNER", "runner-that-must-not-start")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            scenario == "Pass",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("runner_exit"));
     }
     std::fs::write(
         root.path().join("teshi.toml"),
         format!(
-            "[runner]\ncmd = {}\n",
+            "[[runners]]\nname = \"external\"\ncmd = {}\n[runners.match]\npaths = [\"*.feature\"]\n",
             serde_json::to_string(runner).unwrap()
         ),
     )
@@ -194,6 +246,36 @@ fn explicit_cli_and_environment_runners_take_precedence_and_propagate_failure() 
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn removed_runner_configuration_is_rejected_with_a_migration_hint() {
+    let (root, _) = setup();
+    let runner = env!("CARGO_BIN_EXE_teshi-tui-runner");
+    let output = cli(root.path())
+        .args(["run", "sample.feature"])
+        .env("TESHI_RUNNER_CMD", runner)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("TESHI_RUNNER_CMD"));
+    std::fs::write(
+        root.path().join("teshi.toml"),
+        format!(
+            "[runner]\ncmd = {}\n",
+            serde_json::to_string(runner).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = cli(root.path())
+        .args(["run", "sample.feature"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("[[runners]]"));
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn unknown_scenario_and_malformed_runner_configuration_fail_before_launch() {
     let (root, _) = setup();
     let output = cli(root.path())
@@ -209,4 +291,37 @@ fn unknown_scenario_and_malformed_runner_configuration_fail_before_launch() {
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn builtin_browser_without_endpoint_is_blocked_with_exit_code_three() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("login.feature"),
+        "@web-ui\nFeature: Login\n  Scenario: Open page\n    Given the login page is open\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("teshi.toml"),
+        "[[runners]]\nname = \"web\"\nbuiltin = \"browser\"\n[runners.match]\ntags = [\"@web-ui\"]\n",
+    )
+    .unwrap();
+    let output = cli(root.path())
+        .args(["run", "login.feature"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output);
+    let blocked = events
+        .iter()
+        .find(|event| event["type"] == "case_blocked")
+        .expect("case_blocked event");
+    assert_eq!(blocked["category"], "target_unconfigured");
+    assert_eq!(end_run(&events)["blocked"], 1);
 }

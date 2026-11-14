@@ -7,47 +7,85 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use teshi_engine::DaemonManifestExt;
+use serde::Serialize;
+use teshi_engine::run_routing::{
+    BuiltinExecutor, RouteDecision, RouteRequest, RunPlan, RunRoutes, RunnerKind,
+};
+use teshi_engine::runner_protocol::{RUNNER_PROTOCOL_VERSION, RunnerHandshake};
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct RunnerConfigFile {
-    runner: Option<RunnerConfigPartial>,
-}
-
-#[derive(Debug)]
-struct RunnerNotConfigured;
-
-impl std::fmt::Display for RunnerNotConfigured {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("runner cmd missing (set in teshi.toml or TESHI_RUNNER_CMD)")
-    }
-}
-
-impl std::error::Error for RunnerNotConfigured {}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct RunnerConfigPartial {
-    cmd: Option<String>,
-    args: Option<Vec<String>>,
-    cwd: Option<String>,
-    env: Option<HashMap<String, String>>,
-}
-
+/// An external process that speaks runner protocol v1.
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
+    /// Executable to spawn.
     pub cmd: String,
+    /// Arguments passed to the executable.
     pub args: Vec<String>,
+    /// Working directory; inherits Teshi's when `None`.
     pub cwd: Option<PathBuf>,
+    /// Extra environment variables.
     pub env: HashMap<String, String>,
 }
 
+/// How one batch of scenarios is executed.
 #[derive(Debug, Clone)]
-pub struct RunnerCliOverride {
-    pub cmd: Option<String>,
-    pub args: Vec<String>,
-    pub cwd: Option<PathBuf>,
+pub enum Executor {
+    /// In-process step walker for API and mixed scenarios.
+    Dispatch,
+    /// An external protocol process, including the built-in TUI runner.
+    Process(RunnerConfig),
+    /// Manually verified scenarios, reported as skipped without running.
+    Manual,
+    /// `teshi browser|winapp replay`, started once per scenario.
+    Replay {
+        /// Replay family (`browser` or `winapp` subcommand).
+        target: ReplayTarget,
+        /// Teshi executable providing the replay subcommand.
+        program: PathBuf,
+    },
 }
+
+/// Binding replay families available as builtin executors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayTarget {
+    /// Web bindings through the browser sidecar or broker.
+    Browser,
+    /// Windows UI Automation bindings through the WinApp service.
+    Winapp,
+}
+
+impl ReplayTarget {
+    fn subcommand(self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::Winapp => "winapp",
+        }
+    }
+}
+
+/// One executor and the cases it runs, in request order.
+#[derive(Debug, Clone)]
+pub struct ExecBatch {
+    /// Rule name shown in logs and errors.
+    pub name: String,
+    /// How the cases are executed.
+    pub executor: Executor,
+    /// Cases for this executor.
+    pub cases: Vec<RunCase>,
+}
+
+/// A run that failed only because external targets were unavailable.
+///
+/// `teshi run` maps this to its own exit code so CI can tell "go connect the
+/// browser" apart from assertion failures.
+#[derive(Debug, thiserror::Error)]
+#[error("{blocked} scenario(s) blocked by unavailable targets; none failed")]
+pub struct RunBlocked {
+    /// Number of blocked scenarios.
+    pub blocked: usize,
+}
+
+/// Exit code of `teshi run` when scenarios were blocked but none failed.
+pub const RUN_BLOCKED_EXIT_CODE: i32 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunCase {
@@ -63,8 +101,23 @@ pub struct RunCase {
 #[derive(Debug, Clone, Serialize)]
 pub struct RunRequest {
     pub command: String,
+    /// Runner protocol version this request speaks.
+    pub protocol_version: u64,
     pub cases: Vec<RunCase>,
     pub meta: HashMap<String, String>,
+}
+
+impl RunRequest {
+    /// A v1 `run` request.
+    #[must_use]
+    pub fn run(cases: Vec<RunCase>, meta: HashMap<String, String>) -> Self {
+        Self {
+            command: "run".into(),
+            protocol_version: RUNNER_PROTOCOL_VERSION,
+            cases,
+            meta,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +159,12 @@ pub enum RunEvent {
         case_id: String,
         reason: Option<String>,
     },
+    /// The scenario could not start because its external target is unavailable.
+    CaseBlocked {
+        case_id: String,
+        reason: Option<String>,
+        category: Option<String>,
+    },
     Log {
         case_id: Option<String>,
         message: String,
@@ -119,6 +178,7 @@ pub enum RunEvent {
         passed: usize,
         failed: usize,
         skipped: usize,
+        blocked: usize,
     },
     StartStep {
         case_id: Option<String>,
@@ -140,121 +200,217 @@ pub enum RunEvent {
     RunnerError {
         message: String,
     },
+    /// A protocol event Teshi does not interpret (for example `end_example`),
+    /// kept so `teshi run` can forward it unchanged.
+    Other(serde_json::Value),
 }
 
-#[allow(dead_code)]
-pub fn load_runner_config(cli: Option<RunnerCliOverride>) -> Result<RunnerConfig> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    load_runner_config_for_project(&cwd, cli)
-}
-
-/// Load runner settings relative to an explicit project root.
-///
-/// TUI project switching must not depend on the process current directory:
-/// each candidate project gets its own `teshi.toml`, and a relative runner
-/// `cwd` is resolved below that project root.
-pub fn load_runner_config_for_project(
-    project_root: &Path,
-    cli: Option<RunnerCliOverride>,
-) -> Result<RunnerConfig> {
-    let project_root = project_root.to_path_buf();
-    let config_path = project_root.join("teshi.toml");
-    let mut base = RunnerConfigPartial::default();
-    if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let file: RunnerConfigFile = toml::from_str(&raw)
-            .with_context(|| format!("failed to parse {}", config_path.display()))?;
-        if let Some(cfg) = file.runner {
-            base = cfg;
-        }
-    }
-
-    let mut merged = base;
-
-    let env_override = RunnerConfigPartial {
-        cmd: std::env::var("TESHI_RUNNER_CMD").ok(),
-        args: std::env::var("TESHI_RUNNER_ARGS")
-            .ok()
-            .map(|s| s.split_whitespace().map(|v| v.to_string()).collect()),
-        cwd: std::env::var("TESHI_RUNNER_CWD").ok(),
-        env: None,
-    };
-    merged = merge_config(merged, env_override);
-
-    if let Some(cli) = cli {
-        let cli_partial = RunnerConfigPartial {
-            cmd: cli.cmd,
-            args: if cli.args.is_empty() {
-                None
-            } else {
-                Some(cli.args)
-            },
-            cwd: cli.cwd.map(|p| p.to_string_lossy().to_string()),
-            env: None,
-        };
-        merged = merge_config(merged, cli_partial);
-    }
-
-    let cmd = merged
-        .cmd
-        .filter(|s| !s.trim().is_empty())
-        .ok_or(RunnerNotConfigured)?;
-
-    let cwd = merged.cwd.map(PathBuf::from).map(|cwd| {
-        if cwd.is_absolute() {
-            cwd
-        } else {
-            project_root.join(cwd)
-        }
-    });
-
-    Ok(RunnerConfig {
-        cmd,
-        args: merged.args.unwrap_or_default(),
-        cwd,
-        env: merged.env.unwrap_or_default(),
-    })
-}
-
-/// Load an optional project runner configuration while preserving real
-/// configuration errors. A project without a runner command is valid; a
-/// malformed or unreadable `teshi.toml` must remain visible to callers that
-/// are preparing a project switch.
-pub fn load_optional_runner_config_for_project(
-    project_root: &Path,
-    cli: Option<RunnerCliOverride>,
-) -> Result<Option<RunnerConfig>> {
-    match load_runner_config_for_project(project_root, cli) {
-        Ok(config) => Ok(Some(config)),
-        Err(error) if error.downcast_ref::<RunnerNotConfigured>().is_some() => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn merge_config(
-    base: RunnerConfigPartial,
-    override_cfg: RunnerConfigPartial,
-) -> RunnerConfigPartial {
-    RunnerConfigPartial {
-        cmd: override_cfg.cmd.or(base.cmd),
-        args: override_cfg.args.or(base.args),
-        cwd: override_cfg.cwd.or(base.cwd),
-        env: match (base.env, override_cfg.env) {
-            (None, None) => None,
-            (Some(m), None) => Some(m),
-            (None, Some(m)) => Some(m),
-            (Some(mut m), Some(o)) => {
-                m.extend(o);
-                Some(m)
+impl RunEvent {
+    /// Protocol v1 JSON for this event, as printed by `teshi run`.
+    ///
+    /// The merged stream opens with a `start_run` handshake declaring every
+    /// capability, so the output of `teshi run` is itself a valid v1 stream.
+    /// Teshi-side outcomes appear as `runner_exit` and `runner_error`.
+    #[must_use]
+    pub fn to_protocol_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let value = match self {
+            Self::StartRun { run_id, total } => json!({
+                "type": "start_run", "run_id": run_id, "total": total,
+                "protocol_version": RUNNER_PROTOCOL_VERSION,
+                "capabilities": ["steps", "artifacts", "blocked", "http_exchange"],
+            }),
+            Self::StartCase { case_id, name } => {
+                json!({"type": "start_case", "case_id": case_id, "name": name})
             }
-        },
+            Self::CasePassed {
+                case_id,
+                duration_ms,
+            } => json!({"type": "case_passed", "case_id": case_id, "duration_ms": duration_ms}),
+            Self::CaseFailed {
+                case_id,
+                duration_ms,
+                error,
+            } => json!({
+                "type": "case_failed", "case_id": case_id, "duration_ms": duration_ms,
+                "error": {"message": error.message, "stack": error.stack, "attachments": error.attachments},
+            }),
+            Self::CaseSkipped { case_id, reason } => {
+                json!({"type": "case_skipped", "case_id": case_id, "reason": reason})
+            }
+            Self::CaseBlocked {
+                case_id,
+                reason,
+                category,
+            } => json!({
+                "type": "case_blocked", "case_id": case_id, "reason": reason, "category": category,
+            }),
+            Self::Log { case_id, message } => {
+                json!({"type": "log", "case_id": case_id, "message": message})
+            }
+            Self::Artifact {
+                case_id,
+                kind,
+                path,
+            } => json!({"type": "artifact", "case_id": case_id, "kind": kind, "path": path}),
+            Self::EndRun {
+                passed,
+                failed,
+                skipped,
+                blocked,
+            } => json!({
+                "type": "end_run", "passed": passed, "failed": failed,
+                "skipped": skipped, "blocked": blocked,
+            }),
+            Self::StartStep {
+                case_id,
+                step_id,
+                text,
+                is_api,
+            } => json!({
+                "type": "start_step", "case_id": case_id, "step_id": step_id,
+                "text": text, "is_api": is_api,
+            }),
+            Self::EndStep {
+                case_id,
+                step_id,
+                status,
+                message,
+            } => json!({
+                "type": "end_step", "case_id": case_id, "step_id": step_id,
+                "status": status, "message": message,
+            }),
+            Self::HttpExchange(exchange) => {
+                let mut value = serde_json::to_value(exchange).unwrap_or_default();
+                value["type"] = json!("http_exchange");
+                value
+            }
+            Self::RunnerExit { code, success } => {
+                json!({"type": "runner_exit", "code": code, "success": success})
+            }
+            Self::RunnerError { message } => json!({"type": "runner_error", "message": message}),
+            Self::Other(value) => return value.clone(),
+        };
+        without_nulls(value)
     }
 }
 
-pub fn spawn_runner(config: RunnerConfig, request: RunRequest) -> Result<Receiver<RunEvent>> {
-    let (rx, _cancel) = spawn_runner_with_control(config, request)?;
-    Ok(rx)
+/// Drops absent optional fields so emitted events stay minimal.
+fn without_nulls(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|_, field| !field.is_null());
+    }
+    value
+}
+
+/// Resolves a routing rule's executor.
+#[must_use]
+pub fn executor_for(kind: &RunnerKind) -> Executor {
+    match kind {
+        RunnerKind::Builtin(BuiltinExecutor::Dispatch) => Executor::Dispatch,
+        RunnerKind::Builtin(BuiltinExecutor::Tui) => Executor::Process(tui_runner_config(None)),
+        RunnerKind::Builtin(BuiltinExecutor::Browser) => replay_executor(ReplayTarget::Browser),
+        RunnerKind::Builtin(BuiltinExecutor::Winapp) => replay_executor(ReplayTarget::Winapp),
+        RunnerKind::Builtin(BuiltinExecutor::Manual) => Executor::Manual,
+        RunnerKind::External {
+            cmd,
+            args,
+            cwd,
+            env,
+        } => Executor::Process(RunnerConfig {
+            cmd: cmd.clone(),
+            args: args.clone(),
+            cwd: cwd.clone(),
+            env: env.clone(),
+        }),
+    }
+}
+
+fn route_requests(cases: &[RunCase]) -> Vec<RouteRequest> {
+    cases
+        .iter()
+        .map(|case| RouteRequest {
+            id: case.id.clone(),
+            feature_path: PathBuf::from(&case.feature_path),
+            scenario: case.scenario.clone(),
+        })
+        .collect()
+}
+
+fn batches_from_plan(plan: RunPlan, cases: &[RunCase]) -> Vec<ExecBatch> {
+    plan.batches
+        .into_iter()
+        .map(|batch| ExecBatch {
+            executor: executor_for(&batch.rule.kind),
+            name: batch.rule.name,
+            cases: batch
+                .case_ids
+                .iter()
+                .filter_map(|id| cases.iter().find(|case| &case.id == id).cloned())
+                .collect(),
+        })
+        .collect()
+}
+
+/// Loads a project's `[[runners]]`, keeping a configuration error as text so
+/// the project still opens and the error surfaces when a run is requested.
+pub fn load_project_routes(project_root: &Path) -> std::result::Result<RunRoutes, String> {
+    teshi_engine::run_routing::load_run_routes(project_root).map_err(|error| error.to_string())
+}
+
+/// Loads a project's `[[runners]]` for project preparation.
+///
+/// # Errors
+/// An unreadable or syntactically broken `teshi.toml` fails preparation, as it
+/// would for any other project file. Migration and rule errors (the removed
+/// `[runner]` section, `TESHI_RUNNER_*` variables, invalid rules) are kept in
+/// the returned value instead, so they cannot make every project unopenable.
+pub fn prepare_project_routes(
+    project_root: &Path,
+) -> Result<std::result::Result<RunRoutes, String>> {
+    use teshi_engine::run_routing::RouteConfigError;
+    match teshi_engine::run_routing::load_run_routes(project_root) {
+        Ok(routes) => Ok(Ok(routes)),
+        Err(error @ (RouteConfigError::Read { .. } | RouteConfigError::Parse { .. })) => {
+            Err(error.into())
+        }
+        Err(error) => Ok(Err(error.to_string())),
+    }
+}
+
+/// Routes and starts an interactive run rooted at `project_root`.
+///
+/// # Errors
+/// Returns the stored configuration error or the routing error; nothing is
+/// started unless every case routes to exactly one runner.
+pub fn start_routed_run(
+    project_root: &Path,
+    routes: &std::result::Result<RunRoutes, String>,
+    cases: Vec<RunCase>,
+) -> Result<(Receiver<RunEvent>, Sender<()>)> {
+    let routes = routes
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let batches = plan_batches(project_root, routes, &cases)?;
+    let meta = HashMap::from([(
+        "project_root".to_string(),
+        project_root.to_string_lossy().into_owned(),
+    )]);
+    Ok(spawn_routed_run(project_root.to_path_buf(), batches, meta))
+}
+
+/// Routes cases through the project's `[[runners]]` into executor batches.
+///
+/// # Errors
+/// Returns the routing error when no runner is configured or any case does not
+/// match exactly one rule.
+pub fn plan_batches(
+    project_root: &Path,
+    routes: &RunRoutes,
+    cases: &[RunCase],
+) -> Result<Vec<ExecBatch>> {
+    let plan = routes.plan(project_root, &route_requests(cases))?;
+    Ok(batches_from_plan(plan, cases))
 }
 
 /// Spawn an external runner and return both its event stream and an owned
@@ -277,7 +433,7 @@ pub fn spawn_runner_with_control(
 }
 
 /// Returns whether every selected case has a terminal binding sidecar.
-pub fn all_tui_cases(cases: &[RunCase]) -> bool {
+fn all_tui_cases(cases: &[RunCase]) -> bool {
     !cases.is_empty()
         && cases.iter().all(|case| {
             Path::new(&case.feature_path)
@@ -308,13 +464,13 @@ pub fn tui_runner_config(command: Option<String>) -> RunnerConfig {
 
 /// Resolve a run's project root without walking from a relative feature path
 /// into an unrelated ancestor project. Relative CLI paths are rooted at the
-/// caller's working directory; absolute paths still honor an existing
-/// `.teshi` marker in their own ancestor chain.
+/// caller's working directory; absolute paths use the nearest ancestor with
+/// `teshi.toml` or `.teshi`, excluding the user's home directory.
 fn run_project_root(input_path: &Path, resolved_path: &Path) -> Result<PathBuf> {
     if !input_path.is_absolute() {
         return std::env::current_dir().context("resolve run working directory");
     }
-    Ok(teshi_engine::find_project_root(Some(resolved_path))
+    Ok(teshi_engine::run_routing::find_routing_root(resolved_path)
         .or_else(|| resolved_path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from(".")))
 }
@@ -341,11 +497,10 @@ pub fn run_tui(path: &Path, scenario: Option<&str>, command: Option<String>) -> 
         );
     }
     let config = tui_runner_config(command);
-    let request = RunRequest {
-        command: "run".into(),
+    let request = RunRequest::run(
         cases,
-        meta: HashMap::from([("project_root".into(), root.to_string_lossy().into_owned())]),
-    };
+        HashMap::from([("project_root".into(), root.to_string_lossy().into_owned())]),
+    );
     let mut child = Command::new(&config.cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
@@ -375,15 +530,6 @@ pub fn run_tui(path: &Path, scenario: Option<&str>, command: Option<String>) -> 
     Ok(())
 }
 
-/// Walk API/mixed scenarios in-process and emit the same NDJSON event types as an external runner.
-pub fn spawn_teshi_dispatch(
-    project_root: PathBuf,
-    cases: Vec<RunCase>,
-) -> Result<Receiver<RunEvent>> {
-    let (rx, _cancel) = spawn_teshi_dispatch_with_control(project_root, cases)?;
-    Ok(rx)
-}
-
 /// Spawn the in-process dispatch path with a best-effort cancellation handle.
 /// The dispatch API is synchronous, so cancellation takes effect at the next
 /// emitted event and prevents a successful terminal event from being reported.
@@ -395,6 +541,7 @@ pub fn spawn_teshi_dispatch_with_control(
     let (cancel_tx, cancel_rx) = mpsc::channel();
     thread::spawn(move || {
         let mut cancelled = false;
+        let mut gate = ProtocolGate::default();
         let dispatch: Vec<teshi_engine::DispatchCase> = cases
             .iter()
             .map(|case| teshi_engine::DispatchCase {
@@ -405,29 +552,73 @@ pub fn spawn_teshi_dispatch_with_control(
             .collect();
         let script = teshi_engine::default_api_service_script();
         let emit = |value: serde_json::Value| {
-            // The compatibility wrapper intentionally drops its sender after
-            // spawning.  A disconnected receiver therefore means "no
-            // controller", while an explicit unit value is the cancellation
-            // request for the controlled path.
-            if matches!(cancel_rx.try_recv(), Ok(())) {
+            // A disconnected receiver means "no controller"; an explicit unit
+            // value is the cancellation request. Cancellation and protocol
+            // violations are sticky: the synchronous walker cannot be stopped,
+            // so its remaining events are suppressed instead.
+            if cancelled || matches!(cancel_rx.try_recv(), Ok(())) {
                 cancelled = true;
+                return;
+            }
+            if gate.admit(&value).is_err() {
                 return;
             }
             if let Some(event) = parse_event_line(&value.to_string()) {
                 let _ = tx.send(event);
             }
         };
-        if let Err(err) = teshi_engine::dispatch_cases(&project_root, &script, &dispatch, emit) {
-            let _ = tx.send(RunEvent::RunnerError {
-                message: err.to_string(),
-            });
+        let result = teshi_engine::dispatch_cases(&project_root, &script, &dispatch, emit);
+        let error = gate
+            .violation
+            .clone()
+            .or_else(|| result.err().map(|error| error.to_string()));
+        if let Some(message) = error {
+            let _ = tx.send(RunEvent::RunnerError { message });
         }
         let _ = tx.send(RunEvent::RunnerExit {
             code: Some(0),
-            success: !cancelled,
+            success: !cancelled && gate.violation.is_none(),
         });
     });
     Ok((rx, cancel_tx))
+}
+
+/// Enforces runner protocol v1 on one executor's event stream.
+///
+/// Only JSON objects with a string `type` are protocol events; other output
+/// is diagnostic text and never counts toward or against the handshake.
+#[derive(Debug, Default)]
+struct ProtocolGate {
+    handshake: Option<RunnerHandshake>,
+    violation: Option<String>,
+}
+
+impl ProtocolGate {
+    /// Admits one protocol event. The first violation is sticky and every
+    /// later event is rejected with the same message.
+    fn admit(&mut self, event: &serde_json::Value) -> Result<(), String> {
+        if let Some(violation) = &self.violation {
+            return Err(violation.clone());
+        }
+        let result = match &self.handshake {
+            None => RunnerHandshake::from_first_event(event).map(|handshake| {
+                self.handshake = Some(handshake);
+            }),
+            Some(handshake) => handshake.check_event(event),
+        };
+        result.map_err(|error| {
+            let message = error.to_string();
+            self.violation = Some(message.clone());
+            message
+        })
+    }
+}
+
+fn is_protocol_event(value: &serde_json::Value) -> bool {
+    value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
 }
 
 fn run_child(
@@ -508,6 +699,14 @@ fn run_child(
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
     }
+    // Runners that drive Teshi itself test the binary that started them unless
+    // the caller or the rule names one explicitly.
+    if std::env::var_os("TESHI_BIN").is_none()
+        && !config.env.contains_key("TESHI_BIN")
+        && let Ok(exe) = std::env::current_exe()
+    {
+        cmd.env("TESHI_BIN", exe);
+    }
     for (k, v) in &config.env {
         cmd.env(k, v);
     }
@@ -561,10 +760,13 @@ fn run_child(
         None
     };
 
+    let protocol_violated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stdout_thread = if let Some(stdout) = child.stdout.take() {
         let tx_out = tx.clone();
         let evidence = evidence.clone();
+        let protocol_violated = protocol_violated.clone();
         Some(thread::spawn(move || {
+            let mut gate = ProtocolGate::default();
             let mut saved = stdout_file;
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
@@ -573,8 +775,46 @@ fn run_child(
                         message: error.to_string(),
                     });
                 }
-                let value = serde_json::from_str::<serde_json::Value>(&line)
-                    .unwrap_or_else(|_| serde_json::json!({"type":"stdout","message":line}));
+                if gate.violation.is_some() {
+                    // Output after a violation is preserved in stdout.ndjson
+                    // but never interpreted as results.
+                    continue;
+                }
+                let parsed = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .filter(is_protocol_event);
+                if let Some(event) = &parsed {
+                    let was_handshaken = gate.handshake.is_some();
+                    match gate.admit(event) {
+                        Ok(()) if !was_handshaken => {
+                            if let (Some(handshake), Ok(mut run)) =
+                                (&gate.handshake, evidence.lock())
+                            {
+                                let _ = run.record(serde_json::json!({
+                                    "type": "runner_handshake",
+                                    "protocol_version": RUNNER_PROTOCOL_VERSION,
+                                    "capabilities": handshake.capability_names(),
+                                }));
+                            }
+                        }
+                        Ok(()) => {}
+                        Err(message) => {
+                            if let Ok(mut run) = evidence.lock() {
+                                let _ = run.record(serde_json::json!({
+                                    "type": "protocol_error",
+                                    "message": message,
+                                }));
+                            }
+                            let _ = tx_out.send(RunEvent::RunnerError {
+                                message: format!("runner protocol violation: {message}"),
+                            });
+                            protocol_violated.store(true, std::sync::atomic::Ordering::SeqCst);
+                            continue;
+                        }
+                    }
+                }
+                let value =
+                    parsed.unwrap_or_else(|| serde_json::json!({"type":"stdout","message":line}));
                 if let Ok(mut run) = evidence.lock() {
                     let mut value = value;
                     if let Some(step_id) = planned_step_id(&value, &planned) {
@@ -610,14 +850,28 @@ fn run_child(
                     let _ = tx_out.send(event);
                 }
             }
+            gate
         }))
     } else {
         None
     };
 
+    let mut stopped_for_violation = false;
+    let mut cancelled = false;
     let status = loop {
+        // A violating runner is stopped once; its exit is then awaited below.
+        if !stopped_for_violation && protocol_violated.load(std::sync::atomic::Ordering::SeqCst) {
+            stopped_for_violation = true;
+            if let Err(error) = stop_runner_tree(&mut child) {
+                let _ = tx.send(RunEvent::Log {
+                    case_id: None,
+                    message: format!("Could not stop runner process tree: {error}"),
+                });
+            }
+        }
         match cancel_rx.try_recv() {
             Ok(()) => {
+                cancelled = true;
                 match stop_runner_tree(&mut child) {
                     Ok(()) => break child.wait()?,
                     Err(error) => {
@@ -638,9 +892,9 @@ fn run_child(
         }
         thread::sleep(Duration::from_millis(25));
     };
-    if let Some(handle) = stdout_thread {
-        let _ = handle.join();
-    }
+    let gate = stdout_thread
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
     if let Some(handle) = stderr_thread {
         let _ = handle.join();
     }
@@ -648,13 +902,24 @@ fn run_child(
         .lock()
         .map_err(|_| anyhow::anyhow!("evidence writer poisoned"))?;
     run.record(serde_json::json!({"type":"runner_exit","exit_code":status.code(),"stdout_file":"stdout.ndjson","stderr_file":"stderr.txt"}))?;
+    let handshake_missing = gate.handshake.is_none() && gate.violation.is_none() && !cancelled;
+    if handshake_missing {
+        let message = format!(
+            "runner exited before the protocol v{RUNNER_PROTOCOL_VERSION} handshake; \
+             its first event must be start_run with protocol_version and capabilities"
+        );
+        run.record(serde_json::json!({"type":"protocol_error","message":message}))?;
+        let _ = tx.send(RunEvent::RunnerError { message });
+    }
     if run.snapshot().test_status == "running" {
         run.record(serde_json::json!({"type":"end_run","status":"interrupted","reason":"runner_exited_without_completion"}))?;
     }
-    // Missing evidence only taints a passing run. A run that failed or never
-    // completed is unsuccessful on its own status.
-    let accepted = run.snapshot().acceptance_status == "passed";
-    if status.success() && !accepted {
+    // Missing evidence only taints a passing run. A run that failed, was
+    // blocked, or never completed is unsuccessful on its own status.
+    let accepted = run.snapshot().acceptance_status == "passed"
+        && gate.violation.is_none()
+        && !handshake_missing;
+    if status.success() && run.snapshot().rejected() {
         let _ = tx.send(RunEvent::RunnerError {
             message: format!(
                 "Replay acceptance {} (tests: {}, evidence: {:?}); run {}",
@@ -721,8 +986,8 @@ fn stop_runner_tree(child: &mut std::process::Child) -> Result<()> {
 
 pub(crate) fn parse_event_line(line: &str) -> Option<RunEvent> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let kind = value.get("type")?.as_str()?;
-    match kind {
+    let kind = value.get("type")?.as_str()?.to_string();
+    match kind.as_str() {
         "start_run" => Some(RunEvent::StartRun {
             run_id: value
                 .get("run_id")
@@ -756,6 +1021,17 @@ pub(crate) fn parse_event_line(line: &str) -> Option<RunEvent> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         }),
+        "case_blocked" => Some(RunEvent::CaseBlocked {
+            case_id: value.get("case_id")?.as_str()?.to_string(),
+            reason: value
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            category: value
+                .get("category")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        }),
         "log" => Some(RunEvent::Log {
             case_id: value
                 .get("case_id")
@@ -787,6 +1063,7 @@ pub(crate) fn parse_event_line(line: &str) -> Option<RunEvent> {
             passed: value.get("passed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             failed: value.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             skipped: value.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            blocked: value.get("blocked").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
         }),
         "start_step" => Some(RunEvent::StartStep {
             case_id: value
@@ -818,7 +1095,7 @@ pub(crate) fn parse_event_line(line: &str) -> Option<RunEvent> {
         "http_exchange" => teshi_core::HttpExchange::from_value(&value)
             .ok()
             .map(|exchange| RunEvent::HttpExchange(Box::new(exchange))),
-        _ => None,
+        _ => Some(RunEvent::Other(value)),
     }
 }
 
@@ -859,13 +1136,25 @@ fn parse_error(value: Option<&serde_json::Value>) -> RunError {
     }
 }
 
+/// Options for headless `teshi run`.
+#[derive(Debug, Default)]
 pub struct RunCliOptions {
+    /// Feature file or directory; defaults to the working directory.
     pub path: Option<PathBuf>,
+    /// Only run the scenario with this exact name.
     pub scenario: Option<String>,
+    /// Ad-hoc external runner that replaces `[[runners]]` routing for this run.
     pub runner_cmd: Option<String>,
+    /// Arguments for `runner_cmd`.
     pub runner_args: Vec<String>,
+    /// Working directory for `runner_cmd`, relative to the project root.
     pub runner_cwd: Option<PathBuf>,
+    /// Optional JSON report destination.
     pub report_path: Option<PathBuf>,
+    /// Print the routing decision for every scenario without executing.
+    pub explain: bool,
+    /// Emit `explain` output as JSON.
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1036,11 +1325,18 @@ impl RunReportCollector {
             }
             RunEvent::CaseSkipped { case_id, reason } => {
                 if let Some(case) = self.case_mut(case_id) {
-                    let blocked = reason
-                        .as_deref()
-                        .is_some_and(|value| value.starts_with("blocked:"));
-                    case.status = if blocked { "blocked" } else { "skipped" }.to_string();
+                    case.status = "skipped".to_string();
                     case.error = reason.clone();
+                }
+            }
+            RunEvent::CaseBlocked {
+                case_id,
+                reason,
+                category,
+            } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    case.status = "blocked".to_string();
+                    case.error = Some(blocked_message(reason.as_deref(), category.as_deref()));
                 }
             }
             RunEvent::Artifact {
@@ -1171,77 +1467,33 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         anyhow::bail!("Feature validation failed; runner was not started");
     }
 
-    let runner_config = load_runner_config_for_project(
-        &project_root,
-        Some(RunnerCliOverride {
-            cmd: opts.runner_cmd.clone(),
-            args: opts.runner_args.clone(),
-            cwd: opts.runner_cwd.clone(),
-        }),
-    );
-    let runner_config = match runner_config {
-        Err(error) if !error.is::<RunnerNotConfigured>() => return Err(error),
-        result => result,
-    };
-
-    if runner_config
-        .as_ref()
-        .err()
-        .is_some_and(|error| error.is::<RunnerNotConfigured>())
-    {
-        let selected = build_cases_from_path(&feature_path, opts.scenario.as_deref())?;
-        if all_tui_cases(&selected) {
-            return run_tui(&feature_path, opts.scenario.as_deref(), None);
-        }
-    }
-
-    // An explicit NDJSON runner must win over a live daemon and Python engine
-    // auto-detect (`import engine.cli` succeeds on many developer machines).
-    if runner_config.is_err()
-        && let Some(manifest) = teshi_engine::DaemonManifest::load_manifest(&project_root)
-        && manifest.is_daemon_alive()
-    {
-        return run_via_daemon(&manifest, &feature_path, opts);
-    }
-
-    // Fallback: Teshi mixed dispatch, then engine / generic runner
     let cases = build_cases_from_path(&feature_path, opts.scenario.as_deref())?;
     if cases.is_empty() {
-        return Err(anyhow::anyhow!("no scenarios found to run"));
-    }
-    let (mixed, rest) = classify_cases(&cases)?;
-    let had_mixed = !mixed.is_empty();
-    if !mixed.is_empty() {
-        drain_dispatch_events(&project_root, mixed)?;
-    }
-    if rest.is_empty() {
-        return Ok(());
+        anyhow::bail!("no scenarios found to run");
     }
 
-    if !had_mixed && runner_config.is_err() {
-        match crate::engine::load_engine_config(&project_root, None, &[]) {
-            Ok(engine_config) => {
-                return crate::engine::run_feature_with_engine(
-                    &engine_config,
-                    &feature_path,
-                    &opts,
-                );
-            }
-            Err(_engine_err) => {}
+    let batches = if let Some(cmd) = opts.runner_cmd.clone() {
+        anyhow::ensure!(
+            !opts.explain,
+            "--explain inspects [[runners]] routing and cannot be combined with --runner-cmd"
+        );
+        let cwd = opts.runner_cwd.as_ref().map(|cwd| project_root.join(cwd));
+        vec![ExecBatch {
+            name: "--runner-cmd".into(),
+            executor: Executor::Process(RunnerConfig {
+                cmd,
+                args: opts.runner_args.clone(),
+                cwd,
+                env: HashMap::new(),
+            }),
+            cases,
+        }]
+    } else {
+        let routes = teshi_engine::run_routing::load_run_routes(&project_root)?;
+        if opts.explain {
+            return explain_routes(&project_root, &routes, &cases, opts.json);
         }
-    }
-
-    let config = match runner_config {
-        Ok(config) => config,
-        Err(err) => {
-            let all_api = rest
-                .iter()
-                .all(|case| case_engine_mode(case) == Some(teshi_core::EngineMode::Api));
-            if all_api {
-                return drain_dispatch_events(&project_root, rest);
-            }
-            return Err(err);
-        }
+        plan_batches(&project_root, &routes, &cases)?
     };
     let mut meta = HashMap::new();
     meta.insert(
@@ -1267,34 +1519,46 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
             _ => {}
         }
     }
-    let request = RunRequest {
-        command: "run".to_string(),
-        cases: rest,
-        meta,
-    };
+    let runner_names = batches
+        .iter()
+        .map(|batch| batch.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let all_cases: Vec<RunCase> = batches
+        .iter()
+        .flat_map(|batch| batch.cases.iter().cloned())
+        .collect();
     let report_path = opts.report_path.clone();
     let mut report = report_path
         .as_ref()
-        .map(|_| RunReportCollector::new(&feature_path, &config.cmd, &request.cases));
-    let rx = spawn_runner(config, request)?;
+        .map(|_| RunReportCollector::new(&feature_path, &runner_names, &all_cases));
+    let (rx, _cancel) = spawn_routed_run(project_root, batches, meta);
     let mut failed = false;
+    let mut blocked = 0;
     let mut exited = false;
     while let Ok(event) = rx.recv() {
-        println!("{}", format_event(&event));
+        println!("{}", event.to_protocol_json());
         if let Some(report) = &mut report {
             report.observe(&event);
         }
         failed |= matches!(
             event,
-            RunEvent::CaseFailed { .. }
-                | RunEvent::RunnerError { .. }
-                | RunEvent::RunnerExit { success: false, .. }
+            RunEvent::CaseFailed { .. } | RunEvent::RunnerError { .. }
         );
-        if let RunEvent::EndRun { failed: count, .. } = &event {
+        if let RunEvent::EndRun {
+            failed: count,
+            blocked: blocked_count,
+            ..
+        } = &event
+        {
             failed |= *count > 0;
+            blocked = *blocked_count;
         }
-        if matches!(event, RunEvent::RunnerExit { .. }) {
-            exited = true;
+        if matches!(
+            event,
+            RunEvent::RunnerExit { .. } | RunEvent::RunnerError { .. }
+        ) {
+            exited = matches!(event, RunEvent::RunnerExit { .. });
             break;
         }
     }
@@ -1307,41 +1571,48 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     if failed || !exited {
         anyhow::bail!("test runner failed or exited without a completion status");
     }
+    if blocked > 0 {
+        return Err(RunBlocked { blocked }.into());
+    }
     Ok(())
 }
 
-/// POST run request to daemon and stream NDJSON events to stdout.
-fn run_via_daemon(
-    manifest: &teshi_engine::DaemonManifest,
-    feature_path: &Path,
-    opts: RunCliOptions,
+/// Prints how every selected scenario routes, without executing anything.
+fn explain_routes(
+    project_root: &Path,
+    routes: &RunRoutes,
+    cases: &[RunCase],
+    json: bool,
 ) -> Result<()> {
-    let url = format!("http://127.0.0.1:{}/api/v1/daemon/run", manifest.port);
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "feature_path": feature_path.to_string_lossy(),
-            "scenario": opts.scenario,
-        }))
-        .send()
-        .context("send run request to daemon")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        anyhow::bail!("daemon returned {status}: {body}");
+    let decisions = routes.resolve(project_root, &route_requests(cases));
+    if json {
+        println!("{}", serde_json::to_string_pretty(&decisions)?);
+    } else {
+        for route in &decisions {
+            let decision = match &route.decision {
+                RouteDecision::Routed { runner } => format!("-> {runner}"),
+                RouteDecision::Unmatched => "UNMATCHED".to_string(),
+                RouteDecision::Ambiguous { runners } => {
+                    format!("AMBIGUOUS ({})", runners.join(", "))
+                }
+                RouteDecision::Unreadable { reason } => format!("UNREADABLE ({reason})"),
+            };
+            println!(
+                "{} :: {} [{}] {decision}",
+                route.feature,
+                route.scenario,
+                route.tags.join(" ")
+            );
+        }
     }
-
-    // Stream NDJSON lines to stdout
-    use std::io::{BufRead, BufReader, Write};
-    let reader = BufReader::new(resp);
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    for line in reader.lines() {
-        let line = line.context("read daemon response")?;
-        writeln!(handle, "{line}")?;
-    }
+    let unrouted = decisions
+        .iter()
+        .filter(|route| !matches!(route.decision, RouteDecision::Routed { .. }))
+        .count();
+    anyhow::ensure!(
+        unrouted == 0,
+        "{unrouted} scenario(s) do not route to exactly one runner"
+    );
     Ok(())
 }
 
@@ -1417,92 +1688,423 @@ fn resolve_run_project_root(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn format_event(event: &RunEvent) -> String {
+/// Human-readable blocked reason, prefixed with its category when known.
+pub fn blocked_message(reason: Option<&str>, category: Option<&str>) -> String {
+    let reason = reason.unwrap_or("target unavailable");
+    match category {
+        Some(category) => format!("[{category}] {reason}"),
+        None => reason.to_string(),
+    }
+}
+
+/// Final classification of one case inside a routed run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaseOutcome {
+    Passed,
+    Failed,
+    Skipped,
+    Blocked,
+}
+
+fn case_outcome(event: &RunEvent) -> Option<(&str, CaseOutcome)> {
     match event {
-        RunEvent::StartRun { total, .. } => {
-            format!("start_run total={}", total.unwrap_or(0))
-        }
-        RunEvent::StartCase { case_id, name } => {
-            format!("start_case {case_id} {}", name.clone().unwrap_or_default())
-        }
-        RunEvent::CasePassed { case_id, .. } => format!("case_passed {case_id}"),
-        RunEvent::CaseFailed { case_id, error, .. } => {
-            format!("case_failed {case_id} {}", error.message)
-        }
-        RunEvent::CaseSkipped { case_id, .. } => format!("case_skipped {case_id}"),
-        RunEvent::Log { message, .. } => format!("log {message}"),
-        RunEvent::Artifact { kind, path, .. } => format!("artifact {kind} {path}"),
-        RunEvent::EndRun {
-            passed,
-            failed,
-            skipped,
-        } => {
-            format!("end_run passed={passed} failed={failed} skipped={skipped}")
-        }
-        RunEvent::StartStep { step_id, text, .. } => {
-            format!("start_step {step_id} {}", text.clone().unwrap_or_default())
-        }
-        RunEvent::EndStep {
-            step_id, status, ..
-        } => format!("end_step {step_id} {}", status.clone().unwrap_or_default()),
-        RunEvent::HttpExchange(exchange) => format!(
-            "http_exchange {} {} {}",
-            exchange.method, exchange.url, exchange.exchange_id
-        ),
-        RunEvent::RunnerExit { code, success } => {
-            format!("runner_exit code={:?} success={success}", code)
-        }
-        RunEvent::RunnerError { message } => format!("runner_error {message}"),
+        RunEvent::CasePassed { case_id, .. } => Some((case_id, CaseOutcome::Passed)),
+        RunEvent::CaseFailed { case_id, .. } => Some((case_id, CaseOutcome::Failed)),
+        RunEvent::CaseSkipped { case_id, .. } => Some((case_id, CaseOutcome::Skipped)),
+        RunEvent::CaseBlocked { case_id, .. } => Some((case_id, CaseOutcome::Blocked)),
+        _ => None,
     }
 }
 
-fn drain_dispatch_events(project_root: &Path, cases: Vec<RunCase>) -> Result<()> {
-    let rx = spawn_teshi_dispatch(project_root.to_path_buf(), cases)?;
-    let mut failed = false;
-    let mut completed = false;
-    while let Ok(event) = rx.recv() {
-        println!("{}", format_event(&event));
-        failed |= matches!(
-            &event,
-            RunEvent::CaseFailed { .. }
-                | RunEvent::RunnerError { .. }
-                | RunEvent::RunnerExit { success: false, .. }
-        );
-        if let RunEvent::EndRun { failed: count, .. } = &event {
-            failed |= *count > 0;
+fn spawn_batch(
+    batch: &ExecBatch,
+    project_root: &Path,
+    meta: &HashMap<String, String>,
+) -> Result<(Receiver<RunEvent>, Sender<()>)> {
+    match &batch.executor {
+        Executor::Dispatch => {
+            spawn_teshi_dispatch_with_control(project_root.to_path_buf(), batch.cases.clone())
         }
-        if matches!(event, RunEvent::RunnerExit { .. }) {
-            completed = true;
-            break;
+        Executor::Process(config) => {
+            let mut meta = meta.clone();
+            meta.insert("runner_name".into(), batch.name.clone());
+            spawn_runner_with_control(config.clone(), RunRequest::run(batch.cases.clone(), meta))
         }
+        Executor::Manual => Ok(spawn_manual_batch(batch.cases.clone())),
+        Executor::Replay { target, program } => Ok(spawn_replay_batch(
+            *target,
+            program.clone(),
+            project_root.to_path_buf(),
+            batch.cases.clone(),
+        )),
     }
-    anyhow::ensure!(
-        completed && !failed,
-        "replay execution or evidence acceptance failed"
-    );
-    Ok(())
 }
 
-fn case_engine_mode(case: &RunCase) -> Option<teshi_core::EngineMode> {
-    let content = std::fs::read_to_string(&case.feature_path).ok()?;
-    let feature = teshi_core::gherkin::parse_feature(&content, PathBuf::from(&case.feature_path));
-    let scenario = feature
-        .all_scenarios()
-        .into_iter()
-        .find(|item| item.name == case.scenario)?;
-    Some(teshi_core::scenario_engine_mode(&feature, scenario))
-}
+/// Reason reported for every scenario routed to `builtin = "manual"`.
+pub const MANUAL_SKIP_REASON: &str = "manual verification required";
 
-fn classify_cases(cases: &[RunCase]) -> Result<(Vec<RunCase>, Vec<RunCase>)> {
-    let mut mixed = Vec::new();
-    let mut rest = Vec::new();
+/// Reports each manual case as skipped: it has an owner, so the run is not
+/// rejected as unrouted, but nothing claims it was verified.
+fn spawn_manual_batch(cases: Vec<RunCase>) -> (Receiver<RunEvent>, Sender<()>) {
+    let (tx, rx) = mpsc::channel();
+    let (cancel_tx, _cancel_rx) = mpsc::channel();
     for case in cases {
-        match case_engine_mode(case) {
-            Some(teshi_core::EngineMode::Mixed) => mixed.push(case.clone()),
-            _ => rest.push(case.clone()),
+        let _ = tx.send(RunEvent::StartCase {
+            case_id: case.id.clone(),
+            name: Some(case.scenario),
+        });
+        let _ = tx.send(RunEvent::CaseSkipped {
+            case_id: case.id,
+            reason: Some(MANUAL_SKIP_REASON.into()),
+        });
+    }
+    let _ = tx.send(RunEvent::RunnerExit {
+        code: None,
+        success: true,
+    });
+    (rx, cancel_tx)
+}
+
+fn replay_executor(target: ReplayTarget) -> Executor {
+    // The replay subcommands live in the `teshi` binary itself; fall back to
+    // PATH lookup when the running executable cannot be resolved.
+    let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("teshi"));
+    Executor::Replay { target, program }
+}
+
+/// Replays each case in its own `teshi <target> replay` process.
+///
+/// The child reports step events and one terminal case event through
+/// `--emit-runner-protocol`; a case it leaves unreported fails with its last
+/// diagnostic line. Cancellation stops the active child and leaves the
+/// remaining cases unreported, so the orchestrator marks them skipped.
+fn spawn_replay_batch(
+    target: ReplayTarget,
+    program: PathBuf,
+    project_root: PathBuf,
+    cases: Vec<RunCase>,
+) -> (Receiver<RunEvent>, Sender<()>) {
+    let (tx, rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let mut cancelled = false;
+        for case in &cases {
+            if cancelled || matches!(cancel_rx.try_recv(), Ok(())) {
+                cancelled = true;
+                break;
+            }
+            let _ = tx.send(RunEvent::StartCase {
+                case_id: case.id.clone(),
+                name: Some(case.scenario.clone()),
+            });
+            match replay_one_case(target, &program, &project_root, case, &tx, &cancel_rx) {
+                Ok(stopped) => cancelled = stopped,
+                Err(error) => {
+                    let _ = tx.send(RunEvent::CaseFailed {
+                        case_id: case.id.clone(),
+                        duration_ms: None,
+                        error: RunError {
+                            message: format!("{error:#}"),
+                            stack: None,
+                            attachments: Vec::new(),
+                        },
+                    });
+                }
+            }
+        }
+        let _ = tx.send(RunEvent::RunnerExit {
+            code: None,
+            success: !cancelled,
+        });
+    });
+    (rx, cancel_tx)
+}
+
+/// Runs one replay child and forwards its events. Returns whether the run was
+/// cancelled while it was active.
+fn replay_one_case(
+    target: ReplayTarget,
+    program: &Path,
+    project_root: &Path,
+    case: &RunCase,
+    tx: &Sender<RunEvent>,
+    cancel_rx: &Receiver<()>,
+) -> Result<bool> {
+    let feature = Path::new(&case.feature_path);
+    let relative = teshi_engine::run_routing::relative_feature_path(project_root, feature)
+        .with_context(|| {
+            format!(
+                "{} is outside the project root {}",
+                feature.display(),
+                project_root.display()
+            )
+        })?;
+    let mut command = Command::new(program);
+    command
+        .args([target.subcommand(), "replay", "--feature", &relative])
+        .args(["--scenario", &case.scenario, "--non-interactive"])
+        .args(["--emit-runner-protocol", &case.id])
+        .current_dir(project_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let started = std::time::Instant::now();
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("start {} {} replay", program.display(), target.subcommand()))?;
+
+    let stderr_thread = child.stderr.take().map(|stderr| {
+        let tx = tx.clone();
+        let case_id = case.id.clone();
+        thread::spawn(move || {
+            let mut last = None;
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    last = Some(line.clone());
+                }
+                let _ = tx.send(RunEvent::Log {
+                    case_id: Some(case_id.clone()),
+                    message: line,
+                });
+            }
+            last
+        })
+    });
+    let stdout_thread = child.stdout.take().map(|stdout| {
+        let tx = tx.clone();
+        let case_id = case.id.clone();
+        thread::spawn(move || {
+            let mut reported = false;
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                match parse_event_line(&line) {
+                    // A replay speaks only for the case it was started for.
+                    Some(event) if event_case_id(&event) == Some(case_id.as_str()) => {
+                        reported |= case_outcome(&event).is_some();
+                        let _ = tx.send(event);
+                    }
+                    _ => {
+                        let _ = tx.send(RunEvent::Log {
+                            case_id: Some(case_id.clone()),
+                            message: line,
+                        });
+                    }
+                }
+            }
+            reported
+        })
+    });
+
+    let mut cancelled = false;
+    let status = loop {
+        if !cancelled && matches!(cancel_rx.try_recv(), Ok(())) {
+            cancelled = true;
+            if let Err(error) = stop_runner_tree(&mut child) {
+                let _ = tx.send(RunEvent::Log {
+                    case_id: Some(case.id.clone()),
+                    message: format!("Could not stop replay process tree: {error}"),
+                });
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let reported = stdout_thread
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or(false);
+    let last_diagnostic = stderr_thread.and_then(|handle| handle.join().ok().flatten());
+    if !reported && !cancelled {
+        let detail = last_diagnostic.unwrap_or_else(|| format!("exit status {status}"));
+        let _ = tx.send(RunEvent::CaseFailed {
+            case_id: case.id.clone(),
+            duration_ms: Some(started.elapsed().as_millis() as u64),
+            error: RunError {
+                message: format!(
+                    "{} replay exited without reporting a result: {detail}",
+                    target.subcommand()
+                ),
+                stack: None,
+                attachments: Vec::new(),
+            },
+        });
+    }
+    Ok(cancelled)
+}
+
+fn event_case_id(event: &RunEvent) -> Option<&str> {
+    match event {
+        RunEvent::StartCase { case_id, .. }
+        | RunEvent::CasePassed { case_id, .. }
+        | RunEvent::CaseFailed { case_id, .. }
+        | RunEvent::CaseSkipped { case_id, .. }
+        | RunEvent::CaseBlocked { case_id, .. } => Some(case_id),
+        RunEvent::StartStep { case_id, .. }
+        | RunEvent::EndStep { case_id, .. }
+        | RunEvent::Log { case_id, .. }
+        | RunEvent::Artifact { case_id, .. } => case_id.as_deref(),
+        _ => None,
+    }
+}
+
+/// Runs routed batches sequentially as one logical run.
+///
+/// The returned stream has exactly one `StartRun`, one aggregated `EndRun`
+/// (including `blocked`), and one terminal event: `RunnerError` when any
+/// executor failed to run or violated the protocol (consumers stop reading at
+/// that point), otherwise `RunnerExit`. Every case receives a terminal case
+/// event: cases an executor never reported fail, and cases left behind by a
+/// cancellation are skipped. Sending on the returned handle cancels the active
+/// batch and skips the remaining ones.
+pub fn spawn_routed_run(
+    project_root: PathBuf,
+    batches: Vec<ExecBatch>,
+    meta: HashMap<String, String>,
+) -> (Receiver<RunEvent>, Sender<()>) {
+    let (tx, rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let total = batches.iter().map(|batch| batch.cases.len()).sum();
+        let _ = tx.send(RunEvent::StartRun {
+            run_id: None,
+            total: Some(total),
+        });
+        let mut outcomes: HashMap<String, CaseOutcome> = HashMap::new();
+        let mut errors = Vec::new();
+        let mut all_exits_ok = true;
+        let mut cancelled = false;
+        for batch in &batches {
+            if !cancelled {
+                cancelled = matches!(cancel_rx.try_recv(), Ok(()));
+            }
+            if !cancelled {
+                let _ = tx.send(RunEvent::Log {
+                    case_id: None,
+                    message: format!("runner {}: {} scenario(s)", batch.name, batch.cases.len()),
+                });
+                match spawn_batch(batch, &project_root, &meta) {
+                    Ok((batch_rx, batch_cancel)) => {
+                        let exit_ok = forward_batch(
+                            batch,
+                            &batch_rx,
+                            &batch_cancel,
+                            &cancel_rx,
+                            &tx,
+                            &mut outcomes,
+                            &mut errors,
+                            &mut cancelled,
+                        );
+                        all_exits_ok &= exit_ok;
+                    }
+                    Err(error) => {
+                        all_exits_ok = false;
+                        errors.push(format!("{}: {error:#}", batch.name));
+                    }
+                }
+            }
+            // Every case must end with a result so summaries stay complete.
+            for case in &batch.cases {
+                if outcomes.contains_key(&case.id) {
+                    continue;
+                }
+                let event = if cancelled {
+                    outcomes.insert(case.id.clone(), CaseOutcome::Skipped);
+                    RunEvent::CaseSkipped {
+                        case_id: case.id.clone(),
+                        reason: Some("run cancelled".into()),
+                    }
+                } else {
+                    outcomes.insert(case.id.clone(), CaseOutcome::Failed);
+                    RunEvent::CaseFailed {
+                        case_id: case.id.clone(),
+                        duration_ms: None,
+                        error: RunError {
+                            message: format!("runner {} did not report a result", batch.name),
+                            stack: None,
+                            attachments: Vec::new(),
+                        },
+                    }
+                };
+                let _ = tx.send(event);
+            }
+        }
+        let count = |wanted: CaseOutcome| outcomes.values().filter(|o| **o == wanted).count();
+        let failed = count(CaseOutcome::Failed);
+        let blocked = count(CaseOutcome::Blocked);
+        let _ = tx.send(RunEvent::EndRun {
+            passed: count(CaseOutcome::Passed),
+            failed,
+            skipped: count(CaseOutcome::Skipped),
+            blocked,
+        });
+        if errors.is_empty() {
+            let _ = tx.send(RunEvent::RunnerExit {
+                code: None,
+                success: all_exits_ok && !cancelled && failed == 0 && blocked == 0,
+            });
+        } else {
+            let _ = tx.send(RunEvent::RunnerError {
+                message: errors.join("; "),
+            });
+        }
+    });
+    (rx, cancel_tx)
+}
+
+/// Forwards one batch's events into the routed stream and returns whether the
+/// executor exited successfully.
+#[allow(clippy::too_many_arguments)] // Shared orchestration state threaded through one loop.
+fn forward_batch(
+    batch: &ExecBatch,
+    batch_rx: &Receiver<RunEvent>,
+    batch_cancel: &Sender<()>,
+    cancel_rx: &Receiver<()>,
+    tx: &Sender<RunEvent>,
+    outcomes: &mut HashMap<String, CaseOutcome>,
+    errors: &mut Vec<String>,
+    cancelled: &mut bool,
+) -> bool {
+    let mut exit_ok = false;
+    loop {
+        if !*cancelled && matches!(cancel_rx.try_recv(), Ok(())) {
+            *cancelled = true;
+            let _ = batch_cancel.send(());
+        }
+        let event = match batch_rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(event) => event,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        match event {
+            // The orchestrator owns run framing for the merged stream.
+            RunEvent::StartRun { .. } | RunEvent::EndRun { .. } => {}
+            RunEvent::RunnerExit { success, .. } => {
+                exit_ok = success;
+                break;
+            }
+            RunEvent::RunnerError { message } => {
+                let _ = tx.send(RunEvent::Log {
+                    case_id: None,
+                    message: format!("runner {} error: {message}", batch.name),
+                });
+                errors.push(format!("{}: {message}", batch.name));
+            }
+            event => {
+                if let Some((case_id, outcome)) = case_outcome(&event)
+                    && batch.cases.iter().any(|case| case.id == case_id)
+                {
+                    outcomes.insert(case_id.to_string(), outcome);
+                }
+                let _ = tx.send(event);
+            }
         }
     }
-    Ok((mixed, rest))
+    exit_ok
 }
 
 #[cfg(test)]
@@ -1537,34 +2139,84 @@ mod tests {
     }
 
     #[test]
-    fn parse_event_line_ignores_unknown_types() {
-        assert!(parse_event_line(r#"{"type":"not_a_real_event"}"#).is_none());
+    fn parse_event_line_keeps_unknown_types_for_forwarding() {
+        let event = parse_event_line(r#"{"type":"end_example","case_id":"c","example_line":7}"#)
+            .expect("unknown protocol events are kept");
+        assert!(
+            matches!(&event, RunEvent::Other(value) if value["example_line"] == 7),
+            "unexpected event: {event:?}"
+        );
+        assert_eq!(event.to_protocol_json()["type"], "end_example");
+        assert!(parse_event_line(r#"{"no_type":true}"#).is_none());
+        assert!(parse_event_line("plain text").is_none());
     }
 
     #[test]
-    fn cli_runner_cmd_loads_without_relying_on_engine() {
-        let cfg = load_runner_config(Some(RunnerCliOverride {
-            cmd: Some("teshi-requirement-cli-runner".into()),
-            args: vec!["--quiet".into()],
-            cwd: Some(PathBuf::from(".")),
-        }))
-        .expect("cli runner override");
-        assert_eq!(cfg.cmd, "teshi-requirement-cli-runner");
-        assert_eq!(cfg.args, vec!["--quiet"]);
+    fn test_protocol_json_round_trips_core_events_without_nulls() {
+        let cases = [
+            r#"{"type":"case_blocked","case_id":"c","reason":"no session","category":"target_unavailable"}"#,
+            r#"{"type":"end_run","passed":1,"failed":0,"skipped":0,"blocked":1}"#,
+            r#"{"type":"case_passed","case_id":"c","duration_ms":3}"#,
+            r#"{"type":"start_case","case_id":"c","name":"Login"}"#,
+        ];
+        for line in cases {
+            let expected: serde_json::Value = serde_json::from_str(line).expect("fixture json");
+            let event = parse_event_line(line).expect("parse");
+            assert_eq!(event.to_protocol_json(), expected, "round trip of {line}");
+        }
+        let start = RunEvent::StartRun {
+            run_id: None,
+            total: Some(2),
+        }
+        .to_protocol_json();
+        assert!(
+            RunnerHandshake::from_first_event(&start).is_ok(),
+            "teshi run output must open with a valid v1 handshake: {start}"
+        );
+        assert!(
+            start.get("run_id").is_none(),
+            "absent fields are omitted: {start}"
+        );
     }
 
     #[test]
-    fn project_runner_config_is_loaded_from_the_explicit_root() {
+    fn test_parse_event_line_reads_case_blocked_and_blocked_count() {
+        let event = parse_event_line(
+            r#"{"type":"case_blocked","case_id":"c1","reason":"no browser","category":"target_unavailable"}"#,
+        )
+        .expect("parse case_blocked");
+        assert!(
+            matches!(&event, RunEvent::CaseBlocked { case_id, reason: Some(reason), category: Some(category) }
+                if case_id == "c1" && reason == "no browser" && category == "target_unavailable"),
+            "unexpected event: {event:?}"
+        );
+        let end =
+            parse_event_line(r#"{"type":"end_run","passed":1,"failed":0,"skipped":0,"blocked":2}"#)
+                .expect("parse end_run");
+        assert!(
+            matches!(end, RunEvent::EndRun { blocked: 2, .. }),
+            "unexpected event: {end:?}"
+        );
+    }
+
+    #[test]
+    fn test_project_routes_keep_legacy_config_error_for_run_time() {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(
             project.path().join("teshi.toml"),
-            "[runner]\ncmd = \"project-runner\"\ncwd = \".teshi\"\n",
+            "[runner]\ncmd = \"project-runner\"\n",
         )
         .expect("write project config");
-        let config =
-            load_runner_config_for_project(project.path(), None).expect("project runner config");
-        assert_eq!(config.cmd, "project-runner");
-        assert_eq!(config.cwd, Some(project.path().join(".teshi")));
+        let routes = load_project_routes(project.path());
+        let error = routes
+            .as_ref()
+            .expect_err("legacy [runner] must be rejected");
+        assert!(
+            error.contains("[[runners]]"),
+            "missing migration hint: {error}"
+        );
+        let started = start_routed_run(project.path(), &routes, Vec::new());
+        assert!(started.is_err(), "a legacy config must not start a run");
     }
 
     #[test]
@@ -1584,11 +2236,7 @@ mod tests {
                 env: HashMap::new(),
             }
         };
-        let request = RunRequest {
-            command: "run".into(),
-            cases: Vec::new(),
-            meta: HashMap::new(),
-        };
+        let request = RunRequest::run(Vec::new(), HashMap::new());
         let (rx, cancel) = spawn_runner_with_control(config, request).expect("spawn runner");
         std::thread::sleep(Duration::from_millis(100));
         cancel.send(()).expect("send cancellation");
@@ -1646,9 +2294,10 @@ mod tests {
             case_id: "f0:s0".into(),
             duration_ms: Some(12),
         });
-        collector.observe(&RunEvent::CaseSkipped {
+        collector.observe(&RunEvent::CaseBlocked {
             case_id: "f0:s1".into(),
-            reason: Some("blocked: browser session unavailable".into()),
+            reason: Some("browser session unavailable".into()),
+            category: Some("target_unavailable".into()),
         });
         collector.finish(true);
 
@@ -1658,6 +2307,10 @@ mod tests {
         assert_eq!(collector.report.cases[0].steps[0].status, "passed");
         assert_eq!(collector.report.cases[0].attachments[0].path, "screen.txt");
         assert_eq!(collector.report.cases[1].status, "blocked");
+        assert_eq!(
+            collector.report.cases[1].error.as_deref(),
+            Some("[target_unavailable] browser session unavailable")
+        );
     }
 }
 
@@ -1670,6 +2323,10 @@ mod evidence_tests {
         if std::env::var_os("TESHI_EVIDENCE_RUNNER_CHILD").is_none() {
             return;
         }
+        println!(
+            "{}",
+            serde_json::json!({"type":"start_run","total":1,"protocol_version":1,"capabilities":["steps"]})
+        );
         println!(
             "{}",
             serde_json::json!({"type":"end_step","case_id":"case","step_id":"case:L3","status":"passed"})
@@ -1709,9 +2366,8 @@ mod evidence_tests {
             if nonvisual {
                 meta.insert("runner_mode".into(), "cli".into());
             }
-            let request = RunRequest {
-                command: "run".into(),
-                cases: vec![RunCase {
+            let request = RunRequest::run(
+                vec![RunCase {
                     id: "case".into(),
                     feature_path: "case.feature".into(),
                     scenario: "Output".into(),
@@ -1719,7 +2375,7 @@ mod evidence_tests {
                     until_line: None,
                 }],
                 meta,
-            };
+            );
             let (tx, rx) = mpsc::channel();
             let (_cancel, cancel_rx) = mpsc::channel();
             run_child(config, request, tx, cancel_rx).unwrap();
@@ -1744,5 +2400,201 @@ mod evidence_tests {
             );
             assert!(directory.join("stderr.txt").is_file());
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    const CHILD_MODE: &str = "TESHI_PROTOCOL_CHILD_MODE";
+    const CHILD_CASE: &str = "TESHI_PROTOCOL_CHILD_CASE";
+
+    /// Re-entered as a runner process; the mode selects its protocol behavior.
+    #[test]
+    fn protocol_runner_child() {
+        let (Ok(mode), Ok(case)) = (std::env::var(CHILD_MODE), std::env::var(CHILD_CASE)) else {
+            return;
+        };
+        let handshake = |capabilities: &[&str]| {
+            println!(
+                "{}",
+                serde_json::json!({"type":"start_run","total":1,"protocol_version":1,"capabilities":capabilities})
+            );
+        };
+        match mode.as_str() {
+            "pass" => {
+                handshake(&[]);
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"case_passed","case_id":case})
+                );
+            }
+            "blocked" => {
+                handshake(&["blocked"]);
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"case_blocked","case_id":case,"reason":"no session","category":"target_unavailable"})
+                );
+            }
+            "undeclared" => {
+                handshake(&[]);
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"case_blocked","case_id":case,"reason":"no session"})
+                );
+            }
+            "silent" => {
+                handshake(&[]);
+            }
+            _ => {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"case_passed","case_id":case})
+                );
+            }
+        }
+    }
+
+    fn child_batch(name: &str, mode: &str, case_id: &str) -> ExecBatch {
+        ExecBatch {
+            name: name.into(),
+            executor: Executor::Process(RunnerConfig {
+                cmd: std::env::current_exe()
+                    .expect("test executable")
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    "--exact".into(),
+                    "runner::protocol_tests::protocol_runner_child".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: None,
+                env: HashMap::from([
+                    (CHILD_MODE.into(), mode.into()),
+                    (CHILD_CASE.into(), case_id.into()),
+                ]),
+            }),
+            cases: vec![RunCase {
+                id: case_id.into(),
+                feature_path: "case.feature".into(),
+                scenario: case_id.into(),
+                line_number: None,
+                until_line: None,
+            }],
+        }
+    }
+
+    fn run_batches(batches: Vec<ExecBatch>) -> Vec<RunEvent> {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let meta = HashMap::from([(
+            "project_root".into(),
+            project.path().to_string_lossy().into_owned(),
+        )]);
+        let (rx, _cancel) = spawn_routed_run(project.path().to_path_buf(), batches, meta);
+        rx.iter().collect()
+    }
+
+    fn end_run(events: &[RunEvent]) -> (usize, usize, usize, usize) {
+        events
+            .iter()
+            .find_map(|event| match event {
+                RunEvent::EndRun {
+                    passed,
+                    failed,
+                    skipped,
+                    blocked,
+                } => Some((*passed, *failed, *skipped, *blocked)),
+                _ => None,
+            })
+            .expect("routed run must end with end_run")
+    }
+
+    #[test]
+    fn test_routed_run_merges_batches_into_one_framed_run() {
+        let events = run_batches(vec![
+            child_batch("api", "pass", "a"),
+            child_batch("web", "blocked", "b"),
+            child_batch("cli", "silent", "c"),
+        ]);
+        let starts = events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::StartRun { .. }))
+            .count();
+        assert_eq!(starts, 1, "events: {events:?}");
+        assert!(
+            matches!(
+                events.first(),
+                Some(RunEvent::StartRun { total: Some(3), .. })
+            ),
+            "events: {events:?}"
+        );
+        assert_eq!(end_run(&events), (1, 1, 0, 1), "events: {events:?}");
+        assert!(
+            events.iter().any(
+                |event| matches!(event, RunEvent::CaseFailed { case_id, error, .. }
+                if case_id == "c" && error.message.contains("did not report"))
+            ),
+            "an unreported case must fail: {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(RunEvent::RunnerExit { success: false, .. })
+            ),
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_manual_cases_are_skipped_without_failing_the_run() {
+        let mut manual = child_batch("manual", "unused", "m");
+        manual.executor = Executor::Manual;
+        let events = run_batches(vec![manual]);
+        assert!(
+            events.iter().any(
+                |event| matches!(event, RunEvent::CaseSkipped { case_id, reason }
+                if case_id == "m" && reason.as_deref() == Some(MANUAL_SKIP_REASON))
+            ),
+            "events: {events:?}"
+        );
+        assert_eq!(end_run(&events), (0, 0, 1, 0), "events: {events:?}");
+        assert!(
+            matches!(
+                events.last(),
+                Some(RunEvent::RunnerExit { success: true, .. })
+            ),
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_runner_without_handshake_is_rejected() {
+        let events = run_batches(vec![child_batch("legacy", "no_handshake", "a")]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RunEvent::CasePassed { .. })),
+            "pre-handshake results must not be accepted: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(RunEvent::RunnerError { message }) if message.contains("handshake")),
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_undeclared_capability_is_a_protocol_violation() {
+        let events = run_batches(vec![child_batch("web", "undeclared", "a")]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RunEvent::CaseBlocked { .. })),
+            "undeclared events must not be forwarded: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(RunEvent::RunnerError { message }) if message.contains("protocol violation")),
+            "events: {events:?}"
+        );
     }
 }

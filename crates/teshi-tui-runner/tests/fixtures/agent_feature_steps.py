@@ -917,7 +917,7 @@ class World:
 
 def main():
     request = json.load(sys.stdin)
-    emit("start_run", total=len(request["cases"]))
+    emit("start_run", total=len(request["cases"]), protocol_version=1, capabilities=["steps"])
     failed = 0
     for case in request["cases"]:
         emit("start_case", case_id=case["id"], name=case["scenario"])

@@ -178,6 +178,8 @@ Embedded remains project-owned. Chrome uses one loopback broker per OS user sess
 
 Use `teshi browser replay --non-interactive` for CI-style browser setup from confirmed step-bindings. Interactive replay remains the default for terminal agents so each step can be reviewed before execution.
 
+To run web scenarios with `teshi run` or the TUI, route them to `builtin = "browser"` in `teshi.toml` `[[runners]]`. Each scenario is replayed non-interactively; a missing or unreachable endpoint is reported as blocked (exit code `3` when nothing failed). See [runner-protocol.md](runner-protocol.md).
+
 For headless CI without the desktop UI, start the embedded sidecar with:
 
 ```bash

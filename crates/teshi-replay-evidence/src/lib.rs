@@ -210,7 +210,7 @@ impl ReplayEvidenceRun {
         }
         if matches!(
             event["type"].as_str(),
-            Some("case_passed" | "case_failed" | "end_example")
+            Some("case_passed" | "case_failed" | "case_blocked" | "end_example")
         ) {
             let case = event["case_id"].as_str().unwrap_or_default();
             let case = if event["type"] == "end_example" {
@@ -221,6 +221,8 @@ impl ReplayEvidenceRun {
             let counts = teshi_core::replay_evidence::summarize_case(&self.snapshot.events, &case);
             let test = if event["type"] == "case_passed" || event["status"] == "passed" {
                 "passed"
+            } else if event["type"] == "case_blocked" {
+                "blocked"
             } else {
                 "failed"
             };
@@ -245,6 +247,10 @@ impl ReplayEvidenceRun {
                 status
             } else if event["failed"].as_u64().unwrap_or(0) > 0 {
                 "failed"
+            } else if event["blocked"].as_u64().unwrap_or(0) > 0 {
+                // Unavailable targets never count as a pass, but stay
+                // distinguishable from assertion failures.
+                "blocked"
             } else {
                 "passed"
             }

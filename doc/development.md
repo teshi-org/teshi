@@ -50,9 +50,9 @@ For another application, install the runner with
 `cargo install --path crates/teshi-tui-runner --profile dev --locked`, record a
 `name.tui.json` sidecar next to `name.feature`, then run `teshi tui name.feature`.
 Use `--scenario NAME` to select a scenario and `--runner-cmd PATH` or
-`TESHI_TUI_RUNNER` to locate the runner. `teshi run` and Explore select it when all
-selected Features have TUI sidecars and no external runner is configured.
-Explicit external runner configuration retains precedence. See
+`TESHI_TUI_RUNNER` to locate the runner. `teshi run` and Explore use it only
+through a `builtin = "tui"` rule in `teshi.toml` `[[runners]]`; sidecars never
+select a runner implicitly (see [runner-protocol.md](runner-protocol.md)). See
 [the runner guide](../crates/teshi-tui-runner/README.md) for the action schema,
 failure evidence and current Gherkin limitations.
 

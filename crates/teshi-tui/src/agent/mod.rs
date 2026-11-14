@@ -1282,11 +1282,6 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
     let feature_path_filter = args.get("feature_path").and_then(|v| v.as_str());
     let scenario_name_filter = args.get("scenario_name").and_then(|v| v.as_str());
 
-    let runner_config = app
-        .runner_config
-        .clone()
-        .context("no test runner configured. Set up a runner in .teshi/config.toml")?;
-
     // Build run cases from project features
     let mut cases: Vec<crate::runner::RunCase> = Vec::new();
     for feature in app.feature_scope(feature_path_filter) {
@@ -1313,18 +1308,14 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
     }
 
     let total = cases.len();
-    let request = crate::runner::RunRequest {
-        command: "run".to_string(),
-        cases,
-        meta: Default::default(),
-    };
-
-    let rx = crate::runner::spawn_runner(runner_config, request)
-        .context("failed to spawn test runner")?;
+    let (rx, _cancel) =
+        crate::runner::start_routed_run(&app.project.root_dir, &app.run_routes, cases)
+            .context("failed to start test run")?;
 
     let mut passed = 0u32;
     let mut failed = 0u32;
     let mut skipped = 0u32;
+    let mut blocked = 0u32;
     let mut details: Vec<String> = Vec::new();
 
     loop {
@@ -1362,6 +1353,21 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
                         reason.unwrap_or_else(|| "unknown".to_string())
                     ));
                 }
+                crate::runner::RunEvent::CaseBlocked {
+                    case_id,
+                    reason,
+                    category,
+                } => {
+                    blocked += 1;
+                    details.push(format!(
+                        "  BLOCK {}: {}",
+                        case_id,
+                        crate::runner::blocked_message(reason.as_deref(), category.as_deref())
+                    ));
+                }
+                crate::runner::RunEvent::RunnerError { message } => {
+                    details.push(format!("  ERROR runner: {message}"));
+                }
                 _ => {}
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1374,7 +1380,7 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
     }
 
     Ok(format!(
-        "Test run complete: {passed} passed, {failed} failed, {skipped} skipped out of {total} total.\n\nDetails:\n{}",
+        "Test run complete: {passed} passed, {failed} failed, {skipped} skipped, {blocked} blocked out of {total} total.\n\nDetails:\n{}",
         details.join("\n")
     ))
 }

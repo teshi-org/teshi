@@ -126,7 +126,18 @@ or add a custom behave step definition.
 
 See [winui-automation-ids.md](winui-automation-ids.md) for app-side `AutomationId` conventions.
 
-When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards scenarios to `teshi winapp replay` via the NDJSON runner.
+To run WinApp scenarios with `teshi run` or the TUI, route them to the builtin
+executor in `teshi.toml`; each scenario is replayed with `teshi winapp replay
+--scenario`, and a missing service or window is reported as blocked (see
+[runner-protocol.md](runner-protocol.md)):
+
+```toml
+[[runners]]
+name = "winapp"
+builtin = "winapp"
+[runners.match]
+tags = ["@winapp"]
+```
 
 ## Supported actions
 

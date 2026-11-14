@@ -35,6 +35,7 @@ teshi-agent-runtime.workspace = true
 teshi-core.workspace = true
 teshi-engine.workspace = true
 teshi-web-protocol.workspace = true
+thiserror = "2"
 tracing.workspace = true
 tokio.workspace = true
 toml = "0.8"

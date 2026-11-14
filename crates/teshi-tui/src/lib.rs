@@ -29,6 +29,8 @@ mod mindmap;
 mod profiles;
 mod project_context;
 mod runner;
+
+pub use runner::{RUN_BLOCKED_EXIT_CODE, RunBlocked};
 mod session;
 mod terminal_title;
 mod test_frame;
@@ -267,11 +269,15 @@ pub fn run() -> Result<()> {
             runner_arg,
             runner_cwd,
             report,
+            explain,
+            json,
             feature,
         }) => {
-            let opts = cli::Command::run_options(
+            let mut opts = cli::Command::run_options(
                 path, scenario, runner_cmd, runner_arg, runner_cwd, report, feature,
             );
+            opts.explain = explain;
+            opts.json = json;
             return runner::run_with_options(opts);
         }
         Some(cli::Command::Steps { action }) => {
