@@ -2970,12 +2970,16 @@ impl App {
             return false;
         }
         if self.authoring_ui.search_active {
-            // Control chords stay global (Ctrl+Q quits, Ctrl+S saves) rather
-            // than becoming query text.
+            // Control chords are commands, not query text. Leave input mode
+            // before handing them to the keymap, so a following chord key
+            // (Ctrl+W then `l`) or a focus change (Ctrl+N) never sees a stale
+            // search state that would swallow the next plain key.
             if event
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
             {
+                self.authoring_ui.search_active = false;
+                self.authoring_ui.commit_requirement_search();
                 return false;
             }
             match event.code {
@@ -3013,7 +3017,7 @@ impl App {
     }
 
     pub(crate) fn paste_requirement_search(&mut self, text: &str) {
-        for ch in text.chars() {
+        for ch in text.chars().filter(|ch| !ch.is_control()) {
             if !self
                 .handle_requirement_search_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
             {
@@ -4009,6 +4013,53 @@ mod tests {
                 "Esc clears the filter"
             );
             assert_eq!(app.authoring_ui.project_filtered_index().documents.len(), 2);
+        });
+    }
+
+    #[test]
+    fn tree_search_control_chord_leaves_input_mode() {
+        with_isolated_app_data(|| {
+            let mut app = App::from_args().unwrap();
+            app.active_tab = MainTab::Requirements;
+            app.authoring_ui = sample_authoring_state();
+            assert!(app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE
+            )));
+            app.paste_requirement_search("log");
+            assert!(app.authoring_ui.search_active);
+
+            // Ctrl+S reaches the keymap but must not leave the tree capturing
+            // the next plain key as query text (e.g. Ctrl+W's second key).
+            assert!(!app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL
+            )));
+            assert!(!app.authoring_ui.search_active);
+            assert_eq!(app.authoring_ui.search_query, "log");
+            assert!(!app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            )));
+            assert_eq!(
+                app.authoring_ui.search_query, "log",
+                "plain keys are no longer query text"
+            );
+        });
+    }
+
+    #[test]
+    fn tree_search_paste_ignores_control_characters() {
+        with_isolated_app_data(|| {
+            let mut app = App::from_args().unwrap();
+            app.active_tab = MainTab::Requirements;
+            app.authoring_ui = sample_authoring_state();
+            assert!(app.handle_requirement_search_key(KeyEvent::new(
+                KeyCode::Char('/'),
+                KeyModifiers::NONE
+            )));
+            app.paste_requirement_search("lo\ngin");
+            assert_eq!(app.authoring_ui.search_query, "login");
         });
     }
 
