@@ -23352,5 +23352,4 @@ Feature: B
         assert!(App::is_url_allowed("https://Example.com", &whitelist));
         assert!(!App::is_url_allowed("https://example.com", &whitelist));
     }
-
 }
