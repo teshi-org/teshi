@@ -136,7 +136,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -171,7 +171,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -206,7 +206,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -241,7 +241,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -276,7 +276,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -311,7 +311,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -346,7 +346,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -381,7 +381,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -416,7 +416,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150
@@ -451,7 +451,7 @@
         },
         {
           "action": "expect_stable_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000,
           "stable_ms": 150

@@ -136,7 +136,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -170,7 +170,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -204,7 +204,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -238,7 +238,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -272,7 +272,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -306,7 +306,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -340,7 +340,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -374,7 +374,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -408,7 +408,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }
@@ -442,7 +442,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 120000
         }

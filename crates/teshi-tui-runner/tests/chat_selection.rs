@@ -293,8 +293,10 @@ fn native_chat_copy_command_reads_completed_responses() {
         .expect_text("NATIVE_REPLY_01", true, 15000)
         .unwrap();
     // A visible streamed chunk precedes completion; wait for the rendered
-    // idle indicator before submitting another turn.
-    terminal.expect_text("○ native first", true, 15000).unwrap();
+    // completion marker before submitting another turn. A finished turn keeps
+    // the green unread dot until the user touches the conversation, and a
+    // runner-driven turn ends without further input.
+    terminal.expect_text("● native first", true, 15000).unwrap();
 
     terminal.write("native second response").unwrap();
     terminal.key("Enter").unwrap();
@@ -315,7 +317,7 @@ fn native_chat_copy_command_reads_completed_responses() {
     terminal
         .expect_text("NATIVE_REPLY_02", true, 15000)
         .unwrap();
-    terminal.expect_text("○ native first", true, 15000).unwrap();
+    terminal.expect_text("● native first", true, 15000).unwrap();
 
     terminal.write("/copy 2").unwrap();
     terminal.expect_text("/copy 2", true, 5000).unwrap();

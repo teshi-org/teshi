@@ -259,7 +259,9 @@ fn verify_wrapped_chat(source: &str, batches: &[(usize, usize)]) {
                 long_prompt(turn),
                 key("Enter"),
                 text(&format!("WRAPPED_REPLY_{turn:02}")),
-                text("│ ○ Conversation"),
+                // A finished turn leaves the green unread dot until the user
+                // touches the conversation; the runner ends without input.
+                text("│ ● Conversation"),
             ]);
         }
         actions.push(batch);

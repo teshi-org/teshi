@@ -377,7 +377,7 @@
         },
         {
           "action": "expect_text",
-          "text": "│ ○ ",
+          "text": "│ ● ",
           "visible": true,
           "timeout_ms": 15000
         }
