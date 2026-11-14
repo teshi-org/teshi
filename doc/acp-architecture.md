@@ -168,12 +168,14 @@ Teshi tools, including requirement inspection, `submit_requirements`,
 An external agent may prefix these names with the MCP server name.
 
 Calls return to the owning live TUI through an authenticated loopback bridge;
-the existing AgentHost executes them on the UI thread. Test points appear in
-the Test Points tab and still require human review followed by Continue.
-Auto/Bypass file permissions do not grant that review. Manual file edits keep
-their MCP response pending until acceptance or rejection. Accepted scenario
-edits remain in editor buffers until the user saves, matching native editing;
-validation checks those buffers. Cancelled or disconnected pending edits
+the existing AgentHost executes them on the UI thread. Under the default Strict
+review policy, test points appear in the Test Points tab and require human
+review followed by Continue; Auto/Bypass file permissions do not grant that
+review. Under the user-authorized Direct (no-review) policy the generation goes
+straight to planning/writing and `propose_test_points` is not used. Manual file
+edits keep their MCP response pending until acceptance or rejection. Accepted
+scenario edits remain in editor buffers until the user saves, matching native
+editing; validation checks those buffers. Cancelled or disconnected pending edits
 cannot be accepted. Replacing or stopping the backend closes its bridge.
 If a manual acceptance fails, its MCP caller receives the error and the failed
 approval is cleared. The STDIO proxy continues reading while calls wait;

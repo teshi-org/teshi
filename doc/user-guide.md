@@ -50,20 +50,27 @@ Chat interface with an LLM-powered function-calling agent. The agent can inspect
 | `get_feature_content` | Full parsed content of a `.feature` file |
 | `highlight_mindmap_nodes` | Highlight MindMap nodes matching a condition |
 | `apply_mindmap_filter` | Filter the MindMap tree by node name |
-| `submit_requirements` | Record gathered requirements / document sources; advances to test-point proposal |
-| `propose_test_points` | Persist Proposed non-Gherkin test points and pause for human review |
-| `generate_plan` | Record a scenario plan from **approved** test-point IDs only |
-| `insert_scenario` | Insert a new scenario (queues for user approval; embeds `@teshi-tp:<id>` tags) |
+| `submit_requirements` | Record gathered requirements / document sources; advances to test-point proposal (Strict) or Scenario Planning (Direct) |
+| `propose_test_points` | Persist Proposed non-Gherkin test points and pause for human review (Strict policy only) |
+| `generate_plan` | Record a scenario plan from **approved** test-point IDs (Strict) or with empty/omitted `test_point_ids` (Direct) |
+| `insert_scenario` | Insert a new scenario (queues for user approval; embeds `@teshi-tp:<id>` tags when IDs exist) |
 | `update_step` | Update a step body (queues for user approval) |
 
 Editing tools queue file changes for your approval: `Y` to accept, `N`/`Esc` to reject, `D` to view a diff.
 
-**Test-point approval is a separate hard gate.** `ApprovalMode` Auto/Bypass only affects file-change queues; it never approves test points or skips Reviewing Test Points.
+**Human test-point review is an optional policy, not a fixed gate.** Two review policies apply per generation session:
+
+- **Strict** (default) — test points are proposed, then a human approves them in the Test Points tab before planning. `ApprovalMode` Auto/Bypass only affects file-change queues; it never approves test points or skips Reviewing Test Points.
+- **Direct** — the user explicitly authorizes no-review generation. The pipeline goes straight from gathering to planning and writing. No test points are persisted, scenarios may omit `test_point_ids`, no `@teshi-tp:<id>` tags are emitted, and no approval records are fabricated. The chosen policy and the authorization basis are stored in `.teshi/generation-state.json`, so a resumed session does not fall back into the review gate; one authorization stays effective for its task scope. This is recorded as **user-authorized no-review**, never as **human approved**. Existing test points and review records are left untouched.
+
+Enter Direct with an explicit choice: `/generate-direct`, or a recognized chat instruction such as "generate directly" / "skip review". Return to the default with `/review-strict`. A fresh `/generate` also starts in Strict.
 
 Slash helpers:
 
-- `/generate` — confirm the requirement-library source scope, then start requirements gathering
-- `/continue` — continue generation after approving test points (same as `c` on the Test Points tab)
+- `/generate` — confirm the requirement-library source scope, then start requirements gathering under the default Strict policy
+- `/generate-direct` — confirm the source scope and start a user-authorized no-review (Direct) generation
+- `/review-strict` — revoke a Direct authorization and return to the Strict review policy
+- `/continue` — continue generation after approving test points (same as `c` on the Test Points tab; Strict only)
 - `/rename <title>` — set a custom conversation title; automatic titles pause while it is set
 - `/rename --clear` — drop the custom title and resume automatic titles
 
@@ -127,13 +134,15 @@ Review tab for non-Gherkin verification intents stored in `testpoints/testpoints
 - **Details** — title, objective, preconditions, expected outcomes, hierarchy, review state, and realized scenarios
 - **Excerpts** — linked requirement ranges (`Enter` opens Requirements at the highlight)
 
-Review actions: `a` approve, `A` batch approve, `r` reject. After at least one eligible approval, press `c` (or `/continue`) to advance the AI pipeline to Scenario Planning. Press `o` to open a realized Gherkin scenario.
+Review actions: `a` approve, `A` batch approve, `r` reject. After at least one eligible approval, press `c` (or `/continue`) to advance the AI pipeline to Scenario Planning. Press `o` to open a realized Gherkin scenario. These review actions belong to the **Strict** policy; a **Direct** (no-review) generation does not pause here and cannot be mistaken for human approval.
 
 Review states: `Proposed` → `Approved` / `Rejected`; approved points with stale anchors become `NeedsReview`.
 
 ## Feature generation pipeline
 
-When you ask the AI to create a feature (including `/generate`), the authoritative flow is:
+When you ask the AI to create a feature (including `/generate`), the flow depends on the active review policy. The system prompt, stage guidance, tool descriptions, and the persisted generation state all follow the same policy.
+
+**Strict** (default):
 
 1. **Requirements Gathering** — confirm store/iteration scope, then conversational paste and/or persisted document/range sources via `submit_requirements` (`list_requirement_documents` / `read_requirement_document` read the current store on demand)
 2. **Generating Test Points** — agent calls `propose_test_points` (no Given/When/Then inside test points)
@@ -142,7 +151,26 @@ When you ask the AI to create a feature (including `/generate`), the authoritati
 5. **Writing** — `create_feature_file` / `insert_scenario` write Gherkin; scenarios keep `@teshi-tp:<id>` tags
 6. **Validation** — `validate_feature` / tests as applicable
 
-Restarting the TUI restores the review phase, confirmed source scope, and artifacts from `.teshi/generation-state.json` without implicitly approving anything. A store mismatch, missing iteration, or document revision drift pauses generation until you reconfirm sources. Legacy sessions that referenced documents without a store identity are not rebound to the current library.
+**Direct** (user-authorized no review):
+
+1. **Requirements Gathering** — same as Strict
+2. **Planning** — `generate_plan` directly; `test_point_ids` may be empty or omitted, and no IDs or approvals are invented
+3. **Writing** — `create_feature_file` / `insert_scenario` write Gherkin; with no IDs, no `@teshi-tp:<id>` tags are added
+4. **Validation** — `validate_feature` / tests as applicable
+
+`propose_test_points` is unavailable under Direct, and the pipeline never waits in the Test Points tab. Traceability distinguishes **human approved** (Strict with approvals), **user-authorized no-review** (Direct), and **not reviewed**; a Direct generation is never labeled human approved. Traceability to test points can be added later without rewriting history.
+
+Restarting the TUI restores the review phase, the chosen review policy and its authorization basis, confirmed source scope, and artifacts from `.teshi/generation-state.json` without implicitly approving anything. A Direct session resumes at Planning and never falls back into the review gate; a Strict session without approvals still waits. A store mismatch, missing iteration, or document revision drift pauses generation until you reconfirm sources. Legacy sessions that referenced documents without a store identity are not rebound to the current library; legacy state files without a policy field default to Strict.
+
+### Review policy design decisions
+
+doc-48 leaves the policy's configuration level, default, scope, and revocation to design time. The chosen decisions are:
+
+- **Configuration level** — a per-generation-session value in `.teshi/generation-state.json`, not a global or always-on project setting. Strict remains the default so review is not silently disabled for all projects.
+- **Default** — `Strict`. A fresh `/generate`, a new session, or a legacy state file without a policy field all start in Strict.
+- **Scope** — one explicit authorization is effective for its current task scope (the feature generation it was granted for) and is persisted with a `basis` (the recognized instruction or command) and a `scope` (the originating request). A project switch is treated as a scope change and resets the policy to Strict. There is no cross-project or permanent disable.
+- **Revocation** — `/review-strict` revokes a Direct authorization and returns to Strict; a fresh `/generate` does the same. Switching back mid-generation requires re-running the Strict review flow.
+- **Traceability** — `ReviewPolicy` records the strategy, `DirectAuthorization` records the basis, and `review_traceability` classifies a generation as `human approved`, `user-authorized no-review`, or `not reviewed` without ever granting approval. Existing test points and review records are never reset, overwritten, or impersonated.
 
 ## External Test Runner
 
