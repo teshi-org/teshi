@@ -3385,6 +3385,48 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_list_marks_an_unread_answer_in_green() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents.push(crate::app::AgentThread::new_with_backend(
+            1,
+            "Second",
+            teshi_agent::backend::AgentBackendKind::Native,
+        ));
+        app.agents[1].unseen_completion = true;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        // The sidebar row hitboxes sit on the same line as the status dot.
+        let row_of = |app: &App, agent: usize| {
+            app.clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: crate::keymap::Action::AgentSelect(index),
+                        ..
+                    } if *index == agent => Some(*rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("agent {agent} has no sidebar row"))
+        };
+        let buffer = terminal.backend().buffer();
+        let unread = row_of(&app, 1);
+        let dot = &buffer[(unread.x + 1, unread.y)];
+        assert_eq!(dot.symbol(), "●");
+        assert_eq!(dot.fg, theme::SUCCESS, "an unread answer is green");
+
+        let running = row_of(&app, 0);
+        assert_eq!(buffer[(running.x + 1, running.y)].fg, theme::WARNING);
+    }
+
+    #[test]
     fn chat_code_blocks_register_independent_copy_hitboxes() {
         use ratatui::{Terminal, backend::TestBackend};
         let (mut app, _project, _store) = activity_test_app();

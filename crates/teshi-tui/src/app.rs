@@ -287,6 +287,10 @@ pub struct AgentThread {
     /// Kept on the thread rather than derived from the live status so every
     /// finished answer keeps its completion cue as the conversation continues.
     pub completed_answers: std::collections::BTreeSet<usize>,
+    /// A turn finished while this conversation was off screen and the user has
+    /// not looked at it since. Cleared as soon as the AI tab shows it, so the
+    /// sidebar dot and the terminal title can count waiting-to-be-read answers.
+    pub unseen_completion: bool,
     /// Title the model generated after a finished turn. Replaced on later
     /// turns and outranked by an agent-published or custom title.
     pub generated_title: Option<String>,
@@ -589,6 +593,7 @@ impl AgentThread {
             last_stop_detail: None,
             member_dir: None,
             completed_answers: Default::default(),
+            unseen_completion: false,
             generated_title: None,
             agent_title: None,
             custom_title: None,
@@ -4307,6 +4312,10 @@ impl App {
         for agent in &mut self.agents {
             agent.poll_shutdown();
             if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
+                // A live turn owns the conversation again, so the previous
+                // answer is no longer "finished and unread" (a queued follow-up
+                // or a retry would otherwise keep the green dot while running).
+                agent.unseen_completion = false;
                 let start = agent.task_started.get_or_insert_with(Instant::now);
                 agent.task_elapsed = start.elapsed();
             } else if let Some(start) = agent.task_started.take() {
@@ -4381,6 +4390,9 @@ impl App {
                             });
                         }
                         self.agents[i].status = AiStatus::Idle;
+                        // Only a normal turn leaves an answer to be read; an
+                        // interrupted one is reported as a status message.
+                        self.agents[i].unseen_completion = completed_normally;
                         self.agents[i].tool_status = None;
                         // The agent finished without waiting for an answer.
                         self.agents[i].pending_acp_permission = None;
@@ -4662,6 +4674,24 @@ impl App {
             )
         {
             self.ai_interrupt_confirm = false;
+        }
+    }
+
+    /// Marks the conversation on screen as read, driven by user input rather
+    /// than by what is merely painted.
+    ///
+    /// A turn that lands in the chat the user is already watching still leaves
+    /// a green dot: the answer can arrive while their eyes are elsewhere, so
+    /// only an actual key press or click while the conversation is displayed
+    /// clears the mark.
+    pub fn acknowledge_visible_conversation(&mut self) {
+        let visible = self.active_tab == MainTab::Ai
+            || (self.active_tab == MainTab::MindMap && self.mindmap_ai_panel_visible);
+        if !visible {
+            return;
+        }
+        if let Some(agent) = self.agents.get_mut(self.selected_agent) {
+            agent.unseen_completion = false;
         }
     }
 
@@ -15788,6 +15818,89 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_answer_stays_unread_until_the_user_acts_on_it() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "First",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents.push(AgentThread::new_with_backend(
+            1,
+            "Second",
+            teshi_agent::backend::AgentBackendKind::Native,
+        ));
+        app.agents[0].unseen_completion = true;
+        app.agents[1].unseen_completion = true;
+
+        // Merely redrawing the AI tab must not eat the mark, even on the
+        // conversation that is on screen: the answer can land unnoticed.
+        app.active_tab = MainTab::Ai;
+        app.selected_agent = 0;
+        app.poll_llm_events();
+        assert!(app.agents[0].unseen_completion);
+
+        // Input while that conversation is displayed clears only its own mark.
+        app.acknowledge_visible_conversation();
+        assert!(!app.agents[0].unseen_completion);
+        assert!(
+            app.agents[1].unseen_completion,
+            "another conversation keeps its unread mark"
+        );
+
+        // Off the tab there is nothing on screen to acknowledge.
+        app.active_tab = MainTab::Explore;
+        app.acknowledge_visible_conversation();
+        assert!(app.agents[1].unseen_completion);
+
+        // Selecting the second conversation reads it.
+        app.active_tab = MainTab::Ai;
+        app.selected_agent = 1;
+        app.acknowledge_visible_conversation();
+        assert!(!app.agents[1].unseen_completion);
+    }
+
+    #[test]
+    fn the_mindmap_side_panel_reads_the_conversation_it_shows() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "First",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.active_tab = MainTab::MindMap;
+        app.agents[0].unseen_completion = true;
+
+        // A hidden panel shows nothing, so the answer stays unread.
+        app.mindmap_ai_panel_visible = false;
+        app.acknowledge_visible_conversation();
+        assert!(app.agents[0].unseen_completion);
+
+        app.mindmap_ai_panel_visible = true;
+        app.acknowledge_visible_conversation();
+        assert!(!app.agents[0].unseen_completion);
+    }
+
+    #[test]
+    fn a_running_turn_clears_the_previous_unread_mark() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = AgentThread::new_with_backend(
+            0,
+            "First",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0].unseen_completion = true;
+        app.active_tab = MainTab::Explore;
+
+        app.poll_llm_events();
+        assert!(
+            !app.agents[0].unseen_completion,
+            "a queued follow-up must not keep the green dot while running"
+        );
+    }
+
+    #[test]
     fn esc_withdraws_a_queued_message_before_interrupting() {
         let (mut app, _project, _store) = slash_test_app();
         app.agents[0] = AgentThread::new_with_backend(
@@ -23239,4 +23352,5 @@ Feature: B
         assert!(App::is_url_allowed("https://Example.com", &whitelist));
         assert!(!App::is_url_allowed("https://example.com", &whitelist));
     }
+
 }
