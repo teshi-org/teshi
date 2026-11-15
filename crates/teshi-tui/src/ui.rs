@@ -1,10 +1,11 @@
 use crate::theme;
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
-use tui_tree_widget::Tree;
+use tui_tree_widget::{Tree, TreeItem, TreeState};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
@@ -5169,6 +5170,19 @@ fn requirement_viewport(area: Rect) -> Rect {
     }
 }
 
+/// Requirement tree viewport.
+///
+/// The tree keeps one interior column to itself for the entry rail, so the panel
+/// border stays intact and the rail never lands on the frame.
+fn requirement_tree_viewport(area: Rect) -> Rect {
+    let viewport = requirement_viewport(area);
+    Rect {
+        x: viewport.x + 1,
+        width: viewport.width.saturating_sub(1),
+        ..viewport
+    }
+}
+
 /// Draw overflow indicators on panel borders, preserving the content viewport.
 ///
 /// Every pane shares the chat scrollbar paint: solid cells instead of glyphs, a
@@ -5440,7 +5454,7 @@ fn render_requirements_tree(
         );
         return;
     }
-    let viewport = requirement_viewport(area);
+    let viewport = requirement_tree_viewport(area);
     let wrap = RequirementTreeWrap {
         labels: &ui.tree_labels,
         selected: ui.tree_state.selected(),
@@ -5464,6 +5478,7 @@ fn render_requirements_tree(
         .expect("requirement tree")
         .highlight_style(theme::selected_row(focused));
     frame.render_stateful_widget(tree, viewport, &mut ui.tree_state);
+    draw_requirement_entry_bars(frame.buffer_mut(), viewport, &wrapped, &ui.tree_state);
     render_requirement_scrollbars(
         frame,
         ui,
@@ -5502,8 +5517,65 @@ fn render_requirements_tree(
     }
 }
 
+/// Draws the entry rail in the tree's reserved interior column.
+///
+/// The rail occupies `viewport.x - 1`, the column `requirement_tree_viewport`
+/// keeps clear on the left, so it never touches the panel border or the entry
+/// text. Only entries that wrap to several rows get a rail: a one-row entry is
+/// already unambiguous, and marking it would turn the rail into a bullet column.
+///
+/// Each rail starts with `╷`, whose stroke begins at the row's middle, and ends
+/// with `└`, so neighbouring entries are separated by half a row of blank cells
+/// instead of fusing into one line (the A problem: multi-line rows of
+/// neighbouring entries used to blur into one block). An entry cut off by the
+/// bottom of the viewport keeps `│`: it has not ended, it just continues
+/// off-screen. The selected entry's rail is accented to reinforce the
+/// whole-entry highlight.
+fn draw_requirement_entry_bars(
+    buf: &mut Buffer,
+    viewport: Rect,
+    wrapped: &[TreeItem<'_, String>],
+    tree_state: &TreeState<String>,
+) {
+    let offset = tree_state.get_offset();
+    let flattened = tree_state.flatten(wrapped);
+    let selected = tree_state.selected();
+    let bar_style = Style::default().fg(theme::MUTED);
+    let selected_bar_style = Style::default().fg(theme::ACCENT);
+    let bottom = viewport.y + viewport.height;
+    let mut y = viewport.y;
+    for node in flattened.iter().skip(offset) {
+        let height = node.item.height();
+        if y >= bottom {
+            break;
+        }
+        let entry_bottom = (y + height as u16).min(bottom);
+        let drawn = entry_bottom.saturating_sub(y);
+        let complete = drawn as usize == height;
+        if height > 1 {
+            let style = if node.identifier.as_slice() == selected {
+                selected_bar_style
+            } else {
+                bar_style
+            };
+            for row in 0..drawn {
+                let glyph = match (row == 0, complete && row + 1 == drawn) {
+                    (true, _) => "╷",
+                    (_, true) => "└",
+                    _ => "│",
+                };
+                if let Some(cell) = buf.cell_mut((viewport.x.saturating_sub(1), y + row)) {
+                    cell.set_symbol(glyph);
+                    cell.set_style(style);
+                }
+            }
+        }
+        y = entry_bottom;
+    }
+}
+
 /// Rows an unselected requirement tree label may wrap to before it is truncated.
-const REQUIREMENT_TREE_LABEL_ROWS: usize = 2;
+const REQUIREMENT_TREE_LABEL_ROWS: usize = 3;
 
 /// Rewraps requirement tree labels to the pane width for one frame.
 ///
@@ -7947,7 +8019,7 @@ Feature: Rule only
         let mut ui = crate::authoring_tab::AuthoringUiState::empty();
         long_label_tree(&mut ui, 10);
         ui.horizontal_scroll[0] = 5;
-        // Nine content columns leave seven for the label after the folder marker.
+        // Eight content columns leave six for the label after the folder marker.
         let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
         terminal
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
@@ -7955,11 +8027,11 @@ Feature: Rule only
         assert_eq!(ui.scroll_limits[0][0], 0, "wrapped labels never overflow");
         assert_eq!(ui.horizontal_scroll[0], 0);
         assert!(ui.pane_bars[0][0].is_none());
-        // Ten two-row items in four rows: the last two items fit from offset 8.
-        assert_eq!(ui.scroll_limits[0][1], 8);
+        // Ten three-row (capped) items: the last item fits after scrolling.
+        assert_eq!(ui.scroll_limits[0][1], 9);
         let rows = tree_screen_rows(&terminal);
-        assert!(rows[1].contains("long-it"), "{rows:#?}");
-        assert!(rows[2].contains("eratio…"), "{rows:#?}");
+        assert!(rows[1].contains("long-i"), "{rows:#?}");
+        assert!(rows[2].contains("terati"), "{rows:#?}");
         ui.tree_items.clear();
         terminal
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
@@ -7978,10 +8050,10 @@ Feature: Rule only
             .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
             .expect("render");
         let rows = tree_screen_rows(&terminal);
-        assert!(rows[1].contains("long-it"), "{rows:#?}");
-        assert!(rows[2].contains("eration"), "{rows:#?}");
-        assert!(rows[3].contains("-0"), "{rows:#?}");
-        assert!(rows[4].contains("long-it"), "next item follows: {rows:#?}");
+        assert!(rows[1].contains("long-i"), "{rows:#?}");
+        assert!(rows[2].contains("terati"), "{rows:#?}");
+        assert!(rows[3].contains("on-0"), "{rows:#?}");
+        assert!(rows[4].contains("long-i"), "next item follows: {rows:#?}");
         assert!(!rows.concat().contains("eration-0…"));
         // A click on a continuation row selects the wrapped item it belongs to.
         assert_eq!(
@@ -7989,6 +8061,81 @@ Feature: Rule only
                 .rendered_at(ratatui::layout::Position::new(4, 3))
                 .map(<[String]>::to_vec),
             Some(vec!["req-iter:long-iteration-0".to_string()])
+        );
+    }
+
+    #[test]
+    fn requirements_tree_marks_each_entry_with_a_left_rail() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        // One single-row entry, then a wrapped one, then another single-row one.
+        ui.discovered = true;
+        for (id, label) in [
+            ("req-iter:a", "short"),
+            ("req-iter:b", "long-iteration-that-wraps-over-three-rows"),
+            ("req-iter:c", "short"),
+        ] {
+            ui.tree_labels.insert(id.to_string(), Line::from(label));
+            ui.tree_items
+                .push(tui_tree_widget::TreeItem::new_leaf(id.to_string(), label));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(16, 10)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        let buf = terminal.backend().buffer();
+        // The panel border keeps its own column; the rail sits one column inside it.
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        assert_eq!(buf[(0, 1)].symbol(), "│");
+        let interior = 1..buf.area.height.saturating_sub(1);
+        let gutter: String = interior.map(|y| buf[(1, y)].symbol()).collect();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        // Single-row entries leave the gutter empty; the wrapped entry owns a run
+        // that opens with the half stroke and closes with the corner, so the two
+        // neighbours are separated by blank cells above and below.
+        assert!(
+            gutter.starts_with(' '),
+            "single-row entries mark nothing: {rows:#?}"
+        );
+        assert_eq!(
+            gutter.trim_end(),
+            " ╷│└",
+            "the wrapped entry spans three rows: {rows:#?}"
+        );
+        // Entries do not fuse: the closing corner is followed by a blank cell.
+        let after_close: Vec<char> = gutter.chars().skip_while(|c| *c != '└').skip(1).collect();
+        assert_eq!(
+            after_close.first(),
+            Some(&' '),
+            "the next entry must not continue the previous rail: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn requirements_tree_rail_never_closes_an_entry_the_viewport_cuts() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.discovered = true;
+        for (id, label) in [
+            ("req-iter:a", "short"),
+            ("req-iter:b", "wraps-over-three-rows-because-it-is-long"),
+            ("req-iter:c", "short"),
+        ] {
+            ui.tree_labels.insert(id.to_string(), Line::from(label));
+            ui.tree_items
+                .push(tui_tree_widget::TreeItem::new_leaf(id.to_string(), label));
+        }
+        // Five interior rows: the second entry survives only as a sliver.
+        let mut terminal = Terminal::new(TestBackend::new(16, 5)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        let buf = terminal.backend().buffer();
+        let interior = 1..buf.area.height.saturating_sub(1);
+        let gutter: String = interior.map(|y| buf[(1, y)].symbol()).collect();
+        assert!(
+            !gutter.contains('└'),
+            "a clipped entry keeps its rail open: {gutter:?}"
         );
     }
 
