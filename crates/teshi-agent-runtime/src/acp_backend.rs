@@ -42,6 +42,12 @@ pub struct AcpBackendConfig {
     pub option_preferences_path: Option<PathBuf>,
     /// Optional live-host MCP transport supplied by an interactive frontend.
     pub tool_bridge: Option<crate::tool_bridge::ToolBridgeConfig>,
+    /// Whether turns also carry Teshi's authoring-tool guidance paragraph.
+    ///
+    /// The paragraph tells external agents how to use the bridged authoring
+    /// tools; a frontend that disabled prompt injection sends the conversation
+    /// without it. Missing configuration defaults to on.
+    pub inject_prompt_sections: bool,
     /// Automatic retries for turns that a transient network failure ended.
     pub turn_retry: TurnRetryPolicy,
 }
@@ -57,6 +63,7 @@ impl AcpBackendConfig {
             model_preference_path: None,
             option_preferences_path: None,
             tool_bridge: None,
+            inject_prompt_sections: true,
             turn_retry: TurnRetryPolicy::default(),
         }
     }
@@ -284,6 +291,23 @@ impl AcpAgentBackend {
         self.state = AgentBackendStatus::Idle;
     }
 
+    /// Applies the frontend's prompt-injection preference to later turns.
+    pub fn set_inject_prompt_sections(&mut self, enabled: bool) {
+        if let Some(config) = self.config.as_mut() {
+            config.inject_prompt_sections = enabled;
+        }
+    }
+
+    /// Whether turns carry Teshi's authoring-tool guidance paragraph.
+    ///
+    /// A backend that was never configured behaves like the bundled default.
+    fn inject_prompt_sections(&self) -> bool {
+        self.config
+            .as_ref()
+            .map(|config| config.inject_prompt_sections)
+            .unwrap_or(true)
+    }
+
     pub fn status(&self) -> AgentBackendStatus {
         self.state
     }
@@ -494,8 +518,10 @@ impl AcpAgentBackend {
             }
         }
         let mut prompt = prompt_text(system.as_deref(), messages);
-        if self.tool_bridge.is_some() {
-            prompt.push_str("\n\nTeshi tools are available through the teshi-authoring MCP server. Your MCP client may prefix tool names with the server name. Use its submit_requirements, propose_test_points, generate_plan, create_feature_file, insert_scenario, and validate_feature tools for this workflow. Do not replace human review with chat approval. After proposing test points, stop and wait for the user to review them in Teshi and continue generation.");
+        if let Some(guidance) =
+            tool_bridge_guidance(self.tool_bridge.is_some(), self.inject_prompt_sections())
+        {
+            prompt.push_str(guidance);
         }
         // A new ACP process has no remote history. Supply the saved transcript
         // once, then let that process maintain its own conversation.
@@ -796,6 +822,15 @@ impl Drop for AcpAgentBackend {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Authoring-tool guidance appended to ACP turns that expose the MCP bridge.
+const TOOL_BRIDGE_GUIDANCE: &str = "\n\nTeshi tools are available through the teshi-authoring MCP server. Your MCP client may prefix tool names with the server name. Use its submit_requirements, propose_test_points, generate_plan, create_feature_file, insert_scenario, and validate_feature tools for this workflow. Do not replace human review with chat approval. After proposing test points, stop and wait for the user to review them in Teshi and continue generation.";
+
+/// Returns the bridge guidance only when a bridge exists and the frontend did
+/// not disable prompt injection.
+fn tool_bridge_guidance(has_bridge: bool, inject_prompt_sections: bool) -> Option<&'static str> {
+    (has_bridge && inject_prompt_sections).then_some(TOOL_BRIDGE_GUIDANCE)
 }
 
 fn prompt_text(system: Option<&str>, messages: &[ChatMessage]) -> String {
@@ -1603,5 +1638,43 @@ fn exhausted_retry_message(retries: usize, reason: &str) -> String {
         0 => format!("ACP prompt failed: {reason}"),
         1 => format!("ACP prompt failed after 1 automatic retry: {reason}"),
         n => format!("ACP prompt failed after {n} automatic retries: {reason}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_bridge_guidance_follows_the_injection_switch() {
+        assert!(tool_bridge_guidance(true, true).is_some());
+        assert!(
+            tool_bridge_guidance(true, false).is_none(),
+            "the switch removes the guidance paragraph"
+        );
+        assert!(
+            tool_bridge_guidance(false, true).is_none(),
+            "no bridge means nothing to describe"
+        );
+    }
+
+    #[test]
+    fn set_inject_prompt_sections_applies_to_later_turns() {
+        let mut backend = AcpAgentBackend::default();
+        assert!(
+            backend.inject_prompt_sections(),
+            "an unconfigured backend keeps the bundled default"
+        );
+        backend.configure(AcpBackendConfig::new(AcpAgentCommand {
+            program: PathBuf::from("agent"),
+            args: Vec::new(),
+            cwd: PathBuf::from("."),
+            env: HashMap::new(),
+        }));
+        assert!(backend.inject_prompt_sections());
+        backend.set_inject_prompt_sections(false);
+        assert!(!backend.inject_prompt_sections());
+        backend.set_inject_prompt_sections(true);
+        assert!(backend.inject_prompt_sections());
     }
 }

@@ -342,6 +342,7 @@ pub fn run() -> Result<()> {
     let mut app = App::from_cli(&cli_args)?;
     app.set_image_support(image_detection);
     app.version = version_display().to_string();
+    app.load_inject_prompt_sections();
     let mut event_source = input::EventSource::new()?;
     let mut terminal_title = terminal_title::TerminalTitle::new();
     let test_frame_path = std::env::var_os("TESHI_TEST_FRAME_PATH").map(std::path::PathBuf::from);
@@ -417,6 +418,9 @@ pub fn run() -> Result<()> {
                         continue;
                     }
                     app.acknowledge_visible_conversation();
+                    if app.handle_settings_panel_key(key_event) {
+                        continue;
+                    }
                     if app.handle_acp_controls_key(key_event) {
                         continue;
                     }
@@ -525,6 +529,7 @@ pub fn run() -> Result<()> {
                         || app.session_panel_active
                         || app.agent_profile_panel_active
                         || app.approval_panel_active
+                        || app.settings_panel_active
                         || (app.model_panel_active
                             && app.model_panel_mode == app::ModelPanelMode::List)
                         || app.agent().acp_controls_ui.picker_active()

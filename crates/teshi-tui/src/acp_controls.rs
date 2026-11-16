@@ -805,6 +805,7 @@ impl App {
             || self.session_panel_active
             || self.agent_profile_panel_active
             || self.approval_panel_active
+            || self.settings_panel_active
         {
             return false;
         }
@@ -891,6 +892,7 @@ impl App {
         row: u16,
     ) -> bool {
         if self.approval_panel_active
+            || self.settings_panel_active
             || self.agent_profile_panel_active
             || self.model_panel_active
             || self.session_panel_active

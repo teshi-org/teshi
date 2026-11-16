@@ -5,81 +5,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AiStatus, App, ChangeKind, ClickableRegion};
 use crate::keymap::Action;
 use crate::theme;
-
-/// Draw the AI footer using the same rectangles for text and pointer actions.
-pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let compact = area.width < 85;
-    let first = if app.ai_input_focused {
-        (
-            if compact { " Send" } else { " Send [Enter]" },
-            Action::AiSendMessage,
-        )
-    } else {
-        (
-            if compact {
-                " Focus"
-            } else {
-                " Focus [i/Enter]"
-            },
-            Action::AiFocusInput,
-        )
-    };
-    let mut controls = vec![
-        first,
-        (
-            if compact { " Blur" } else { " Blur [Esc]" },
-            Action::AiBlurInput,
-        ),
-        (
-            if compact || app.ai_input_focused {
-                " Model"
-            } else {
-                " Model [m]"
-            },
-            Action::ModelPanelOpen,
-        ),
-    ];
-    // The toggle only advertises a surface this terminal can actually show.
-    if super::ai_sidebar_width(frame.area().width).is_some() {
-        controls.push((
-            if compact { " Chats" } else { " Chats [Ctrl+g]" },
-            Action::AiToggleSidebar,
-        ));
-    }
-    let mode = if app.ai_sidebar_focused {
-        "[CHATS] "
-    } else if app.ai_input_focused {
-        "[INPUT] "
-    } else {
-        "[NORMAL] "
-    };
-    super::render_action_bar(frame, app, area, mode, &controls, false);
-    let used = mode.width() as u16
-        + controls
-            .iter()
-            .map(|(label, _)| label.width() as u16)
-            .sum::<u16>();
-    let hint = if app.ai_input_focused {
-        "Esc then j/k scroll"
-    } else if app.ai_sidebar_focused {
-        "j/k chat · Enter open · l back"
-    } else if app.ai_sidebar_visible {
-        "h chats · j/k/l/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
-    } else {
-        "hjkl/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
-    };
-    if used + 2 < area.width {
-        frame.render_widget(
-            Paragraph::new(hint).style(theme::muted()),
-            Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
-        );
-    }
-}
 
 /// Draw a scroll-following thread list and persistent New and Close controls.
 pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -211,6 +140,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         || app.quit_pending_confirm
         || app.ai_interrupt_confirm
         || app.approval_panel_active
+        || app.settings_panel_active
         || app.agent_profile_panel_active
         || app.authoring_ui.overlay_active()
         || app.generation_scope_prompt.is_some()

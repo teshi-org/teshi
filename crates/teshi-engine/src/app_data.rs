@@ -53,7 +53,7 @@ pub fn validated_window_size(width: u32, height: u32) -> Option<(u32, u32)> {
 }
 
 /// Persisted UI preferences (window geometry is handled by the window-state plugin on desktop).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Legacy window width migrated to the window-state plugin on first launch.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +65,30 @@ pub struct AppSettings {
     /// Requirements tab filter/group preferences keyed by store and project identity.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub requirements_views: HashMap<String, RequirementsViewPrefs>,
+    /// Whether the TUI appends its extra prompt context to AI chats:
+    /// the project-context system message, authoring pipeline and generation
+    /// status sections, exploration guidance, and ACP tool guidance.
+    ///
+    /// Missing keys and the bundled default keep the context on, so an
+    /// upgrade never silently changes what the agent receives.
+    #[serde(default = "default_inject_prompt_sections")]
+    pub inject_prompt_sections: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            window_width: None,
+            window_height: None,
+            last_project_parent: None,
+            requirements_views: HashMap::new(),
+            inject_prompt_sections: default_inject_prompt_sections(),
+        }
+    }
+}
+
+fn default_inject_prompt_sections() -> bool {
+    true
 }
 
 /// User-level Requirements tab view preferences for one requirement store and project.
@@ -810,5 +834,43 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(migrated["projects"], serde_json::json!([]));
         assert_eq!(migrated["paths"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn settings_default_keeps_prompt_sections_enabled() {
+        assert!(AppSettings::default().inject_prompt_sections);
+    }
+
+    #[test]
+    fn settings_without_the_key_keep_prompt_sections_enabled() {
+        // Older settings.json files predate the switch; they must not silently
+        // disable the sections.
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"last_project_parent":"C:/work"}"#).unwrap();
+        assert!(settings.inject_prompt_sections);
+    }
+
+    #[test]
+    fn prompt_section_setting_round_trips_and_survives_other_writes() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let app = tmp.path().join("app");
+            unsafe { std::env::set_var("TESHI_APP_DATA_DIR", &app) };
+            fs::create_dir_all(&app).unwrap();
+
+            // No file yet: the bundled default applies.
+            assert!(load_settings().unwrap().inject_prompt_sections);
+
+            let mut settings = load_settings().unwrap();
+            settings.inject_prompt_sections = false;
+            save_settings(&settings).unwrap();
+            assert!(!load_settings().unwrap().inject_prompt_sections);
+
+            // An unrelated load-modify-save write preserves the switch.
+            let project = tmp.path().join("project");
+            fs::create_dir_all(&project).unwrap();
+            remember_project_parent(&project).unwrap();
+            assert!(!load_settings().unwrap().inject_prompt_sections);
+        });
     }
 }

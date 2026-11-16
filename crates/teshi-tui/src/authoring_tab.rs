@@ -2897,47 +2897,6 @@ pub fn review_state_style(state: ReviewState) -> Style {
     }
 }
 
-/// Footer hint line for the Requirements tab.
-pub fn requirements_footer_line(
-    store_path: &Path,
-    filter: &RequirementIterationFilter,
-) -> Line<'static> {
-    let filter_label = match filter {
-        RequirementIterationFilter::All => "All".to_string(),
-        RequirementIterationFilter::Unassigned => UNASSIGNED_ITERATION_LABEL.to_string(),
-        RequirementIterationFilter::Named(name) => name.clone(),
-    };
-    theme::footer_line(vec![
-        Span::raw(" Scope [o] Link [b] "),
-        Span::styled(
-            " Delete [d/Delete] ",
-            Style::default().fg(theme::FOOTER_DESC),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" Store {} ", store_path.display()),
-            Style::default().fg(theme::FOOTER_DESC),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!(" Filter {filter_label} [i] "),
-            Style::default().fg(theme::FOOTER_DESC),
-        ),
-        Span::raw(" "),
-        Span::styled(" Group [g] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Iteration [I] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Priority [p] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Reload [R] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" New doc [n] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
-    ])
-}
-
 /// Requirements tree text search, mirroring the Explore Feature search state
 /// machine: `/` starts typing, Enter keeps the filter, Esc clears it.
 impl App {
@@ -2953,6 +2912,7 @@ impl App {
             || self.model_panel_active
             || self.session_panel_active
             || self.approval_panel_active
+            || self.settings_panel_active
             || self.agent_profile_panel_active
             || self.change_summary_visible
             || self.scenario_dropdown_open
@@ -3871,16 +3831,6 @@ mod tests {
         assert_eq!(state.tree_state.selected(), path.as_slice());
         assert!(state.tree_state.opened().contains(&group_path));
         assert_eq!(state.buffer.as_string(), "# Draft\n\n");
-    }
-
-    #[test]
-    fn narrow_normal_wide_layout_constants_exist() {
-        // Rendering tests live in ui; ensure footer helper is non-empty.
-        let line = requirements_footer_line(
-            Path::new("%APPDATA%/teshi/requirements"),
-            &RequirementIterationFilter::All,
-        );
-        assert!(!line.spans.is_empty());
     }
 
     #[test]

@@ -61,6 +61,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "settings",
         "Select ACP model, mode, thinking and other settings",
     ),
+    (
+        "preferences",
+        "Teshi settings: extra AI system-prompt sections",
+    ),
     ("agent-profile", "Select Native agent profile"),
     (
         "generate",
@@ -922,6 +926,9 @@ fn empty_running_detail(case_id: String) -> CaseDetail {
 
 #[derive(Debug, Clone, Default)]
 pub struct RunSummary {
+    /// Total cases in the run. The footer reports passed/failed, but the
+    /// summary keeps the full count for callers that render a ratio.
+    #[allow(dead_code)]
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -1378,6 +1385,10 @@ pub struct App {
     pub approval_panel_active: bool,
     /// Selected index within the approval mode panel.
     pub approval_panel_selection: usize,
+    /// Whether the app Settings overlay is active.
+    pub settings_panel_active: bool,
+    /// Highlighted row in the app Settings overlay.
+    pub settings_panel_selection: usize,
     pub slash_suggestion_active: bool,
     pub slash_suggestion_selection: usize,
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
@@ -1408,6 +1419,12 @@ pub struct App {
     pub config: AppConfig,
     /// Whether the auth credential management overlay is active.
     pub auth_panel_active: bool,
+    /// Whether the TUI appends its extra prompt context to AI chats.
+    ///
+    /// Mirrors [`teshi_engine::AppSettings::inject_prompt_sections`] and is
+    /// loaded by the interactive loop, not by the library constructors, so
+    /// unit tests never read the user's real settings file.
+    pub inject_prompt_sections: bool,
     // ── Model profile state ─────────────────────────────────
     pub model_profiles: Vec<crate::profiles::ModelProfile>,
     pub model_active_id: Option<String>,
@@ -2734,6 +2751,8 @@ impl App {
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
+            settings_panel_active: false,
+            settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -2750,6 +2769,7 @@ impl App {
             version: String::new(),
             config,
             auth_panel_active: false,
+            inject_prompt_sections: true,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -2878,6 +2898,8 @@ impl App {
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
+            settings_panel_active: false,
+            settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -2960,6 +2982,7 @@ impl App {
             version: String::new(),
             config,
             auth_panel_active: false,
+            inject_prompt_sections: true,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -3079,6 +3102,8 @@ impl App {
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
+            settings_panel_active: false,
+            settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -3161,6 +3186,7 @@ impl App {
             version: String::new(),
             config,
             auth_panel_active: false,
+            inject_prompt_sections: true,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -3770,6 +3796,7 @@ impl App {
             });
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
+                config.inject_prompt_sections = self.inject_prompt_sections;
                 config.tool_bridge = Some(teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
                     executable: std::env::current_exe()?,
                     tools: self.agent_tools(agent_idx),
@@ -4905,29 +4932,45 @@ impl App {
     }
 
     /// Check whether a user message is requesting feature/scenario generation.
+    ///
+    /// Both an authoring verb and an authoring noun are required. Bare verbs
+    /// ("create", "make", "写") show up in ordinary questions, and a bare noun
+    /// ("feature", "场景") is often only a reference, so matching either one
+    /// alone would inject the pipeline block into unrelated chat.
     fn is_generation_request(text: &str) -> bool {
-        let keywords = [
+        const VERBS: &[&str] = &[
             "create",
             "generate",
             "make",
-            "new feature",
-            "new scenario",
-            "add feature",
-            "add scenario",
-            "write a",
-            "write an",
-            "写",
+            "add",
+            "write",
+            "build",
+            "implement",
+            "new",
+            "need",
+            "want",
             "创建",
             "生成",
             "添加",
             "新增",
+            "编写",
+            "写",
+            "加",
+            "做",
+            "实现",
+        ];
+        const NOUNS: &[&str] = &[
+            "feature", "scenario", "gherkin", "bdd", "story", "功能", "场景", "用例", "特性",
+            "需求",
         ];
         let lower = text.to_lowercase();
-        keywords.iter().any(|k| lower.contains(k))
+        VERBS.iter().any(|verb| lower.contains(verb))
+            && NOUNS.iter().any(|noun| lower.contains(noun))
     }
 
     /// Build `ChatMessage` list from the current AI chat history for LLM
-    /// requests.  Prepends a project-context summary as a system message.
+    /// requests.  Prepends a project-context summary as a system message unless
+    /// the Settings switch disabled prompt injection.
     fn build_chat_messages_for_agent(&self, agent_idx: usize) -> Vec<crate::llm::ChatMessage> {
         let mut msgs: Vec<crate::llm::ChatMessage> = Vec::new();
         let latest_visual_message = self.agents[agent_idx]
@@ -4935,11 +4978,14 @@ impl App {
             .iter()
             .rposition(|message| message.source.as_deref() == Some("browser_visual_observation"));
 
-        // Inject project context as a system message at the front
-        if self.agents[agent_idx]
-            .messages()
-            .iter()
-            .any(|m| matches!(m.role, AiRole::User))
+        // Inject project context as a system message at the front. With the
+        // switch off this is omitted together with every other appended
+        // section, so the profile prompt is the only system text.
+        if self.inject_prompt_sections
+            && self.agents[agent_idx]
+                .messages()
+                .iter()
+                .any(|m| matches!(m.role, AiRole::User))
         {
             msgs.push(crate::llm::ChatMessage {
                 role: "system".into(),
@@ -5487,6 +5533,19 @@ impl App {
          If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
          Always check the [Project Context] to understand existing files before generating.";
 
+    /// Always-on, compact pointer to the authoring pipeline.
+    ///
+    /// The full policy blocks are large and topic-defining (external ACP agents
+    /// title their sessions from the first prompt text), so they are injected
+    /// only while a generation is underway or the user explicitly asks for one.
+    /// This short entry keeps ordinary chat light while still steering a
+    /// free-form request into `submit_requirements` instead of direct writes.
+    const GENERATION_PIPELINE_ENTRY: &'static str = "\n\n## Feature Authoring\n\
+         Feature and scenario authoring goes through Teshi's authoring tools, not direct file writes.\n\
+         When the user asks to create or extend a feature, start with `submit_requirements`;\n\
+         never call `create_feature_file` or `insert_scenario` before the pipeline reaches Feature Writing.\n\
+         The test-point review step depends on the active review policy and is spelled out once generation starts.";
+
     /// Returns the Feature Generation Pipeline guidance block for `policy`.
     fn generation_pipeline_prompt(policy: teshi_agent::pipeline::ReviewPolicy) -> &'static str {
         match policy {
@@ -5495,19 +5554,65 @@ impl App {
         }
     }
 
+    /// Whether this turn needs the full, policy-specific pipeline block.
+    ///
+    /// Pipeline state is authoritative: any active stage means the guidance
+    /// must persist across every tool round without re-reading user text.
+    /// `Complete` deliberately ignores chat history so a finished generation
+    /// cannot resurrect the block on a later follow-up or retry.
+    ///
+    /// From `Idle`, only the turn that actually asks for a generation gets the
+    /// full block. When that turn calls a tool, follow-up turns pass no
+    /// `request`; they fall back to the latest user message so the block
+    /// survives tool rounds until the pipeline records its first stage.
+    fn needs_generation_guidance(&self, request: Option<&str>, agent_idx: usize) -> bool {
+        use teshi_agent::pipeline::GenerationStage;
+        match self.generation_stage {
+            GenerationStage::Idle => request
+                .or_else(|| {
+                    self.agents[agent_idx]
+                        .messages()
+                        .iter()
+                        .rev()
+                        .find(|message| {
+                            message.role == AiRole::User
+                                && message.source.as_deref() != Some("agent_progress")
+                        })
+                        .map(|message| message.content.as_str())
+                })
+                .is_some_and(Self::is_generation_request),
+            GenerationStage::Complete => false,
+            _ => true,
+        }
+    }
+
     /// The system prompt used for all AI chat requests.
-    /// Uses the active agent profile's instructions as the base, then appends
-    /// pipeline guidance.
+    /// Uses the active agent profile's instructions as the base, appends the
+    /// compact authoring entry, then the full pipeline block when this turn
+    /// needs it. The Settings switch can suppress every extra section.
     fn ai_system_prompt(&self, request: Option<&str>, agent_idx: usize) -> String {
         let profile = self.agent_profile(agent_idx);
         let instructions = profile
             .map(|p| p.system_prompt.clone())
             .unwrap_or_else(|| "You are a helpful assistant.".to_string());
         let mut prompt = instructions;
+        let generation_requested = request.is_some_and(Self::is_generation_request);
 
-        // Generation pipeline guidance is policy-aware: Direct never injects a
+        // "Off" means the agent profile prompt only: no authoring entry, no
+        // pipeline/stage/scope block, no extra or exploration guidance. One
+        // early return keeps future sections from bypassing the switch.
+        if !self.inject_prompt_sections {
+            return prompt;
+        }
+
+        // The entry is small enough for every chat; the full pipeline block is
+        // policy-aware and only worth its token and topic cost when a
+        // generation is underway or just started. Direct never receives a
         // mandatory human-review instruction after the user opts out.
-        prompt.push_str(Self::generation_pipeline_prompt(self.review_policy));
+        prompt.push_str(Self::GENERATION_PIPELINE_ENTRY);
+        if self.needs_generation_guidance(request, agent_idx) {
+            prompt.push_str(Self::generation_pipeline_prompt(self.review_policy));
+        }
 
         // Inject pipeline stage guidance if a generation is in progress
         if !matches!(
@@ -5546,13 +5651,11 @@ impl App {
         }
 
         // Append extra guidance for generation requests
-        if let Some(req) = request
-            && Self::is_generation_request(req)
-        {
+        if generation_requested {
             prompt.push_str(
                 "\n\n## Additional Guidance (Generation Request Detected)\n\
                      The user is asking you to create or generate content. Follow the\n\
-                     Feature Generation Process above carefully. Before creating files,\n\
+                     Feature Generation Pipeline above carefully. Before creating files,\n\
                      scan the [Project Context] to understand existing patterns and reuse\n\
                      step text where appropriate. Prioritize data-driven Scenario Outlines\n\
                      over repetitive Basic scenarios when the same flow applies to\n\
@@ -9300,6 +9403,29 @@ impl App {
             };
         }
 
+        // App Settings overlay intercept.
+        if self.settings_panel_active {
+            return match action {
+                Action::SettingsPanelToggle => {
+                    if self.settings_panel_selection == 0 {
+                        self.toggle_inject_prompt_sections();
+                    }
+                    Ok(())
+                }
+                Action::SettingsPanelClose | Action::ClearInputState => {
+                    self.close_settings_panel();
+                    Ok(())
+                }
+                // The host-safe quit chord stays live even with the overlay
+                // open; the key handler lets it through to the keymap.
+                Action::Quit => {
+                    self.quit();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         // Agent profile selection panel intercept.
         if self.agent_profile_panel_active {
             if self.agent_panel_mode != AgentPanelMode::List {
@@ -9613,6 +9739,14 @@ impl App {
             }
             Action::ModelPanelOpen => {
                 self.cmd_models()?;
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelOpen => {
+                self.open_agent_backend_panel(AgentPanelMode::SelectBackend);
+                self.quit_pending_confirm = false;
+            }
+            Action::SettingsPanelOpen => {
+                self.open_settings_panel();
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelClose => {
@@ -11414,7 +11548,10 @@ impl App {
             | Action::AgentPanelFormInsert(_)
             | Action::AgentPanelFormBackspace
             | Action::AgentPanelFormSubmit
-            | Action::AgentPanelFormCancel => {}
+            | Action::AgentPanelFormCancel
+            // Settings actions are handled in their own intercept — unreachable here.
+            | Action::SettingsPanelToggle
+            | Action::SettingsPanelClose => {}
         }
         self.clamp_cursor();
         Ok(())
@@ -12686,6 +12823,7 @@ impl App {
             || self.session_panel_active
             || self.auth_panel_active
             || self.approval_panel_active
+            || self.settings_panel_active
             || self.agent_profile_panel_active
             || self.quit_pending_confirm
             || self.change_summary_visible
@@ -12950,6 +13088,7 @@ impl App {
             && !self.session_panel_active
             && !self.auth_panel_active
             && !self.approval_panel_active
+            && !self.settings_panel_active
             && !self.agent_profile_panel_active
             && !self.quit_pending_confirm
             && !self.change_summary_visible
@@ -14102,6 +14241,139 @@ impl App {
 
     // ── Slash command handlers ─────────────────────────────────────────
 
+    /// Number of rows in the app Settings overlay.
+    pub(crate) const SETTINGS_ROWS: usize = 1;
+
+    /// Whether any prompt or overlay already owns keyboard input.
+    ///
+    /// The app Settings chord must not stack on top of a pending prompt or
+    /// another modal, matching the precedence the other panels enforce.
+    fn prompt_owns_input(&self) -> bool {
+        self.pending_delete.is_some()
+            || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
+            || self.command_line.is_some()
+            || self.auth_panel_active
+            || self.model_panel_active
+            || self.session_panel_active
+            || self.agent_profile_panel_active
+            || self.approval_panel_active
+            || self.change_summary_visible
+            || self.generation_scope_prompt.is_some()
+            || self.step_keyword_picker.is_some()
+            || self.scenario_dropdown_open
+            || self.authoring_ui.overlay_active()
+            || self.has_external_change_prompt()
+            || self.has_agent_change_prompt()
+            || self.has_acp_permission_prompt()
+            || self.screenshot.visible
+            || self.project_switch.overlay != crate::project_context::SwitchOverlay::None
+    }
+
+    /// Opens the app Settings overlay unless another prompt owns input.
+    pub fn open_settings_panel(&mut self) {
+        if self.prompt_owns_input() {
+            return;
+        }
+        self.settings_panel_active = true;
+        self.settings_panel_selection = 0;
+        self.status = "Settings: ↑↓ move · Enter/Space toggle · Esc close".into();
+    }
+
+    pub fn close_settings_panel(&mut self) {
+        self.settings_panel_active = false;
+    }
+
+    /// Sets the system-prompt injection preference in memory only.
+    ///
+    /// Persistence is separate so unit tests never touch the user's settings
+    /// file; the interactive loop is the only caller of the persisted toggle.
+    /// Connected ACP backends read the value on their next turn without a
+    /// reconnect.
+    pub fn set_inject_prompt_sections(&mut self, enabled: bool) {
+        self.inject_prompt_sections = enabled;
+        for agent in &mut self.agents {
+            agent.backend.set_inject_prompt_sections(enabled);
+        }
+    }
+
+    /// Flips the system-prompt injection preference and persists it.
+    fn toggle_inject_prompt_sections(&mut self) {
+        let enabled = !self.inject_prompt_sections;
+        self.inject_prompt_sections = enabled;
+        self.status = if enabled {
+            "System-prompt sections: On".into()
+        } else {
+            "System-prompt sections: Off (agent profile prompt only)".into()
+        };
+        let result = teshi_engine::load_settings().and_then(|mut settings| {
+            settings.inject_prompt_sections = enabled;
+            teshi_engine::save_settings(&settings)
+        });
+        if let Err(error) = result {
+            self.status = format!("Settings applied but not saved: {error}");
+        }
+    }
+
+    /// Loads the persisted injection preference once at interactive startup.
+    ///
+    /// `App::from_cli` and the test constructors deliberately skip this so
+    /// library tests never read the developer's real `settings.json`.
+    pub fn load_inject_prompt_sections(&mut self) {
+        if let Ok(settings) = teshi_engine::load_settings() {
+            self.set_inject_prompt_sections(settings.inject_prompt_sections);
+        }
+    }
+
+    /// Handles the Settings chord and, while the overlay is open, every key it
+    /// owns. Returns true when the key was consumed.
+    pub fn handle_settings_panel_key(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return false;
+        }
+        if !self.settings_panel_active {
+            // Ctrl+Shift+P; bare Ctrl+P stays the Requirements priority edit.
+            // Some terminals drop the SHIFT bit but keep the uppercase char, so
+            // accept that form without widening to lowercase Ctrl+P.
+            let chord = match key.code {
+                KeyCode::Char('P') => key.modifiers.contains(KeyModifiers::CONTROL),
+                KeyCode::Char('p') => key
+                    .modifiers
+                    .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+                _ => false,
+            };
+            if chord {
+                self.open_settings_panel();
+                return self.settings_panel_active;
+            }
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => self.close_settings_panel(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_panel_selection = self.settings_panel_selection.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = Self::SETTINGS_ROWS.saturating_sub(1);
+                if self.settings_panel_selection < last {
+                    self.settings_panel_selection += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self.settings_panel_selection == 0 {
+                    self.toggle_inject_prompt_sections();
+                }
+            }
+            // The overlay covers the app, so it swallows every other key; only
+            // the host-safe quit chord stays live.
+            _ => {
+                return !(key.code == KeyCode::Char('q')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            }
+        }
+        true
+    }
+
     fn open_agent_backend_panel(&mut self, mode: AgentPanelMode) {
         let root = match crate::acp_agents::store_dir() {
             Ok(root) => root,
@@ -14399,6 +14671,10 @@ impl App {
             }
             return Ok(());
         }
+        if command == "preferences" || command == "prefs" {
+            self.open_settings_panel();
+            return Ok(());
+        }
         if command == "settings" {
             self.open_acp_controls(None);
             return Ok(());
@@ -14582,7 +14858,7 @@ impl App {
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /generate, /generate-direct, /review-strict, /continue".to_string();
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /preferences, /generate, /generate-direct, /review-strict, /continue".to_string();
         Ok(())
     }
 
@@ -14954,6 +15230,260 @@ mod tests {
         let strict = App::generation_pipeline_prompt(ReviewPolicy::Strict);
         assert!(strict.contains("Do NOT skip the human review gate"));
         assert!(strict.contains("Stop and wait"));
+    }
+
+    #[test]
+    fn test_system_prompt_injects_pipeline_only_when_needed() {
+        use teshi_agent::pipeline::GenerationStage;
+        const ENTRY: &str = "## Feature Authoring";
+        const PIPELINE: &str = "## Feature Generation Pipeline";
+        let (mut app, _project, _store) = slash_test_app();
+
+        // Every chat gets the compact entry; plain questions stop there.
+        let plain = app.ai_system_prompt(Some("Why is the sidebar empty?"), 0);
+        assert!(plain.contains(ENTRY), "the compact entry stays available");
+        assert!(
+            !plain.contains(PIPELINE),
+            "a plain question must not carry pipeline guidance"
+        );
+
+        // A bare verb or a bare noun is not a generation request.
+        let bare_verb = app.ai_system_prompt(Some("为什么写不进去？"), 0);
+        assert!(!bare_verb.contains(PIPELINE));
+        let bare_noun = app.ai_system_prompt(Some("Where is the feature list?"), 0);
+        assert!(!bare_noun.contains(PIPELINE));
+
+        let generate = app.ai_system_prompt(Some("Generate a login feature"), 0);
+        assert!(
+            generate.contains(PIPELINE),
+            "a generation request needs pipeline guidance"
+        );
+
+        // A clarification answer keeps the entry only; the pipeline has not
+        // started yet, and the full block never leaks into unrelated replies.
+        let clarification = app.ai_system_prompt(Some("用户名 + 密码，连续 3 次失败锁定"), 0);
+        assert!(clarification.contains(ENTRY));
+        assert!(!clarification.contains(PIPELINE));
+
+        // Tool rounds on the generation turn pass no request; the latest user
+        // line still asks for a generation, so the block survives.
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::User,
+            content: "生成登录功能的 feature".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        let followup = app.ai_system_prompt(None, 0);
+        assert!(
+            followup.contains(PIPELINE),
+            "a follow-up turn keeps guidance from the latest user request"
+        );
+
+        app.agents[0].messages_mut().clear();
+        app.generation_stage = GenerationStage::Planning;
+        let in_progress = app.ai_system_prompt(Some("Looks good, continue"), 0);
+        assert!(
+            in_progress.contains(PIPELINE),
+            "an active generation keeps pipeline guidance"
+        );
+
+        // `Complete` ignores history: a finished generation must not resurrect
+        // the block from the request that started it.
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::User,
+            content: "Generate a login feature".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        app.generation_stage = GenerationStage::Complete;
+        let finished = app.ai_system_prompt(None, 0);
+        assert!(
+            !finished.contains(PIPELINE),
+            "a finished generation drops pipeline guidance"
+        );
+    }
+
+    #[test]
+    fn generation_request_requires_an_authoring_verb_and_noun() {
+        for text in [
+            "Generate a login feature",
+            "帮我写一个登录功能的 feature",
+            "实现登录场景",
+            "Need a new story for checkout",
+        ] {
+            assert!(App::is_generation_request(text), "{text}");
+        }
+        for text in [
+            "Why is the sidebar empty?",
+            "Why was the file not created?",
+            "为什么写不进去？",
+            "Where is the feature list?",
+            "如何生成一份报告",
+        ] {
+            assert!(!App::is_generation_request(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn system_prompt_sections_can_be_disabled() {
+        use teshi_agent::pipeline::GenerationStage;
+        let (mut app, _project, _store) = slash_test_app();
+        app.generation_stage = GenerationStage::Planning;
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::User,
+            content: "Generate a login feature".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+
+        // Every extra section is eligible on this turn.
+        let enabled = app.ai_system_prompt(Some("Generate a login feature"), 0);
+        assert!(enabled.contains("## Feature Authoring"));
+        assert!(enabled.contains("## Feature Generation Pipeline"));
+        assert!(enabled.contains("## Generation Pipeline Status"));
+        assert!(enabled.contains("Additional Guidance"));
+
+        app.set_inject_prompt_sections(false);
+        let disabled = app.ai_system_prompt(Some("Generate a login feature"), 0);
+        let expected = app
+            .agent_profile(0)
+            .map(|profile| profile.system_prompt.clone())
+            .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+        assert_eq!(disabled, expected, "off means the profile prompt only");
+        for marker in [
+            "## Feature Authoring",
+            "## Feature Generation Pipeline",
+            "## Generation Pipeline Status",
+            "Additional Guidance",
+            "## Exploration Mode",
+        ] {
+            assert!(!disabled.contains(marker), "{marker}");
+        }
+    }
+
+    #[test]
+    fn project_context_system_message_follows_the_injection_switch() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::User,
+            content: "hello".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+
+        let enabled = app.build_chat_messages_for_agent(0);
+        assert_eq!(
+            enabled.first().map(|message| message.role.as_str()),
+            Some("system")
+        );
+        assert!(
+            enabled[0]
+                .content
+                .text()
+                .unwrap_or_default()
+                .contains("[Project Context]")
+        );
+
+        app.set_inject_prompt_sections(false);
+        let disabled = app.build_chat_messages_for_agent(0);
+        assert!(
+            !disabled.iter().any(|message| message.role == "system"),
+            "off sends no extra system message"
+        );
+        assert_eq!(disabled.len(), 1);
+    }
+
+    #[test]
+    fn global_footer_actions_open_sessions_and_settings() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.handle_action(Action::SessionPanelOpen).unwrap();
+        assert!(app.session_panel_active);
+
+        app.session_panel_active = false;
+        app.handle_action(Action::SettingsPanelOpen).unwrap();
+        assert!(app.settings_panel_active);
+    }
+
+    #[test]
+    fn settings_panel_toggles_prompt_sections_and_persists() {
+        with_app_data_dir(|_| {
+            let (mut app, _project, _store) = slash_test_app();
+            let chord = KeyEvent::new(
+                KeyCode::Char('P'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            );
+            assert!(app.handle_settings_panel_key(chord));
+            assert!(app.settings_panel_active);
+            assert!(app.inject_prompt_sections, "the bundled default is on");
+
+            assert!(
+                app.handle_settings_panel_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            );
+            assert!(!app.inject_prompt_sections);
+            assert!(
+                !teshi_engine::load_settings()
+                    .unwrap()
+                    .inject_prompt_sections,
+                "the toggle is written to the user settings store"
+            );
+
+            assert!(app.handle_settings_panel_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            assert!(!app.settings_panel_active);
+        });
+    }
+
+    #[test]
+    fn settings_panel_swallows_keys_but_keeps_ctrl_q() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.open_settings_panel();
+        assert!(app.settings_panel_active);
+        assert!(
+            app.handle_settings_panel_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+        );
+        assert!(
+            !app.handle_settings_panel_key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL
+            ))
+        );
+    }
+
+    #[test]
+    fn settings_panel_does_not_open_over_another_prompt() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.quit_pending_confirm = true;
+        let chord = KeyEvent::new(
+            KeyCode::Char('P'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert!(!app.handle_settings_panel_key(chord));
+        assert!(!app.settings_panel_active);
+    }
+
+    #[test]
+    fn preferences_slash_opens_app_settings_while_settings_stays_acp() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.execute_slash_command("preferences").unwrap();
+        assert!(app.settings_panel_active);
+
+        app.settings_panel_active = false;
+        app.execute_slash_command("settings").unwrap();
+        assert!(
+            !app.settings_panel_active,
+            "/settings must keep targeting agent-advertised ACP settings"
+        );
     }
 
     #[test]
@@ -15654,6 +16184,30 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK; restored by `_restore`.
         unsafe { std::env::set_var(key, registry.path()) };
         f(registry.path());
+    }
+
+    /// Runs `f` with `TESHI_APP_DATA_DIR` pointing at a temporary directory,
+    /// restoring the previous value even if `f` panics.
+    fn with_app_data_dir(f: impl FnOnce(&Path)) {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: serialized by ENV_LOCK, which outlives this guard.
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("TESHI_APP_DATA_DIR", value) },
+                    None => unsafe { std::env::remove_var("TESHI_APP_DATA_DIR") },
+                }
+            }
+        }
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let data = tempdir().unwrap();
+        let _restore = Restore(std::env::var_os("TESHI_APP_DATA_DIR"));
+        // SAFETY: serialized by ENV_LOCK; restored by `_restore`.
+        unsafe { std::env::set_var("TESHI_APP_DATA_DIR", data.path()) };
+        f(data.path());
     }
 
     #[test]
@@ -22351,6 +22905,8 @@ mod tests {
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
+            settings_panel_active: false,
+            settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -22367,6 +22923,7 @@ mod tests {
             version: String::new(),
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
+            inject_prompt_sections: true,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -22564,6 +23121,8 @@ Feature: B
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
+            settings_panel_active: false,
+            settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -22580,6 +23139,7 @@ Feature: B
             version: String::new(),
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
+            inject_prompt_sections: true,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,

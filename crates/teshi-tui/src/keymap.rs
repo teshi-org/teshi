@@ -388,6 +388,10 @@ pub enum Action {
     // Model profile panel
     /// Open the model profile management overlay.
     ModelPanelOpen,
+    /// Open the Agent selector for this conversation.
+    AgentPanelOpen,
+    /// Open Teshi's app Settings overlay.
+    SettingsPanelOpen,
     /// Close the model profile management overlay.
     ModelPanelClose,
     /// Activate the currently selected profile.
@@ -443,7 +447,6 @@ pub enum Action {
     ClearSelection,
     // ── Session browser panel actions ─────────────────
     /// Open the session browser panel (triggered via `/sessions` slash command).
-    #[allow(dead_code)]
     SessionPanelOpen,
     SessionPanelClose,
     SessionPanelUp,
@@ -499,6 +502,11 @@ pub enum Action {
     AgentPanelFormSubmit,
     /// Cancel the form and return to the list.
     AgentPanelFormCancel,
+    // ── App Settings overlay actions ─────────────────────
+    /// Toggle the highlighted app-setting row (Enter/Space or a pointer click).
+    SettingsPanelToggle,
+    /// Close the app Settings overlay (the bottom-right Close control).
+    SettingsPanelClose,
 }
 
 impl Action {

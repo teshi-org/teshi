@@ -33,6 +33,15 @@ All five tab labels and the project header are clickable. Narrow terminals use
 Explore, Map, AI, Req, and Points labels. Wheels target the pane beneath the
 pointer; Shift+wheel scrolls horizontally where supported.
 
+### Global footer
+
+Every tab shares one application action bar: **Sessions** (`/sessions`),
+**Agents** (`/agent`), **Models** (`m`), **Save** (`Ctrl+S`), and **Settings**
+(`Ctrl+Shift+P`). The labels are clickable. Action names lead and their
+keyboard or command affordance follows as secondary text. The `^q 退出` control
+stays pinned at the bottom-right. Tab-specific shortcuts remain documented in
+the sections below instead of occupying the footer.
+
 ### Command line
 
 `:` in any Normal/Browse mode opens a single-line prompt in the footer strip.
@@ -437,11 +446,17 @@ cancels/closes. Text forms preserve printable `j/k`.
 | ACP registry | List navigation; Enter installs the selected agent |
 | Native Agent Profiles | List navigation; Enter selects; no active add/edit/delete form |
 | ACP settings | List navigation; h/Left/Backspace returns; l/Right/Enter opens/applies; a opens Agent selection; p opens approvals |
+| App Settings | List navigation; Enter/Space toggles; Esc or the bottom-right Close control closes; changes save as you make them |
 | Authentication panel | Esc closes |
 
 Ctrl+comma or `/settings` opens ACP settings. Other active modals keep ownership
 of their input. Terminals that cannot encode Ctrl+comma can use `/settings`.
 Agent mode settings and Teshi approval modes remain separate controls.
+Ctrl+Shift+P or `/preferences` opens Teshi app settings. The first switch
+controls whether AI chats receive Teshi's extra prompt context (project
+context, authoring pipeline, generation status, exploration, and ACP tool
+guidance); it is on by default, persisted in the user settings file, and saves
+as you toggle it.
 
 ## AI slash commands
 
@@ -463,6 +478,7 @@ Agent mode settings and Teshi approval modes remain separate controls.
 | `/agent` | Session agent backend |
 | `/acp` | Installed ACP agents and registry |
 | `/settings` | ACP model, mode, thinking, and other advertised settings |
+| `/preferences` | Teshi app settings: toggle extra AI system-prompt sections |
 | `/agent-profile` | Native Agent Profile selection |
 | `/generate` | Start requirements → test points → scenarios generation |
 | `/continue` | Continue generation after the human test-point review gate |
@@ -543,8 +559,8 @@ and text-selection colors retain their own meaning within a user message.
 
 The chat sidebar takes a quarter of the AI tab, clamped between 20 and 30
 columns, and a subdued selected-row fill. It disappears below 90 columns so the
-conversation keeps its reading width, and **Ctrl+G** (or the footer Chats
-control) hides it on wider terminals; the chat title then reads "chats hidden
+conversation keeps its reading width, and **Ctrl+G** hides it on wider
+terminals; the chat title then reads "chats hidden
 [Ctrl+g]". Once a conversation is saved, the title also shows its local session ID;
 click the ID to copy it. On narrow panels the ID is kept while the agent name and
 sidebar hint are dropped. Agent selection, model selection and overflow settings remain

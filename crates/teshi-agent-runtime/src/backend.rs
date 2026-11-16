@@ -204,6 +204,16 @@ impl AgentBackendRuntime {
         }
     }
 
+    /// Applies the frontend's prompt-injection preference to future ACP turns.
+    ///
+    /// Native turns only receive Teshi's extra sections through the system
+    /// prompt, so they need no backend-level update here.
+    pub fn set_inject_prompt_sections(&mut self, enabled: bool) {
+        if let Self::Acp(backend) = self {
+            backend.set_inject_prompt_sections(enabled);
+        }
+    }
+
     pub fn start(&mut self) -> anyhow::Result<()> {
         match self {
             Self::Native(backend) => {

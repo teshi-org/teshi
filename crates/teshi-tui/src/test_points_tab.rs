@@ -6,7 +6,6 @@ use std::path::Path;
 use crate::theme;
 use anyhow::{Context, Result};
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, RequirementLink, ResolutionState, ReviewState, TestPoint, TextRange,
     slice_by_char_range,
@@ -604,30 +603,6 @@ fn document_excerpt(artifacts: &AuthoringArtifacts, link: &RequirementLink) -> (
         .unwrap_or_else(|| link.quote.quote.clone());
 
     (title, quote)
-}
-
-/// Footer hint line for the Test Points tab.
-pub fn test_points_footer_line() -> Line<'static> {
-    theme::footer_line(vec![
-        Span::styled(" Focus [Tab] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Approve [a] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Reject [r] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Batch [A] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Continue [c] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(
-            " Open scenario [o] ",
-            Style::default().fg(theme::FOOTER_DESC),
-        ),
-        Span::raw(" "),
-        Span::styled(" Filter [f] ", Style::default().fg(theme::FOOTER_DESC)),
-        Span::raw(" "),
-        Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
-    ])
 }
 
 /// Full review-state name for detail display.
