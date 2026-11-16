@@ -81,8 +81,10 @@ wix/web-files.wxs
 teshi-bridge.zip
 crates/teshi-tui/testpoints/
 
-# Runtime Test Points store created when the bundled sample project is opened
-features/*/testpoints/
+# Runtime Test Points JSON created when a locale tree is opened as a project.
+# Authored Features live under features/*/testpoints/<module>/ and stay tracked.
+features/*/testpoints/testpoints.json
+features/*/testpoints/*.lock
 
 # Lock file held while a test points store is open
 testpoints/*.lock
