@@ -926,9 +926,6 @@ fn empty_running_detail(case_id: String) -> CaseDetail {
 
 #[derive(Debug, Clone, Default)]
 pub struct RunSummary {
-    /// Total cases in the run. The footer reports passed/failed, but the
-    /// summary keeps the full count for callers that render a ratio.
-    #[allow(dead_code)]
     pub total: usize,
     pub passed: usize,
     pub failed: usize,

@@ -383,6 +383,26 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
+    // Contextual controls keep their place on the left. The global actions
+    // occupy a compact strip on the right when the row has room for both;
+    // narrow terminals keep the contextual controls and drop the strip.
+    const APP_ACTIONS_WIDTH: u16 = 40;
+    let show_app_actions = footer.width >= APP_ACTIONS_WIDTH + 2 + 40;
+    let (context_footer, app_footer) = if show_app_actions {
+        let left = Rect {
+            width: footer.width - APP_ACTIONS_WIDTH - 2,
+            ..footer
+        };
+        let right = Rect {
+            x: footer.x + left.width + 2,
+            width: APP_ACTIONS_WIDTH,
+            ..footer
+        };
+        (left, Some(right))
+    } else {
+        (footer, None)
+    };
+
     if app.command_line.is_some() {
         render_command_line(frame, app, footer);
     } else if let Some(ref msg) = app.status_message {
@@ -395,7 +415,125 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         )]);
         frame.render_widget(Paragraph::new(status_line), footer);
     } else {
-        render_global_footer(frame, app, footer);
+        if app.active_tab == MainTab::Explore && !app.is_editor_active() {
+            render_explore_footer(frame, app, context_footer, footer.width < 100);
+        } else if app.active_tab == MainTab::Ai {
+            render_ai_footer(frame, app, context_footer, footer.width < 85);
+        } else if app.active_tab == MainTab::Requirements {
+            use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
+            // The mode belongs to the document pane; other panes keep the room for
+            // their own controls.
+            let mode = match app.authoring_ui.editor_mode {
+                _ if app.authoring_ui.focus != RequirementsFocus::Editor => "",
+                RequirementsEditorMode::Preview => "[PREVIEW]",
+                RequirementsEditorMode::Browse => "[BROWSE]",
+                RequirementsEditorMode::Insert => "[INSERT]",
+                RequirementsEditorMode::VisualChar => "[VISUAL]",
+                RequirementsEditorMode::VisualLine => "[V-LINE]",
+            };
+            let controls =
+                requirements_footer_controls(&app.authoring_ui, context_footer.width, footer.width);
+            render_action_bar(frame, app, context_footer, mode, &controls, false);
+        } else if app.active_tab == MainTab::TestPoints {
+            let inserting = app.test_points_ui.editing;
+            if inserting {
+                render_action_bar(
+                    frame,
+                    app,
+                    context_footer,
+                    "[INSERT] ",
+                    &[
+                        ("Save [Ctrl+s] ", Action::Save),
+                        ("Normal [Esc]", Action::TpExitInsert),
+                    ],
+                    false,
+                );
+            } else if context_footer.width < 40 {
+                render_action_bar(
+                    frame,
+                    app,
+                    context_footer,
+                    "",
+                    &[
+                        (" Save", Action::Save),
+                        (" Approve", Action::TpApprove),
+                        (" Reject", Action::TpReject),
+                    ],
+                    false,
+                );
+            } else {
+                let compact = footer.width < 100;
+                let controls = [
+                    (
+                        if compact { " Approve" } else { " Approve [a]" },
+                        Action::TpApprove,
+                    ),
+                    (
+                        if compact { " Reject" } else { " Reject [r]" },
+                        Action::TpReject,
+                    ),
+                    (
+                        if compact { " Batch" } else { " Batch [A]" },
+                        Action::TpBatchApprove,
+                    ),
+                    (
+                        if compact {
+                            " Continue"
+                        } else {
+                            " Continue [c]"
+                        },
+                        Action::TpContinueGeneration,
+                    ),
+                    (
+                        if compact { " Filter" } else { " Filter [f]" },
+                        Action::TpReviewFilter,
+                    ),
+                    (if compact { " Save" } else { " Save [s]" }, Action::Save),
+                ];
+                render_action_bar(
+                    frame,
+                    app,
+                    context_footer,
+                    if compact {
+                        "[NORMAL] "
+                    } else {
+                        "[NORMAL] i edit "
+                    },
+                    &controls,
+                    false,
+                );
+            }
+        } else {
+            let key_hints = theme::footer_line(footer_hints(app).spans);
+            let controls_width = context_footer.width.min(31);
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    context_footer.x,
+                    context_footer.y,
+                    controls_width,
+                    context_footer.height,
+                ),
+                "",
+                &[(" Save", Action::Save), (" Model", Action::ModelPanelOpen)],
+                false,
+            );
+            if context_footer.width > controls_width {
+                frame.render_widget(
+                    Paragraph::new(key_hints),
+                    Rect::new(
+                        context_footer.x + controls_width,
+                        context_footer.y,
+                        context_footer.width - controls_width,
+                        context_footer.height,
+                    ),
+                );
+            }
+        }
+        if let Some(app_footer) = app_footer {
+            render_app_actions(frame, app, app_footer);
+        }
     }
 
     if exit_width > 0 {
@@ -517,50 +655,20 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_pointer_feedback(frame, app);
 }
 
-/// Render the global footer actions, iCode Footer style: semantic action
-/// labels with their keyboard or command affordance as secondary text.
-fn render_global_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let actions: [(&str, &str, Action); 5] = [
-        (" Sessions", " /sessions", Action::SessionPanelOpen),
-        (" Agents", " /agent", Action::AgentPanelOpen),
-        (" Models", " m", Action::ModelPanelOpen),
-        (" Save", " Ctrl+S", Action::Save),
-        (" Settings", " Ctrl+Shift+P", Action::SettingsPanelOpen),
+/// Draw the compact global action strip, iCode Footer style.
+///
+/// Contextual tab controls keep the left side of the row; this strip carries
+/// application destinations and settings on the right, and yields entirely on
+/// narrow terminals so the contextual controls stay reachable.
+fn render_app_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let actions = [
+        (" Sessions", Action::SessionPanelOpen),
+        (" Agents", Action::AgentPanelOpen),
+        (" Models m", Action::ModelPanelOpen),
+        (" Save", Action::Save),
+        (" Settings", Action::SettingsPanelOpen),
     ];
-    let hint_style = Style::default().fg(theme::FOOTER_DESC);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut used = 0u16;
-    for (index, (name, hint, action)) in actions.into_iter().enumerate() {
-        let gap: u16 = if index == 0 { 0 } else { 2 };
-        let width = gap + name.width() as u16 + hint.width() as u16;
-        if used + width > area.width {
-            break;
-        }
-        if gap > 0 {
-            spans.push(Span::styled("  ", hint_style));
-        }
-        app.clickable_regions.push(ClickableRegion::ActionButton {
-            rect: Rect::new(
-                area.x + used + gap,
-                area.y,
-                name.width() as u16 + hint.width() as u16,
-                1,
-            ),
-            action,
-            modal: false,
-        });
-        spans.push(Span::styled(
-            name.to_string(),
-            Style::default()
-                .fg(theme::PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ));
-        if !hint.is_empty() {
-            spans.push(Span::styled(hint.to_string(), hint_style));
-        }
-        used += width;
-    }
-    frame.render_widget(Paragraph::new(theme::footer_line(spans)), area);
+    render_action_bar(frame, app, area, "", &actions, false);
 }
 
 /// Single-line `:` prompt in the footer strip; the block caret marks the cursor.
@@ -3802,6 +3910,211 @@ fn status_label(status: RunStatus) -> &'static str {
     }
 }
 
+fn feature_display_name(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "feature".to_string())
+}
+
+fn render_explore_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect, compact: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let feature_name = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| feature_display_name(&f.file_path))
+        .unwrap_or_else(|| "-".to_string());
+    let scenario_name = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .and_then(|f| f.scenario_at(app.explore_selected_scenario))
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let left = format!("{feature_name}  {scenario_name}");
+
+    let total = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| f.scenario_count())
+        .unwrap_or(0);
+    let right = if let Some(summary) = &app.explore_run_summary {
+        let mut text = format!(
+            "{}/{} passed, {} failed",
+            summary.passed, summary.total, summary.failed
+        );
+        if summary.blocked > 0 {
+            text.push_str(&format!(", {} blocked", summary.blocked));
+        }
+        text
+    } else {
+        format!("0/{total} 通过")
+    };
+
+    let controls = [
+        (
+            if compact { " Run" } else { " Run [r]" },
+            Action::RunScenario,
+        ),
+        (
+            if compact {
+                " Detail"
+            } else {
+                " Detail [Enter]"
+            },
+            Action::ToggleFailureDetail,
+        ),
+        (
+            if compact { " Edit" } else { " Edit [e]" },
+            Action::EnterEdit,
+        ),
+    ];
+    let used = controls
+        .iter()
+        .map(|(label, _)| label.width() as u16)
+        .sum::<u16>();
+    let width = area.width.saturating_sub(used + 1) as usize;
+    let left_w = UnicodeWidthStr::width(left.as_str());
+    let right_w = UnicodeWidthStr::width(right.as_str());
+
+    let text = if right_w >= width {
+        truncate_string_to_cols(right.as_str(), width as u16)
+    } else {
+        let mut out = String::new();
+        let mut left_trimmed = left;
+        let avail_left = width.saturating_sub(right_w + 1);
+        if left_w > avail_left {
+            left_trimmed = truncate_string_to_cols(left_trimmed.as_str(), avail_left as u16);
+        }
+        let left_trimmed_w = UnicodeWidthStr::width(left_trimmed.as_str());
+        let spaces = width.saturating_sub(left_trimmed_w + right_w);
+        out.push_str(&left_trimmed);
+        out.push_str(&" ".repeat(spaces));
+        out.push_str(&right);
+        out
+    };
+
+    render_action_bar(frame, app, area, "", &controls, false);
+    if area.width > used + 1 {
+        frame.render_widget(
+            Paragraph::new(theme::footer_line([Span::raw(text)])),
+            Rect::new(area.x + used + 1, area.y, area.width - used - 1, 1),
+        );
+    }
+}
+
+fn footer_pill(label: &'static str) -> Span<'static> {
+    Span::raw(label)
+}
+
+fn footer_hints(app: &App) -> Line<'static> {
+    if app.is_editor_active() {
+        if app.step_input_active {
+            return Line::raw("[INSERT] Enter commit · Esc normal · Ctrl+s save · Arrows move");
+        }
+        return Line::from(vec![
+            footer_pill("[NORMAL] Edit [i/Enter] "),
+            Span::raw(" "),
+            footer_pill(" Given/Then/And [Ctrl+g/t/a] "),
+            Span::raw(" "),
+            footer_pill(" Step [o/O] "),
+            Span::raw(" "),
+            footer_pill(" Delete [dd] "),
+            Span::raw(" "),
+            footer_pill(" Copy/Paste [yy/p] "),
+            Span::raw(" "),
+            footer_pill(" MoveStep [Ctrl+j/k] "),
+            Span::raw(" "),
+            footer_pill(" Fold [Space] "),
+            Span::raw(" "),
+            footer_pill(" FoldAll [Ctrl+Space] "),
+            Span::raw(" "),
+            footer_pill(" Save [Ctrl+s] "),
+        ]);
+    }
+    match (app.active_tab, app.view_stage) {
+        (MainTab::MindMap, _)
+            if app.mindmap_focus == MindMapFocus::AiPanel && app.ai_input_focused =>
+        {
+            // AI chat input focused — show AI-style hints
+            Line::from(vec![
+                footer_pill("[INPUT] Send [Enter] "),
+                Span::raw(" "),
+                footer_pill(" Back/Browse [Esc] "),
+                Span::raw(" "),
+                footer_pill(" Newline [Shift+Enter] "),
+            ])
+        }
+        (MainTab::MindMap, _) if app.mindmap_focus == MindMapFocus::AiPanel => {
+            // AI panel focused but input not focused. The return control leads:
+            // the combined footer can clip its tail on narrower terminals.
+            Line::from(vec![
+                footer_pill("[NORMAL] Return Tree [Esc] "),
+                Span::raw(" "),
+                footer_pill(" Input [i/Enter] "),
+                Span::raw(" "),
+                footer_pill(" Scroll [hjkl/Arrows] "),
+            ])
+        }
+        (MainTab::MindMap, _) => {
+            // Tree focused
+            let mut hints = vec![
+                footer_pill(" Navigate [↑↓] "),
+                Span::raw(" "),
+                footer_pill(" Toggle [Space] "),
+                Span::raw(" "),
+                footer_pill(" Expand [→] "),
+                Span::raw(" "),
+                footer_pill(" Collapse [←] "),
+            ];
+            if app.mindmap_ai_panel_visible {
+                hints.push(Span::raw(" "));
+                hints.push(footer_pill(" Focus Panel [Enter] "));
+                hints.push(Span::raw(" "));
+                hints.push(footer_pill(" Toggle Panel [p] "));
+            } else {
+                hints.push(Span::raw(" "));
+                hints.push(footer_pill(" Show Panel [p] "));
+            }
+            Line::from(hints)
+        }
+        (MainTab::Explore, _) => Line::from(vec![
+            footer_pill(" Focus [Tab/←→] "),
+            Span::raw(" "),
+            footer_pill(" Navigate [↑↓] "),
+            Span::raw(" "),
+            footer_pill(" Edit [e/→] "),
+            Span::raw(" "),
+            footer_pill(" Detail [Enter] "),
+            Span::raw(" "),
+            footer_pill(" Run [r] "),
+            Span::raw(" "),
+            footer_pill(" AI [a] "),
+        ]),
+        (MainTab::Ai, _) if app.ai_input_focused => {
+            Line::raw("[INPUT] Enter send · Shift+Enter newline · Esc normal · Ctrl+v paste")
+        }
+        (MainTab::Ai, _) if app.ai_sidebar_visible => Line::raw(
+            "[NORMAL] i/Enter input · h chats · j/k/l/Arrows scroll · [/] agent · a new · x close",
+        ),
+        (MainTab::Ai, _) => {
+            Line::raw("[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close")
+        }
+        // These tabs render their contextual controls before `footer_hints`
+        // is consulted; keep the arms exhaustive without reviving the old
+        // text-only footer helpers.
+        (MainTab::Requirements, _) | (MainTab::TestPoints, _) => Line::raw(""),
+    }
+}
+
+/// Renders the footer bar for the AI tab.
+fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect, compact: bool) {
+    pointer_controls::render_ai_footer(frame, app, area, compact);
+}
+
 /// Renders the auth management overlay panel over the entire screen.
 fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
@@ -5164,6 +5477,92 @@ fn render_requirement_scrollbars(
         );
         ui.pane_bars[pane][1] = Some(bar);
     }
+}
+
+/// Requirements tab: tree, Markdown editor, and linked test points.
+/// Footer controls for the focused Requirements pane.
+///
+/// The tree shows view settings plus the Space menu, which holds every row operation;
+/// the editor shows document commands. Labels shorten below 100 columns and only the
+/// essentials remain below 55.
+fn requirements_footer_controls(
+    ui: &crate::authoring_tab::AuthoringUiState,
+    width: u16,
+    full_width: u16,
+) -> Vec<(&'static str, Action)> {
+    use crate::authoring_tab::RequirementsEditorMode;
+    let tree = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
+    let label =
+        |full: &'static str, short: &'static str| if full_width < 100 { short } else { full };
+    // The view switch leads the editor controls; Insert and Visual leave
+    // through Normal mode, so they offer none.
+    let view = match ui.editor_mode {
+        RequirementsEditorMode::Preview => {
+            Some((label(" Edit [e]", " Edit"), Action::ReqEnterEditView))
+        }
+        RequirementsEditorMode::Browse => {
+            Some((label(" Preview [Esc]", " Preview"), Action::ReqEnterPreview))
+        }
+        _ => None,
+    };
+    // A test point is created from selected source text, which the preview lacks.
+    let point = !ui.is_previewing();
+    if width < 55 {
+        return if tree {
+            vec![
+                (" Actions", Action::ReqActionMenu),
+                (" New", Action::ReqNewDocument),
+                (" Filter", Action::ReqFilterOverlay),
+            ]
+        } else if point {
+            vec![
+                (" Save", Action::Save),
+                (" New", Action::ReqNewDocument),
+                (" Point", Action::ReqNewTestPoint),
+            ]
+        } else {
+            vec![
+                (" Edit", Action::ReqEnterEditView),
+                (" Save", Action::Save),
+                (" New", Action::ReqNewDocument),
+            ]
+        };
+    }
+    if !tree {
+        return view
+            .into_iter()
+            .chain([(label(" Save [Ctrl+s]", " Save"), Action::Save)])
+            .chain(point.then_some((label(" Point [n]", " Point"), Action::ReqNewTestPoint)))
+            .chain([
+                (
+                    label(" Iteration [I]", " Iteration"),
+                    Action::ReqEditIteration,
+                ),
+                (
+                    label(" Priority [Ctrl+p]", " Priority"),
+                    Action::ReqEditPriority,
+                ),
+                (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+            ])
+            .collect();
+    }
+    let mut controls = vec![
+        (label(" Scope [o]", " Scope"), Action::ReqProjectScope),
+        (label(" View [g]", " View"), Action::ReqGroupToggle),
+        (label(" Filter [i]", " Filter"), Action::ReqFilterOverlay),
+    ];
+    if ui.is_project_scope() {
+        controls.push((
+            label(" Completed [H]", " Completed"),
+            Action::ReqCompletedToggle,
+        ));
+    }
+    controls.extend([
+        (label(" Reload [R]", " Reload"), Action::ReqReloadStore),
+        (label(" Actions [Space]", " Actions"), Action::ReqActionMenu),
+        (label(" New doc [n]", " New"), Action::ReqNewDocument),
+    ]);
+    controls
 }
 
 fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -7137,12 +7536,12 @@ mod truncate_tests {
 
     #[test]
     fn global_footer_lists_semantic_actions_on_every_tab() {
-        for tab in [
-            crate::app::MainTab::Explore,
-            crate::app::MainTab::MindMap,
-            crate::app::MainTab::Ai,
-            crate::app::MainTab::Requirements,
-            crate::app::MainTab::TestPoints,
+        for (tab, contextual) in [
+            (crate::app::MainTab::Explore, "Run"),
+            (crate::app::MainTab::MindMap, "Navigate"),
+            (crate::app::MainTab::Ai, "Send"),
+            (crate::app::MainTab::Requirements, "New"),
+            (crate::app::MainTab::TestPoints, "Approve"),
         ] {
             let mut app = App::from_args().expect("app init");
             app.active_tab = tab;
@@ -7153,7 +7552,14 @@ mod truncate_tests {
             let text = (0..160)
                 .map(|x| buffer[(x, 23)].symbol())
                 .collect::<String>();
-            assert!(text.starts_with(" Sessions"), "{tab:?}: {text}");
+            assert!(
+                text.contains(contextual),
+                "contextual {contextual} control stays on {tab:?}: {text}"
+            );
+            assert!(
+                text.contains("Sessions"),
+                "the global strip stays on {tab:?}: {text}"
+            );
             for label in ["Agents", "Models", "Save", "Settings"] {
                 assert!(text.contains(label), "{tab:?}: {text}");
             }
@@ -7164,11 +7570,12 @@ mod truncate_tests {
                 ("Save", Action::Save),
                 ("Settings", Action::SettingsPanelOpen),
             ] {
-                let offset = text.find(label).unwrap() as u16;
+                let byte = text.rfind(label).unwrap();
+                let offset = unicode_width::UnicodeWidthStr::width(&text[..byte]) as u16;
                 assert_eq!(
                     buffer[(offset, 23)].fg,
                     crate::theme::PRIMARY,
-                    "{label} keeps semantic emphasis"
+                    "{tab:?} {label} keeps semantic emphasis: {text}"
                 );
                 assert!(
                     app.clickable_regions.iter().any(|region| matches!(
@@ -7176,12 +7583,6 @@ mod truncate_tests {
                         ClickableRegion::ActionButton { action: found, .. } if found == &action
                     )),
                     "{label} is clickable"
-                );
-            }
-            for hint in ["hjkl", "[Tab/←→]", "Iteration [I]", "Enter send"] {
-                assert!(
-                    !text.contains(hint),
-                    "the footer no longer lists key hints on {tab:?}: {text}"
                 );
             }
             let exit = app
