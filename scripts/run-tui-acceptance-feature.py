@@ -15,10 +15,10 @@ import sys
 import time
 
 PINNED = {
-    "external_feature_sync.feature": "7601ec883d40fcacf84965ac4ce19e9849148bb951dd8451ab155f2f115bd1ef",
-    "外部功能文件同步.feature": "3a881ddd6a9fc202c61d80769eede754ec7d50ea2fc70e6a0c9d1c8677b30fda",
-    "footer_actions.feature": "1f0100f227db5be0e8b292c36e3500a25ac97525a0da96449637b88ab80fde31",
-    "底部操作.feature": "b4c69512255c94c5102e0a140a32b5c4eec9cbfc67404afdd2ccd8f32184b0fc",
+    "external_feature_sync.feature": "abe6029a99d21ebc3ce35608f641ca226185472f15be7cebd11ee4f0c1b29c79",
+    "外部功能文件同步.feature": "2f9c3ce5f569cd272e466b24a357cf1895e9e71c35ddb9a04360e0a9f27a51f1",
+    "footer_actions.feature": "f9b20a4dc19109d327aee6cc6559331fcd411189444680fcb6c6f7f72e2e7d06",
+    "底部操作.feature": "8e1118f619a2246cbe863fefd24eccabe7c59866ac77b538211dc5e6c2103fe4",
     "chat_profile_title.feature": "093d6f8271f782263365a171360d6ca221e228378c669ef3373c1e71545eadeb",
     "聊天配置标题.feature": "461ad953009d281c0191b2c02954c9952b1e6df2a7f59de0949a8d3c1b6c4482",
     "chat_focus_hint.feature": "f1f3ab75f1bef7ab39a43e6c089623e627a314428dc849aa1cd2e457af2d5c91",

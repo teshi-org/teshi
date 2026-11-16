@@ -4,9 +4,9 @@
 
 ## 已验证可回放（已落盘 .tui.json 并通过）
 
-- features/en-US/chat_profile_title.feature — 场景 default title：通过。
+- features/en-US/ai_chat/sessions/chat_profile_title.feature — 场景 default title：通过。
   - 关键：步骤文本需去掉 Gherkin 关键字（Given/When/Then），binding.text 必须与解析后的 step.text 完全一致，否则报 stale。
-- features/en-US/footer_actions.feature — 场景 Click a visible action：通过。
+- features/en-US/common/interaction/footer_actions.feature — 场景 Click a visible action：通过。
   - 验证路径：launch → 按 4 进 Requirements → 页脚出现 Save [Ctrl+s] → click_text Save → 仍在 Requirements。
 
 ## 已证明的回放管线

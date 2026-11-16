@@ -11,8 +11,9 @@ When reviewing PRs, splitting scenarios, or unsure about granularity, read [refe
 
 ## Output location (Teshi product self-test)
 
-- Default: `features/en-US/<english-name>.feature` and `features/zh-CN/<中文名>.feature`
-- English filenames are snake_case capability names (`requirement_listing.feature`). Chinese filenames match the `功能` title (`需求列表.feature`). Sidecar `*.bindings.json` files use the same stem
+- Default: `features/en-US/<module>/<english-name>.feature` and `features/zh-CN/<模块>/<中文名>.feature`
+- Choose the module from `features/README.md` (for example AI composer work goes in `features/zh-CN/AI聊天/输入框/` and `features/en-US/ai_chat/composer/`); keep the two locale trees conceptually mirrored
+- English filenames are snake_case capability names (`requirement_listing.feature`). Chinese filenames match the `功能` title (`需求列表.feature`). Sidecar `*.bindings.json` files use the same stem and stay beside the Feature
 - Tag Teshi Web scenarios `@web-ui`
 - Tag requirement CLI control-plane scenarios `@cli` only
 - CLI E2E is executed with `teshi-requirement-cli-runner` against `@cli` files in those language directories. Run those files (or a glob of them), not the whole language directory — it also contains `@web-ui` scenarios
@@ -24,8 +25,8 @@ For a WinUI3 bug regression in another project, put the Feature in that project�
 
 Teshi self-test keeps paired locales. Keywords must match the Gherkin language header; step text uses that locale.
 
-- `features/en-US/`: English snake_case filenames; `# language: en` with English keywords (`Feature`, `Background`, `Scenario`, `Given`, `When`, `Then`, `And`) and English step text
-- `features/zh-CN/`: Chinese filenames matching the `功能` title; `# language: zh-CN` with Chinese keywords (`功能`, `背景`, `场景`, `假如`, `当`, `那么`, `并且`) and Chinese step text
+- `features/en-US/`: English snake_case directories and filenames; `# language: en` with English keywords (`Feature`, `Background`, `Scenario`, `Given`, `When`, `Then`, `And`) and English step text
+- `features/zh-CN/`: Chinese module directories and filenames matching the `功能` title; `# language: zh-CN` with Chinese keywords (`功能`, `背景`, `场景`, `假如`, `当`, `那么`, `并且`) and Chinese step text
 - Do not mix English keywords under `# language: zh-CN`, or translated keywords under `# language: en`
 - **Never** embed CSS selectors, testids, AutomationIds, or URLs in step text unless the step explicitly mentions a URL
 
@@ -81,7 +82,7 @@ Feature: Requirement listing
     假如 已有一份包含登录和结账样例文档的隔离需求库
 ```
 
-Save those as `features/en-US/requirement_listing.feature` and `features/zh-CN/需求列表.feature`.
+Save those as `features/en-US/requirements/documents/requirement_listing.feature` and `features/zh-CN/需求/文档/需求列表.feature`.
 
 ## Step granularity (important for replay)
 
@@ -103,7 +104,7 @@ Validate the exact source before handing it to binding or execution:
 
 ~~~bash
 TESHI=teshi
-$TESHI check --feature features/en-US/<name>.feature --json
+$TESHI check --feature features/en-US/<module>/<name>.feature --json
 ~~~
 
 Use the same command for the Chinese pair. Treat a non-zero result as a
@@ -114,8 +115,8 @@ For `@web-ui` files:
 
 ```bash
 TESHI=${TESHI_CLI:-teshi}
-$TESHI steps list --feature features/en-US/<name>.feature
-$TESHI steps unbound --feature features/en-US/<name>.feature
+$TESHI steps list --feature features/en-US/<module>/<name>.feature
+$TESHI steps unbound --feature features/en-US/<module>/<name>.feature
 ```
 
 Hand unbound browser steps to **teshi** for binding and **playwright-locator** for browser verification. Hand unbound WinUI3 steps to **winapp-regression**. If a specialist is unavailable, inspect the relevant CLI help rather than assuming a repository path exists.

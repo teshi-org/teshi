@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-tui-acceptance-feature.py"
-FEATURE = "features/en-US/external_feature_sync.feature"
+FEATURE = "features/en-US/explore/sync/external_feature_sync.feature"
 
 
 class ExternalSyncAdapterTests(unittest.TestCase):

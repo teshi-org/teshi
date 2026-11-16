@@ -61,7 +61,7 @@ jobs:
         run: |
           $env:TESHI_SELF_TEST_BIN = (Resolve-Path 'target/debug/teshi.exe').Path
           $runner = (Resolve-Path 'crates/teshi-tui-runner/target/debug/teshi-directory-feature-runner.exe').Path
-          & $env:TESHI_SELF_TEST_BIN check --feature features/zh-CN/项目目录加载.feature --json
+          & $env:TESHI_SELF_TEST_BIN check --feature features/zh-CN/项目/加载/项目目录加载.feature --json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $failed = $false
           foreach ($repeat in 1..3) {
@@ -69,7 +69,7 @@ jobs:
             $env:TESHI_FEATURE_ARTIFACTS = "$root/directory-evidence"
             $env:TESHI_MANAGEMENT_POINTER_ARTIFACTS = "$root/management-evidence"
             $env:TESHI_CAPTURE_TIMINGS = "$root/capture-timings.ndjson"
-            python scripts/run-ci-command.py --label directory --timeout-seconds 900 --artifacts "$root/directory" -- $env:TESHI_SELF_TEST_BIN run features/zh-CN/项目目录加载.feature --runner-cmd $runner --report "$root/directory-evidence/report.json"
+            python scripts/run-ci-command.py --label directory --timeout-seconds 900 --artifacts "$root/directory" -- $env:TESHI_SELF_TEST_BIN run features/zh-CN/项目/加载/项目目录加载.feature --runner-cmd $runner --report "$root/directory-evidence/report.json"
             if ($LASTEXITCODE -ne 0) { $failed = $true }
             python scripts/run-ci-command.py --label management --timeout-seconds 300 --serial-libtest --artifacts "$root/management" -- cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --test management_pointer -- --ignored --test-threads=1
             if ($LASTEXITCODE -ne 0) { $failed = $true }

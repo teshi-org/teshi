@@ -31,13 +31,52 @@ documentation. If a user-visible behavior depends on one of those details,
 describe the observable result instead. The complete ownership rule is in
 [`doc/test-strategy.md`](../doc/test-strategy.md).
 
+## Directory layout
+
+Features are grouped by product capability under each locale. Keep the two
+locale trees conceptually mirrored; English directories are snake_case and
+Chinese directories use the product's Chinese module names.
+
+| `features/zh-CN/` | `features/en-US/` | Contents |
+|---|---|---|
+| `AI聊天/输入框/` | `ai_chat/composer/` | AI composer selection, undo, word editing, input focus |
+| `AI聊天/会话/` | `ai_chat/sessions/` | conversations, session titles, agent selection and context |
+| `AI聊天/状态/` | `ai_chat/status/` | activity, runtime/context, ACP status row |
+| `AI聊天/ACP/` | `ai_chat/acp/` | ACP generation, settings, approvals, permissions, long/wrapped conversations |
+| `需求/文档/` | `requirements/documents/` | requirement listing, authoring, creation, tabs, names |
+| `需求/界面/` | `requirements/ui/` | requirement pane presentation |
+| `需求/项目/` | `requirements/projects/` | project-scoped requirement organization |
+| `需求/Gherkin/` | `requirements/gherkin/` | Gherkin validation self-bootstrap |
+| `Explore/导航/` | `explore/navigation/` | horizontal step navigation |
+| `Explore/差异/` | `explore/diff/` | per-step changes |
+| `Explore/布局/` | `explore/layout/` | combined detail layout |
+| `Explore/同步/` | `explore/sync/` | external Feature file synchronization |
+| `项目/切换/` | `project/switch/` | project switching and its boundaries |
+| `项目/加载/` | `project/loading/` | project directory loading |
+| `项目/工作区/` | `project/workspace/` | workspace members and resources |
+| `终端/布局/` | `terminal/layout/` | compact terminal layouts |
+| `终端/标题/` | `terminal/title/` | terminal title policy |
+| `终端/命令行/` | `terminal/command_line/` | the `:` command line |
+| `终端/编辑器/` | `terminal/editor/` | Feature editing in the terminal |
+| `终端/性能/` | `terminal/performance/` | TUI exit performance |
+| `Web/回放/` | `web/replay/` | replay review and run/inspect |
+| `Web/浏览器/` | `web/browser/` | browser profile selection |
+| `通用/交互/` | `common/interaction/` | footer actions and pointer feedback |
+| `通用/截图/` | `common/screenshot/` | screenshot inspection |
+| `WinApp/窗口/` | `winapp/` | native Windows/WinUI3 regressions |
+| `测试点/需求链接/` | `testpoints/requirement_links/` | test-point requirement links |
+
+Keep a Feature's source-bound `.bindings.json` or `.tui.template.json`
+sidecar in the same module directory, beside its `.feature` file. Generated
+`*.tui.json` replays stay in fixture directories and are not committed.
+
 ## Recorded execution results
 
 Run the matrix against a source-built CLI and its sibling runner binaries:
 
 ```text
 python scripts/run-feature-matrix.py --teshi path/to/teshi
-python scripts/run-feature-matrix.py --teshi path/to/teshi --feature features/en-US/tui_conversation_history.feature
+python scripts/run-feature-matrix.py --teshi path/to/teshi --feature features/en-US/ai_chat/sessions/tui_conversation_history.feature
 ```
 
 Each invocation creates `.teshi/feature-results/runs/<run-id>/matrix.json`,
