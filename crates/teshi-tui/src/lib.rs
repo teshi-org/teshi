@@ -10,6 +10,7 @@ mod chat_images;
 mod chat_state;
 mod chat_title;
 mod cli;
+mod composer;
 mod config;
 mod diff;
 mod doc_images;

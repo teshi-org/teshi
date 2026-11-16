@@ -13,7 +13,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
-9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Every scrollbar, on either axis, is a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Never draw a bar with `─`, `━`, `│`, or `┃`.
+9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Vertical scrollbars are a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Horizontal scrollbars use a `▄` half-block foreground on one row with the same track/thumb colours, keeping the bar visually thin while preserving the full-row pointer target. Never draw a bar with `─`, `━`, `│`, or `┃`.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips. Confirmation dialogs (`Dialog`) and option pickers (`ListDialog`) instead use `ui/dialog.rs`, modeled on iCode's `ConfirmDialog`: a veiled backdrop, a DIALOG_BG card with a BORDER outline (WARNING for destructive decisions), two-cell horizontal padding, width tiers of 43/64/80/100 columns capped at 90% of the screen, and a centered row of solid buttons. Confirmations center their message; pickers list full-width selectable rows that scroll with the selection, with muted notes below; forms (`FormDialog`) align labeled one-row input bars, scroll long text to keep the caret visible, and put live feedback and help below. Buttons rest at their muted fill and use the full semantic color when Enter or the arrow selection activates them; Primary confirms, Warning cancels, Danger destroys, and Neutral edits without closing. Up to three buttons are tall half-block pills; more share one compact row.
 
 Never paint the terminal background globally. Fill only selections, chips, active
@@ -75,7 +75,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | `muted()` | Metadata foreground |
 | `status_style(status)` | Idle muted, running warning, passed success, failed error, skipped border |
 | `diff_style(kind)` | Semantic diff foreground for `+`/`-`/`~` gutter markers; changed rows keep Gherkin syntax colours and paint no background |
-| `scrollbar_lines(total, extent, start, axis, state)` | Solid track/thumb cells for either axis, with clamped position and pointer state |
+| `scrollbar_lines(total, extent, start, axis, state)` | Solid vertical cells and thin `▄` horizontal cells, with clamped position and pointer state |
 | `highlight_color(color)` | Map existing named MindMap highlights onto theme roles |
 
 Gherkin: Header FG bold; Tag ACCENT; Given PRIMARY; When WARNING; Then SUCCESS;
@@ -96,7 +96,7 @@ Keep existing node text, shape, IDs, navigation, and grouping unchanged.
 | Spinner | `◐◓◑◒` |
 | Rail | User `▌` accent, finished answer `▌` green, activity `│` quiet |
 | Composer | Prompt `›`, submit `↵` |
-| Scrollbar | Track `│`, thumb `┃` |
+| Scrollbar | Vertical solid cells; horizontal `▄` |
 | Bullets | `• ▪ ‣ ⭑ ◦` |
 | Current menu item | `◦` |
 | Checkboxes | `[*] [ ]` |

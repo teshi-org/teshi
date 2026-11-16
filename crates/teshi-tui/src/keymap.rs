@@ -289,6 +289,40 @@ pub enum Action {
     ChangeSummaryJump,
     // AI tab input
     AiSendChar(char),
+    /// Select the whole composer draft (Ctrl+A).
+    AiSelectAll,
+    /// Undo the last composer edit (Ctrl+Z).
+    AiUndo,
+    /// Redo the last undone composer edit (Ctrl+Y / Ctrl+Shift+Z).
+    AiRedo,
+    /// Cut the composer selection (Ctrl+X).
+    AiCut,
+    /// Extend the composer selection left (Shift+Left).
+    AiSelectLeft,
+    /// Extend the composer selection right (Shift+Right).
+    AiSelectRight,
+    /// Extend the composer selection up one display row (Shift+Up).
+    AiSelectUp,
+    /// Extend the composer selection down one display row (Shift+Down).
+    AiSelectDown,
+    /// Extend the composer selection to the line start (Shift+Home).
+    AiSelectHome,
+    /// Extend the composer selection to the line end (Shift+End).
+    AiSelectEnd,
+    /// Move the composer caret to the previous word (Ctrl+Left).
+    AiCursorWordLeft,
+    /// Move the composer caret to the next word (Ctrl+Right).
+    AiCursorWordRight,
+    /// Extend the composer selection to the previous word (Ctrl+Shift+Left).
+    AiSelectWordLeft,
+    /// Extend the composer selection to the next word (Ctrl+Shift+Right).
+    AiSelectWordRight,
+    /// Delete the word before the composer caret (Ctrl+Backspace / Ctrl+W).
+    AiBackspaceWord,
+    /// Delete the word after the composer caret (Ctrl+Delete).
+    AiDeleteWord,
+    /// Delete from the composer caret to the line start (Ctrl+U).
+    AiDeleteToLineStart,
     AiSendMessage,
     /// Continue an interrupted ACP task in the current session.
     AiContinueTask,
@@ -1643,12 +1677,81 @@ impl Action {
                 (KeyCode::Enter, KeyModifiers::SHIFT)
                 | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Self::AiNewline),
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
+                // Editing chords precede the generic Backspace/Delete/arrow
+                // arms below; terminals that send raw control bytes are
+                // accepted alongside the named chords.
+                (KeyCode::Char('a'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{1}'), _) => {
+                    Some(Self::AiSelectAll)
+                }
+                (KeyCode::Char('z'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{1a}'), _) => {
+                    Some(Self::AiUndo)
+                }
+                (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(Self::AiRedo),
+                (KeyCode::Char('z' | 'Z'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiRedo)
+                }
+                (KeyCode::Char('x'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{18}'), _) => {
+                    Some(Self::AiCut)
+                }
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{15}'), _) => {
+                    Some(Self::AiDeleteToLineStart)
+                }
+                (KeyCode::Char('w'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{17}'), _) => {
+                    Some(Self::AiBackspaceWord)
+                }
+                (KeyCode::Backspace, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Self::AiBackspaceWord)
+                }
+                (KeyCode::Delete, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Self::AiDeleteWord)
+                }
+                (KeyCode::Insert, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Self::CopySelection)
+                }
+                (KeyCode::Insert, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiClipboardPaste)
+                }
+                (KeyCode::Char('v' | 'V'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiClipboardPaste)
+                }
+                (KeyCode::Left, modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiSelectWordLeft)
+                }
+                (KeyCode::Right, modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiSelectWordRight)
+                }
+                (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Self::AiCursorWordLeft)
+                }
+                (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Self::AiCursorWordRight)
+                }
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                 (KeyCode::Delete, _) => Some(Self::AiDelete),
                 (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
                 (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
                 (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
                 (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
+                (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectLeft)
+                }
+                (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectRight)
+                }
+                (KeyCode::Up, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectUp)
+                }
+                (KeyCode::Down, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectDown)
+                }
                 (KeyCode::Up, _) => Some(Self::AiCursorUp),
                 (KeyCode::Down, _) => Some(Self::AiCursorDown),
                 (KeyCode::Left, _) => Some(Self::AiCursorLeft),
@@ -1661,6 +1764,12 @@ impl Action {
                 (KeyCode::PageDown, _) => Some(Self::AiScrollDown),
                 (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
+                (KeyCode::Home, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectHome)
+                }
+                (KeyCode::End, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectEnd)
+                }
                 (KeyCode::Home, _) => Some(Self::AiCursorHome),
                 (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 // Windows Terminal consumes Ctrl+V and forwards nothing when the
@@ -3563,6 +3672,94 @@ mod tests {
     }
 
     #[test]
+    fn composer_editing_chords_precede_generic_keys() {
+        let context = chat_context(MainTab::Ai, MindMapFocus::Main, true);
+        for (code, modifiers, expected) in [
+            (
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                Action::AiSelectAll,
+            ),
+            (KeyCode::Char('z'), KeyModifiers::CONTROL, Action::AiUndo),
+            (KeyCode::Char('y'), KeyModifiers::CONTROL, Action::AiRedo),
+            (
+                KeyCode::Char('z'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Action::AiRedo,
+            ),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL, Action::AiCut),
+            (
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+                Action::AiDeleteToLineStart,
+            ),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                Action::AiBackspaceWord,
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL,
+                Action::AiBackspaceWord,
+            ),
+            (KeyCode::Delete, KeyModifiers::CONTROL, Action::AiDeleteWord),
+            (
+                KeyCode::Insert,
+                KeyModifiers::CONTROL,
+                Action::CopySelection,
+            ),
+            (
+                KeyCode::Insert,
+                KeyModifiers::SHIFT,
+                Action::AiClipboardPaste,
+            ),
+            (
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Action::AiClipboardPaste,
+            ),
+            (
+                KeyCode::Left,
+                KeyModifiers::CONTROL,
+                Action::AiCursorWordLeft,
+            ),
+            (
+                KeyCode::Right,
+                KeyModifiers::CONTROL,
+                Action::AiCursorWordRight,
+            ),
+            (
+                KeyCode::Left,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Action::AiSelectWordLeft,
+            ),
+            (
+                KeyCode::Right,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Action::AiSelectWordRight,
+            ),
+            (KeyCode::Left, KeyModifiers::SHIFT, Action::AiSelectLeft),
+            (KeyCode::Right, KeyModifiers::SHIFT, Action::AiSelectRight),
+            (KeyCode::Up, KeyModifiers::SHIFT, Action::AiSelectUp),
+            (KeyCode::Down, KeyModifiers::SHIFT, Action::AiSelectDown),
+            (KeyCode::Home, KeyModifiers::SHIFT, Action::AiSelectHome),
+            (KeyCode::End, KeyModifiers::SHIFT, Action::AiSelectEnd),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                Action::AiScrollUp,
+            ),
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, modifiers), context),
+                Some(expected),
+                "{code:?} {modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
     fn pane_prefix_is_global_but_text_modes_keep_precedence() {
         let base = requirements_tree_context();
         for active_tab in [
@@ -3622,25 +3819,9 @@ mod tests {
                 ..base
             },
             KeyContext {
-                active_tab: MainTab::Ai,
-                ai_input_focused: true,
-                ai_sidebar_focused: false,
-                ai_sidebar_visible: false,
-                ..base
-            },
-            KeyContext {
                 active_tab: MainTab::TestPoints,
                 test_points_focus: TestPointsFocus::Details,
                 test_points_editing: true,
-                ..base
-            },
-            KeyContext {
-                active_tab: MainTab::MindMap,
-                mindmap_focus: MindMapFocus::AiPanel,
-                mindmap_ai_panel_visible: true,
-                ai_input_focused: true,
-                ai_sidebar_focused: false,
-                ai_sidebar_visible: false,
                 ..base
             },
             KeyContext {
@@ -3657,6 +3838,23 @@ mod tests {
                 None
             );
         }
+        // In the AI composer Ctrl+W edits text instead of starting a pane chord.
+        let ai_input = KeyContext {
+            active_tab: MainTab::MindMap,
+            mindmap_focus: MindMapFocus::AiPanel,
+            mindmap_ai_panel_visible: true,
+            ai_input_focused: true,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
+            ..base
+        };
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                ai_input,
+            ),
+            Some(Action::AiBackspaceWord)
+        );
     }
 
     #[test]
