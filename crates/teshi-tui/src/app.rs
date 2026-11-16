@@ -235,8 +235,7 @@ pub struct AgentThread {
     pub id: usize,
     pub title: String,
     pub status: AiStatus,
-    pub input: String,
-    pub input_cursor: usize,
+    pub input: crate::composer::Composer,
     /// Images behind the `[Image #N]` placeholders in [`Self::input`].
     pub(crate) input_images: crate::chat_images::DraftImages,
     pub tool_status: Option<String>,
@@ -566,8 +565,7 @@ impl AgentThread {
             id,
             title: title.to_string(),
             status: AiStatus::Idle,
-            input: String::new(),
-            input_cursor: 0,
+            input: Default::default(),
             input_images: Default::default(),
             tool_status: None,
             scroll_offset: 0,
@@ -1390,6 +1388,9 @@ pub struct App {
     pub slash_suggestion_selection: usize,
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
     pub ai_input_focused: bool,
+    /// Width in cells of the last rendered composer text area. Zero before the
+    /// first frame; vertical caret movement falls back to logical lines then.
+    pub composer_text_width: u16,
     /// Whether the AI tab hides its conversation sidebar so the chat owns the row.
     pub ai_sidebar_collapsed: bool,
     /// Whether the Chat sidebar is the focused pane on the AI tab.
@@ -2753,6 +2754,7 @@ impl App {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            composer_text_width: 0,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -2900,6 +2902,7 @@ impl App {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            composer_text_width: 0,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -3104,6 +3107,7 @@ impl App {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            composer_text_width: 0,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -4132,9 +4136,10 @@ impl App {
     }
 
     fn insert_ai_text(&mut self, text: &str) {
-        let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-        self.agent_mut().input.insert_str(byte_idx, text);
-        self.agent_mut().input_cursor += text.chars().count();
+        self.agent_mut()
+            .input
+            .insert(text, crate::composer::EditUnit::Atomic);
+        self.sync_composer_atoms();
     }
 
     /// Attaches `paths` to the draft as `[Image #N]` placeholders at the
@@ -4148,8 +4153,8 @@ impl App {
             .collect::<Vec<_>>()
             .join(" ");
         text.push(' ');
-        let byte_idx = char_to_byte_idx(&agent.input, agent.input_cursor);
-        if agent.input[..byte_idx]
+        let byte_idx = char_to_byte_idx(agent.input.text(), agent.input.cursor());
+        if agent.input.text()[..byte_idx]
             .chars()
             .next_back()
             .is_some_and(|ch| !ch.is_whitespace())
@@ -4167,9 +4172,8 @@ impl App {
     /// placeholder expanded to its `@path` mention.
     fn take_ai_draft(&mut self) -> String {
         let agent = self.agent_mut();
-        let text = std::mem::take(&mut agent.input);
+        let text = agent.input.take_text();
         let images = std::mem::take(&mut agent.input_images);
-        agent.input_cursor = 0;
         agent.chat.recall = None;
         crate::chat_images::expand_placeholders(&text, &images)
     }
@@ -4216,27 +4220,42 @@ impl App {
     fn restore_ai_draft(&mut self, agent_idx: usize, text: &str) {
         let (draft, images) = crate::chat_images::collapse_mentions(text, &self.project.root_dir);
         let agent = &mut self.agents[agent_idx];
-        agent.input_cursor = draft.chars().count();
-        agent.input = draft;
+        agent.input.set_text(draft);
         agent.input_images = images;
+        self.sync_composer_atoms_for(agent_idx);
     }
 
-    /// Byte range of the attached placeholder ending at (`before`) or starting
-    /// at the cursor, so editing keys treat it as one character.
-    fn placeholder_at_cursor(&self, before: bool) -> Option<std::ops::Range<usize>> {
-        let agent = self.agent();
-        let cursor = char_to_byte_idx(&agent.input, agent.input_cursor);
-        crate::chat_images::placeholders(&agent.input)
-            .into_iter()
-            .find(|(range, number)| {
-                agent.input_images.path(*number).is_some()
-                    && if before {
-                        range.end == cursor
-                    } else {
-                        range.start == cursor
-                    }
-            })
-            .map(|(range, _)| range)
+    /// Rebuilds the composer's atomic placeholder ranges from the attached
+    /// images. Called after edits that can move or remove a placeholder.
+    fn sync_composer_atoms_for(&mut self, agent_idx: usize) {
+        let atoms = {
+            let agent = &self.agents[agent_idx];
+            let text = agent.input.text();
+            crate::chat_images::placeholders(text)
+                .into_iter()
+                .filter(|(_, number)| agent.input_images.path(*number).is_some())
+                .map(|(range, _)| {
+                    let start = text[..range.start].chars().count();
+                    let end = text[..range.end].chars().count();
+                    start..end
+                })
+                .collect()
+        };
+        self.agents[agent_idx].input.set_atoms(atoms);
+    }
+
+    fn sync_composer_atoms(&mut self) {
+        self.sync_composer_atoms_for(self.selected_agent);
+    }
+
+    /// Keeps slash suggestions coherent after a text-changing edit.
+    fn after_composer_edit(&mut self) {
+        if self.slash_suggestion_active {
+            self.slash_suggestion_selection = 0;
+            if !self.agent().input.starts_with('/') {
+                self.slash_suggestion_active = false;
+            }
+        }
     }
 
     /// Attaches the image files or bitmap on the clipboard.
@@ -9567,11 +9586,9 @@ impl App {
             }
             Action::ExploreRight => {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
-                    if self.explore_focus == ColumnFocus::Step {
-                        self.explore_enter_edit();
-                    } else {
-                        self.explore_focus_next();
-                    }
+                    // h/l move through the visual column order; `e`/EnterEdit
+                    // opens the editor from the Steps column.
+                    self.explore_focus_next();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -10909,17 +10926,20 @@ impl App {
             }
             Action::AiRemoveAttachment(index) => {
                 let root = self.project.root_dir.clone();
-                let mut input = std::mem::take(&mut self.agent_mut().input);
+                let mut input = self.agent().input.text().to_string();
                 if let Some(start) = crate::chat_images::remove_attachment(
                     &mut input,
                     &self.agent().input_images,
                     &root,
                     index,
                 ) {
-                    self.agent_mut().input_cursor = input[..start].chars().count();
+                    let cursor = input[..start].chars().count();
+                    let agent = self.agent_mut();
+                    agent.input.set_text(input);
+                    agent.input.set_cursor(cursor);
+                    self.sync_composer_atoms();
                     self.status = "Image removed".to_string();
                 }
-                self.agent_mut().input = input;
                 self.quit_pending_confirm = false;
             }
             Action::AiCopySessionId => {
@@ -10936,9 +10956,8 @@ impl App {
             Action::OpenReplayWebUi => self.open_replay_web_ui(),
             Action::AiNewline => {
                 self.focus_ai_input();
-                let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-                self.agent_mut().input.insert(byte_idx, '\n');
-                self.agent_mut().input_cursor += 1;
+                self.agent_mut().input.insert_char('\n');
+                self.sync_composer_atoms();
                 self.quit_pending_confirm = false;
             }
             Action::AiClipboardPaste => {
@@ -10972,9 +10991,8 @@ impl App {
             }
             Action::AiSendChar(ch) => {
                 self.focus_ai_input();
-                let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-                self.agent_mut().input.insert(byte_idx, ch);
-                self.agent_mut().input_cursor += 1;
+                self.agent_mut().input.insert_char(ch);
+                self.sync_composer_atoms();
                 self.quit_pending_confirm = false;
                 // Activate slash command suggestions when "/" is typed
                 if self.agent().input.starts_with('/') && !self.slash_suggestion_active {
@@ -11034,113 +11052,136 @@ impl App {
                 self.dispatch_user_message(user_msg)?;
             }
             Action::AiBackspace => {
-                if let Some(range) = self.placeholder_at_cursor(true) {
-                    let removed = self.agent().input[range.clone()].chars().count();
-                    self.agent_mut().input.replace_range(range, "");
-                    self.agent_mut().input_cursor -= removed;
-                } else if self.agent().input_cursor > 0 {
-                    let byte_idx =
-                        char_to_byte_idx(&self.agent().input, self.agent().input_cursor - 1);
-                    self.agent_mut().input.remove(byte_idx);
-                    self.agent_mut().input_cursor -= 1;
-                }
+                self.agent_mut().input.backspace();
+                self.sync_composer_atoms();
+                self.after_composer_edit();
                 self.quit_pending_confirm = false;
-                // Reset selection as backspace changes the filter
-                if self.slash_suggestion_active {
-                    self.slash_suggestion_selection = 0;
-                }
-                // Dismiss slash suggestions if input no longer starts with "/"
-                if self.slash_suggestion_active && !self.agent().input.starts_with('/') {
-                    self.slash_suggestion_active = false;
-                    self.slash_suggestion_selection = 0;
-                }
             }
             Action::AiDelete => {
-                if let Some(range) = self.placeholder_at_cursor(false) {
-                    self.agent_mut().input.replace_range(range, "");
-                } else if self.agent().input_cursor < self.agent().input.chars().count() {
-                    let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-                    self.agent_mut().input.remove(byte_idx);
+                self.agent_mut().input.delete();
+                self.sync_composer_atoms();
+                self.after_composer_edit();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiBackspaceWord => {
+                self.agent_mut().input.delete_word_back();
+                self.sync_composer_atoms();
+                self.after_composer_edit();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiDeleteWord => {
+                self.agent_mut().input.delete_word_forward();
+                self.sync_composer_atoms();
+                self.after_composer_edit();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiDeleteToLineStart => {
+                self.agent_mut().input.delete_to_line_start();
+                self.sync_composer_atoms();
+                self.after_composer_edit();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectAll => {
+                self.focus_ai_input();
+                self.agent_mut().input.select_all();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiUndo => {
+                if self.agent_mut().input.undo() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiRedo => {
+                if self.agent_mut().input.redo() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCut => {
+                if let Some(range) = self.agent().input.selection()
+                    && let Some(text) = self.agent().input.selected_text()
+                    && self.try_copy_to_clipboard(&text)
+                {
+                    self.agent_mut().input.remove_chars(range);
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                    self.status = format!("Cut {} character(s)", text.chars().count());
+                    self.set_status_message(self.status.clone());
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorLeft => {
-                let step = self
-                    .placeholder_at_cursor(true)
-                    .map_or(1, |range| self.agent().input[range].chars().count());
-                self.agent_mut().input_cursor = self.agent().input_cursor.saturating_sub(step);
+                self.agent_mut().input.move_left(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorRight => {
-                let step = self
-                    .placeholder_at_cursor(false)
-                    .map_or(1, |range| self.agent().input[range].chars().count());
-                let max = self.agent().input.chars().count();
-                self.agent_mut().input_cursor = (self.agent().input_cursor + step).min(max);
+                self.agent_mut().input.move_right(false);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectLeft => {
+                self.agent_mut().input.move_left(true);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectRight => {
+                self.agent_mut().input.move_right(true);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCursorWordLeft => {
+                self.agent_mut().input.move_word_left(false);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCursorWordRight => {
+                self.agent_mut().input.move_word_right(false);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectWordLeft => {
+                self.agent_mut().input.move_word_left(true);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectWordRight => {
+                self.agent_mut().input.move_word_right(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorUp | Action::AiCursorDown => {
-                let chars: Vec<char> = self.agent().input.chars().collect();
-                let cursor = self.agent().input_cursor.min(chars.len());
-                let start = chars[..cursor]
-                    .iter()
-                    .rposition(|c| *c == '\n')
-                    .map_or(0, |i| i + 1);
-                let column = cursor - start;
                 let up = matches!(action, Action::AiCursorUp);
-                let target = if up {
-                    (start > 0).then(|| {
-                        let end = start - 1;
-                        let previous = chars[..end]
-                            .iter()
-                            .rposition(|c| *c == '\n')
-                            .map_or(0, |i| i + 1);
-                        previous + column.min(end - previous)
-                    })
+                let width = self.composer_text_width;
+                let moved = if up {
+                    self.agent_mut().input.move_up(false, width)
                 } else {
-                    chars[cursor..].iter().position(|c| *c == '\n').map(|end| {
-                        let next = cursor + end + 1;
-                        let length = chars[next..]
-                            .iter()
-                            .position(|c| *c == '\n')
-                            .unwrap_or(chars.len() - next);
-                        next + column.min(length)
-                    })
+                    self.agent_mut().input.move_down(false, width)
                 };
-                // Multi-line drafts move the caret first; only the first or
-                // last line hands Up/Down over to sent-prompt recall.
-                match target {
-                    Some(target) => self.agent_mut().input_cursor = target,
-                    None => {
-                        self.recall_sent_prompt(up);
-                    }
+                if !moved {
+                    self.recall_sent_prompt(up);
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectUp | Action::AiSelectDown => {
+                let up = matches!(action, Action::AiSelectUp);
+                let width = self.composer_text_width;
+                if up {
+                    self.agent_mut().input.move_up(true, width);
+                } else {
+                    self.agent_mut().input.move_down(true, width);
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorHome => {
-                let cursor = self.agent().input_cursor;
-                self.agent_mut().input_cursor = self
-                    .agent()
-                    .input
-                    .chars()
-                    .take(cursor)
-                    .enumerate()
-                    .filter(|(_, c)| *c == '\n')
-                    .map(|(i, _)| i + 1)
-                    .last()
-                    .unwrap_or(0);
+                self.agent_mut().input.move_home(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorEnd => {
-                let cursor = self.agent().input_cursor;
-                self.agent_mut().input_cursor = cursor
-                    + self
-                        .agent()
-                        .input
-                        .chars()
-                        .skip(cursor)
-                        .take_while(|c| *c != '\n')
-                        .count();
+                self.agent_mut().input.move_end(false);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectHome => {
+                self.agent_mut().input.move_home(true);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSelectEnd => {
+                self.agent_mut().input.move_end(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiOpenAgentSelector => self.execute_slash_command("agent")?,
@@ -11269,12 +11310,10 @@ impl App {
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
                     // Clear the input (cmd is about to execute); "copy" will override below
-                    self.agent_mut().input.clear();
-                    self.agent_mut().input_cursor = 0;
+                    self.agent_mut().input.set_text(String::new());
                     // Execute the command through the same dispatcher as submitted commands.
                     return if *name == "copy" {
-                        self.agent_mut().input = "/copy ".into();
-                        self.agent_mut().input_cursor = self.agent().input.len();
+                        self.agent_mut().input.set_text("/copy ".to_string());
                         Ok(())
                     } else {
                         self.execute_slash_command(name)
@@ -11284,8 +11323,7 @@ impl App {
                 // unknown command such as `/copy 3`); submit it to the same
                 // dispatcher as a submitted command.
                 if let Some(command) = self.agent().input.strip_prefix('/').map(str::to_owned) {
-                    self.agent_mut().input.clear();
-                    self.agent_mut().input_cursor = 0;
+                    self.agent_mut().input.set_text(String::new());
                     self.slash_suggestion_active = false;
                     return self.execute_slash_command(&command);
                 }
@@ -11508,8 +11546,7 @@ impl App {
                     } else {
                         self.status = "Input cleared".to_string();
                     }
-                    self.agent_mut().input.clear();
-                    self.agent_mut().input_cursor = 0;
+                    self.agent_mut().input.set_text(String::new());
                     self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().status = AiStatus::Idle;
                     self.slash_suggestion_active = false;
@@ -12687,6 +12724,19 @@ impl App {
     }
 
     fn copy_selection_to_clipboard(&mut self) -> Result<()> {
+        // The composer selection wins over the chat selection; with neither,
+        // the existing editor/chat behavior is unchanged.
+        if (self.active_tab == MainTab::Ai
+            || (self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::AiPanel))
+            && self.agent().input.has_selection()
+            && let Some(text) = self.agent().input.selected_text()
+        {
+            if self.try_copy_to_clipboard(&text) {
+                self.status = format!("Copied {} character(s)", text.chars().count());
+                self.set_status_message(self.status.clone());
+            }
+            return Ok(());
+        }
         if self.chat_selection.is_some()
             && (self.active_tab == MainTab::Ai
                 || (self.active_tab == MainTab::MindMap
@@ -14888,8 +14938,7 @@ impl App {
         self.agent_mut().messages_mut().clear();
         self.agent_mut().chat = Default::default();
         self.agent_mut().partial_response_mut().clear();
-        self.agent_mut().input.clear();
-        self.agent_mut().input_cursor = 0;
+        self.agent_mut().input.set_text(String::new());
         self.agent_mut().status = AiStatus::Idle;
         self.agent_mut().tool_status = None;
         self.agent_mut().scroll_offset = 0;
@@ -14927,8 +14976,7 @@ impl App {
                 return Ok(());
             }
             self.agent_mut().partial_response_mut().clear();
-            self.agent_mut().input.clear();
-            self.agent_mut().input_cursor = 0;
+            self.agent_mut().input.set_text(String::new());
             self.agent_mut().status = AiStatus::Idle;
             self.agent_mut().scroll_offset = 0;
             self.status = format!(
@@ -15164,8 +15212,7 @@ impl App {
         agent.latest_visual_observation = None;
         agent.last_finish_reason = None;
         agent.last_stop_detail = None;
-        agent.input.clear();
-        agent.input_cursor = 0;
+        agent.input.set_text(String::new());
         agent.status = AiStatus::Idle;
         agent.scroll_offset = 0;
         self.ai_input_focused = false;
@@ -16291,7 +16338,7 @@ mod tests {
         );
         app.agents[0].status = AiStatus::Waiting;
         for input in ["first queued", "second queued"] {
-            app.agents[0].input = input.into();
+            app.agents[0].input.set_text(input.to_string());
             app.handle_action(Action::AiSendMessage).unwrap();
         }
         assert_eq!(
@@ -16309,8 +16356,8 @@ mod tests {
         );
         assert!(app.agent().input.is_empty());
         app.execute_slash_command("unqueue").unwrap();
-        assert_eq!(app.agent().input, "second queued");
-        assert_eq!(app.agent().input_cursor, "second queued".chars().count());
+        assert_eq!(app.agent().input.text(), "second queued");
+        assert_eq!(app.agent().input.cursor(), "second queued".chars().count());
         app.handle_action(Action::AiCancel).unwrap();
         app.poll_llm_events();
         assert_eq!(
@@ -16318,7 +16365,7 @@ mod tests {
             Some("first queued")
         );
         assert!(!app.agent().chat.queue_ready);
-        assert_eq!(app.agent().input, "second queued");
+        assert_eq!(app.agent().input.text(), "second queued");
     }
 
     #[test]
@@ -16466,7 +16513,7 @@ mod tests {
         app.agents[0].chat.queue.push_back("second queued".into());
 
         app.handle_action(Action::AiInterruptRequest).unwrap();
-        assert_eq!(app.agent().input, "second queued");
+        assert_eq!(app.agent().input.text(), "second queued");
         assert_eq!(
             app.agent()
                 .chat
@@ -16760,14 +16807,14 @@ mod tests {
             teshi_agent::backend::AgentBackendKind::Native,
         );
         app.agents[0].status = AiStatus::Waiting;
-        app.agent_mut().input = "first queued".into();
+        app.agent_mut().input.set_text("first queued".to_string());
         app.handle_action(Action::AiSendMessage).unwrap();
         // Stopping the turn pauses the queue; a later message resumes it but
         // must not jump ahead of what is queued.
         app.handle_action(Action::AiCancel).unwrap();
         assert!(!app.agent().chat.queue_ready);
 
-        app.agent_mut().input = "second queued".into();
+        app.agent_mut().input.set_text("second queued".to_string());
         app.handle_action(Action::AiSendMessage).unwrap();
         assert_eq!(
             app.agent()
@@ -16801,7 +16848,7 @@ mod tests {
         );
         app.agents[0].status = AiStatus::Error;
         app.agents[0].chat.queue.push_back("kept follow-up".into());
-        app.agent_mut().input = "next question".into();
+        app.agent_mut().input.set_text("next question".to_string());
         app.handle_action(Action::AiSendMessage).unwrap();
         assert_eq!(
             app.agent()
@@ -17931,13 +17978,91 @@ mod tests {
     }
 
     #[test]
+    fn composer_select_all_typing_and_undo_replace_the_draft() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("first\nsecond".to_string());
+
+        app.handle_action(Action::AiSelectAll).unwrap();
+        assert_eq!(
+            app.agent().input.selected_text().as_deref(),
+            Some("first\nsecond")
+        );
+        app.handle_action(Action::AiSendChar('x')).unwrap();
+        assert_eq!(app.agent().input.text(), "x");
+        app.handle_action(Action::AiUndo).unwrap();
+        assert_eq!(app.agent().input.text(), "first\nsecond");
+    }
+
+    #[test]
+    fn composer_selection_is_replaced_by_paste_and_one_undo_restores_it() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("abcdef".to_string());
+
+        app.handle_action(Action::AiSelectAll).unwrap();
+        app.handle_action(Action::AiPaste("XYZ".to_string()))
+            .unwrap();
+        assert_eq!(app.agent().input.text(), "XYZ");
+        app.handle_action(Action::AiUndo).unwrap();
+        assert_eq!(app.agent().input.text(), "abcdef");
+    }
+
+    #[test]
+    fn composer_word_delete_handles_mixed_english_and_chinese() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("abc你好def".to_string());
+        app.agent_mut().input.move_end(false);
+
+        for expected in ["abc你好", "abc你", "abc", ""] {
+            app.handle_action(Action::AiBackspaceWord).unwrap();
+            assert_eq!(app.agent().input.text(), expected);
+        }
+    }
+
+    #[test]
+    fn composer_vertical_movement_uses_wrapped_rows_before_history() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.composer_text_width = 4;
+        app.agent_mut().input.set_text("abcdefgh".to_string());
+        app.agent_mut().input.set_cursor(6);
+
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input.cursor(), 2);
+        assert!(app.agent().chat.recall.is_none());
+        app.handle_action(Action::AiCursorUp).unwrap();
+        assert_eq!(app.agent().input.cursor(), 2);
+    }
+
+    #[test]
+    fn composer_full_width_slash_starts_suggestions() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text(String::new());
+
+        app.handle_action(Action::AiSendChar('／')).unwrap();
+        assert_eq!(app.agent().input.text(), "/");
+        assert!(app.slash_suggestion_active);
+    }
+
+    #[test]
     fn newline_action_inserts_a_literal_line_break() {
         let (mut app, _project, _store) = slash_test_app();
-        app.agent_mut().input = "first line".into();
-        app.agent_mut().input_cursor = app.agent().input.chars().count();
+        app.agent_mut().input.set_text("first line".to_string());
+        let len = app.agent().input.char_len();
+        app.agent_mut().input.set_cursor(len);
         app.handle_action(Action::AiNewline).unwrap();
-        app.agent_mut().input.push_str("second line");
-        assert_eq!(app.agent().input, "first line\nsecond line");
+        app.agent_mut()
+            .input
+            .insert("second line", crate::composer::EditUnit::Atomic);
+        assert_eq!(app.agent().input.text(), "first line\nsecond line");
     }
 
     #[test]
@@ -18416,7 +18541,7 @@ mod tests {
         let (mut app, _project, _store) = slash_test_app();
         configure_acp_fixture(&mut app, "cancel_keeps_session");
         app.active_tab = MainTab::Ai;
-        app.agent_mut().input = "first question".into();
+        app.agent_mut().input.set_text("first question".to_string());
         app.handle_action(Action::AiSendMessage).unwrap();
         wait_mcp_fixture(&mut app, |app| {
             app.agent().partial_response().contains("working")
@@ -18443,7 +18568,9 @@ mod tests {
             "cancelling a turn must not tear down the ACP process"
         );
 
-        app.agent_mut().input = "second question".into();
+        app.agent_mut()
+            .input
+            .set_text("second question".to_string());
         app.handle_action(Action::AiSendMessage).unwrap();
         assert!(!app.status.contains("still stopping"), "{}", app.status);
         wait_mcp_fixture(&mut app, |app| {
@@ -18475,10 +18602,12 @@ mod tests {
         image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))
             .save(app.project.root_dir.join("shot.png"))
             .unwrap();
-        app.agent_mut().input = "what is on @shot.png".to_string();
+        app.agent_mut()
+            .input
+            .set_text("what is on @shot.png".to_string());
         app.handle_action(Action::AiSendMessage).unwrap();
         assert_eq!(
-            app.agent().input,
+            app.agent().input.text(),
             "what is on [Image #1]",
             "the draft stays while image support is unknown, its image as a placeholder"
         );
@@ -18508,10 +18637,12 @@ mod tests {
             teshi_agent::backend::AgentBackendKind::Native,
         );
         let mut images = crate::chat_images::DraftImages::default();
-        app.agent_mut().input = format!("see {}", images.attach("shot.png".into()));
+        app.agent_mut()
+            .input
+            .set_text(format!("see {}", images.attach("shot.png".into())));
         app.agent_mut().input_images = images;
         app.handle_action(Action::AiSendMessage).unwrap();
-        assert_eq!(app.agent().input, "see [Image #1]");
+        assert_eq!(app.agent().input.text(), "see [Image #1]");
         assert_eq!(
             app.agent().input_images.path(1),
             Some(app.project.root_dir.join("shot.png").as_path()),
@@ -18571,21 +18702,21 @@ mod tests {
         image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]))
             .save(&path)
             .unwrap();
-        app.agent_mut().input = "compare".into();
-        app.agent_mut().input_cursor = 7;
+        app.agent_mut().input.set_text("compare".to_string());
+        app.agent_mut().input.set_cursor(7);
         app.handle_action(Action::AiPaste(format!("\"{}\"", path.display())))
             .unwrap();
-        assert_eq!(app.agent().input, "compare [Image #1] ");
+        assert_eq!(app.agent().input.text(), "compare [Image #1] ");
         app.handle_action(Action::AiBackspace).unwrap();
         app.handle_action(Action::AiBackspace).unwrap();
         assert_eq!(
-            app.agent().input,
+            app.agent().input.text(),
             "compare ",
             "Backspace deletes a placeholder as a whole"
         );
         app.handle_action(Action::AiPaste(path.display().to_string()))
             .unwrap();
-        assert_eq!(app.agent().input, "compare [Image #2] ");
+        assert_eq!(app.agent().input.text(), "compare [Image #2] ");
         app.active_tab = MainTab::Ai;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -18615,10 +18746,10 @@ mod tests {
             }
         )));
         app.handle_action(Action::AiRemoveAttachment(0)).unwrap();
-        assert_eq!(app.agent().input, "compare ");
+        assert_eq!(app.agent().input.text(), "compare ");
         app.handle_action(Action::AiPaste("plain text".into()))
             .unwrap();
-        assert_eq!(app.agent().input, "compare plain text");
+        assert_eq!(app.agent().input.text(), "compare plain text");
     }
 
     #[test]
@@ -18630,7 +18761,7 @@ mod tests {
             .unwrap();
         app.handle_action(Action::AiPaste(path.display().to_string()))
             .unwrap();
-        let draft = app.agent().input.clone();
+        let draft = app.agent().input.text().to_string();
         app.active_tab = MainTab::Ai;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -18671,7 +18802,7 @@ mod tests {
             app.screenshot.origin,
             crate::image_view::ScreenshotOrigin::Image
         );
-        assert_eq!(app.agent().input, draft, "opening keeps the draft");
+        assert_eq!(app.agent().input.text(), draft, "opening keeps the draft");
 
         let (buffer, text) = draw(&mut app);
         // 100x30 terminal: the 28-row content area loses one row top and
@@ -18704,7 +18835,7 @@ mod tests {
             .unwrap();
         assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
         assert!(app.screenshot.visible);
-        assert_eq!(app.agent().input, draft);
+        assert_eq!(app.agent().input.text(), draft);
         assert_eq!(app.active_tab, MainTab::Ai);
 
         app.handle_mouse_event(left, close.x, close.y, KeyModifiers::NONE)
@@ -18713,7 +18844,7 @@ mod tests {
             !app.screenshot.visible,
             "the close button closes the viewer"
         );
-        assert_eq!(app.agent().input, draft);
+        assert_eq!(app.agent().input.text(), draft);
         assert_eq!(app.active_tab, MainTab::Ai);
         let (_, text) = draw(&mut app);
         assert!(!text.contains("Close [Esc]"), "{text}");
@@ -18744,8 +18875,8 @@ mod tests {
     }
 
     fn set_draft(app: &mut App, text: &str) {
-        app.agent_mut().input = text.to_string();
-        app.agent_mut().input_cursor = text.chars().count();
+        app.agent_mut().input.set_text(text.to_string());
+        app.agent_mut().input.set_cursor(text.chars().count());
     }
 
     #[test]
@@ -18767,9 +18898,9 @@ mod tests {
         ];
         for (step, (action, expected)) in steps.into_iter().enumerate() {
             app.handle_action(action).unwrap();
-            assert_eq!(app.agent().input, expected, "step {step}");
+            assert_eq!(app.agent().input.text(), expected, "step {step}");
             assert_eq!(
-                app.agent().input_cursor,
+                app.agent().input.cursor(),
                 expected.chars().count(),
                 "step {step}: caret should sit at the end of the recalled text"
             );
@@ -18781,12 +18912,12 @@ mod tests {
         let (mut app, _project, _store) = recall_test_app(&[("earlier", None)]);
         set_draft(&mut app, "line one\nline two");
         app.handle_action(Action::AiCursorUp).unwrap();
-        assert_eq!(app.agent().input, "line one\nline two");
-        assert_eq!(app.agent().input_cursor, "line one".len());
+        assert_eq!(app.agent().input.text(), "line one\nline two");
+        assert_eq!(app.agent().input.cursor(), "line one".len());
         app.handle_action(Action::AiCursorUp).unwrap();
-        assert_eq!(app.agent().input, "earlier");
+        assert_eq!(app.agent().input.text(), "earlier");
         app.handle_action(Action::AiCursorDown).unwrap();
-        assert_eq!(app.agent().input, "line one\nline two");
+        assert_eq!(app.agent().input.text(), "line one\nline two");
     }
 
     #[test]
@@ -18794,7 +18925,7 @@ mod tests {
         let (mut app, _project, _store) = recall_test_app(&[]);
         set_draft(&mut app, "draft");
         app.handle_action(Action::AiCursorUp).unwrap();
-        assert_eq!(app.agent().input, "draft");
+        assert_eq!(app.agent().input.text(), "draft");
         assert!(app.agent().chat.recall.is_none());
     }
 
@@ -19023,7 +19154,9 @@ mod tests {
             app.agent_mut().last_finish_reason = Some(reason.into());
             assert!(app.agent().task_interrupted());
         }
-        app.agent_mut().input = "keep this draft".into();
+        app.agent_mut()
+            .input
+            .set_text("keep this draft".to_string());
         app.handle_action(Action::AiContinueTask).unwrap();
         // A second click cannot enqueue another turn while one is running.
         app.handle_action(Action::AiContinueTask).unwrap();
@@ -19035,7 +19168,7 @@ mod tests {
             app.agent().backend.acp_controls().unwrap().session_id,
             session
         );
-        assert_eq!(app.agent().input, "keep this draft");
+        assert_eq!(app.agent().input.text(), "keep this draft");
         assert_eq!(
             app.agent()
                 .messages()
@@ -20422,7 +20555,7 @@ mod tests {
     #[test]
     fn slash_menu_generate_uses_command_dispatcher() {
         let (mut app, _project, _store) = slash_test_app();
-        app.agent_mut().input = "/generate".into();
+        app.agent_mut().input.set_text("/generate".to_string());
         app.slash_suggestion_active = true;
 
         app.handle_action(Action::AiSlashSelect).unwrap();
@@ -20434,7 +20567,9 @@ mod tests {
     #[test]
     fn slash_menu_subcommand_enters_dispatcher() {
         let (mut app, _project, _store) = slash_test_app();
-        app.agent_mut().input = "/acp add sample".into();
+        app.agent_mut()
+            .input
+            .set_text("/acp add sample".to_string());
         app.slash_suggestion_active = true;
         app.handle_action(Action::AiSlashSelect).unwrap();
         assert!(app.status.contains("Usage: /acp add"));
@@ -20445,7 +20580,7 @@ mod tests {
     fn slash_menu_continue_uses_command_dispatcher() {
         let (mut app, _project, _store) = slash_test_app();
         app.generation_stage = teshi_agent::pipeline::GenerationStage::ReviewingTestPoints;
-        app.agent_mut().input = "/continue".into();
+        app.agent_mut().input.set_text("/continue".to_string());
         app.slash_suggestion_active = true;
 
         app.handle_action(Action::AiSlashSelect).unwrap();
@@ -22464,6 +22599,36 @@ mod tests {
         app.explore_focus = ColumnFocus::Step;
         app.explore_focus_next();
         assert_eq!(app.explore_focus, ColumnFocus::Step);
+
+        // Visual order is Features → Scenarios → Steps.
+        app.explore_focus = ColumnFocus::Feature;
+        app.explore_focus_next();
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+        app.explore_focus_next();
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
+        app.explore_focus_prev();
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+        app.explore_focus_prev();
+        assert_eq!(app.explore_focus, ColumnFocus::Feature);
+    }
+
+    #[test]
+    fn test_explore_horizontal_focus_reaches_scenario() {
+        let mut app = App::from_args().expect("app init");
+        app.active_tab = MainTab::Explore;
+        app.explore_focus = ColumnFocus::Feature;
+
+        app.handle_action(Action::ExploreRight).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+        app.handle_action(Action::ExploreRight).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
+        app.handle_action(Action::ExploreRight).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
+
+        app.handle_action(Action::FocusPrevColumn).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+        app.handle_action(Action::FocusPrevColumn).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Feature);
     }
 
     #[test]
@@ -22780,7 +22945,7 @@ mod tests {
     }
 
     #[test]
-    fn test_explore_right_enters_and_left_exits_edit() {
+    fn test_explore_edit_entry_and_left_exit() {
         use std::path::PathBuf;
         use teshi_core::gherkin;
 
@@ -22907,6 +23072,7 @@ mod tests {
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            composer_text_width: 0,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -22967,8 +23133,8 @@ mod tests {
             ),
         };
 
-        app.handle_action(Action::ExploreRight)
-            .expect("right should enter edit");
+        app.handle_action(Action::EnterEdit)
+            .expect("e should enter edit");
         assert!(app.explore_edit_mode);
 
         app.handle_action(Action::MoveLeft)
@@ -23123,6 +23289,7 @@ Feature: B
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
+            composer_text_width: 0,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,

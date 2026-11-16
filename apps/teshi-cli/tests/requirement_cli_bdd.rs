@@ -80,16 +80,29 @@ fn bindings_explicitly_pending(content: &str) -> bool {
     header.contains("not bound") || header.contains("remain pending")
 }
 
+/// Recursively copy requirement `@cli` Features into a flat locale directory.
+///
+/// Product Features live under nested module folders; the temp project only
+/// needs the matching files under `features/<locale>/`.
 fn copy_cli_features(locale: &str, dst: &Path) {
     let src = features_dir().join(locale);
     let dest = dst.join(locale);
     fs::create_dir_all(&dest).unwrap();
-    for entry in fs::read_dir(&src).unwrap() {
+    copy_cli_features_from(&src, &dest);
+}
+
+fn copy_cli_features_from(src: &Path, dest: &Path) {
+    for entry in fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            copy_cli_features_from(&path, dest);
+            continue;
+        }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.ends_with(".feature") && is_requirement_cli_feature(&entry.path()) {
-            fs::copy(entry.path(), dest.join(name)).unwrap();
+        if name_str.ends_with(".feature") && is_requirement_cli_feature(&path) {
+            fs::copy(&path, dest.join(name)).unwrap();
         }
     }
 }

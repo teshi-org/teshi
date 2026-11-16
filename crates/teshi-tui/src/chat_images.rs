@@ -387,6 +387,18 @@ pub struct ImageMention {
 /// part of its path.
 const MENTION_TRAILING: [char; 8] = [',', '.', ';', ':', '!', '?', ')', ']'];
 
+/// CJK characters count as a token boundary before an `@` mention.
+fn is_cjk_wide(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3000}'..='\u{303F}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FF00}'..='\u{FFEF}'
+    )
+}
+
 /// The `@path` mention for `path`, quoted when it contains whitespace.
 pub fn format_mention(path: &Path) -> String {
     let text = path.to_string_lossy();
@@ -399,16 +411,16 @@ pub fn format_mention(path: &Path) -> String {
 
 /// Image mentions in `text` whose path has an image extension.
 ///
-/// A mention starts with `@` at the start of the text or after whitespace and
-/// runs to the next whitespace, or to the closing quote of `@"..."`. Trailing
-/// sentence punctuation is not part of the path. Relative paths resolve
-/// against `base`. Existence is not checked here.
+/// A mention starts with `@` at the start of the text, after whitespace, or
+/// directly after a CJK character, and runs to the next whitespace, or to the
+/// closing quote of `@"..."`. Trailing sentence punctuation is not part of the
+/// path. Relative paths resolve against `base`. Existence is not checked here.
 pub fn image_mentions(text: &str, base: &Path) -> Vec<ImageMention> {
     let mut mentions = Vec::new();
     let mut previous: Option<char> = None;
     let mut chars = text.char_indices().peekable();
     while let Some((start, ch)) = chars.next() {
-        let at_boundary = previous.is_none_or(char::is_whitespace);
+        let at_boundary = previous.is_none_or(|ch| ch.is_whitespace() || is_cjk_wide(ch));
         previous = Some(ch);
         if ch != '@' || !at_boundary {
             continue;
@@ -988,6 +1000,7 @@ mod tests {
             ("@\"unterminated.png", &[]),
             ("(@c.gif)", &[]),
             ("line\n@d.bmp", &["@d.bmp"]),
+            ("中文@shot.png", &["@shot.png"]),
         ];
         for (text, expected) in cases {
             let found: Vec<&str> = image_mentions(text, base)

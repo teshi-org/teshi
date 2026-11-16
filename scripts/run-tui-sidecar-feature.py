@@ -937,7 +937,10 @@ def main() -> int:
     if not generic:
         candidate = Path(teshi).with_name("teshi-tui-runner" + (".exe" if os.name == "nt" else ""))
         generic = str(candidate)
-    canonical_path = ROOT / "features/en-US" / key_name
+    canonical_path = next((ROOT / "features").rglob(key_name), None)
+    if canonical_path is None:
+        print(f"canonical feature not found under features/: {key_name}", file=sys.stderr)
+        return 2
     canonical_source = canonical_path.read_text(encoding="utf-8")
 
     # Step events from the generic TUI runner are forwarded unchanged.

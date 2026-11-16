@@ -75,7 +75,10 @@ def main() -> int:
         if not owners:
             errors.append(f"{relative}: missing runner tag ({', '.join(sorted(RUNNER_TAGS))})")
 
-        locale = path.parent.name
+        locale = next(
+            (part for part in path.parts if part in LANGUAGE_BY_DIRECTORY),
+            None,
+        )
         expected_language = LANGUAGE_BY_DIRECTORY.get(locale)
         if expected_language and expected_language not in content.splitlines()[:3]:
             errors.append(f"{relative}: expected {expected_language!r} in the language header")

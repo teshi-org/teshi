@@ -62,15 +62,28 @@ fn is_validation_feature(path: &Path) -> bool {
     })
 }
 
+/// Recursively copy `@validation-e2e` Features into a flat locale directory.
+///
+/// Product Features live under nested module folders; the temp project only
+/// needs the matching files under `features/<locale>/`.
 fn copy_validation_features(locale: &str, destination: &Path) {
     let source = features_dir().join(locale);
     let target = destination.join(locale);
     fs::create_dir_all(&target).expect("create locale directory");
+    copy_validation_features_from(&source, &target);
+}
+
+fn copy_validation_features_from(source: &Path, target: &Path) {
     for entry in fs::read_dir(source).expect("read feature locale") {
         let entry = entry.expect("read feature entry");
+        let path = entry.path();
+        if path.is_dir() {
+            copy_validation_features_from(&path, target);
+            continue;
+        }
         let name = entry.file_name();
-        if name.to_string_lossy().ends_with(".feature") && is_validation_feature(&entry.path()) {
-            fs::copy(entry.path(), target.join(name)).expect("copy validation Feature");
+        if name.to_string_lossy().ends_with(".feature") && is_validation_feature(&path) {
+            fs::copy(&path, target.join(name)).expect("copy validation Feature");
         }
     }
 }

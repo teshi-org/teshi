@@ -413,9 +413,11 @@ pub(crate) enum ThumbState {
 /// reverse-video blocks.
 ///
 /// A vertical bar returns one line per row; a horizontal bar returns a single
-/// line of `extent` cells, because it spans one row. Thumb and track are
-/// filled with a background rather than a glyph so the bar stays solid
-/// whatever font the terminal uses; `state` lifts the thumb fill only.
+/// line of `extent` half-height blocks, because it spans one row. The half
+/// block keeps the horizontal bar visually thin while preserving the full-row
+/// pointer target. Vertical thumb and track use a background fill; the
+/// horizontal bar uses a foreground half block so the row's upper half stays
+/// quiet. `state` lifts the thumb colour only.
 pub(crate) fn scrollbar_lines(
     total: usize,
     extent: usize,
@@ -426,26 +428,33 @@ pub(crate) fn scrollbar_lines(
     let Some((thumb_pos, thumb_len)) = scrollbar_thumb(total, extent, start, axis) else {
         return Vec::new();
     };
-    let thumb = Style::default().bg(match state {
+    let thumb_color = match state {
         ThumbState::Idle => SCROLL_THUMB,
         ThumbState::Hovered => SCROLL_THUMB_HOVER,
         ThumbState::Grabbed => SCROLL_THUMB_ACTIVE,
-    });
-    let track = Style::default().bg(SCROLL_TRACK_BG);
-    let cell = |index: usize| {
-        if (thumb_pos..thumb_pos + thumb_len).contains(&index) {
-            thumb
-        } else {
-            track
-        }
     };
+    let is_thumb = |index: usize| (thumb_pos..thumb_pos + thumb_len).contains(&index);
     match axis {
         ScrollAxis::Vertical => (0..extent)
-            .map(|index| Line::styled(" ", cell(index)))
+            .map(|index| {
+                let bg = if is_thumb(index) {
+                    thumb_color
+                } else {
+                    SCROLL_TRACK_BG
+                };
+                Line::styled(" ", Style::default().bg(bg))
+            })
             .collect(),
         ScrollAxis::Horizontal => {
             let spans = (0..extent)
-                .map(|index| Span::styled(" ", cell(index)))
+                .map(|index| {
+                    let fg = if is_thumb(index) {
+                        thumb_color
+                    } else {
+                        SCROLL_TRACK_BG
+                    };
+                    Span::styled("▄", Style::default().fg(fg))
+                })
                 .collect::<Vec<_>>();
             vec![Line::from(spans)]
         }
@@ -544,7 +553,10 @@ mod tests {
             .map(|line| {
                 line.spans
                     .iter()
-                    .filter(|span| span.style.bg.or(line.style.bg) == Some(SCROLL_THUMB))
+                    .filter(|span| {
+                        span.style.bg.or(line.style.bg) == Some(SCROLL_THUMB)
+                            || span.style.fg == Some(SCROLL_THUMB)
+                    })
                     .count()
             })
             .sum()
@@ -596,19 +608,24 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_scrollbar_paints_one_row_of_solid_cells() {
+    fn horizontal_scrollbar_paints_one_row_of_thin_half_blocks() {
         let lines = scrollbar_lines(1000, 20, 0, ScrollAxis::Horizontal, ThumbState::Idle);
         assert_eq!(lines.len(), 1, "a horizontal bar spans one row");
         assert_eq!(lines[0].width(), 20);
+        assert_eq!(lines[0].spans[0].content, "▄");
+        assert_eq!(
+            lines[0].spans[0].style.bg, None,
+            "half block, not a solid fill"
+        );
         assert_eq!(
             lines[0]
                 .spans
                 .iter()
-                .filter(|span| span.style.bg == Some(SCROLL_THUMB))
+                .filter(|span| span.style.fg == Some(SCROLL_THUMB))
                 .count(),
             MIN_SCROLLBAR_THUMB_HORIZONTAL
         );
-        assert_eq!(lines[0].spans[0].style.bg, Some(SCROLL_THUMB));
+        assert_eq!(lines[0].spans[0].style.fg, Some(SCROLL_THUMB));
     }
 
     #[test]
@@ -627,7 +644,8 @@ mod tests {
         assert_eq!(grabbed[0].style.bg, Some(SCROLL_THUMB_ACTIVE));
 
         let horizontal = scrollbar_lines(1000, 20, 0, ScrollAxis::Horizontal, ThumbState::Grabbed);
-        assert_eq!(horizontal[0].spans[0].style.bg, Some(SCROLL_THUMB_ACTIVE));
+        assert_eq!(horizontal[0].spans[0].style.fg, Some(SCROLL_THUMB_ACTIVE));
+        assert_eq!(horizontal[0].spans[0].style.bg, None);
     }
 
     #[test]

@@ -37,8 +37,8 @@ clear the previous selection and reload history; late image responses are ignore
 
 ## Acceptance status
 
-The paired Features are `features/en-US/replay_screenshot_review.feature` and
-`features/zh-CN/回放截图查看.feature`. Their ten scenarios per locale remain
+The paired Features are `features/en-US/web/replay/replay_screenshot_review.feature` and
+`features/zh-CN/Web/回放/回放截图查看.feature`. Their ten scenarios per locale remain
 pending live UI binding and replay. There is currently no ready browser session
 for verified locator acquisition. No confirmed bindings have been fabricated.
 Their headers say live bindings remain pending, so the catalog keeps the

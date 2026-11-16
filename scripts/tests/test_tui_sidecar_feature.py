@@ -21,8 +21,8 @@ spec.loader.exec_module(adapter)
 class ProjectSwitchTemplateTests(unittest.TestCase):
     def test_localized_project_switch_templates_keep_the_same_actions(self):
         templates = [
-            adapter.ROOT / "features/en-US/tui_project_switch.tui.template.json",
-            adapter.ROOT / "features/zh-CN/项目切换.tui.template.json",
+            adapter.ROOT / "features/en-US/project/switch/tui_project_switch.tui.template.json",
+            adapter.ROOT / "features/zh-CN/项目/切换/项目切换.tui.template.json",
         ]
         actions = [
             {step["line"]: step["actions"] for step in json.loads(path.read_text(encoding="utf-8"))["steps"]}
@@ -245,8 +245,11 @@ class ProjectSwitchTemplateTests(unittest.TestCase):
                 adapter.fixture_feature_paths(project, str(project.parent / "outside.feature"))
 
     def test_each_locale_expands_into_independent_fixture_roots(self):
-        for locale, stem in (("en-US", "tui_project_switch"), ("zh-CN", "项目切换")):
-            feature = adapter.ROOT / "features" / locale / (stem + ".feature")
+        for feature in (
+            adapter.ROOT / "features/en-US/project/switch/tui_project_switch.feature",
+            adapter.ROOT / "features/zh-CN/项目/切换/项目切换.feature",
+        ):
+            locale = feature.parents[2].name
             source = feature.read_text(encoding="utf-8")
             for _ in range(2):
                 with self.subTest(locale=locale), tempfile.TemporaryDirectory() as name:
@@ -264,7 +267,7 @@ class ProjectSwitchTemplateTests(unittest.TestCase):
                     self.assertEqual((root / "project-invalid/teshi.toml").read_text(), "[runner\n")
 
     def test_changed_source_text_or_lines_fail_before_fixture_creation(self):
-        feature = adapter.ROOT / "features/en-US/tui_project_switch.feature"
+        feature = adapter.ROOT / "features/en-US/project/switch/tui_project_switch.feature"
         source = feature.read_text(encoding="utf-8")
         for changed in ("\n" + source, source.replace("the isolated projects are ready", "unbound setup")):
             with tempfile.TemporaryDirectory() as name:

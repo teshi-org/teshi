@@ -2,7 +2,7 @@
 
 Each scenario is tracked independently. Results refer to recorded runs, not an unconditional claim about later source edits. Unlisted bindings are open.
 
-## features/en-US/browser_profiles.feature
+## features/en-US/web/browser/browser_profiles.feature
 
 - [ ] Teshi web shows Browser Profiles after startup — open
 - [ ] Multiple profiles are not selected automatically — open
@@ -10,7 +10,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] User refreshes the browser profile list — open
 - [ ] User can retry connecting Chrome from Browser Profiles — open
 
-## features/en-US/chat_acp_status_row.feature
+## features/en-US/ai_chat/status/chat_acp_status_row.feature
 
 - [ ] shared activity row — open
 - [ ] narrow status priority — open
@@ -18,44 +18,44 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] Keep error and interrupted-task recovery visible — open
 - [ ] Preserve the native backend status row — open
 
-## features/en-US/chat_focus_hint.feature
+## features/en-US/ai_chat/composer/chat_focus_hint.feature
 
 - [x] Focus does not add border hints — passed (.teshi/feature-results/chat-focus-feature-20261027/matrix.json)
 - [ ] Retain send and newline controls — failed (.teshi/feature-results/chat-focus-feature-20261027/matrix.json)
 
-## features/en-US/chat_profile_title.feature
+## features/en-US/ai_chat/sessions/chat_profile_title.feature
 
 - [x] default title — passed (.teshi/feature-results/chat-title-feature-20261027/matrix.json)
 - [x] custom profile title — passed (.teshi/feature-results/chat-title-feature-20261027/matrix.json)
 - [x] A custom profile named Default stays identifiable — passed (.teshi/feature-results/chat-title-feature-20261027/matrix.json)
 
-## features/en-US/chat_runtime_context.feature
+## features/en-US/ai_chat/status/chat_runtime_context.feature
 
 - [x] Show task elapsed time across tool work — passed (.teshi/feature-results/chat-runtime-feature-rerun-20261027/matrix.json)
 - [x] Unknown usage is not zero — passed (.teshi/feature-results/chat-runtime-feature-rerun-20261027/matrix.json)
 - [x] Show reported occupancy and threshold — passed (.teshi/feature-results/chat-runtime-feature-rerun-20261027/matrix.json)
 
-## features/en-US/combined_detail_layout.feature
+## features/en-US/explore/layout/combined_detail_layout.feature
 
 - [x] Combine supporting details in two columns — passed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 - [x] Keep all panes reachable on a small screen — passed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 
-## features/en-US/compact_terminal_layout.feature
+## features/en-US/terminal/layout/compact_terminal_layout.feature
 
 - [x] Keep focused content accessible — passed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 - [ ] Resize without stale pointer targets — failed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 
-## features/en-US/explore_horizontal_navigation.feature
+## features/en-US/explore/navigation/explore_horizontal_navigation.feature
 
 - [x] Reach long Step text — passed (.teshi/feature-results/horizontal-feature-rerun-20261027/matrix.json)
 - [x] Clamp at the content boundary — passed (.teshi/feature-results/horizontal-feature-rerun-20261027/matrix.json)
 
-## features/en-US/explore_step_changes.feature
+## features/en-US/explore/diff/explore_step_changes.feature
 
 - [ ] Browse added and removed Steps — open
 - [ ] Bound navigation at the first change — open
 
-## features/en-US/external_feature_sync.feature
+## features/en-US/explore/sync/external_feature_sync.feature
 
 - [x] Discover additions in the configured scope — passed (.teshi/feature-results/external-context-20261027/matrix.json)
 - [ ] Refresh a batch of changes — failed (.teshi/feature-results/external-context-20261027/matrix.json)
@@ -63,12 +63,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] Defer changes during a run — passed (.teshi/feature-results/external-context-20261027/matrix.json)
 - [ ] Retain the project on scan failure — failed (.teshi/feature-results/external-context-20261027/matrix.json)
 
-## features/en-US/footer_actions.feature
+## features/en-US/common/interaction/footer_actions.feature
 
 - [x] Click a visible action — passed (.teshi/feature-results/footer-feature-final-20261027/matrix.json)
 - [x] Clipped actions are not clickable — passed (.teshi/feature-results/footer-feature-final-20261027/matrix.json)
 
-## features/en-US/gherkin_validation_e2e.feature
+## features/en-US/requirements/gherkin/gherkin_validation_e2e.feature
 
 - [x] Missing Chinese step separator is diagnosed — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Valid source and attachments are accepted — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -88,12 +88,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] Daemon warning report is structured and visible — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Daemon validation errors keep a structured report — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/en-US/pointer_feedback.feature
+## features/en-US/common/interaction/pointer_feedback.feature
 
 - [x] Highlight a clickable target — passed (.teshi/feature-results/pointer-feature-20261027/matrix.json)
 - [ ] Modal coverage blocks underlying feedback — failed (.teshi/feature-results/pointer-feature-20261027/matrix.json)
 
-## features/en-US/replay_screenshot_review.feature
+## features/en-US/web/replay/replay_screenshot_review.feature
 
 - [ ] View a screenshot for a completed step — open
 - [ ] Inspect an available screenshot while replay continues — open
@@ -106,7 +106,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] Explain when a saved image is missing or unreadable — open
 - [ ] Keep screenshot evidence scoped to the selected project — open
 
-## features/en-US/requirement_authoring.feature
+## features/en-US/requirements/documents/requirement_authoring.feature
 
 - [x] Batch assignment moves both documents into an iteration — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Unknown document in a batch leaves existing assignments unchanged — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -118,7 +118,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] Non-interactive edit without a body is rejected — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Blank iteration name is rejected — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/en-US/requirement_creation.feature
+## features/en-US/requirements/documents/requirement_creation.feature
 
 - [x] Create from a file with an explicit project — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Create from stdin without implicit associations — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -126,7 +126,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] Concurrent creation preserves every document — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Failed persistence leaves no partial document — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/en-US/requirement_listing.feature
+## features/en-US/requirements/documents/requirement_listing.feature
 
 - [x] Named iteration JSON list includes only assigned documents — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Unassigned JSON list excludes assigned documents — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -142,18 +142,18 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] Unlinking a project leaves the shared document unassigned — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Portable snapshot contains the linked source documents — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/en-US/requirement_tab.feature
+## features/en-US/requirements/documents/requirement_tab.feature
 
 - [x] Teshi without a project path still loads the requirement library — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/en-US/requirement_timestamp_names.feature
+## features/en-US/requirements/documents/requirement_timestamp_names.feature
 
 - [ ] Name a new document independently of identity — open
 - [ ] Preserve historical links — open
 - [ ] Avoid equal timestamp collisions — open
 - [ ] Clock rollback cannot overwrite history — open
 
-## features/en-US/run_inspect.feature
+## features/en-US/web/replay/run_inspect.feature
 
 - [ ] User opens Run from the shell header — open
 - [ ] Run lists Gherkin scenarios from the open project — open
@@ -163,12 +163,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] User can expand redacted secrets after a run — open
 - [ ] User returns to Browser Profiles from Run — open
 
-## features/en-US/terminal_title_policy.feature
+## features/en-US/terminal/title/terminal_title_policy.feature
 
 - [ ] Proposed project and aggregate state — open
 - [ ] Preserve shell title until a decision — open
 
-## features/en-US/testpoint_requirement_links.feature
+## features/en-US/testpoints/requirement_links/testpoint_requirement_links.feature
 
 - [x] Listing reports each test point with its links — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Listing reports a test point that has no links — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -183,15 +183,15 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] Adding a link to an unknown test point is rejected — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] Removing a link that matches nothing is rejected — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/en-US/tui_acp_authoring.feature
+## features/en-US/ai_chat/acp/tui_acp_authoring.feature
 
 - [ ] Generate a feature through human review and Save — open
 
-## features/en-US/tui_acp_long_conversation.feature
+## features/en-US/ai_chat/acp/tui_acp_long_conversation.feature
 
 - [ ] Complete thirty wrapped conversation turns — open
 
-## features/en-US/tui_acp_model_persistence.feature
+## features/en-US/ai_chat/acp/tui_acp_model_persistence.feature
 
 - [ ] Fresh sessions restore the confirmed model — open
 - [ ] Agent preferences and existing conversations remain independent — open
@@ -199,23 +199,23 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] An unavailable saved model falls back to the agent default — open
 - [ ] A restoration timeout blocks prompts until reconciliation — open
 
-## features/en-US/tui_acp_permission_allow.feature
+## features/en-US/ai_chat/acp/tui_acp_permission_allow.feature
 
 - [ ] Allowing the second option continues the conversation — open
 
-## features/en-US/tui_acp_permission_reject.feature
+## features/en-US/ai_chat/acp/tui_acp_permission_reject.feature
 
 - [ ] Rejecting the permission ends the turn — open
 
-## features/en-US/tui_acp_settings.feature
+## features/en-US/ai_chat/acp/tui_acp_settings.feature
 
 - [ ] Switching the model refreshes the choices that depend on it — open
 
-## features/en-US/tui_acp_wrapped_chat.feature
+## features/en-US/ai_chat/acp/tui_acp_wrapped_chat.feature
 
 - [ ] Keep the sixth wrapped reply visible — open
 
-## features/en-US/tui_agent_activity.feature
+## features/en-US/ai_chat/status/tui_agent_activity.feature
 
 - [ ] Show reasoning before the final answer (Native) — open
 - [ ] Show reasoning before the final answer (ACP) — open
@@ -231,7 +231,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] Preserve progress styling after an interrupted turn (ACP, failure) — open
 - [ ] Do not promote ACP progress when no final answer follows a tool — open
 
-## features/en-US/tui_agent_selection_memory.feature
+## features/en-US/ai_chat/sessions/tui_agent_selection_memory.feature
 
 - [ ] First launch without a saved selection uses Native — open
 - [ ] A new agent uses the last explicitly selected ACP agent — open
@@ -243,11 +243,11 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] A removed preferred ACP agent produces a visible Native fallback — open
 - [ ] A connection failure does not silently switch the preferred agent — open
 
-## features/en-US/tui_codebuddy_live_conversation.feature
+## features/en-US/ai_chat/acp/tui_codebuddy_live_conversation.feature
 
 - [ ] Complete ten real CodeBuddy turns — open
 
-## features/en-US/tui_conversation_history.feature
+## features/en-US/ai_chat/sessions/tui_conversation_history.feature
 
 - [ ] Save an unfinished reply without a lifecycle command (Native) — open
 - [ ] Save an unfinished reply without a lifecycle command (ACP) — open
@@ -264,12 +264,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] Keep native credentials out of saved conversations — open
 - [ ] Keep ACP credentials out of saved conversations — open
 
-## features/en-US/tui_editor.feature
+## features/en-US/terminal/editor/tui_editor.feature
 
 - [ ] Navigate between views and exit — open
 - [ ] Run, edit, and save a feature — open
 
-## features/en-US/tui_exit_performance.feature
+## features/en-US/terminal/performance/tui_exit_performance.feature
 
 - [ ] Quit promptly when no agent work is pending — open
 - [ ] Interrupt pending ACP work when quitting — open
@@ -277,7 +277,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] Close multiple idle ACP conversations without serial delays — open
 - [ ] Preserve a completed conversation across a prompt exit — open
 
-## features/en-US/tui_project_switch.feature
+## features/en-US/project/switch/tui_project_switch.feature
 
 - [ ] Keyboard switching loads project B — open
 - [ ] Pointer selection opens a recent project — open
@@ -297,7 +297,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] Explicitly loaded legacy history remains unassigned — open
 - [ ] A shared global requirement reloads each project's own links — open
 
-## features/en-US/tui_project_switch_boundaries.feature
+## features/en-US/project/switch/tui_project_switch_boundaries.feature
 
 - [ ] Invalid target encoding preserves an unsaved project — open
 - [ ] Unreadable target sources can be repaired before retrying — open
@@ -307,7 +307,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] A failed requirement draft save can be cancelled and retried — open
 - [ ] A failed test-point save retains edits and review state for retry — open
 
-## features/en-US/tui_project_switch_failures.feature
+## features/en-US/project/switch/tui_project_switch_failures.feature
 
 - [ ] Undo and redo cannot restore the previous project's content — open
 - [ ] Recover a failed Feature save before switching — open
@@ -317,19 +317,19 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] A stalled synchronous dispatch times out without changing projects — open
 - [ ] Open a project path when recent history is empty — open
 
-## features/en-US/winapp_capability_diagnostics.feature
+## features/en-US/winapp/winapp_capability_diagnostics.feature
 
 - [ ] Prefer effective semantic controls — open
 - [ ] Diagnose a container-only tree — open
 - [ ] Do not infer absence from truncation — open
 
-## features/en-US/winapp_owned_instances.feature
+## features/en-US/winapp/winapp_owned_instances.feature
 
 - [ ] Observe redirected second launch — open
 - [ ] Stop only the owned instance — open
 - [ ] Reject a lost ownership token — open
 
-## features/en-US/winapp_visual_exploration.feature
+## features/en-US/winapp/winapp_visual_exploration.feature
 
 - [ ] Operate without semantic controls — open
 - [ ] Reject stale coordinates — open
@@ -345,27 +345,27 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 
 - [ ] Missing controls can be asserted absent — open
 
-## features/zh-CN/ACP会话设置.feature
+## features/zh-CN/AI聊天/ACP/ACP会话设置.feature
 
 - [ ] 切换模型会刷新依赖它的选项 — open
 
-## features/zh-CN/ACP功能生成.feature
+## features/zh-CN/AI聊天/ACP/ACP功能生成.feature
 
 - [ ] 通过人工审核和保存生成功能文件 — open
 
-## features/zh-CN/ACP换行对话.feature
+## features/zh-CN/AI聊天/ACP/ACP换行对话.feature
 
 - [ ] 第六轮换行回复保持可见 — open
 
-## features/zh-CN/ACP权限允许对话.feature
+## features/zh-CN/AI聊天/ACP/ACP权限允许对话.feature
 
 - [ ] 允许第二个权限选项后对话继续 — open
 
-## features/zh-CN/ACP权限拒绝对话.feature
+## features/zh-CN/AI聊天/ACP/ACP权限拒绝对话.feature
 
 - [ ] 拒绝权限请求后回合结束 — open
 
-## features/zh-CN/ACP模型选择持久化.feature
+## features/zh-CN/AI聊天/ACP/ACP模型选择持久化.feature
 
 - [ ] 新会话恢复已确认的模型 — open
 - [ ] 代理偏好与已有对话互不影响 — open
@@ -373,11 +373,11 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 已保存模型不可用时使用代理默认模型 — open
 - [ ] 恢复超时时阻止消息直至模型状态重新确认 — open
 
-## features/zh-CN/ACP长对话.feature
+## features/zh-CN/AI聊天/ACP/ACP长对话.feature
 
 - [ ] 完成三十轮换行对话 — open
 
-## features/zh-CN/Agent对话持久化.feature
+## features/zh-CN/AI聊天/会话/Agent对话持久化.feature
 
 - [ ] 无需生命周期命令即可保存未完成回复 (Native) — open
 - [ ] 无需生命周期命令即可保存未完成回复 (ACP) — open
@@ -394,7 +394,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 原生代理凭据不进入已保存对话 — open
 - [ ] ACP代理凭据不进入已保存对话 — open
 
-## features/zh-CN/Agent运行过程展示.feature
+## features/zh-CN/AI聊天/状态/Agent运行过程展示.feature
 
 - [ ] 在最终回答之前展示思考内容 (Native) — open
 - [ ] 在最终回答之前展示思考内容 (ACP) — open
@@ -410,11 +410,11 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 本轮中断后保留过程回复样式 (ACP, 失败) — open
 - [ ] ACP工具后没有最终回答时不提升过程回复样式 — open
 
-## features/zh-CN/CodeBuddy真实ACP对话.feature
+## features/zh-CN/AI聊天/ACP/CodeBuddy真实ACP对话.feature
 
 - [ ] 完成十轮真实 CodeBuddy 对话 — open
 
-## features/zh-CN/Gherkin 校验自举.feature
+## features/zh-CN/需求/Gherkin/Gherkin 校验自举.feature
 
 - [x] 诊断中文步骤缺少分隔符 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 接受有效源文本和步骤附件 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -434,7 +434,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] daemon 警告报告结构完整且可见 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] daemon 校验错误保留结构化报告 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/zh-CN/TUI退出性能.feature
+## features/zh-CN/终端/性能/TUI退出性能.feature
 
 - [ ] 没有待处理代理任务时及时退出 — open
 - [ ] 退出时中断等待中的ACP任务 — open
@@ -442,12 +442,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 多个空闲ACP会话退出时不叠加串行等待 — open
 - [ ] 及时退出后仍保留已完成的对话 — open
 
-## features/zh-CN/合并细节布局.feature
+## features/zh-CN/Explore/布局/合并细节布局.feature
 
 - [x] 两列组合辅助细节 — passed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 - [x] 小屏所有面板仍可访问 — passed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 
-## features/zh-CN/回放截图查看.feature
+## features/zh-CN/Web/回放/回放截图查看.feature
 
 - [ ] 查看已完成步骤的截图 — open
 - [ ] 回放尚未结束时查看已有截图 — open
@@ -460,7 +460,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 说明已保存图片丢失或无法读取 — open
 - [ ] 截图证据随当前项目切换 — open
 
-## features/zh-CN/外部功能文件同步.feature
+## features/zh-CN/Explore/同步/外部功能文件同步.feature
 
 - [x] 发现配置范围内新增文件 — passed (.teshi/feature-results/external-context-20261027/matrix.json)
 - [ ] 刷新一批变化 — failed (.teshi/feature-results/external-context-20261027/matrix.json)
@@ -468,22 +468,22 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] 运行期间延后同步 — passed (.teshi/feature-results/external-context-20261027/matrix.json)
 - [ ] 扫描失败保留项目 — failed (.teshi/feature-results/external-context-20261027/matrix.json)
 
-## features/zh-CN/小屏终端布局.feature
+## features/zh-CN/终端/布局/小屏终端布局.feature
 
 - [x] 保证聚焦内容可访问 — passed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 - [ ] 调整尺寸不残留点击区域 — failed (.teshi/feature-results/compact-layout-feature-20261027/matrix.json)
 
-## features/zh-CN/底部操作.feature
+## features/zh-CN/通用/交互/底部操作.feature
 
 - [x] 点击可见操作 — passed (.teshi/feature-results/footer-feature-final-20261027/matrix.json)
 - [x] 截断操作不可点击 — passed (.teshi/feature-results/footer-feature-final-20261027/matrix.json)
 
-## features/zh-CN/步骤横向导航.feature
+## features/zh-CN/Explore/导航/步骤横向导航.feature
 
 - [x] 访问长步骤文本 — passed (.teshi/feature-results/horizontal-feature-rerun-20261027/matrix.json)
 - [x] 停在内容边界 — passed (.teshi/feature-results/horizontal-feature-rerun-20261027/matrix.json)
 
-## features/zh-CN/测试点需求链接.feature
+## features/zh-CN/测试点/需求链接/测试点需求链接.feature
 
 - [x] 列出会报出每个测试点及其链接 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 列出会报出没有链接的测试点 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -498,7 +498,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] 向未知测试点追加链接会被拒绝 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 删除匹配不到任何链接时会被拒绝 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/zh-CN/浏览器配置选择.feature
+## features/zh-CN/Web/浏览器/浏览器配置选择.feature
 
 - [ ] teshi web 启动后显示浏览器配置 — open
 - [ ] 多个配置不会被自动选中 — open
@@ -506,12 +506,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 用户刷新浏览器配置列表 — open
 - [ ] 用户可从浏览器配置重试连接 Chrome — open
 
-## features/zh-CN/点击悬停反馈.feature
+## features/zh-CN/通用/交互/点击悬停反馈.feature
 
 - [x] 高亮可点击目标 — passed (.teshi/feature-results/pointer-feature-20261027/matrix.json)
 - [ ] 弹层阻止底层反馈 — failed (.teshi/feature-results/pointer-feature-20261027/matrix.json)
 
-## features/zh-CN/直接创建需求.feature
+## features/zh-CN/需求/文档/直接创建需求.feature
 
 - [x] 从文件创建并显式关联项目 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 从标准输入创建且不隐式关联 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -519,19 +519,19 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] 并发创建保留所有文档 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 保存失败不残留半成品 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/zh-CN/窗口实例生命周期.feature
+## features/zh-CN/WinApp/窗口/窗口实例生命周期.feature
 
 - [ ] 观察重定向的二次启动 — open
 - [ ] 仅停止本次拥有的实例 — open
 - [ ] 拒绝丢失的拥有凭证 — open
 
-## features/zh-CN/窗口能力诊断.feature
+## features/zh-CN/WinApp/窗口/窗口能力诊断.feature
 
 - [ ] 优先有效语义控件 — open
 - [ ] 诊断仅容器树 — open
 - [ ] 不从截断推断不存在 — open
 
-## features/zh-CN/窗口视觉探索.feature
+## features/zh-CN/WinApp/窗口/窗口视觉探索.feature
 
 - [ ] 无语义控件时操作 — open
 - [ ] 拒绝过期坐标 — open
@@ -543,17 +543,17 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 像素稳定不代表业务成功 — open
 - [ ] 在已观察客户区内滚动和拖动 — open
 
-## features/zh-CN/终端功能编辑.feature
+## features/zh-CN/终端/编辑器/终端功能编辑.feature
 
 - [ ] 切换视图并退出 — open
 - [ ] 执行测试并编辑保存功能文件 — open
 
-## features/zh-CN/终端标题规则.feature
+## features/zh-CN/终端/标题/终端标题规则.feature
 
 - [ ] 建议的项目与聚合状态 — open
 - [ ] 决策前保留Shell标题 — open
 
-## features/zh-CN/聊天ACP状态行.feature
+## features/zh-CN/AI聊天/状态/聊天ACP状态行.feature
 
 - [ ] 同行活动状态 — open
 - [ ] 窄屏状态优先级 — open
@@ -561,24 +561,24 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 保留错误和中断任务恢复入口 — open
 - [ ] 保留原生后端状态行 — open
 
-## features/zh-CN/聊天耗时与上下文.feature
+## features/zh-CN/AI聊天/状态/聊天耗时与上下文.feature
 
 - [x] 展示包含工具过程的任务耗时 — passed (.teshi/feature-results/chat-runtime-feature-rerun-20261027/matrix.json)
 - [x] 未知用量不冒充零 — passed (.teshi/feature-results/chat-runtime-feature-rerun-20261027/matrix.json)
 - [x] 展示实际占用与阈值 — passed (.teshi/feature-results/chat-runtime-feature-rerun-20261027/matrix.json)
 
-## features/zh-CN/聊天聚焦提示.feature
+## features/zh-CN/AI聊天/输入框/聊天聚焦提示.feature
 
 - [x] 聚焦不增加边框提示 — passed (.teshi/feature-results/chat-focus-feature-20261027/matrix.json)
 - [ ] 保留发送和换行 — failed (.teshi/feature-results/chat-focus-feature-20261027/matrix.json)
 
-## features/zh-CN/聊天配置标题.feature
+## features/zh-CN/AI聊天/会话/聊天配置标题.feature
 
 - [x] 默认标题 — passed (.teshi/feature-results/chat-title-feature-20261027/matrix.json)
 - [x] 自定义配置标题 — passed (.teshi/feature-results/chat-title-feature-20261027/matrix.json)
 - [x] 名为Default的自定义配置仍可识别 — passed (.teshi/feature-results/chat-title-feature-20261027/matrix.json)
 
-## features/zh-CN/记住上次选择的Agent.feature
+## features/zh-CN/AI聊天/会话/记住上次选择的Agent.feature
 
 - [ ] 首次启动没有已保存选择时使用Native — open
 - [ ] 新建Agent沿用最近主动选择的ACP代理 — open
@@ -590,7 +590,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 已删除的首选ACP代理触发可见的Native回退 — open
 - [ ] 连接失败不会静默切换首选代理 — open
 
-## features/zh-CN/运行并检查场景.feature
+## features/zh-CN/Web/回放/运行并检查场景.feature
 
 - [ ] 用户从壳标题打开运行界面 — open
 - [ ] 运行界面列出当前项目中的 Gherkin 场景 — open
@@ -600,12 +600,12 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 运行完成后用户可以展开已脱敏的机密 — open
 - [ ] 用户从运行界面返回浏览器配置 — open
 
-## features/zh-CN/逐条步骤差异.feature
+## features/zh-CN/Explore/差异/逐条步骤差异.feature
 
 - [ ] 浏览新增和删除步骤 — open
 - [ ] 首条变化的导航边界 — open
 
-## features/zh-CN/需求列表.feature
+## features/zh-CN/需求/文档/需求列表.feature
 
 - [x] 按命名迭代列出 JSON 时只包含已分配文档 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 未分配 JSON 列表排除已分配文档 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -621,18 +621,18 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] 解除项目关联后共享文档成为未关联需求 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 项目快照包含已关联需求的完整正文 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/zh-CN/需求时间戳命名.feature
+## features/zh-CN/需求/文档/需求时间戳命名.feature
 
 - [ ] 文件名与身份分离 — open
 - [ ] 保留历史关联 — open
 - [ ] 避免同时间戳冲突 — open
 - [ ] 时钟回拨不覆盖历史 — open
 
-## features/zh-CN/需求标签页.feature
+## features/zh-CN/需求/文档/需求标签页.feature
 
 - [x] 无项目路径启动 teshi 仍能加载需求库 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/zh-CN/需求编写.feature
+## features/zh-CN/需求/文档/需求编写.feature
 
 - [x] 批量分配把两份文档划入同一迭代 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 批次中的未知文档不会改动已有分配 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
@@ -644,7 +644,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [x] 非交互编辑且未提供正文时被拒绝 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 - [x] 空白迭代名被拒绝 — passed (.teshi/feature-results/cli-matrix-current-20261027/matrix.json)
 
-## features/zh-CN/项目切换.feature
+## features/zh-CN/项目/切换/项目切换.feature
 
 - [ ] 使用键盘切换并加载项目 B — open
 - [ ] 使用指针选择最近项目 — open
@@ -664,7 +664,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 显式载入的旧会话仍保持未归属 — open
 - [ ] 同一全局需求重新载入各项目自己的关联 — open
 
-## features/zh-CN/项目切换失败边界.feature
+## features/zh-CN/项目/切换/项目切换失败边界.feature
 
 - [ ] 撤销和重做不能恢复上一个项目的内容 — open
 - [ ] 修复功能文件保存失败后再切换 — open
@@ -674,7 +674,7 @@ Each scenario is tracked independently. Results refer to recorded runs, not an u
 - [ ] 同步分发停滞时超时并保留当前项目 — open
 - [ ] 最近历史为空时通过路径打开项目 — open
 
-## features/zh-CN/项目切换持久化边界.feature
+## features/zh-CN/项目/切换/项目切换持久化边界.feature
 
 - [ ] 目标编码无效时保留未保存的项目 — open
 - [ ] 修复无法读取的目标文件后重试切换 — open

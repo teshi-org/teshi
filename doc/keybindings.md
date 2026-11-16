@@ -12,7 +12,7 @@ current modal layer. Requirements calls its Normal mode **Browse**.
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` / `4` / `5` | Explore / MindMap / AI / Requirements / Test Points, in Normal mode |
-| `Ctrl+W`, then `h/j/k/l` or Left/Down/Up/Right | Focus the adjacent visible pane; stop at edges |
+| `Ctrl+W`, then `h/j/k/l` or Left/Down/Up/Right | Focus the adjacent visible pane; stop at edges. The AI composer keeps `Ctrl+W` for deleting the previous word |
 | `Esc` after `Ctrl+W` | Cancel the prefix |
 | `j/k` or Down/Up | Navigate lists and trees |
 | `hjkl` or arrows | Move the cursor in a Normal-mode text editor |
@@ -74,8 +74,8 @@ work while the prompt is open, and a left click closes it.
 | `/` | Search Feature names, titles, and relative paths in the Features column; the title shows `/query` with a block caret (Left/Right/Home/End move it, Delete removes forward); Enter keeps the filter, Esc clears it |
 | Enter | Toggle the selected Feature directory |
 | `j/k`, Down/Up | Select next/previous row |
-| `h/Left` | In the Features column: collapse an open directory, otherwise select the parent directory. Elsewhere: previous column |
-| `l/Right` | In the Features column: expand a closed directory, step into the first child of an open one, or open a Feature's scenarios. Elsewhere: navigate right according to the selected column |
+| `h/Left` | In the Features column: collapse an open directory, otherwise select the parent directory. Elsewhere: move focus to the previous visible column in the order Scenarios → Features or Steps → Scenarios |
+| `l/Right` | In the Features column: expand a closed directory, step into the first child of an open one, or open a Feature's scenarios. Elsewhere: move focus to the next visible column (Scenarios, then Steps); use `e` to edit |
 | Shift+Tab | Previous column |
 | Tab | Next column |
 | Home/End, `gg/G` | First/last row |
@@ -87,6 +87,9 @@ work while the prompt is open, and a left click closes it.
 | `a` | Request an AI suggestion |
 | `e` | Open the selected file editor |
 | Esc | Clear the current interaction state |
+
+Features occupy the left column. In the right column, Scenarios sit above
+Steps; Tab/Shift+Tab and the pane chords follow that visual order.
 
 ### Feature editor: Normal
 
@@ -112,7 +115,8 @@ work while the prompt is open, and a left click closes it.
 | `s` / Ctrl+S | Save |
 | Esc | Leave the current editor state |
 
-`Ctrl+W` is exclusively a pane prefix; the old When shortcut is removed. Use
+`Ctrl+W` is a pane prefix outside the AI composer; inside the composer it
+deletes the previous word. The old When shortcut is removed. Use
 the keyword picker to select When. The default editor branch retains the legacy
 Ctrl+backslash control-character binding for the MindMap AI panel.
 
@@ -206,7 +210,7 @@ first leaves Input. In panel Normal mode, `o` also opens the location dropdown.
 | `j/k`, Down/Up | Scroll vertically |
 | `h/l`, Left/Right | Scroll horizontally; on the AI tab `h`/Left focus the Chats sidebar when it is on screen |
 | Alt+arrows | Scroll in the corresponding direction |
-| Ctrl+U / Ctrl+D | Scroll half a viewport up / down |
+| Ctrl+U / Ctrl+D | Scroll half a viewport up / down (chat Normal mode); the AI composer uses Ctrl+U to delete to the line start |
 | `gg/G`, Home/End | History top/bottom |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Scroll history |
 | Ctrl+G | Show or hide the AI tab Chats sidebar, also while typing |
@@ -233,9 +237,19 @@ Clicking a conversation focuses the sidebar too.
 | Printable characters | Insert text |
 | Enter | Send; empty input returns to Normal |
 | Ctrl+J / Shift+Enter | Insert a newline |
-| Left/Right, Up/Down | Move input cursor; Up/Down move between input lines, then on the first/last line recall earlier/later prompts sent in this conversation (Down past the newest restores the draft) |
+| Left/Right, Up/Down | Move input cursor; Up/Down move by wrapped display row, then recall earlier/later prompts on the first/last row (Down past the newest restores the draft) |
 | Home/End | Move to the start/end of the current input line |
 | Backspace/Delete | Delete text; an `[Image #N]` placeholder is deleted as a whole |
+| Ctrl+A | Select the whole draft |
+| Shift+arrows, Shift+Home/End | Extend the draft selection |
+| Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z | Undo / redo the draft |
+| Ctrl+X | Cut the draft selection |
+| Ctrl+Left/Right | Move the caret by word |
+| Ctrl+Backspace / Ctrl+W | Delete the previous word |
+| Ctrl+Delete | Delete the next word |
+| Ctrl+U | Delete to the line start |
+| Ctrl+Insert / Shift+Insert / Ctrl+Shift+V | Fallback copy / paste where a terminal intercepts Ctrl+C or Ctrl+V |
+| Up/Down | Move by wrapped display row; history recall starts at the first/last row |
 | Ctrl+V / Alt+V | Paste clipboard text; with no text on the clipboard, attach its image or image files. In Windows Terminal, Ctrl+V reaches Teshi as the terminal's empty paste for an image-only clipboard; Alt+V reads the clipboard directly in any terminal |
 | Alt+arrows | Scroll history |
 | PageUp/PageDown, Ctrl+K | Scroll history vertically |
@@ -250,9 +264,13 @@ keeps the turn running, so a second Esc never stops the run by itself. A
 confirmed interrupt ends the turn and keeps the ACP process and session for the
 next message. With no run in progress, Esc opens the quit confirmation: Enter or
 `y` exits, `n` or Esc stays. Ctrl+Q exits from any mode, and `:` then `q` reaches
-the same exit without a control chord; Ctrl+C copies the selection instead.
+the same exit without a control chord; Ctrl+C copies the draft selection first,
+then the chat selection, and otherwise keeps its existing behavior. Ctrl+K stays
+chat-history scrolling; delete-to-line-end is intentionally not bound.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
+Full-width `／` and `＠` become `/` and `@` at command and mention boundaries;
+`＃` and `！` stay literal.
 
 A pasted screenshot or a pasted or dropped image file appears in the input as
 an `[Image #N]` placeholder; typing `@path` to a PNG, JPEG, GIF, WebP, or BMP

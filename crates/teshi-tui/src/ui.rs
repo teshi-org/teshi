@@ -1155,6 +1155,27 @@ fn compact_panes(area: Rect, focus: usize) -> [Rect; 3] {
     [left, main, detail]
 }
 
+/// Explore keeps the Feature column fixed, gives the Scenario list only the
+/// rows it needs (capped at 40%), and hands the rest to Steps. Tiny terminals
+/// still show only the focused pane.
+fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 3] {
+    if area.width < 70 || area.height < 12 {
+        let mut panes = [Rect::default(); 3];
+        panes[focus.min(2)] = area;
+        return panes;
+    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
+    let max_scenario = (right.height * 40 / 100).max(3);
+    let desired = (scenario_rows.min(u16::MAX as usize) as u16)
+        .saturating_add(2)
+        .clamp(3, max_scenario);
+    let scenario_height = desired.min(right.height.saturating_sub(3).max(3));
+    let [scenario, steps] =
+        Layout::vertical([Constraint::Length(scenario_height), Constraint::Min(3)]).areas(right);
+    [left, scenario, steps]
+}
+
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.explore_edit_mode {
         let cols = Layout::default()
@@ -1165,7 +1186,8 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         render_reserved_panel(frame, app, cols[1]);
         return;
     }
-    let cols = compact_panes(area, app.explore_focus.index());
+    let scenario_rows = explore_scenario_count(app);
+    let cols = explore_panes(area, app.explore_focus.index(), scenario_rows);
 
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
@@ -1806,15 +1828,14 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-fn explore_scenarios_title(app: &App) -> String {
+fn explore_scenario_count(app: &App) -> usize {
     if let Some(deleted_idx) = app.explore_selected_deleted_feature {
-        let count = app
+        return app
             .git_status
             .deleted
             .get(deleted_idx)
             .map(|view| view.deleted_scenarios().count())
             .unwrap_or(0);
-        return format!("Scenarios ({count})");
     }
     let current_count = app
         .project
@@ -1827,7 +1848,11 @@ fn explore_scenarios_title(app: &App) -> String {
         .current_at(app.explore_selected_feature)
         .map(|view| view.deleted_scenarios().count())
         .unwrap_or(0);
-    format!("Scenarios ({})", current_count + deleted_count)
+    current_count + deleted_count
+}
+
+fn explore_scenarios_title(app: &App) -> String {
+    format!("Scenarios ({})", explore_scenario_count(app))
 }
 
 /// Gherkin syntax spans for one source line. `keyword_kind` overrides the
@@ -7491,12 +7516,41 @@ mod truncate_tests {
     use std::path::PathBuf;
 
     use super::{
-        Line, Span, build_case_detail_lines, explore_scenarios_title, render, truncate_line_to_cols,
+        Line, Span, build_case_detail_lines, explore_panes, explore_scenarios_title, render,
+        truncate_line_to_cols,
     };
     use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
     use crate::keymap::Action;
     use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
+
+    #[test]
+    fn explore_scenarios_take_only_their_rows_while_steps_get_the_rest() {
+        let area = ratatui::layout::Rect::new(0, 0, 120, 30);
+
+        let [_, scenario, steps] = explore_panes(area, 0, 1);
+        assert_eq!(scenario.height, 3, "one scenario plus borders");
+        assert_eq!(steps.height, 27);
+        assert_eq!(scenario.y, area.y, "Scenarios sit above the Steps list");
+        assert_eq!(steps.bottom(), area.bottom());
+
+        let [_, scenario, steps] = explore_panes(area, 0, 0);
+        assert_eq!(scenario.height, 3, "an empty list still has borders");
+        assert_eq!(steps.height, 27);
+
+        let [_, scenario, steps] = explore_panes(area, 0, 30);
+        assert_eq!(scenario.height, 12, "the scenario pane caps at 40%");
+        assert_eq!(steps.height, 18);
+    }
+
+    #[test]
+    fn explore_narrow_or_short_layout_shows_only_the_focused_pane() {
+        let area = ratatui::layout::Rect::new(0, 0, 60, 20);
+        let panes = explore_panes(area, 2, 5);
+        assert_eq!(panes[0], ratatui::layout::Rect::default());
+        assert_eq!(panes[1], ratatui::layout::Rect::default());
+        assert_eq!(panes[2], area);
+    }
 
     #[test]
     fn workspace_meta_pins_the_version_to_the_tab_row() {
@@ -8540,6 +8594,11 @@ Feature: Rule only
             });
         let (rect, content_width, viewport_width) = scrollbar.expect("feature scrollbar");
         assert_eq!(rect.height, 1);
+        assert_eq!(
+            terminal.backend().buffer()[(rect.x, rect.y)].symbol(),
+            "▄",
+            "the horizontal bar is a thin half-block row"
+        );
         assert!(content_width > viewport_width);
         assert_eq!(
             app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()],

@@ -274,7 +274,7 @@ Do not change the real user requirement store for tests. Create isolated project
 
 Library inspected with `teshi requirements path`, `list --json`, and `show <id> --json`:
 
-- Store: `C:/Users/lilin/AppData/Roaming/teshi/requirements`.
+- Store: `C:/Users/<user>/AppData/Roaming/teshi/requirements`.
 - Store ID: `reqstore-18d3e4036ad71b3800002674`.
 - 15 documents; doc-1 is placeholder content; doc-3 and doc-5 overlap.
 - Metadata has no completion status. The categories below are source-review judgments, not persisted statuses or test results.
@@ -720,7 +720,7 @@ Changes:
 Execution:
 
 ```text
-python scripts/run-feature-matrix.py --teshi .teshi/artifacts/p8-feature-20261016-232551/bin-accepted/teshi.exe --feature features/en-US/tui_project_switch.feature --feature features/zh-CN/项目切换.feature --output-dir .teshi/artifacts/p8-feature-20261016-232551/matrix-isolated
+python scripts/run-feature-matrix.py --teshi .teshi/artifacts/p8-feature-20261016-232551/bin-accepted/teshi.exe --feature features/en-US/project/switch/tui_project_switch.feature --feature features/zh-CN/项目/切换/项目切换.feature --output-dir .teshi/artifacts/p8-feature-20261016-232551/matrix-isolated
 ```
 
 Results and evidence:
@@ -821,7 +821,7 @@ No web behavior is requested here. Native gates exclude wasm-only `teshi-web`; i
 
 Earlier P9 baseline (2026-10-16): `cargo check --workspace --exclude teshi-web --locked` passed, and the native workspace Clippy gate passed after fixing four lint errors in the project-switch/chat-selection code. The first parallel workspace test exposed a process-global environment-variable race between `app_data` and `managed_runtime`; a shared crate-level test lock was added, the engine tests then passed 246/246, and the rerun reached the update-helper package where six `portable_handoff` tests fail in this environment with Windows error 448 (`untrusted mount point`). The Requirements/TUI suite passed 453/453 with one unrelated ignored test. `cargo doc` reached only warning-level broken-link/bare-URL diagnostics but was stopped after an unusually long rustdoc phase and is not counted as passed. These are historical results from before the latest P8.6 fixes, not a final integrated gate.
 
-P8.6 validation refresh: the final paired project-switch Features passed 20/20; the final TUI unit suite passed 454 tests with one ignored; `cargo clippy -p teshi-tui --locked --all-targets --all-features -- -D warnings`, independent runner tests/Clippy, catalog, and adapter contracts passed. The toolchain binaries are usable by prepending `C:/Users/lilin/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin` to PATH; the normal Cargo shim fails to launch in this environment. `cargo fmt --all --check` now runs but fails on pre-existing formatting differences outside the two Rust files changed in this continuation; `fmt-before.log` and `fmt-final.log` retain the exact locations. The changed `app.rs` and `ui.rs` were formatted. Full workspace tests/docs, Linux acceptance, the broader normal/narrow interaction matrix, and the final cross-package checklist remain open. This continuation does not rerun the unrelated browser/WinApp blockers or convert the earlier 36/41 result into a current full-suite pass.
+P8.6 validation refresh: the final paired project-switch Features passed 20/20; the final TUI unit suite passed 454 tests with one ignored; `cargo clippy -p teshi-tui --locked --all-targets --all-features -- -D warnings`, independent runner tests/Clippy, catalog, and adapter contracts passed. The toolchain binaries are usable by prepending `C:/Users/<user>/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin` to PATH; the normal Cargo shim fails to launch in this environment. `cargo fmt --all --check` now runs but fails on pre-existing formatting differences outside the two Rust files changed in this continuation; `fmt-before.log` and `fmt-final.log` retain the exact locations. The changed `app.rs` and `ui.rs` were formatted. Full workspace tests/docs, Linux acceptance, the broader normal/narrow interaction matrix, and the final cross-package checklist remain open. This continuation does not rerun the unrelated browser/WinApp blockers or convert the earlier 36/41 result into a current full-suite pass.
 
 P8.3 validation refresh (2026-10-17): external-runner shutdown, dirty-to-busy recheck, and visible timeout reporting are covered by the focused continuation above. The new CLI passed project-switch 22/22 and terminal-editor 4/4; TUI units passed 458 with one ignored, TUI Clippy passed, and Python adapter/matrix contracts passed 10/10. Touched Rust formatting and diff whitespace checks passed; workspace formatting still fails at the same historical locations. The full native workspace gates and the independent runner suite were not rerun in this continuation, and Linux was not exercised. Historical browser/WinApp blockers remain unverified, not passed.
 

@@ -23,7 +23,7 @@ fn runner_child_fixture() {
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn english_tui_command_edits_and_saves() {
     verify(
-        include_str!("../../../features/en-US/tui_editor.feature"),
+        include_str!("../../../features/en-US/terminal/editor/tui_editor.feature"),
         "tui",
     );
 }
@@ -32,7 +32,7 @@ fn english_tui_command_edits_and_saves() {
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn chinese_run_command_routes_to_tui_and_saves() {
     verify(
-        include_str!("../../../features/zh-CN/终端功能编辑.feature"),
+        include_str!("../../../features/zh-CN/终端/编辑器/终端功能编辑.feature"),
         "run",
     );
 }
@@ -41,7 +41,7 @@ fn chinese_run_command_routes_to_tui_and_saves() {
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn wrapped_acp_replies_remain_visible_after_six_turns() {
     verify_wrapped_chat(
-        include_str!("../../../features/en-US/tui_acp_wrapped_chat.feature"),
+        include_str!("../../../features/en-US/ai_chat/acp/tui_acp_wrapped_chat.feature"),
         &[(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)],
     );
 }
@@ -50,7 +50,7 @@ fn wrapped_acp_replies_remain_visible_after_six_turns() {
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn thirty_turn_wrapped_acp_conversation_keeps_each_reply_visible() {
     verify_wrapped_chat(
-        include_str!("../../../features/en-US/tui_acp_long_conversation.feature"),
+        include_str!("../../../features/en-US/ai_chat/acp/tui_acp_long_conversation.feature"),
         &[(1, 10), (11, 20), (21, 30)],
     );
 }
@@ -64,7 +64,7 @@ fn live_codebuddy_completes_ten_visible_turns() {
         "manual acceptance requires authenticated CodeBuddy and explicit TESHI_CODEBUDDY_LIVE=1; absence is not a test pass"
     );
     verify_live_codebuddy(include_str!(
-        "../../../features/en-US/tui_codebuddy_live_conversation.feature"
+        "../../../features/en-US/ai_chat/acp/tui_codebuddy_live_conversation.feature"
     ));
 }
 
@@ -308,7 +308,7 @@ fn verify_wrapped_chat(source: &str, batches: &[(usize, usize)]) {
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn acp_permission_allow_continues_the_turn() {
     verify_permission_prompt(
-        include_str!("../../../features/en-US/tui_acp_permission_allow.feature"),
+        include_str!("../../../features/en-US/ai_chat/acp/tui_acp_permission_allow.feature"),
         true,
     );
 }
@@ -317,7 +317,7 @@ fn acp_permission_allow_continues_the_turn() {
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn acp_permission_reject_stops_the_turn() {
     verify_permission_prompt(
-        include_str!("../../../features/en-US/tui_acp_permission_reject.feature"),
+        include_str!("../../../features/en-US/ai_chat/acp/tui_acp_permission_reject.feature"),
         false,
     );
 }
@@ -447,7 +447,7 @@ fn verify_permission_prompt(source: &str, allow: bool) {
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn acp_settings_switch_model_by_mouse_and_keyboard() {
-    let source = include_str!("../../../features/en-US/tui_acp_settings.feature");
+    let source = include_str!("../../../features/en-US/ai_chat/acp/tui_acp_settings.feature");
     let binary = std::fs::canonicalize(
         std::env::var("TESHI_SELF_TEST_BIN").expect("set TESHI_SELF_TEST_BIN"),
     )

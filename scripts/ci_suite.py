@@ -14,7 +14,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / ".github/terminal-partitions.json"
-FEATURE = "features/zh-CN/项目目录加载.feature"
+FEATURE = "features/zh-CN/项目/加载/项目目录加载.feature"
 MANIFEST = "crates/teshi-tui-runner/Cargo.toml"
 
 spec = importlib.util.spec_from_file_location("ci_command", ROOT / "scripts/run-ci-command.py")

@@ -74,6 +74,6 @@ Build the CLI and `crates/teshi-tui-runner` with `--locked`. Set
 runner, then execute each locale:
 
 ```text
-teshi run features/en-US/tui_acp_approval.feature --runner-cmd python --runner-arg scripts/run-tui-sidecar-feature.py --report en-approval.json
-teshi run features/zh-CN/ACP斜杠审批.feature --runner-cmd python --runner-arg scripts/run-tui-sidecar-feature.py --report zh-approval.json
+teshi run features/en-US/ai_chat/acp/tui_acp_approval.feature --runner-cmd python --runner-arg scripts/run-tui-sidecar-feature.py --report en-approval.json
+teshi run features/zh-CN/AI聊天/ACP/ACP斜杠审批.feature --runner-cmd python --runner-arg scripts/run-tui-sidecar-feature.py --report zh-approval.json
 ```

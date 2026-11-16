@@ -2477,8 +2477,9 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         Paragraph::new("›").style(fg(if active { theme::ACCENT } else { theme::MUTED })),
         Rect::new(inner.x, inner.y, 1, 1),
     );
+    app.composer_text_width = text_width;
     let agent = app.agent();
-    let (rows, cursor) = input_rows(&agent.input, agent.input_cursor, text_width);
+    let (rows, cursor) = input_rows(&agent.input, agent.input.cursor(), text_width);
     let scroll = cursor.0.saturating_sub(inner.height - 1);
     let display = if agent.input.is_empty() {
         let placeholder = if active {
@@ -2499,6 +2500,12 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         )
     };
     frame.render_widget(Paragraph::new(display), text_area);
+    if text_width > 0
+        && let Some(selection) = agent.input.selection()
+    {
+        let layout = crate::composer::layout(agent.input.text(), text_width);
+        paint_composer_selection(frame, text_area, &layout, selection, scroll);
+    }
     // Registered after the composer region so a click on a placeholder opens
     // the image instead of only focusing the input.
     for (rect, path) in attachment_hitboxes(app, text_area, scroll) {
@@ -2511,7 +2518,7 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
     let agent = app.agent();
     if active && text_width > 0 {
         let position = (text_x + cursor.1, inner.y + cursor.0 - scroll);
-        let under = agent.input.chars().nth(agent.input_cursor);
+        let under = agent.input.chars().nth(agent.input.cursor());
         paint_block_cursor(frame, text_area, position, under);
         // The hardware cursor stays at the caret so OS IME candidate windows
         // anchor to the typed text even when the terminal hides it.
@@ -2540,6 +2547,34 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
             action,
             modal: false,
         });
+    }
+}
+
+/// Paints the composer selection before the block caret, so the caret remains
+/// visible at the focused end.
+fn paint_composer_selection(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    layout: &crate::composer::Layout,
+    selection: std::ops::Range<usize>,
+    scroll: u16,
+) {
+    let style = Style::default()
+        .fg(theme::FG)
+        .bg(theme::EDITOR_SELECTION_BG);
+    for &(row, column, cells) in layout.cells.get(selection).unwrap_or_default() {
+        if cells == 0 || row < scroll {
+            continue;
+        }
+        let y = area.y + row - scroll;
+        if y >= area.bottom() {
+            continue;
+        }
+        let start = area.x + column;
+        let end = (start + cells).min(area.right());
+        for x in start..end {
+            frame.buffer_mut()[(x, y)].set_style(style);
+        }
     }
 }
 
@@ -2964,7 +2999,8 @@ mod tests {
             .unwrap();
         app.handle_action(crate::keymap::Action::AiPaste(path.display().to_string()))
             .unwrap();
-        app.agent_mut().input = format!("abcdefgh{}", app.agent().input);
+        let text = format!("abcdefgh{}", app.agent().input.text());
+        app.agent_mut().input.set_text(text);
         let area = Rect::new(10, 5, 12, 3);
 
         let hitboxes = attachment_hitboxes(&app, area, 0);
@@ -3642,8 +3678,8 @@ mod tests {
             app.ai_input_focused = true;
             app.agents[0].status = AiStatus::Waiting;
             let draft = "中文导航 first line\nsecond line with a long wrapped follow-up";
-            app.agents[0].input = draft.into();
-            app.agents[0].input_cursor = draft.chars().count();
+            app.agents[0].input.set_text(draft.to_string());
+            app.agents[0].input.set_cursor(draft.chars().count());
             let mut terminal = Terminal::new(TestBackend::new(width, 22)).unwrap();
             terminal
                 .draw(|frame| {
@@ -3846,8 +3882,8 @@ mod tests {
         ];
         for (draft, caret, expected) in cases {
             app.ai_input_focused = true;
-            app.agent_mut().input = draft.to_string();
-            app.agent_mut().input_cursor = caret;
+            app.agent_mut().input.set_text(draft.to_string());
+            app.agent_mut().input.set_cursor(caret);
             let cells = cursor_cells(&mut terminal, &mut app);
             let glyphs: Vec<&str> = cells.iter().map(|(_, glyph)| glyph.as_str()).collect();
             assert_eq!(glyphs, expected, "block cursor for {draft:?} at {caret}");
@@ -3866,6 +3902,37 @@ mod tests {
         assert!(
             cells.is_empty(),
             "an unfocused composer shows no caret: {cells:?}"
+        );
+    }
+
+    #[test]
+    fn composer_selection_paints_the_editor_selection_fill() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("abcdefgh".to_string());
+        app.agent_mut().input.set_cursor(0);
+        for _ in 0..4 {
+            app.agent_mut().input.move_right(true);
+        }
+        assert_eq!(app.agent().input.selected_text().as_deref(), Some("abcd"));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let selected = (0..20)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].bg == crate::theme::EDITOR_SELECTION_BG)
+            .count();
+        assert!(
+            selected >= 4,
+            "the composer selection is visible: {selected} cells"
         );
     }
 

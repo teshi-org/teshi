@@ -156,10 +156,10 @@ cargo build -p teshi-cli --locked
 cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml --bin teshi-image-feature-runner --locked
 $env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path
 $runner = (Resolve-Path crates/teshi-tui-runner/target/debug/teshi-image-feature-runner.exe).Path
-& $env:TESHI_SELF_TEST_BIN check --feature features/en-US/tui_image_viewer.feature --json
-& $env:TESHI_SELF_TEST_BIN check --feature features/zh-CN/流畅截图查看.feature --json
-& $env:TESHI_SELF_TEST_BIN run features/en-US/tui_image_viewer.feature --runner-cmd $runner --runner-cwd (Get-Location).Path
-& $env:TESHI_SELF_TEST_BIN run features/zh-CN/流畅截图查看.feature --runner-cmd $runner --runner-cwd (Get-Location).Path
+& $env:TESHI_SELF_TEST_BIN check --feature features/en-US/common/screenshot/tui_image_viewer.feature --json
+& $env:TESHI_SELF_TEST_BIN check --feature features/zh-CN/通用/截图/流畅截图查看.feature --json
+& $env:TESHI_SELF_TEST_BIN run features/en-US/common/screenshot/tui_image_viewer.feature --runner-cmd $runner --runner-cwd (Get-Location).Path
+& $env:TESHI_SELF_TEST_BIN run features/zh-CN/通用/截图/流畅截图查看.feature --runner-cmd $runner --runner-cwd (Get-Location).Path
 ```
 
 These PTY assertions prove controls, cancellation, source-region metadata and
