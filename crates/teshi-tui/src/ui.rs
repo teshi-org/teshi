@@ -1708,9 +1708,23 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let rows = app.feature_browser_rows();
     if rows.is_empty() {
+        // Search/filter empty-states only apply when the catalog actually has
+        // files; a truly empty project must keep "(no features)" even after the
+        // runner types `/.feature` to force an external refresh.
+        let has_any_files = app
+            .lazy_features
+            .as_ref()
+            .map(|catalog| !catalog.paths.is_empty())
+            .unwrap_or_else(|| !app.project.features.is_empty())
+            || !app.git_status.deleted.is_empty();
         let searching = !app.feature_browser.query.text().is_empty();
         let text = if app.features_loading() {
             "Scanning Feature files..."
+        } else if !has_any_files {
+            app.lazy_features
+                .as_ref()
+                .and_then(|state| state.scan_error.as_deref())
+                .unwrap_or("(no features)")
         } else if filter_active && !app.feature_tags.index.is_complete() {
             "Indexing tags..."
         } else if filter_active && searching {

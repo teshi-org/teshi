@@ -432,22 +432,42 @@ impl App {
             .file_matches(path, &self.feature_tags.selected)
     }
 
-    /// Scenario indices (into `all_scenarios()`) that satisfy the tag filter.
+    /// Scenario indices that Scenario-pane navigation may land on.
+    ///
+    /// For a deleted Feature those are HEAD scenarios. For a live Feature the
+    /// tag filter restricts current AST indices; when the filter is off,
+    /// HEAD-deleted scenarios follow as trailing indices so MoveUp/MoveDown
+    /// still reaches them. An active filter hides deleted scenarios so Steps
+    /// stay aligned with matching tags.
     pub(crate) fn explore_visible_scenario_indices(&self) -> Vec<usize> {
+        if let Some(deleted_idx) = self.explore_selected_deleted_feature {
+            let count = self
+                .git_status
+                .deleted
+                .get(deleted_idx)
+                .map(|view| view.deleted_scenarios().count())
+                .unwrap_or(0);
+            return (0..count).collect();
+        }
         let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
             return Vec::new();
         };
-        let count = feature.scenario_count();
-        if !self.filter_active() {
-            return (0..count).collect();
+        let current_count = feature.scenario_count();
+        if self.filter_active() {
+            let tags = effective_scenario_tags(feature);
+            return (0..current_count)
+                .filter(|&index| {
+                    tags.get(index)
+                        .is_some_and(|tags| tags_have_all(tags, &self.feature_tags.selected))
+                })
+                .collect();
         }
-        let tags = effective_scenario_tags(feature);
-        (0..count)
-            .filter(|&index| {
-                tags.get(index)
-                    .is_some_and(|tags| tags_have_all(tags, &self.feature_tags.selected))
-            })
-            .collect()
+        let deleted_count = self
+            .git_status
+            .current_at(self.explore_selected_feature)
+            .map(|view| view.deleted_scenarios().count())
+            .unwrap_or(0);
+        (0..current_count + deleted_count).collect()
     }
 
     /// Keyboard handling for the tag strip, before the shared keymap.
