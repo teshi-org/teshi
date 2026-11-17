@@ -316,6 +316,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
     app.clickable_regions.clear();
+    app.feature_tags.begin_frame();
     app.agent_mut().acp_controls_ui.clear_regions();
     app.chat_history_rect = None;
 
@@ -1456,21 +1457,197 @@ fn input_with_cursor(text: &str, cursor: usize, width: u16) -> String {
     truncate_string_to_cols(&display, width)
 }
 
+/// Keeps both ends of a tag that cannot fit one line, with an ellipsis between.
+fn truncate_middle(text: &str, max_cols: usize) -> String {
+    let total: usize = text.chars().map(|ch| ch.width().unwrap_or(0)).sum();
+    if total <= max_cols {
+        return text.to_string();
+    }
+    if max_cols < 2 {
+        return "…".to_string();
+    }
+    let head_budget = (max_cols - 1) / 2;
+    let tail_budget = max_cols - 1 - head_budget;
+    let mut head = String::new();
+    let mut head_w = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if head_w + w > head_budget {
+            break;
+        }
+        head.push(ch);
+        head_w += w;
+    }
+    let mut tail = String::new();
+    let mut tail_w = 0;
+    for ch in text.chars().rev() {
+        let w = ch.width().unwrap_or(0);
+        if tail_w + w > tail_budget {
+            break;
+        }
+        tail.insert(0, ch);
+        tail_w += w;
+    }
+    format!("{head}…{tail}")
+}
+
+/// Truncates a styled title from the right, keeping per-tag colors intact.
+fn truncate_spans(spans: Vec<Span<'static>>, max_cols: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut remaining = max_cols;
+    for span in spans {
+        let width = UnicodeWidthStr::width(span.content.as_ref());
+        if width <= remaining {
+            remaining -= width;
+            out.push(span);
+        } else {
+            let text = truncate_string_to_cols(&span.content, remaining as u16);
+            if !text.is_empty() {
+                out.push(Span::styled(text, span.style));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Flow-wraps the tag pool into at most two rows inside the Features pane.
+fn render_explore_tags(frame: &mut Frame<'_>, app: &mut App, area: Rect, tags: &[String]) {
+    // One column at the right is reserved for the scroll arrows.
+    let content_width = area.width.saturating_sub(1) as usize;
+    if content_width == 0 || area.height == 0 {
+        return;
+    }
+    let mut lines: Vec<Vec<(usize, usize, String)>> = vec![Vec::new()];
+    let mut line_width = 0usize;
+    for (index, tag) in tags.iter().enumerate() {
+        let label = truncate_middle(tag, content_width);
+        let width = UnicodeWidthStr::width(label.as_str());
+        let gap = usize::from(line_width > 0);
+        if line_width > 0 && line_width + gap + width > content_width {
+            lines.push(Vec::new());
+            line_width = 0;
+        }
+        let col = line_width + usize::from(line_width > 0);
+        // `lines` always starts with one empty row and only grows via push.
+        if let Some(line) = lines.last_mut() {
+            line.push((index, col, label));
+        }
+        line_width = col + width;
+    }
+    let line_count = lines.len();
+    let visible_rows = area.height as usize;
+    let max_scroll = line_count.saturating_sub(visible_rows);
+    app.feature_tags.scroll_line = app.feature_tags.scroll_line.min(max_scroll);
+    let scroll = app.feature_tags.scroll_line;
+
+    let mut slots = Vec::new();
+    for (line, entries) in lines.iter().enumerate() {
+        for (index, col, _) in entries {
+            slots.push(crate::feature_tags::TagSlot {
+                index: *index,
+                line,
+                col: *col,
+            });
+        }
+    }
+    app.feature_tags.slots = slots;
+    app.feature_tags.line_count = line_count;
+    app.feature_tags.visible_rows = visible_rows;
+    app.feature_tags.area = Some(area);
+
+    let hover = app.mouse_position;
+    for (row, line_index) in (scroll..(scroll + visible_rows).min(line_count)).enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut last_col = 0usize;
+        for (index, col, label) in &lines[line_index] {
+            if *col > last_col {
+                spans.push(Span::raw(" ".repeat(*col - last_col)));
+            }
+            let width = UnicodeWidthStr::width(label.as_str()) as u16;
+            let rect = Rect::new(area.x + *col as u16, area.y + row as u16, width, 1);
+            app.clickable_regions.push(ClickableRegion::ExploreTag {
+                index: *index,
+                rect,
+            });
+            let selected = app.feature_tags.selected.contains(tags[*index].as_str());
+            let highlighted = (app.feature_tags.focused && app.feature_tags.cursor == *index)
+                || hover.is_some_and(|(x, y)| rect.contains((x, y).into()));
+            let style = if selected {
+                Style::default()
+                    .bg(crate::feature_tags::tag_accent(&tags[*index]))
+                    .fg(theme::CHIP_FG)
+                    .add_modifier(Modifier::BOLD)
+            } else if highlighted {
+                // Hover/focus tint only; never underline (tui-style-guide rule 4).
+                Style::default().fg(theme::FG).bg(theme::HOVER_BG)
+            } else {
+                Style::default().fg(theme::MUTED)
+            };
+            spans.push(Span::styled(label.clone(), style));
+            last_col = *col + width as usize;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(area.x, area.y + row as u16, content_width as u16, 1),
+        );
+    }
+
+    let arrow_x = area.x + content_width as u16;
+    if scroll > 0 {
+        let rect = Rect::new(arrow_x, area.y, 1, 1);
+        app.feature_tags.up_hit = Some(rect);
+        app.clickable_regions
+            .push(ClickableRegion::ExploreTagScroll { down: false, rect });
+        frame.render_widget(Paragraph::new("↑"), rect);
+    }
+    if scroll + visible_rows < line_count {
+        let rect = Rect::new(arrow_x, area.y + visible_rows as u16 - 1, 1, 1);
+        app.feature_tags.down_hit = Some(rect);
+        app.clickable_regions
+            .push(ClickableRegion::ExploreTagScroll { down: true, rect });
+        frame.render_widget(Paragraph::new("↓"), rect);
+    }
+}
+
 fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::feature_browser::Row;
     let focused = app.explore_focus == ColumnFocus::Feature;
     let searching = app.feature_browser.searching;
-    let mut title = if searching || !app.feature_browser.query.text().is_empty() {
-        let mut spans = vec![Span::raw("Features ".to_string())];
-        spans.extend(search_query_spans(&app.feature_browser.query, searching));
-        Line::from(spans)
-    } else if let Some(catalog) = &app.lazy_features {
-        Line::from(format!(
-            "Features ({}) [/] File search",
-            catalog.paths.len()
-        ))
+    let mut title_spans: Vec<Span<'static>> =
+        if searching || !app.feature_browser.query.text().is_empty() {
+            let mut spans = vec![Span::raw("Features ".to_string())];
+            spans.extend(search_query_spans(&app.feature_browser.query, searching));
+            spans
+        } else if let Some(catalog) = &app.lazy_features {
+            vec![Span::raw(format!(
+                "Features ({}) [/] File search",
+                catalog.paths.len()
+            ))]
+        } else {
+            vec![Span::raw("Features [/] Search".to_string())]
+        };
+    let filter_active = app.filter_active();
+    if filter_active {
+        title_spans.push(Span::raw(" · ".to_string()));
+        for (index, tag) in app.feature_tags.selected.iter().enumerate() {
+            if index > 0 {
+                title_spans.push(Span::raw(" ".to_string()));
+            }
+            title_spans.push(Span::styled(
+                tag.clone(),
+                Style::default()
+                    .fg(crate::feature_tags::tag_accent(tag))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    let badge_x = area.right().saturating_sub(2);
+    let mut title = if filter_active {
+        let max_title = badge_x.saturating_sub(area.x + 1).saturating_sub(1) as usize;
+        Line::from(truncate_spans(title_spans, max_title))
     } else {
-        Line::from("Features [/] Search".to_string())
+        Line::from(title_spans)
     };
     if app.features_loading() {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -1488,22 +1665,81 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = explore_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if filter_active && badge_x > area.x {
+        let rect = Rect::new(badge_x, area.y, 1, 1);
+        app.feature_tags.clear_hit = Some(rect);
+        app.clickable_regions
+            .push(ClickableRegion::ExploreTagClear { rect });
+        let mut style = Style::default()
+            .fg(theme::PRIMARY)
+            .add_modifier(Modifier::BOLD);
+        if app
+            .mouse_position
+            .is_some_and(|(x, y)| rect.contains((x, y).into()))
+        {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        frame.render_widget(Paragraph::new(Line::from(Span::styled("✗", style))), rect);
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let tags = app.feature_tags.index.all_tags();
+    let tag_rows = if tags.is_empty() || inner.height < 4 {
+        0
+    } else if inner.height >= 8 {
+        crate::feature_tags::MAX_TAG_ROWS
+    } else {
+        1
+    };
+    let separator = usize::from(tag_rows > 0);
+    let tree_height = (inner.height as usize)
+        .saturating_sub(tag_rows + separator)
+        .max(1);
+    let tree_inner = Rect::new(inner.x, inner.y, inner.width, tree_height as u16);
+    if tag_rows > 0 {
+        let tag_area = Rect::new(
+            inner.x,
+            inner.y + tree_height as u16 + separator as u16,
+            inner.width,
+            tag_rows as u16,
+        );
+        render_explore_tags(frame, app, tag_area, &tags);
+    }
     let rows = app.feature_browser_rows();
     if rows.is_empty() {
-        frame.render_widget(
-            Paragraph::new(if app.features_loading() {
-                "Scanning Feature files..."
-            } else {
-                app.lazy_features
-                    .as_ref()
-                    .and_then(|state| state.scan_error.as_deref())
-                    .unwrap_or("(no features)")
-            }),
-            inner,
-        );
+        // Search/filter empty-states only apply when the catalog actually has
+        // files; a truly empty project must keep "(no features)" even after the
+        // runner types `/.feature` to force an external refresh.
+        let has_any_files = app
+            .lazy_features
+            .as_ref()
+            .map(|catalog| !catalog.paths.is_empty())
+            .unwrap_or_else(|| !app.project.features.is_empty())
+            || !app.git_status.deleted.is_empty();
+        let searching = !app.feature_browser.query.text().is_empty();
+        let text = if app.features_loading() {
+            "Scanning Feature files..."
+        } else if !has_any_files {
+            app.lazy_features
+                .as_ref()
+                .and_then(|state| state.scan_error.as_deref())
+                .unwrap_or("(no features)")
+        } else if filter_active && !app.feature_tags.index.is_complete() {
+            "Indexing tags..."
+        } else if filter_active && searching {
+            "No files match both tags and search"
+        } else if filter_active {
+            "No files match the selected tags"
+        } else if searching {
+            "No files match the search"
+        } else {
+            app.lazy_features
+                .as_ref()
+                .and_then(|state| state.scan_error.as_deref())
+                .unwrap_or("(no features)")
+        };
+        frame.render_widget(Paragraph::new(text), tree_inner);
         return;
     }
     let selected = app.explore_selected_feature_row();
@@ -1511,7 +1747,7 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         frame,
         app,
         ColumnFocus::Feature,
-        inner,
+        tree_inner,
         rows.len(),
         app.feature_browser_width(),
         selected,
@@ -1686,26 +1922,33 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let normal = Style::default();
     let mut lines: Vec<Line> = Vec::new();
 
+    let visible = app.explore_visible_scenario_indices();
     let scenarios = app
         .project
         .features
         .get(app.explore_selected_feature)
         .map(|f| f.all_scenarios());
-    let deleted_scenarios: Vec<_> = app
-        .git_status
-        .current_at(app.explore_selected_feature)
-        .map(|view| view.deleted_scenarios().cloned().collect())
-        .unwrap_or_default();
+    let deleted_scenarios: Vec<_> = if app.filter_active() {
+        Vec::new()
+    } else {
+        app.git_status
+            .current_at(app.explore_selected_feature)
+            .map(|view| view.deleted_scenarios().cloned().collect())
+            .unwrap_or_default()
+    };
 
-    if scenarios.as_ref().is_none_or(|s| s.is_empty()) && deleted_scenarios.is_empty() {
+    if visible.is_empty() && deleted_scenarios.is_empty() {
         lines.push(Line::styled(
             " (no scenarios)",
             Style::default().fg(theme::MUTED),
         ));
     }
-    let current_scenario_count = scenarios.as_ref().map_or(0, Vec::len);
-    if let Some(scenarios) = scenarios {
-        for (i, scenario) in scenarios.iter().enumerate() {
+    let current_scenario_count = visible.len();
+    if let Some(scenarios) = scenarios.as_ref() {
+        for &i in &visible {
+            let Some(scenario) = scenarios.get(i) else {
+                continue;
+            };
             let status = app
                 .explore_case_status
                 .get(&(app.explore_selected_feature, i))
@@ -1786,26 +2029,37 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.push(line);
     }
 
-    let content_area = render_explore_lines(frame, app, ColumnFocus::Scenario, inner, lines);
+    let selected_position = visible
+        .iter()
+        .position(|&index| index == app.explore_selected_scenario)
+        .unwrap_or(0);
+    let content_area = render_explore_lines_selected(
+        frame,
+        app,
+        ColumnFocus::Scenario,
+        inner,
+        lines,
+        Some(selected_position),
+    );
 
     // Register clickable regions for each scenario row
-    if let Some(scenarios) = app
+    if app
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| f.all_scenarios())
+        .is_some()
     {
-        for (i, _scenario) in scenarios.iter().enumerate() {
+        for (row, &i) in visible.iter().enumerate() {
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx: i,
-                    row_y: content_area.y + i as u16,
+                    row_y: content_area.y + row as u16,
                     col_x: content_area.x,
                     col_right: content_area.right(),
                 });
         }
         for (deleted_idx, _deleted) in deleted_scenarios.iter().enumerate() {
-            let scenario_idx = scenarios.len() + deleted_idx;
+            let scenario_idx = current_scenario_count + deleted_idx;
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx,
@@ -1837,17 +2091,15 @@ fn explore_scenario_count(app: &App) -> usize {
             .map(|view| view.deleted_scenarios().count())
             .unwrap_or(0);
     }
-    let current_count = app
-        .project
-        .features
-        .get(app.explore_selected_feature)
-        .map(|f| f.scenario_count())
-        .unwrap_or(0);
-    let deleted_count = app
-        .git_status
-        .current_at(app.explore_selected_feature)
-        .map(|view| view.deleted_scenarios().count())
-        .unwrap_or(0);
+    let current_count = app.explore_visible_scenario_indices().len();
+    let deleted_count = if app.filter_active() {
+        0
+    } else {
+        app.git_status
+            .current_at(app.explore_selected_feature)
+            .map(|view| view.deleted_scenarios().count())
+            .unwrap_or(0)
+    };
     current_count + deleted_count
 }
 

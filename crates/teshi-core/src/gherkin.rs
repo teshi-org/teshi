@@ -250,6 +250,9 @@ fn parse_feature_with_lang(
                     break;
                 }
 
+                // Remember the tag start so a sibling Feature-level block can
+                // reclaim tags that do not belong to this Rule.
+                let tag_start = idx;
                 let rtags = collect_tags(&lines, &mut idx);
                 if idx >= lines.len() {
                     break;
@@ -257,9 +260,11 @@ fn parse_feature_with_lang(
 
                 let rtrimmed = lines[idx].trim();
 
-                // Only consume scenarios indented deeper than the Rule header
+                // Only consume scenarios indented deeper than the Rule header.
+                // Revert tag consumption when the next block is a sibling.
                 let line_indent = lines[idx].len() - lines[idx].trim().len();
                 if line_indent <= rule_indent {
+                    idx = tag_start;
                     break;
                 }
 
@@ -995,6 +1000,25 @@ Feature: With Rule
         );
         assert_eq!(f.scenario_at(2).map(|s| s.name.as_str()), Some("No rule"));
         assert!(f.scenario_at(3).is_none());
+    }
+
+    #[test]
+    fn rule_exit_preserves_tags_for_sibling_scenario() {
+        let content = "\
+Feature: With Rule
+  Rule: Login rules
+    Scenario: Nested
+      Given nested
+
+  @sibling
+  Scenario: After rule
+    Given standalone
+";
+        let f = parse_feature(content, PathBuf::from("rule-sibling.feature"));
+        assert_eq!(f.rules[0].scenarios.len(), 1);
+        assert_eq!(f.scenarios.len(), 1);
+        assert_eq!(f.scenarios[0].name, "After rule");
+        assert_eq!(f.scenarios[0].tags, vec!["@sibling"]);
     }
 
     #[test]
