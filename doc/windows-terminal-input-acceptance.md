@@ -21,6 +21,13 @@ reader owns a fresh handle so cancellation cannot strand subsequent consumers
 of standard input. UTF-16 surrogate pairs are retained across console read
 boundaries and across key records.
 
+Pointer reporting (`?1000h ?1003h ?1015h ?1006h`) is requested only after the VT
+input source starts. Until the console reads input as VT it owns mouse tracking
+and answers those modes itself, so a terminal behind a ConPTY — a phone's
+touchscreen over SSH, for example — receives only a folded `?1003;1006h` and
+never starts reporting taps. Textual enables VT input before its mouse modes for
+the same reason.
+
 ## Reproduce on Windows
 
 ```powershell
