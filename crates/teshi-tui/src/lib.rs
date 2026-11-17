@@ -73,6 +73,11 @@ use ratatui::backend::CrosstermBackend;
 /// This matches Textual's widely compatible mode sequence. Any-event tracking
 /// already includes button motion, so enabling `?1002h` as well is redundant
 /// and needlessly introduces another tracking-mode transition for multiplexers.
+///
+/// Send this only after the Windows console takes VT input
+/// ([`input::EventSource::new`]); until then conhost owns mouse tracking and
+/// swallows these modes instead of forwarding them, so a terminal behind a
+/// ConPTY (an SSH session, for example) never starts reporting touches.
 struct EnableAppMouseCapture;
 
 impl Command for EnableAppMouseCapture {
@@ -143,10 +148,21 @@ impl TerminalGuard {
         }
         execute!(io::stdout(), Hide)?;
         guard.cursor_hidden = true;
-        execute!(io::stdout(), EnableAppMouseCapture)?;
-        guard.mouse_capture = true;
         execute!(io::stdout(), EnableBracketedPaste)?;
         Ok(guard)
+    }
+
+    /// Ask the terminal to report pointer events (click, drag, wheel, touch).
+    ///
+    /// Call this after [`input::EventSource::new`] so the Windows console
+    /// already reads input as VT. ConPTY otherwise answers the request itself
+    /// and forwards only a folded `?1003;1006h`, which leaves terminals that
+    /// honour the plain modes (a phone's touchscreen over SSH, for instance)
+    /// with no pointer input at all.
+    fn enable_mouse_capture(&mut self) -> Result<()> {
+        execute!(io::stdout(), EnableAppMouseCapture)?;
+        self.mouse_capture = true;
+        Ok(())
     }
 }
 
@@ -325,7 +341,7 @@ pub fn run() -> Result<()> {
         None => {}
     }
 
-    let _guard = TerminalGuard::setup()?;
+    let mut guard = TerminalGuard::setup()?;
     // Query the terminal before anything reads stdin: the graphics probe
     // consumes the terminal's reply, and `EventSource` starts a reader on
     // Windows that would take those bytes instead.
@@ -346,6 +362,9 @@ pub fn run() -> Result<()> {
     app.version = version_display().to_string();
     app.load_inject_prompt_sections();
     let mut event_source = input::EventSource::new()?;
+    // Pointer reporting goes out only once the console reads input as VT;
+    // see `TerminalGuard::enable_mouse_capture`.
+    guard.enable_mouse_capture()?;
     let mut terminal_title = terminal_title::TerminalTitle::new();
     let test_frame_path = std::env::var_os("TESHI_TEST_FRAME_PATH").map(std::path::PathBuf::from);
 
@@ -611,7 +630,7 @@ pub fn run() -> Result<()> {
     // a frozen full-screen UI.
     drop(terminal_title);
     drop(terminal);
-    drop(_guard);
+    drop(guard);
     // Only the Windows reader thread outlives the loop; elsewhere there is
     // nothing to release and `drop` would just trip clippy::drop_non_drop.
     #[cfg(windows)]
