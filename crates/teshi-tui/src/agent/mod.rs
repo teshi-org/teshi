@@ -3203,6 +3203,7 @@ mod pipeline_gate_tests {
             acp_permission_pending: false,
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         assert_eq!(
             Action::from_key_event(
