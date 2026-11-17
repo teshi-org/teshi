@@ -1336,6 +1336,8 @@ pub struct App {
     pub explore_focus: ColumnFocus,
     pub explore_selected_feature: usize,
     pub(crate) feature_browser: crate::feature_browser::FeatureBrowser,
+    /// Tag pool, active filter and the interactive tag strip below the tree.
+    pub(crate) feature_tags: crate::feature_tags::FeatureTagFilter,
     /// Selected HEAD-only deleted Feature row, when the selection is not a
     /// current project Feature.
     pub explore_selected_deleted_feature: Option<usize>,
@@ -1750,6 +1752,20 @@ pub enum ClickableRegion {
         row_y: u16,
         col_x: u16,
         col_right: u16,
+    },
+    /// A tag in the Features pane's filter strip (click toggles it).
+    ExploreTag {
+        index: usize,
+        rect: ratatui::layout::Rect,
+    },
+    /// The `X` in the Features title; clears every selected tag.
+    ExploreTagClear {
+        rect: ratatui::layout::Rect,
+    },
+    /// A `^`/`v` scroll affordance inside the tag strip.
+    ExploreTagScroll {
+        down: bool,
+        rect: ratatui::layout::Rect,
     },
     ExploreHorizontalScrollbar {
         column: ColumnFocus,
@@ -2721,6 +2737,7 @@ impl App {
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             feature_browser: Default::default(),
+            feature_tags: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -2952,6 +2969,7 @@ impl App {
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             feature_browser: Default::default(),
+            feature_tags: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -3157,6 +3175,7 @@ impl App {
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             feature_browser: Default::default(),
+            feature_tags: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -3448,7 +3467,7 @@ impl App {
         }
     }
 
-    fn normalize_explore_selection(&mut self) {
+    pub(crate) fn normalize_explore_selection(&mut self) {
         if let Some(deleted_idx) = self.explore_selected_deleted_feature {
             if deleted_idx >= self.git_status.deleted.len() {
                 self.explore_selected_deleted_feature = None;
@@ -3482,14 +3501,29 @@ impl App {
         if self.explore_selected_feature >= feature_len {
             self.explore_selected_feature = feature_len - 1;
         }
-        let scenario_count = self.explore_selected_scenario_count();
-        if scenario_count == 0 {
-            self.explore_selected_scenario = 0;
-            self.explore_selected_step = 0;
-            return;
-        }
-        if self.explore_selected_scenario >= scenario_count {
-            self.explore_selected_scenario = scenario_count - 1;
+        // Tag filter: visible scenario indices are the source of truth. An
+        // empty match must not leave Steps bound to a filtered-out scenario.
+        if self.filter_active() {
+            let visible = self.explore_visible_scenario_indices();
+            let Some(&first) = visible.first() else {
+                self.explore_selected_scenario = 0;
+                self.explore_selected_step = 0;
+                return;
+            };
+            if !visible.contains(&self.explore_selected_scenario) {
+                self.explore_selected_scenario = first;
+                self.explore_selected_step = 0;
+            }
+        } else {
+            let scenario_count = self.explore_selected_scenario_count();
+            if scenario_count == 0 {
+                self.explore_selected_scenario = 0;
+                self.explore_selected_step = 0;
+                return;
+            }
+            if self.explore_selected_scenario >= scenario_count {
+                self.explore_selected_scenario = scenario_count - 1;
+            }
         }
         if self.explore_selected_scenario_is_deleted() {
             self.explore_selected_step = 0;
@@ -3497,7 +3531,12 @@ impl App {
         }
         let feature = &self.project.features[self.explore_selected_feature];
         let scenarios = feature.all_scenarios();
-        let steps = &scenarios[self.explore_selected_scenario].steps;
+        let Some(scenario) = scenarios.get(self.explore_selected_scenario) else {
+            self.explore_selected_scenario = 0;
+            self.explore_selected_step = 0;
+            return;
+        };
+        let steps = &scenario.steps;
         if steps.is_empty() {
             self.explore_selected_step = 0;
             return;
@@ -6162,6 +6201,7 @@ impl App {
 
     /// Polls the directory catalog and installs only the selected Feature's AST.
     pub(crate) fn poll_lazy_features(&mut self) {
+        self.poll_feature_tags();
         let busy = self.dirty
             || self.buffer_dirty.iter().any(|dirty| *dirty)
             || self.runner_rx.is_some()
@@ -8038,13 +8078,22 @@ impl App {
                 let next = clamp_idx(current as isize + delta, len);
                 if next != current {
                     self.explore_set_feature_row(next);
+                } else if delta > 0 && current == len - 1 {
+                    self.maybe_enter_feature_tags();
                 }
             }
             ColumnFocus::Scenario => {
-                let scenarios = self.explore_selected_scenario_count();
-                let next = clamp_idx(self.explore_selected_scenario as isize + delta, scenarios);
-                if next != self.explore_selected_scenario {
-                    self.explore_set_scenario(next);
+                let visible = self.explore_visible_scenario_indices();
+                if visible.is_empty() {
+                    return;
+                }
+                let position = visible
+                    .iter()
+                    .position(|&index| index == self.explore_selected_scenario)
+                    .unwrap_or(0);
+                let next = clamp_idx(position as isize + delta, visible.len());
+                if visible[next] != self.explore_selected_scenario {
+                    self.explore_set_scenario(visible[next]);
                 }
             }
             ColumnFocus::Step => {
@@ -8065,7 +8114,11 @@ impl App {
                     self.explore_set_feature_row(0);
                 }
             }
-            ColumnFocus::Scenario => self.explore_set_scenario(0),
+            ColumnFocus::Scenario => {
+                if let Some(&first) = self.explore_visible_scenario_indices().first() {
+                    self.explore_set_scenario(first);
+                }
+            }
             ColumnFocus::Step => {
                 self.explore_selected_step = 0;
                 self.persist_explore_memory();
@@ -8083,7 +8136,7 @@ impl App {
                 }
             }
             ColumnFocus::Scenario => {
-                if let Some(last) = self.explore_selected_scenario_count().checked_sub(1) {
+                if let Some(&last) = self.explore_visible_scenario_indices().last() {
                     self.explore_set_scenario(last);
                 }
             }
@@ -12931,6 +12984,18 @@ impl App {
 
         if self.active_tab == MainTab::Explore
             && !self.explore_edit_mode
+            && matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            && self
+                .feature_tags
+                .area
+                .is_some_and(|rect| rect.contains(pos))
+        {
+            self.scroll_feature_tags(kind == MouseEventKind::ScrollDown, 1);
+            self.quit_pending_confirm = false;
+            return Ok(());
+        }
+        if self.active_tab == MainTab::Explore
+            && !self.explore_edit_mode
             && !self.explore_detail_open
             && matches!(
                 kind,
@@ -13398,7 +13463,10 @@ impl App {
                 | ClickableRegion::RequirementFilterOption { rect, .. }
                 | ClickableRegion::TestPointField { rect, .. }
                 | ClickableRegion::TestPointExcerpt { rect, .. }
-                | ClickableRegion::TestPointScenario { rect, .. } => rect.contains(*pos),
+                | ClickableRegion::TestPointScenario { rect, .. }
+                | ClickableRegion::ExploreTag { rect, .. }
+                | ClickableRegion::ExploreTagClear { rect }
+                | ClickableRegion::ExploreTagScroll { rect, .. } => rect.contains(*pos),
                 ClickableRegion::ModelProfileRow { rect, .. }
                 | ClickableRegion::ModelFormField { rect, .. }
                 | ClickableRegion::AgentProfileRow { rect, .. }
@@ -13423,7 +13491,10 @@ impl App {
                 | ClickableRegion::RequirementFilterOption { .. }
                 | ClickableRegion::TestPointField { .. }
                 | ClickableRegion::TestPointExcerpt { .. }
-                | ClickableRegion::TestPointScenario { .. } => {}
+                | ClickableRegion::TestPointScenario { .. }
+                | ClickableRegion::ExploreTag { .. }
+                | ClickableRegion::ExploreTagClear { .. }
+                | ClickableRegion::ExploreTagScroll { .. } => {}
                 ClickableRegion::ModelProfileRow { .. }
                 | ClickableRegion::ModelFormField { .. }
                 | ClickableRegion::AgentProfileRow { .. }
@@ -13554,6 +13625,15 @@ impl App {
         region: &ClickableRegion,
         pos: &ratatui::layout::Position,
     ) -> Result<()> {
+        // Clicking anything outside the tag strip returns focus to the tree.
+        if !matches!(
+            region,
+            ClickableRegion::ExploreTag { .. }
+                | ClickableRegion::ExploreTagClear { .. }
+                | ClickableRegion::ExploreTagScroll { .. }
+        ) {
+            self.feature_tags.focused = false;
+        }
         match region {
             ClickableRegion::ActionButton { action, .. } => {
                 self.handle_action(action.clone())?;
@@ -13671,6 +13751,21 @@ impl App {
             ClickableRegion::ExploreStep { step_idx, .. } => {
                 self.explore_selected_step = *step_idx;
                 self.explore_focus = crate::app::ColumnFocus::Step;
+            }
+            ClickableRegion::ExploreTag { index, .. } => {
+                let tags = self.feature_tags.index.all_tags();
+                let Some(tag) = tags.get(*index).cloned() else {
+                    return Ok(());
+                };
+                self.explore_focus = crate::app::ColumnFocus::Feature;
+                self.feature_tags.focused = true;
+                self.feature_tags.cursor = *index;
+                self.toggle_feature_tag(&tag);
+            }
+            ClickableRegion::ExploreTagClear { .. } => self.clear_feature_tags(),
+            ClickableRegion::ExploreTagScroll { down, .. } => {
+                let page = self.feature_tags.visible_rows.max(1);
+                self.scroll_feature_tags(*down, page);
             }
             ClickableRegion::ExploreHorizontalScrollbar {
                 column,
@@ -23039,6 +23134,7 @@ mod tests {
             explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
             feature_browser: Default::default(),
+            feature_tags: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -23256,6 +23352,7 @@ Feature: B
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             feature_browser: Default::default(),
+            feature_tags: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,

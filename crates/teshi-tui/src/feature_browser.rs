@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ struct SearchFile {
     searchable: String,
     index: usize,
     deleted: bool,
+    absolute: PathBuf,
 }
 
 /// One visible tree row; the trailing `usize` is the row's tree depth.
@@ -118,6 +120,17 @@ impl App {
         let files_key = key.finish();
         self.feature_browser_filter_query().hash(&mut key);
         self.feature_browser.expanded.hash(&mut key);
+        self.feature_tags.selected.hash(&mut key);
+        // Progressive parsing and loaded-AST edits change visibility under a filter.
+        if self.filter_active() {
+            self.feature_tags.index.revision().hash(&mut key);
+            for feature in &self.project.features {
+                feature.file_path.hash(&mut key);
+                for tags in crate::feature_tags::effective_scenario_tags(feature) {
+                    tags.hash(&mut key);
+                }
+            }
+        }
         let key = key.finish();
         if let Some((cached_key, rows)) = self.feature_browser.rows.borrow().as_ref()
             && *cached_key == key
@@ -196,7 +209,7 @@ impl App {
                     .to_string_lossy()
                     .replace('\\', "/");
                 let searchable = path.to_lowercase();
-                files.insert((path, false), (index, searchable));
+                files.insert((path, false), (index, searchable, file_path.clone()));
             }
         } else {
             for (index, feature) in self.project.features.iter().enumerate() {
@@ -208,7 +221,10 @@ impl App {
                     .replace('\\', "/");
                 let searchable =
                     format!("{}\n{}", path.to_lowercase(), feature.name.to_lowercase());
-                files.insert((path, false), (index, searchable));
+                files.insert(
+                    (path, false),
+                    (index, searchable, feature.file_path.clone()),
+                );
             }
         }
         for (index, feature) in self.git_status.deleted.iter().enumerate() {
@@ -223,16 +239,19 @@ impl App {
                 .to_string_lossy()
                 .replace('\\', "/");
             let searchable = path.to_lowercase();
-            files.insert((path, true), (index, searchable));
+            files.insert((path, true), (index, searchable, absolute.clone()));
         }
         files
             .into_iter()
-            .map(|((path, deleted), (index, searchable))| SearchFile {
-                path,
-                searchable,
-                index,
-                deleted,
-            })
+            .map(
+                |((path, deleted), (index, searchable, absolute))| SearchFile {
+                    path,
+                    searchable,
+                    index,
+                    deleted,
+                    absolute,
+                },
+            )
             .collect()
     }
 
@@ -249,8 +268,12 @@ impl App {
             searchable,
             index,
             deleted,
+            absolute,
         } in files
         {
+            if self.filter_active() && !self.feature_path_matches_filter(absolute) {
+                continue;
+            }
             if !query.is_empty() && !searchable.contains(&query) {
                 continue;
             }
@@ -327,6 +350,11 @@ impl App {
     }
 
     pub(crate) fn handle_feature_browser_key(&mut self, event: KeyEvent) -> bool {
+        // While the tag strip owns the cursor, the tree's h/l and Enter keys
+        // belong to the strip instead of directory expansion.
+        if self.feature_tags.focused && !self.feature_browser.searching {
+            return false;
+        }
         if self.active_tab != MainTab::Explore
             || self.explore_edit_mode
             || self.explore_focus != ColumnFocus::Feature
