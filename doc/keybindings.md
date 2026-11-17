@@ -7,7 +7,9 @@ letters mean Shift+letter. `dd`, `gg`, and `Ctrl+W h` are sequential keys.
 
 Normal/Browse mode owns commands. Insert/Input mode owns printable characters,
 including `hjkl`, `q`, `s`, and digits. `Esc` returns to Normal or closes the
-current modal layer. Requirements calls its Normal mode **Browse**.
+current modal layer. With no active selection, `Ctrl+C` matches that Escape
+binding; with a selection it still copies. Requirements calls its Normal mode
+**Browse**.
 
 | Key | Action |
 |-----|--------|
@@ -21,7 +23,7 @@ current modal layer. Requirements calls its Normal mode **Browse**.
 | `Ctrl+B/Ctrl+F` or PageUp/PageDown | Page up/down in Normal mode and choice lists |
 | `s` / `Ctrl+S` | Save the active editable buffer in Normal mode |
 | `m` | Open model settings in Normal mode |
-| `Ctrl+Q` or `:q` | Exit; the `^q 退出` control at the bottom-right of every tab is the clickable equivalent. `:q` is the host-safe route when a parent terminal also binds `Ctrl+Q`. `q` and `Ctrl+C` never exit, and Ctrl+C copies the selection |
+| `Ctrl+Q` or `:q` | Exit; the `^q 退出` control at the bottom-right of every tab is the clickable equivalent. `:q` is the host-safe route when a parent terminal also binds `Ctrl+Q`. `q` never exits. `Ctrl+C` copies an active selection; with nothing selected it matches `Esc` (cancel, close, or blur) so tablets without a reliable Escape key can still dismiss overlays and leave insert modes. Immediate exit remains `Ctrl+Q` / `:q` only |
 
 Pane chords do not steal text input or Requirements visual selections. Existing
 Tab/Shift+Tab and non-text column-navigation keys remain available. In
@@ -265,8 +267,9 @@ confirmed interrupt ends the turn and keeps the ACP process and session for the
 next message. With no run in progress, Esc opens the quit confirmation: Enter or
 `y` exits, `n` or Esc stays. Ctrl+Q exits from any mode, and `:` then `q` reaches
 the same exit without a control chord; Ctrl+C copies the draft selection first,
-then the chat selection, and otherwise keeps its existing behavior. Ctrl+K stays
-chat-history scrolling; delete-to-line-end is intentionally not bound.
+then the chat selection, and with neither selection matches Esc (blur, interrupt
+dismiss, or quit confirmation). Ctrl+K stays chat-history scrolling;
+delete-to-line-end is intentionally not bound.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
 Full-width `／` and `＠` become `/` and `@` at command and mention boundaries;

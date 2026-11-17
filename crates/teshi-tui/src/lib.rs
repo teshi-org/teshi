@@ -54,8 +54,8 @@ use anyhow::Result;
 use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -439,6 +439,25 @@ pub fn run() -> Result<()> {
                         continue;
                     }
                     app.acknowledge_visible_conversation();
+                    // Ctrl+C copies an active selection; otherwise every Esc path
+                    // (panels, searches, overlays, mode ladder) must stay reachable
+                    // on tablets whose Escape key is unreliable.
+                    let key_event = if key_event.code == KeyCode::Char('c')
+                        && key_event.modifiers == KeyModifiers::CONTROL
+                    {
+                        if app.has_copyable_selection() {
+                            app.handle_action(Action::CopySelection)?;
+                            continue;
+                        }
+                        KeyEvent {
+                            code: KeyCode::Esc,
+                            modifiers: KeyModifiers::NONE,
+                            kind: key_event.kind,
+                            state: key_event.state,
+                        }
+                    } else {
+                        key_event
+                    };
                     if app.handle_settings_panel_key(key_event) {
                         continue;
                     }
@@ -519,6 +538,8 @@ pub fn run() -> Result<()> {
                                 crate::project_context::SwitchOverlay::None
                             ),
                             command_line_active: app.command_line.is_some(),
+                            // Selection was already handled above for Ctrl+C.
+                            has_copyable_selection: false,
                         },
                     ) {
                         app.handle_action(action)?;

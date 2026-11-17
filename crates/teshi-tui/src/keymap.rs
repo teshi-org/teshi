@@ -71,6 +71,11 @@ pub struct KeyContext {
     pub project_switch_active: bool,
     /// Whether the `:` command line owns printable input.
     pub command_line_active: bool,
+    /// Whether Ctrl+C should copy instead of acting like Escape.
+    ///
+    /// True when the composer, chat history, or editor has an active selection
+    /// that [`Action::CopySelection`] would own.
+    pub has_copyable_selection: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -547,8 +552,9 @@ impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
         // Ctrl+Q is the only control-chord exit and it wins over every mode so
         // the user can always leave. `:q` is the chord-free route that survives
-        // hosts which swallow Ctrl+Q. Ctrl+C belongs to copying, and a bare `q`
-        // is ordinary input in insert modes.
+        // hosts which swallow Ctrl+Q. A bare `q` is ordinary input in insert
+        // modes. Ctrl+C copies when a selection exists; otherwise it follows
+        // the Escape binding so tablets without a reliable Esc can cancel.
         if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::CONTROL {
             return Some(Self::Quit);
         }
@@ -708,11 +714,22 @@ impl Action {
                 _ => {}
             }
         }
-        // Ctrl+C copies the current selection instead of exiting. With nothing
-        // selected it reports that to the status line rather than closing the
-        // session, so the habitual interrupt cannot lose work.
+        // Ctrl+C copies when a selection exists. Otherwise rewrite it as Esc so
+        // every Esc-aware cancel/close path stays reachable on keyboards that
+        // lack a reliable Escape key. Immediate Quit remains Ctrl+Q / `:q` only.
         if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
-            return Some(Self::CopySelection);
+            if context.has_copyable_selection {
+                return Some(Self::CopySelection);
+            }
+            return Self::from_key_event(
+                KeyEvent {
+                    code: KeyCode::Esc,
+                    modifiers: KeyModifiers::NONE,
+                    kind: event.kind,
+                    state: event.state,
+                },
+                context,
+            );
         }
 
         if context.external_change_prompt_active {
@@ -2322,6 +2339,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         }
     }
 
@@ -2348,15 +2366,79 @@ mod tests {
                 Some(Action::Quit),
                 "a bare q must never exit"
             );
-            assert_eq!(
+            assert_ne!(
                 Action::from_key_event(
                     KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
                     context
                 ),
+                Some(Action::Quit),
+                "Ctrl+C must never Quit immediately"
+            );
+            let with_selection = KeyContext {
+                has_copyable_selection: true,
+                ..context
+            };
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    with_selection
+                ),
                 Some(Action::CopySelection),
-                "Ctrl+C must copy the selection instead of exiting"
+                "Ctrl+C must copy when a selection exists"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_c_without_selection_mirrors_escape() {
+        let cases = [
+            (
+                chat_context(MainTab::Ai, MindMapFocus::Main, true),
+                Action::AiBlurInput,
+            ),
+            (
+                chat_context(MainTab::Ai, MindMapFocus::Main, false),
+                Action::RequestQuit,
+            ),
+            (
+                chat_context(MainTab::Explore, MindMapFocus::Main, false),
+                Action::ClearInputState,
+            ),
+            (requirements_tree_context(), Action::ClearInputState),
+        ];
+        for (context, expected) in cases {
+            let esc =
+                Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context);
+            let ctrl_c = Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                context,
+            );
+            assert_eq!(esc, Some(expected.clone()), "Esc baseline for {expected:?}");
+            assert_eq!(
+                ctrl_c, esc,
+                "Ctrl+C must mirror Esc when nothing is selected"
+            );
+        }
+
+        let mut interrupt = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        interrupt.ai_interrupt_confirm = true;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                interrupt
+            ),
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), interrupt)
+        );
+
+        let mut command = chat_context(MainTab::Explore, MindMapFocus::Main, false);
+        command.command_line_active = true;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                command
+            ),
+            Some(Action::CommandLineCancel)
+        );
     }
 
     #[test]
@@ -2412,6 +2494,7 @@ mod tests {
     fn command_line_owns_keys_while_quit_still_wins() {
         let context = KeyContext {
             command_line_active: true,
+            has_copyable_selection: false,
             ..chat_context(MainTab::Explore, MindMapFocus::Main, false)
         };
         for ch in ['w', 'q', ':', ' '] {
@@ -2573,6 +2656,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -2621,6 +2705,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -2669,6 +2754,7 @@ mod tests {
             acp_permission_pending: true,
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         let keys = [
             (KeyCode::Up, KeyModifiers::NONE, Action::AcpPermissionUp),
@@ -2756,6 +2842,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -2814,6 +2901,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -2872,6 +2960,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -2938,6 +3027,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -2986,6 +3076,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -3034,6 +3125,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -3106,6 +3198,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -3173,6 +3266,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
@@ -3461,6 +3555,7 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
             command_line_active: false,
+            has_copyable_selection: false,
         }
     }
 

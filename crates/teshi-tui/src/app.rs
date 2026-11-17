@@ -12760,6 +12760,22 @@ impl App {
         self.chat_selection_dragging = false;
     }
 
+    /// Whether Ctrl+C should copy rather than act like Escape.
+    ///
+    /// Matches the ownership order in [`Self::copy_selection_to_clipboard`]:
+    /// composer selection, then chat history selection, then editor selection.
+    pub(crate) fn has_copyable_selection(&self) -> bool {
+        let chat_context = self.active_tab == MainTab::Ai
+            || (self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::AiPanel);
+        if chat_context && self.agent().input.has_selection() {
+            return true;
+        }
+        if chat_context && self.chat_selection.is_some() {
+            return true;
+        }
+        self.selection_anchor.is_some() && self.selection_end.is_some()
+    }
+
     fn try_copy_to_clipboard(&mut self, text: &str) -> bool {
         match set_system_clipboard(text) {
             Ok(clipboard) => {
