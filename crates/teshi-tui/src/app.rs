@@ -21474,6 +21474,9 @@ mod tests {
             store.path().into(),
         )
         .unwrap();
+        // `from_project_directory` installs the host UI locale (saved setting or
+        // OS locale), so pin English instead of assuming the host resolves to it.
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
         await_catalog(&mut app, 2);
         await_launch_selection(&mut app);
         assert_eq!(app.project.features.len(), 1);
@@ -24296,6 +24299,9 @@ Feature: B
             store.path().to_path_buf(),
         )
         .unwrap();
+        // `from_project_directory` installs the host UI locale (saved setting or
+        // OS locale), so pin English instead of assuming the host resolves to it.
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
         fs::write(project.path().join("unreadable.feature"), [0xff, 0xfe]).unwrap();
         await_catalog(&mut app, 2);
         load_catalog_file(&mut app, 0);
