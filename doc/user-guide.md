@@ -4,11 +4,23 @@
 
 Run `teshi` in the project directory to recursively load `.feature` files from
 `./features`. When `features` has language directories such as `zh-CN` and
-`en-US`, only the one matching your system UI language is loaded. Without
+`en-US`, only the one matching the TUI UI language is loaded (`/preferences` →
+UI Language, `TESHI_LOCALE`, or the system language when set to System). Changing
+UI Language retargets that directory without reopening the project. The language
+rule applies when a project is opened; switching projects in-session scans the new
+project root recursively. Without
 language directories, all Feature files under `features` are included. A missing
 `features` directory falls back to `.feature` files directly in the project root,
 without scanning subdirectories or creating `features`. If none exist, the project
 opens empty. A missing language match reports an error.
+
+UI Language localizes the tab bar, footers and action bars, Explore/MindMap/
+Requirements pane headings and empty states, the session browser, Test Points
+details, model/auth/agent overlays, project switch overlays, requirement overlay
+forms and dialogs, the chat panel header and composer chrome, the slash-command
+palette, and the Settings overlay. Transient status messages are still being
+migrated and may remain English; Gherkin keywords inside `.feature` files are never
+rewritten.
 
 Use `teshi .` for the same loading rules, or `teshi project/` to open another project.
 Use `teshi -R` or `teshi project/ -R` to recursively scan the entire target directory.
@@ -77,9 +89,26 @@ Slash helpers:
 Conversation titles are generated after a normally finished turn: the panel header, the chat
 sidebar and `/sessions` show the same label. An ACP agent's `session_info_update` title outranks the
 generated one, and a manual `/rename` outranks both. Cancelled or failed turns never rename the
-conversation. Titles follow the language of the user's messages: a Chinese conversation gets a
-Chinese title, and a pure-English title returned for a Chinese conversation is discarded in favour
-of the first-message label.
+conversation. The title follows the language of the conversation's primary topic; Teshi does not
+reject or retranslate a title whose language differs from the messages, and falls back to the
+first-message label only when no title was generated.
+
+Conversations are checkpointed as one JSON file per session:
+
+| Platform | Path |
+|----------|------|
+| Windows | `%APPDATA%\teshi\sessions\` |
+| Linux | `$XDG_CONFIG_HOME/teshi/sessions` (often `~/.config/teshi/sessions`) |
+| macOS | `dirs::config_dir()/teshi/sessions` |
+
+`TESHI_SESSION_DIR` overrides the directory. Each file holds the visible transcript (including
+tool calls), unsent drafts, completed-answer marks, titles, `project_root`, `backend_kind`, and
+`acp_agent_id` when the conversation uses an installed ACP agent. Teshi does not store the ACP
+agent's own session id: resuming an ACP conversation starts a fresh agent session, and its first
+prompt re-seeds the saved transcript as `[Restored conversation history]`. Installed ACP agents and
+their per-agent model, session-option, and approval preferences live in the ACP store
+(`%LOCALAPPDATA%\teshi\acp` on Windows; `TESHI_ACP_STORE_DIR` overrides it), not in the session
+files.
 
 The AI tab is hidden when no LLM credentials are configured. Press `m` to manage shared model profiles, or type `/auth` for a status overview. From the shell, use `teshi auth login` (same store as Desktop Settings).
 

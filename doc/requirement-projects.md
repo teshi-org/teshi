@@ -17,7 +17,7 @@ associations of the original project remain in the shared store.
 
 The TUI opens the Current project window when given a project path. Starting
 `teshi` without a path opens All projects for library browsing while loading
-Feature files from `./features` according to the system UI language. Feature
+Feature files from `./features` according to the TUI UI language. Feature
 discovery does not move the project root into the selected language directory.
 See [CLI startup rules](cli-usage.md#open-files-tui). In the requirement tree, `o` cycles
 Current project, All projects, and No project. `b` toggles the selected saved
