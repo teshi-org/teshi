@@ -333,6 +333,14 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    // Paint the screen surface first, the way iCode's `MainScreen` paints
+    // `$background`: the palette then reads the same in any terminal profile.
+    // Component fills draw on top; a region cleared later repaints it with
+    // `clear_to` because `Clear` alone resets cells to the terminal's defaults.
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::FG).bg(theme::SCREEN_BG)),
+        frame.area(),
+    );
     // Validate the raw editor buffer on every redraw.  The parser-backed
     // project remains permissive; these diagnostics are only an editor aid
     // and never prevent Browse/Insert rendering or input handling.
@@ -664,6 +672,24 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
             paint_hover(frame, Rect::new(area.x, y, area.width, 1));
         }
     }
+}
+
+/// Clears `area` before new content and repaints it with `bg`.
+///
+/// `Clear` resets every cell to the terminal's own defaults, which would cut a
+/// transparent hole through the screen surface. Any cleared region that does not
+/// immediately draw its own fill must be cleared through here instead.
+pub(crate) fn clear_to(frame: &mut Frame<'_>, area: Rect, bg: Color) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::FG).bg(bg)),
+        area,
+    );
+}
+
+/// [`clear_to`] on the screen surface.
+pub(crate) fn clear_to_surface(frame: &mut Frame<'_>, area: Rect) {
+    clear_to(frame, area, theme::SCREEN_BG);
 }
 
 /// Tints a hovered target. Fills are lifted by `theme::hover_fill`, so an
@@ -3083,7 +3109,7 @@ fn render_mindmap_scenario_preview(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    frame.render_widget(Clear, inner);
+    clear_to_surface(frame, inner);
 
     // Paint full-width spaces first to avoid stale pixels from previous frames
     let buf = frame.buffer_mut();
@@ -3233,7 +3259,7 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.screenshot.visible || area.is_empty() {
         return;
     }
-    frame.render_widget(Clear, area);
+    clear_to_surface(frame, area);
     let popup = image_viewer_rect(area);
     let standalone = app.screenshot.origin == crate::image_view::ScreenshotOrigin::Image;
     let noun = if standalone { "image" } else { "capture" };
@@ -3608,7 +3634,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     let editor_block = theme::panel_block(title, !preview);
     let editor_inner = editor_block.inner(area);
     frame.render_widget(editor_block, area);
-    frame.render_widget(Clear, editor_inner);
+    clear_to_surface(frame, editor_inner);
 
     // Keep a small, non-blocking diagnostics pane inside the editor.  The
     // source area retains at least two rows in normal terminal sizes, while
@@ -6170,7 +6196,7 @@ fn render_requirements_editor(
         editor_actions.push((crate::i18n::t("req.point"), Action::ReqNewTestPoint));
     }
     editor_actions.push((crate::i18n::t("req.new"), Action::ReqNewDocument));
-    frame.render_widget(Clear, content_inner);
+    clear_to_surface(frame, content_inner);
 
     if missing {
         frame.render_widget(
@@ -7916,6 +7942,59 @@ mod truncate_tests {
                 .any(|region| matches!(region, ClickableRegion::ProjectControl { .. })),
             "the project label stays clickable when the version yields"
         );
+    }
+
+    #[test]
+    fn screen_surface_covers_every_tab() {
+        // iCode paints `MainScreen` with the theme background; teshi does the
+        // same so no cell keeps the terminal profile's own colors. A cleared
+        // region that forgets `clear_to` shows up here as a `Reset` cell.
+        for tab in [
+            crate::app::MainTab::Explore,
+            crate::app::MainTab::MindMap,
+            crate::app::MainTab::Ai,
+            crate::app::MainTab::Requirements,
+            crate::app::MainTab::TestPoints,
+        ] {
+            let mut app = App::from_args().expect("app init");
+            app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+            app.active_tab = tab;
+            app.status_message = None;
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let width = buffer.area.width as usize;
+            // A default background is the terminal's own; no leading cell may
+            // keep it, or the terminal profile would show through the surface.
+            let terminal_owned: ratatui::style::Color = Default::default();
+            // Ratatui resets the hidden continuation cell of a wide glyph, so
+            // only a leading cell can expose the terminal background.
+            let transparent: Vec<(u16, u16)> = buffer
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| cell.bg == terminal_owned)
+                .filter(|(index, _)| {
+                    *index % width == 0
+                        || unicode_width::UnicodeWidthStr::width(buffer.content[index - 1].symbol())
+                            < 2
+                })
+                .map(|(index, _)| ((index % width) as u16, (index / width) as u16))
+                .collect();
+            assert!(
+                transparent.is_empty(),
+                "{tab:?} leaves {} cells on the terminal background: {:?}",
+                transparent.len(),
+                &transparent[..transparent.len().min(12)]
+            );
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.bg == crate::theme::SCREEN_BG),
+                "{tab:?} paints the screen surface"
+            );
+        }
     }
 
     #[test]

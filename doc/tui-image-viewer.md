@@ -87,8 +87,8 @@ show a cached view. Any new request cancels this prefetch at the next phase
 or tile boundary. Prefetch does not keep decoded sources, so it cannot evict
 the source that zooming the current capture needs.
 
-Only the cells the image covers are encoded; letterbox space stays terminal
-background. Sixel tiles use `icy_sixel`'s Wu quantizer with 256 colors per
+Only the cells the image covers are encoded; letterbox space keeps the overlay
+surface. Sixel tiles use `icy_sixel`'s Wu quantizer with 256 colors per
 tile and no dithering, which keeps UI text sharp. Tile rows are encoded on a
 few scoped threads. The workspace compiles the image, PNG, JPEG, and Sixel
 crates with `opt-level = 3` in the dev profile, because unoptimized decoding

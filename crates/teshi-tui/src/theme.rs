@@ -1,8 +1,11 @@
 //! Shared chrys-derived palette and component styles for the terminal UI.
 //!
 //! Values follow the default `chrys` theme (a Dracula-inspired purple palette).
-//! The terminal background stays visible. Fills are limited to component
-//! surfaces such as selection, chips, footers, overlays, code and diff tints.
+//! Like iCode's `MainScreen { background: $background }`, the UI paints every
+//! screen cell with [`SCREEN_BG`] and [`FG`] before drawing, so the palette reads
+//! the same in any terminal profile instead of inheriting the terminal's own
+//! colours. Component surfaces such as selection, chips, footers, overlays, code
+//! and diff tints layer on top of that screen surface.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -63,6 +66,12 @@ pub(crate) const FG: Color = Color::Rgb(0xEE, 0xEE, 0xEE);
 pub(crate) const MUTED: Color = Color::Rgb(0x94, 0x94, 0x94);
 /// Quiet border color for unfocused panels and table rules.
 pub(crate) const BORDER: Color = Color::Rgb(0x5F, 0x5F, 0x5F);
+/// Solid screen surface behind every component, matching iCode's `background`
+/// (`chrys` uses the same `#1C1C1C` for background, surface and panel).
+///
+/// [`crate::ui::render`] paints it under the whole frame so the content keeps its
+/// contrast whatever the terminal profile's own background is.
+pub(crate) const SCREEN_BG: Color = Color::Rgb(0x1C, 0x1C, 0x1C);
 /// Surface color for code fences and blockquotes.
 pub(crate) const BLOCK_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
 /// Subtle user-message surface, restricted to the chat transcript.
@@ -199,8 +208,8 @@ pub(crate) fn input_style(focused: bool) -> Style {
 /// Recolors a cell under a modal backdrop, like iCode's 40% background veil.
 ///
 /// RGB colors are blended toward the dialog surface. A default (`Reset`)
-/// foreground is treated as [`FG`]; a default background stays the terminal's
-/// own so the backdrop never paints the terminal background. Other colors are
+/// foreground is treated as [`FG`]; a default background stays `Reset` so the
+/// veil never recolors the screen surface painted beneath it. Other colors are
 /// returned unchanged and the caller dims them with a modifier.
 pub(crate) fn backdrop_color(color: Color, foreground: bool) -> Option<Color> {
     /// Share of the original color that survives the veil, in percent.
@@ -265,12 +274,13 @@ pub(crate) fn action_line(text: &'static str) -> Line<'static> {
 /// Background for a cell under the pointer. A cell that already carries a fill
 /// keeps its hue and is lifted instead of replaced, because that fill pairs with
 /// a dedicated foreground (a selected row, a chip) that a flat tint would hide.
+/// The screen surface itself is the rest state, so it takes [`HOVER_BG`] whole.
 pub(crate) fn hover_fill(bg: Color) -> Color {
     /// Headroom that reads as a distinct hover on a dark terminal without
     /// washing the label out against its own foreground.
     const LIFT: u8 = 0x20;
     match bg {
-        Color::Reset => HOVER_BG,
+        Color::Reset | SCREEN_BG => HOVER_BG,
         Color::Rgb(r, g, b) => Color::Rgb(
             r.saturating_add(LIFT),
             g.saturating_add(LIFT),

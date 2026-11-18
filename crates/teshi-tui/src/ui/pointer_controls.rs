@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{AiStatus, App, ChangeKind, ClickableRegion};
 use crate::keymap::Action;
@@ -200,7 +200,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         height,
     );
     app.clickable_regions.clear();
-    frame.render_widget(Clear, panel);
+    super::clear_to(frame, panel, theme::DIALOG_BG);
     let changes = app.has_agent_change_prompt();
     let title = if changes {
         crate::i18n::t("chat.pending.title")
