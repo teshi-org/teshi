@@ -225,4 +225,72 @@ mod tests {
         assert_eq!(EffectiveUiLocale::En.feature_language_tag(), "en-US");
         assert_eq!(EffectiveUiLocale::ZhCn.feature_language_tag(), "zh-CN");
     }
+
+    fn with_locale_envs<T>(pairs: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _guard = crate::app_data::test_env_lock();
+        let previous: Vec<_> = pairs
+            .iter()
+            .map(|(key, value)| {
+                let prior = std::env::var_os(key);
+                match value {
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+                (*key, prior)
+            })
+            .collect();
+        let result = f();
+        for (key, prior) in previous {
+            match prior {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn teshi_locale_env_overrides_saved_preference() {
+        with_locale_envs(&[(TESHI_LOCALE_ENV, Some("zh-CN"))], || {
+            assert_eq!(
+                resolve_effective_ui_locale(UiLocalePreference::En, Some("en-US")),
+                EffectiveUiLocale::ZhCn
+            );
+        });
+        with_locale_envs(&[(TESHI_LOCALE_ENV, Some("en"))], || {
+            assert_eq!(
+                resolve_effective_ui_locale(UiLocalePreference::ZhCn, Some("zh-CN")),
+                EffectiveUiLocale::En
+            );
+        });
+        // Unknown tokens fall through to the saved preference.
+        with_locale_envs(&[(TESHI_LOCALE_ENV, Some("fr-FR"))], || {
+            assert_eq!(
+                resolve_effective_ui_locale(UiLocalePreference::ZhCn, Some("en-US")),
+                EffectiveUiLocale::ZhCn
+            );
+        });
+    }
+
+    #[test]
+    fn feature_language_env_overrides_ui_locale_tag() {
+        with_locale_envs(&[(TESHI_FEATURE_LANGUAGE_ENV, Some("ja-JP"))], || {
+            assert_eq!(
+                resolve_feature_discovery_locale(UiLocalePreference::En, Some("en-US")),
+                "ja-JP"
+            );
+        });
+        with_locale_envs(
+            &[
+                (TESHI_FEATURE_LANGUAGE_ENV, None),
+                (TESHI_LOCALE_ENV, Some("zh-CN")),
+            ],
+            || {
+                assert_eq!(
+                    resolve_feature_discovery_locale(UiLocalePreference::En, Some("en-US")),
+                    "zh-CN"
+                );
+            },
+        );
+    }
 }

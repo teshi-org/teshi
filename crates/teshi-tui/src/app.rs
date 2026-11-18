@@ -2590,6 +2590,9 @@ impl App {
             root_dir: root.to_path_buf(),
             features: Vec::new(),
         };
+        // Install catalogs before construction so the startup status is localized.
+        // Interactive startup still re-applies via `load_app_preferences`.
+        crate::i18n::apply_preference(preference);
         let mut app = Self::from_loaded_directory(
             root,
             &discovery_root,
@@ -2602,8 +2605,6 @@ impl App {
         // `-R` keeps the whole project root; otherwise locale changes may retarget
         // features/<locale>/ without reopening the project.
         app.feature_locale_follows_ui = !recursive;
-        // Keep the preference that drove Feature discovery; catalogs are
-        // installed later by `load_app_preferences` before the first paint.
         app.ui_locale = preference;
         // Deleted Files must still be reported for a recursive project even though
         // only the selected Feature is parsed.
@@ -2732,12 +2733,8 @@ impl App {
             should_quit: false,
             active_tab: MainTab::Explore,
             dirty: false,
-            status: format!(
-                "Opened directory with {} feature file(s)",
-                active_idx
-                    .map_or(0, |_| 1)
-                    .max(if active_idx.is_some() { 1 } else { 0 })
-            ),
+            // Overwritten below once buffer count is known.
+            status: String::new(),
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -2885,7 +2882,10 @@ impl App {
         app.restore_generation_session_from_disk();
         app.mindmap_index.apply_highlight_categories("root");
         let n = app.buffers.len();
-        app.status = format!("Opened directory with {n} feature file(s)");
+        app.status = crate::i18n::fill(
+            crate::i18n::t("status.opened_directory"),
+            &[("count", &crate::i18n::arg(&n))],
+        );
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.show_selection_warning();
@@ -11213,8 +11213,7 @@ impl App {
                 let message = if self.status.starts_with("Feature refresh incomplete;") {
                     self.status.clone()
                 } else {
-                    "Feature refresh requested; active runs and pending edits defer synchronization"
-                        .into()
+                    crate::i18n::t("status.feature_refresh_requested").into()
                 };
                 self.set_status_message(message);
             }
@@ -14361,7 +14360,7 @@ impl App {
             .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
         self.restore_snapshot(snapshot);
         self.mark_current_buffer_dirty();
-        self.status = "Undo".to_string();
+        self.status = crate::i18n::t("status.undo").to_string();
         self.quit_pending_confirm = false;
     }
 
@@ -14374,7 +14373,7 @@ impl App {
             .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
         self.restore_snapshot(snapshot);
         self.mark_current_buffer_dirty();
-        self.status = "Redo".to_string();
+        self.status = crate::i18n::t("status.redo").to_string();
         self.quit_pending_confirm = false;
     }
 
@@ -14839,7 +14838,10 @@ impl App {
         });
         match result {
             Ok(()) => {
-                self.status = crate::i18n::t("settings.status.locale").replace("{value}", label);
+                self.status = crate::i18n::fill(
+                    crate::i18n::t("settings.status.locale"),
+                    &[("value", label)],
+                );
                 self.refresh_feature_directory_for_ui_locale();
             }
             Err(error) => {
@@ -14870,13 +14872,11 @@ impl App {
             Ok(path) => path,
             Err(error) => {
                 self.status = crate::i18n::fill(
-                    crate::i18n::t("status."),
+                    crate::i18n::t("status.detail_with_error"),
                     &[
                         (
-                            "arg0",
-                            &crate::i18n::arg(&crate::i18n::t(
-                                "settings.status.locale_dir_missing",
-                            )),
+                            "detail",
+                            crate::i18n::t("settings.status.locale_dir_missing"),
                         ),
                         ("error", &crate::i18n::arg(&error)),
                     ],
@@ -14948,8 +14948,10 @@ impl App {
         self.capture_index = Default::default();
         self.explore_captures.clear();
         self.normalize_explore_selection();
-        self.status = crate::i18n::t("settings.status.locale_dir_switched")
-            .replace("{path}", &discovery_root.display().to_string());
+        self.status = crate::i18n::fill(
+            crate::i18n::t("settings.status.locale_dir_switched"),
+            &[("path", &discovery_root.display().to_string())],
+        );
     }
 
     /// Loads persisted app Settings once at interactive startup.

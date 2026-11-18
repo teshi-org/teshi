@@ -1093,8 +1093,14 @@ fn en(key: &str) -> Option<&'static str> {
         "status.now_works_in_workspace_created_for_it" => {
             "{arg0} now works in {label}; workspace {arg1} created for it"
         }
-        "status." => "{arg0} — {error}",
+        "status.detail_with_error" => "{detail} — {error}",
         "status.images_attached" => "{count} images attached",
+        "status.opened_directory" => "Opened directory with {count} feature file(s)",
+        "status.undo" => "Undo",
+        "status.redo" => "Redo",
+        "status.feature_refresh_requested" => {
+            "Feature refresh requested; active runs and pending edits defer synchronization"
+        }
         _ => return None,
     })
 }
@@ -2062,8 +2068,14 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "status.now_works_in_workspace_created_for_it" => {
             "{arg0} 现在工作于 {label}；已为其创建工作区 {arg1}"
         }
-        "status." => "{arg0} — {error}",
+        "status.detail_with_error" => "{detail} — {error}",
         "status.images_attached" => "已附加 {count} 张图片",
+        "status.opened_directory" => "已打开目录，共 {count} 个 Feature 文件",
+        "status.undo" => "已撤销",
+        "status.redo" => "已重做",
+        "status.feature_refresh_requested" => {
+            "已请求刷新 Feature；进行中的运行与未保存编辑会推迟同步"
+        }
         _ => return None,
     })
 }
@@ -2078,7 +2090,9 @@ pub fn fill(template: &str, pairs: &[(&str, &str)]) -> String {
     while let Some(start) = rest.find('{') {
         out.push_str(&rest[..start]);
         let Some(offset) = rest[start..].find('}') else {
-            break;
+            // Keep the unmatched brace and the remainder literal.
+            out.push_str(&rest[start..]);
+            return out;
         };
         let end = start + offset;
         let name = &rest[start + 1..end];
@@ -2195,6 +2209,7 @@ mod tests {
         assert_eq!(fill("{a}", &[("a", "{b}"), ("b", "2")]), "{b}");
         assert_eq!(fill("{missing}", &[]), "{missing}");
         assert_eq!(fill("plain", &[("a", "1")]), "plain");
+        assert_eq!(fill("keep {unclosed", &[]), "keep {unclosed");
     }
 
     #[test]
