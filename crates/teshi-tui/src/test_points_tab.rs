@@ -608,10 +608,10 @@ fn document_excerpt(artifacts: &AuthoringArtifacts, link: &RequirementLink) -> (
 /// Full review-state name for detail display.
 pub fn review_state_name(state: ReviewState) -> &'static str {
     match state {
-        ReviewState::Proposed => "Proposed",
-        ReviewState::Approved => "Approved",
-        ReviewState::Rejected => "Rejected",
-        ReviewState::NeedsReview => "Needs review",
+        ReviewState::Proposed => crate::i18n::t("tp.review.proposed"),
+        ReviewState::Approved => crate::i18n::t("tp.review.approved"),
+        ReviewState::Rejected => crate::i18n::t("tp.review.rejected"),
+        ReviewState::NeedsReview => crate::i18n::t("tp.review.needs_review"),
     }
 }
 

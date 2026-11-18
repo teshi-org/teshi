@@ -348,9 +348,9 @@ impl AuthoringUiState {
     pub fn project_scope_label(&self) -> &'static str {
         use teshi_core::authoring::RequirementProjectFilter;
         match self.project_filter {
-            RequirementProjectFilter::All => "All projects",
-            RequirementProjectFilter::Unassigned => "No project",
-            RequirementProjectFilter::Project(_) => "Current project",
+            RequirementProjectFilter::All => crate::i18n::t("req.scope.all"),
+            RequirementProjectFilter::Unassigned => crate::i18n::t("req.scope.none"),
+            RequirementProjectFilter::Project(_) => crate::i18n::t("req.scope.current"),
         }
     }
 
@@ -2805,10 +2805,9 @@ pub fn build_requirement_tree(
             if !unassigned.is_empty() {
                 let child = build_path_tree(&unassigned, "unassigned/", styles, &mut labels);
                 let id = format!("{TREE_ITER_PREFIX}{UNASSIGNED_ITERATION_LABEL}");
-                labels.insert(id.clone(), Line::from(UNASSIGNED_ITERATION_LABEL));
-                items.push(
-                    TreeItem::new(id, UNASSIGNED_ITERATION_LABEL.to_string(), child).unwrap(),
-                );
+                let label = crate::i18n::t("req.iteration.unassigned");
+                labels.insert(id.clone(), Line::from(label));
+                items.push(TreeItem::new(id, label.to_string(), child).unwrap());
             }
             items
         }
@@ -4082,6 +4081,17 @@ mod tests {
             )));
             assert!(!app.authoring_ui.search_active);
         });
+    }
+
+    #[test]
+    fn tree_status_title_follows_the_ui_locale() {
+        let state = AuthoringUiState::empty();
+        crate::i18n::set_effective_locale(teshi_engine::EffectiveUiLocale::ZhCn);
+        let title = state.tree_status_title();
+        assert!(title.contains("全部项目"), "{title}");
+        assert!(title.contains("迭代：全部"), "{title}");
+        crate::i18n::set_effective_locale(teshi_engine::EffectiveUiLocale::En);
+        assert!(state.tree_status_title().contains("All projects"));
     }
 
     #[test]
