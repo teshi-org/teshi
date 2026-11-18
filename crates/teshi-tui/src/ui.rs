@@ -1116,18 +1116,24 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-/// Chat-title column, matching iCode's sidebar: 30% of the row, never under
-/// 42 columns (titles stay readable) and never over 60 (the conversation
-/// keeps the extra width).
-const AI_SIDEBAR_MIN_WIDTH: u16 = 42;
-/// Beyond this width extra columns belong to the conversation, not the list.
-const AI_SIDEBAR_MAX_WIDTH: u16 = 60;
-/// The sidebar never appears when the conversation would fall below this.
+/// Shared left-pane band for Explore / Requirements / Test Points / AI:
+/// 30% of the row, never under 42 columns (titles stay readable) and never
+/// over 60 (the main content keeps the extra width). MindMap keeps its own
+/// 55/45 split because the tree is the primary surface there.
+const LEFT_PANE_MIN_WIDTH: u16 = 42;
+/// Beyond this width extra columns belong to the main content, not the list.
+const LEFT_PANE_MAX_WIDTH: u16 = 60;
+/// The AI sidebar never appears when the conversation would fall below this.
 const AI_CHAT_MIN_WIDTH: u16 = 50;
 
-/// Resolve the sidebar width, or `None` when the chat should own the row.
+/// Resolve the shared left-pane width (30%, clamped to 42..=60).
+pub(super) fn left_pane_width(panel_width: u16) -> u16 {
+    (panel_width * 3 / 10).clamp(LEFT_PANE_MIN_WIDTH, LEFT_PANE_MAX_WIDTH)
+}
+
+/// Resolve the AI sidebar width, or `None` when the chat should own the row.
 pub(super) fn ai_sidebar_width(panel_width: u16) -> Option<u16> {
-    let width = (panel_width * 3 / 10).clamp(AI_SIDEBAR_MIN_WIDTH, AI_SIDEBAR_MAX_WIDTH);
+    let width = left_pane_width(panel_width);
     (panel_width.saturating_sub(width) >= AI_CHAT_MIN_WIDTH).then_some(width)
 }
 
@@ -1191,33 +1197,39 @@ fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-/// Renders the Explore tab: three-column feature/scenario/step browser.
 /// Two columns with supporting details below the main content; tiny terminals
 /// show only the focused pane, preserving all keyboard navigation targets.
+/// Left width matches the AI tab band via [`left_pane_width`].
 fn compact_panes(area: Rect, focus: usize) -> [Rect; 3] {
     if area.width < 70 || area.height < 12 {
         let mut panes = [Rect::default(); 3];
         panes[focus.min(2)] = area;
         return panes;
     }
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
+    let [left, right] = Layout::horizontal([
+        Constraint::Length(left_pane_width(area.width)),
+        Constraint::Min(10),
+    ])
+    .areas(area);
     let [main, detail] =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(right);
     [left, main, detail]
 }
 
-/// Explore keeps the Feature column fixed, gives the Scenario list only the
-/// rows it needs (capped at 40%), and hands the rest to Steps. Tiny terminals
-/// still show only the focused pane.
+/// Explore keeps the Feature column on the shared left-pane band, gives the
+/// Scenario list only the rows it needs (capped at 40%), and hands the rest
+/// to Steps. Tiny terminals still show only the focused pane.
 fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 3] {
     if area.width < 70 || area.height < 12 {
         let mut panes = [Rect::default(); 3];
         panes[focus.min(2)] = area;
         return panes;
     }
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
+    let [left, right] = Layout::horizontal([
+        Constraint::Length(left_pane_width(area.width)),
+        Constraint::Min(10),
+    ])
+    .areas(area);
     let max_scenario = (right.height * 40 / 100).max(3);
     let desired = (scenario_rows.min(u16::MAX as usize) as u16)
         .saturating_add(2)
@@ -9903,16 +9915,35 @@ Feature: Rule only
 }
 
 #[cfg(test)]
-mod ai_sidebar_width_tests {
-    use super::ai_sidebar_width;
+mod left_pane_width_tests {
+    use super::{ai_sidebar_width, explore_panes, left_pane_width};
 
     #[test]
-    fn test_chat_title_column_follows_icode_band() {
-        // 30% of the row, clamped to 42..=60, and hidden when chat would drop below 50.
+    fn test_left_pane_follows_shared_band() {
+        // 30% of the row, clamped to 42..=60.
+        assert_eq!(left_pane_width(91), 42);
+        assert_eq!(left_pane_width(140), 42);
+        assert_eq!(left_pane_width(200), 60);
+        assert_eq!(left_pane_width(240), 60);
+    }
+
+    #[test]
+    fn test_ai_sidebar_hides_when_chat_would_drop_below_min() {
         assert_eq!(ai_sidebar_width(91), None);
         assert_eq!(ai_sidebar_width(92), Some(42));
         assert_eq!(ai_sidebar_width(140), Some(42));
         assert_eq!(ai_sidebar_width(200), Some(60));
         assert_eq!(ai_sidebar_width(240), Some(60));
+    }
+
+    #[test]
+    fn test_explore_left_column_matches_shared_band() {
+        let area = ratatui::layout::Rect::new(0, 0, 140, 30);
+        let [left, _, _] = explore_panes(area, 0, 1);
+        assert_eq!(left.width, left_pane_width(area.width));
+        assert_eq!(
+            left.width,
+            ai_sidebar_width(area.width).expect("AI sidebar fits")
+        );
     }
 }
