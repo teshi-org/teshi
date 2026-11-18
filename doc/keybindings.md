@@ -467,17 +467,19 @@ cancels/closes. Text forms preserve printable `j/k`.
 | ACP registry | List navigation; Enter installs the selected agent |
 | Native Agent Profiles | List navigation; Enter selects; no active add/edit/delete form |
 | ACP settings | List navigation; h/Left/Backspace returns; l/Right/Enter opens/applies; a opens Agent selection; p opens approvals |
-| App Settings | List navigation; Enter/Space toggles; Esc or the bottom-right Close control closes; changes save as you make them |
+| App Settings | List navigation; Enter/Space toggles the prompt switch or cycles UI language; Esc or the bottom-right Close control closes; changes save as you make them |
 | Authentication panel | Esc closes |
 
 Ctrl+comma or `/settings` opens ACP settings. Other active modals keep ownership
 of their input. Terminals that cannot encode Ctrl+comma can use `/settings`.
 Agent mode settings and Teshi approval modes remain separate controls.
-Ctrl+Shift+P or `/preferences` opens Teshi app settings. The first switch
-controls whether AI chats receive Teshi's extra prompt context (project
-context, authoring pipeline, generation status, exploration, and ACP tool
-guidance); it is on by default, persisted in the user settings file, and saves
-as you toggle it.
+Ctrl+Shift+P or `/preferences` opens Teshi app settings. The first row controls
+whether AI chats receive Teshi's extra prompt context (project context, authoring
+pipeline, generation status, exploration, and ACP tool guidance); it is on by
+default. The second row cycles the UI language (System → English → 简体中文).
+Both are persisted in the user settings file and save as you change them. A UI
+language change also retargets `features/<locale>/` in the open session unless
+the project was opened with `-R` or Feature buffers are dirty.
 
 ## AI slash commands
 
@@ -499,7 +501,7 @@ as you toggle it.
 | `/agent` | Session agent backend |
 | `/acp` | Installed ACP agents and registry |
 | `/settings` | ACP model, mode, thinking, and other advertised settings |
-| `/preferences` | Teshi app settings: toggle extra AI system-prompt sections |
+| `/preferences` | Teshi app settings: UI language and extra AI system-prompt sections |
 | `/agent-profile` | Native Agent Profile selection |
 | `/generate` | Start requirements → test points → scenarios generation |
 | `/continue` | Continue generation after the human test-point review gate |

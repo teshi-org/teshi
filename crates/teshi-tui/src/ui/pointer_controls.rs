@@ -16,8 +16,8 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     if area.width < 5 || area.height < 3 {
         return;
     }
-    let block =
-        theme::panel_block(" Chats [Ctrl+g] ", app.ai_sidebar_focused).title_style(theme::muted());
+    let block = theme::panel_block(crate::i18n::t("chat.chats.title"), app.ai_sidebar_focused)
+        .title_style(theme::muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -73,8 +73,8 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
         "",
         &[
-            (" New [a]", Action::AgentNew),
-            (" Close [x]", Action::AgentClose),
+            (crate::i18n::t("chat.new"), Action::AgentNew),
+            (crate::i18n::t("chat.close"), Action::AgentClose),
         ],
         false,
     );
@@ -97,6 +97,7 @@ pub(super) fn render_slash_suggestions(
     let start = selected.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
     for (index, (name, description)) in commands.iter().enumerate().skip(start).take(rows) {
+        let description = crate::i18n::slash_description(name).unwrap_or(description);
         let line = Line::from(format!(" /{name}  {description}"));
         lines.push(if index == selected {
             line.style(theme::selected_row(true))
@@ -119,8 +120,8 @@ pub(super) fn render_slash_suggestions(
         Rect::new(area.x, area.bottom() - 1, area.width, 1),
         "",
         &[
-            (" Select", Action::AiSlashSelect),
-            (" Dismiss", Action::AiSlashDismiss),
+            (crate::i18n::t("action.select"), Action::AiSlashSelect),
+            (crate::i18n::t("action.dismiss"), Action::AiSlashDismiss),
         ],
         false,
     );
@@ -131,15 +132,19 @@ pub(super) fn render_slash_suggestions(
 pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect, compact: bool) {
     let first = if app.ai_input_focused {
         (
-            if compact { " Send" } else { " Send [Enter]" },
+            if compact {
+                crate::i18n::t("chat.send")
+            } else {
+                crate::i18n::t("chat.send.key")
+            },
             Action::AiSendMessage,
         )
     } else {
         (
             if compact {
-                " Focus"
+                crate::i18n::t("chat.focus")
             } else {
-                " Focus [i/Enter]"
+                crate::i18n::t("chat.focus.key")
             },
             Action::AiFocusInput,
         )
@@ -147,14 +152,18 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect,
     let mut controls = vec![
         first,
         (
-            if compact { " Blur" } else { " Blur [Esc]" },
+            if compact {
+                crate::i18n::t("chat.blur")
+            } else {
+                crate::i18n::t("chat.blur.key")
+            },
             Action::AiBlurInput,
         ),
         (
             if compact || app.ai_input_focused {
-                " Model"
+                crate::i18n::t("chat.model_chip")
             } else {
-                " Model [m]"
+                crate::i18n::t("chat.model_chip.key")
             },
             Action::ModelPanelOpen,
         ),
@@ -162,16 +171,20 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect,
     // The toggle only advertises a surface this terminal can actually show.
     if super::ai_sidebar_width(frame.area().width).is_some() {
         controls.push((
-            if compact { " Chats" } else { " Chats [Ctrl+g]" },
+            if compact {
+                crate::i18n::t("chat.chats_chip")
+            } else {
+                crate::i18n::t("chat.chats_chip.key")
+            },
             Action::AiToggleSidebar,
         ));
     }
     let mode = if app.ai_sidebar_focused {
-        "[CHATS] "
+        crate::i18n::t("mode.chats")
     } else if app.ai_input_focused {
-        "[INPUT] "
+        crate::i18n::t("mode.input")
     } else {
-        "[NORMAL] "
+        crate::i18n::t("mode.normal")
     };
     super::render_action_bar(frame, app, area, mode, &controls, false);
     let used = mode.width() as u16
@@ -180,13 +193,13 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect,
             .map(|(label, _)| label.width() as u16)
             .sum::<u16>();
     let hint = if app.ai_input_focused {
-        "Esc then j/k scroll"
+        crate::i18n::t("chat.hint.chats_normal")
     } else if app.ai_sidebar_focused {
-        "j/k chat · Enter open · l back"
+        crate::i18n::t("chat.hint.chats_browse")
     } else if app.ai_sidebar_visible {
-        "h chats · j/k/l/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
+        crate::i18n::t("chat.hint.normal_sidebar")
     } else {
-        "hjkl/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
+        crate::i18n::t("chat.hint.normal")
     };
     if used + 2 < area.width {
         frame.render_widget(
@@ -238,10 +251,19 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
             "",
             &[
-                (" Accept", Action::AgentChangeAccept),
-                (" Reject", Action::AgentChangeReject),
-                (" Diff", Action::AgentChangeDiff),
-                (" Summary", Action::ToggleChangeSummary),
+                (
+                    crate::i18n::t("chat.change.accept"),
+                    Action::AgentChangeAccept,
+                ),
+                (
+                    crate::i18n::t("chat.change.reject"),
+                    Action::AgentChangeReject,
+                ),
+                (crate::i18n::t("chat.change.diff"), Action::AgentChangeDiff),
+                (
+                    crate::i18n::t("chat.change.summary"),
+                    Action::ToggleChangeSummary,
+                ),
             ],
             true,
         );
@@ -259,9 +281,9 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
     frame.render_widget(Clear, panel);
     let changes = app.has_agent_change_prompt();
     let title = if changes {
-        " Pending Agent Change "
+        crate::i18n::t("chat.pending.title")
     } else {
-        " ACP permission requested "
+        crate::i18n::t("chat.permission.title")
     };
     let block = theme::panel_block(title, true);
     let inner = block.inner(panel);
@@ -306,19 +328,35 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
             "",
             &[
                 (
-                    if compact { " Accept" } else { " Accept [y]" },
+                    if compact {
+                        crate::i18n::t("chat.change.accept")
+                    } else {
+                        " Accept [y]"
+                    },
                     Action::AgentChangeAccept,
                 ),
                 (
-                    if compact { " Reject" } else { " Reject [n]" },
+                    if compact {
+                        crate::i18n::t("chat.change.reject")
+                    } else {
+                        " Reject [n]"
+                    },
                     Action::AgentChangeReject,
                 ),
                 (
-                    if compact { " Diff" } else { " Diff [d]" },
+                    if compact {
+                        crate::i18n::t("chat.change.diff")
+                    } else {
+                        " Diff [d]"
+                    },
                     Action::AgentChangeDiff,
                 ),
                 (
-                    if compact { " Summary" } else { " Summary [s]" },
+                    if compact {
+                        crate::i18n::t("chat.change.summary")
+                    } else {
+                        " Summary [s]"
+                    },
                     Action::ToggleChangeSummary,
                 ),
             ],
@@ -358,8 +396,14 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
             "",
             &[
-                (" Allow [Enter]", Action::AcpPermissionConfirm),
-                (" Reject [Esc]", Action::AcpPermissionReject),
+                (
+                    crate::i18n::t("chat.permission.allow"),
+                    Action::AcpPermissionConfirm,
+                ),
+                (
+                    crate::i18n::t("chat.permission.reject"),
+                    Action::AcpPermissionReject,
+                ),
             ],
             true,
         );

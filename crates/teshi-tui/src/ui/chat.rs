@@ -728,9 +728,9 @@ pub(super) fn render_chat_panel(
             app.agent().status,
             AiStatus::Waiting | AiStatus::AwaitingApproval
         ) {
-            "Enter queues another"
+            crate::i18n::t("chat.queue.more")
         } else {
-            "send a message to resume"
+            crate::i18n::t("chat.queue.resume")
         };
         let preview = app
             .agent()
@@ -796,7 +796,7 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
     } as usize;
 
     let mut title = Line::from(Span::styled(
-        " AI Chat ",
+        crate::i18n::t("chat.panel.title"),
         fg(theme::FG).add_modifier(Modifier::BOLD),
     ));
     // The conversation title is the panel's identity, but the session ID must
@@ -819,7 +819,7 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
     if let Some(id) = app.agent().session_id().map(str::to_owned) {
         let used = title.width();
         let id_with_gap = id.width() + " ".width();
-        let prefix = ["· Session: ", "· "]
+        let prefix = [crate::i18n::t("chat.session.prefix"), "· "]
             .into_iter()
             .find(|prefix| used + prefix.width() + id_with_gap <= room);
         if let Some(prefix) = prefix {
@@ -850,10 +850,13 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
     if !app.agent_registry.uses_builtin_fallback()
         && (app.agent().backend_selected || app.agent().backend.is_connected())
     {
-        optional.push(format!("· Agent: {} ", app.active_agent_profile().name));
+        optional.push(crate::i18n::fill(
+            crate::i18n::t("chat.agent.suffix"),
+            &[("name", &app.active_agent_profile().name)],
+        ));
     }
     if placement == ChatPlacement::Tab && app.ai_sidebar_collapsed {
-        optional.push("· chats hidden [Ctrl+g] ".to_string());
+        optional.push(crate::i18n::t("chat.chats_hidden").to_string());
     }
     for segment in optional {
         if title.width() + segment.width() <= room {
@@ -962,20 +965,23 @@ fn render_chat_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let model = app.active_model_label.as_deref().unwrap_or("Select");
+    let model = app
+        .active_model_label
+        .as_deref()
+        .unwrap_or(crate::i18n::t("chat.model.select"));
     let model = activity_summary(model, area.width.saturating_sub(27) as usize);
     let controls = [
         (
             if app.agent().backend_selected || app.agent().backend.is_connected() {
-                " Agent Native ▾ "
+                crate::i18n::t("chat.agent_native")
             } else {
-                " Agent ▾ "
+                crate::i18n::t("chat.agent")
             }
             .to_string(),
             crate::keymap::Action::AiOpenAgentSelector,
         ),
         (
-            format!(" Model {model} ▾ "),
+            crate::i18n::fill(crate::i18n::t("chat.model"), &[("model", &model)]),
             crate::keymap::Action::ModelPanelOpen,
         ),
     ];
@@ -1002,7 +1008,7 @@ fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         && x + 5 <= area.right()
     {
         frame.render_widget(
-            Paragraph::new("Ready").style(muted()),
+            Paragraph::new(crate::i18n::t("chat.ready")).style(muted()),
             Rect::new(x, area.y, 5, 1),
         );
     }
@@ -1189,12 +1195,15 @@ fn place_history_images(
             .place(frame, &image.path, image.size, area, image.row)
         {
             crate::image_view::InlineState::Shown => None,
-            crate::image_view::InlineState::Loading => Some(("Loading image…".into(), muted())),
-            crate::image_view::InlineState::Failed(reason) => {
-                Some((format!("Cannot show image: {reason}"), fg(theme::WARNING)))
+            crate::image_view::InlineState::Loading => {
+                Some((crate::i18n::t("chat.image.loading").into(), muted()))
             }
+            crate::image_view::InlineState::Failed(reason) => Some((
+                crate::i18n::t("chat.image.error").replace("{reason}", &reason.to_string()),
+                fg(theme::WARNING),
+            )),
             crate::image_view::InlineState::Placeholder => {
-                Some(("Scroll to show the image".into(), muted()))
+                Some((crate::i18n::t("chat.image.scroll").into(), muted()))
             }
         };
         if let Some((text, style)) = note {
@@ -1276,8 +1285,8 @@ fn build_chat_projection(
 
     if agent.messages().is_empty() {
         let greeting = match placement {
-            ChatPlacement::Tab => "Welcome to AI Chat! Type a message below and press Enter.",
-            ChatPlacement::Embedded => "Welcome to AI Chat!",
+            ChatPlacement::Tab => crate::i18n::t("chat.greeting"),
+            ChatPlacement::Embedded => crate::i18n::t("chat.greeting.embedded"),
         };
         append_unselectable(
             &mut out,
@@ -1286,9 +1295,9 @@ fn build_chat_projection(
         append_blank(&mut out);
         if !agent.backend.is_connected() {
             let hint = if agent.backend_selected {
-                "Agent preselected; not connected. Focus the input to start, or use /agent."
+                crate::i18n::t("chat.hint.preselected")
             } else {
-                "No agent selected. Use /agent to choose, or focus the input to use Teshi Native."
+                crate::i18n::t("chat.hint.no_agent")
             };
             append_unselectable(
                 &mut out,
@@ -1299,8 +1308,7 @@ fn build_chat_projection(
         if agent.backend_kind() == teshi_agent::backend::AgentBackendKind::Native
             && !crate::llm::is_configured()
         {
-            let note =
-                "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.";
+            let note = crate::i18n::t("chat.hint.auth");
             append_unselectable(
                 &mut out,
                 wrap_line_to_width(Line::styled(note, fg(theme::WARNING)), width),
@@ -1373,7 +1381,7 @@ fn build_chat_projection(
                 .copied()
                 .unwrap_or(agent.activity_details_expanded);
             let summary = if messages[turn.start].source.as_deref() == Some("compacted") {
-                "Activity".into()
+                crate::i18n::t("chat.activity").into()
             } else {
                 crate::chat_state::process_summary(&messages[turn.start + 1..turn.end])
             };
@@ -1661,7 +1669,7 @@ fn build_chat_projection(
             vec![Line::from(vec![
                 Span::styled(QUIET_RAIL, fg(theme::BORDER)),
                 Span::styled(format!("{} ", thinking_pulse_frame()), fg(theme::ACCENT)),
-                Span::styled("Waiting for agent…", muted()),
+                Span::styled(crate::i18n::t("chat.waiting"), muted()),
             ])],
         );
     }
@@ -1720,9 +1728,9 @@ fn rail_body_width(width: usize) -> u16 {
 
 fn role_header(role: AiRole, source: Option<&str>, completed: bool) -> Line<'static> {
     let (label, color) = match role {
-        AiRole::User => ("You", theme::ACCENT),
-        _ if source == Some("agent_progress") => ("Teshi", theme::MUTED),
-        _ => ("Teshi", theme::SUCCESS),
+        AiRole::User => (crate::i18n::t("chat.role.you"), theme::ACCENT),
+        _ if source == Some("agent_progress") => (crate::i18n::t("chat.role.teshi"), theme::MUTED),
+        _ => (crate::i18n::t("chat.role.teshi"), theme::SUCCESS),
     };
     let mut spans = Vec::with_capacity(3);
     if let Some(source) = source.filter(|source| *source != "agent_progress") {
@@ -1907,8 +1915,8 @@ fn activity_summary(text: &str, width: usize) -> String {
 /// The trailing state tells the user how to resume a paused queue, so it must
 /// survive narrow chat panels; the preview is the least useful part.
 fn queue_summary(count: usize, preview: &str, state: &str, width: usize) -> String {
-    let prefix = format!("Queued {count}: ");
-    let tail = format!(" · /unqueue to edit · {state}");
+    let prefix = crate::i18n::t("chat.queued").replace("{count}", &count.to_string());
+    let tail = crate::i18n::fill(crate::i18n::t("chat.queued.tail"), &[("state", state)]);
     let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
     let budget = width.saturating_sub(prefix.width() + tail.width());
     // Without room for one preview cell plus its ellipsis, clip the whole line.
@@ -3315,6 +3323,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn chat_panel_title_follows_the_ui_locale() {
+        let mut app = App::from_args().expect("app init");
+        let area = Rect::new(0, 0, 120, 1);
+        crate::i18n::set_effective_locale(teshi_engine::EffectiveUiLocale::ZhCn);
+        let title: String = chat_panel_title(&mut app, area, ChatPlacement::Tab)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(title.contains("AI 对话"), "{title}");
+        crate::i18n::set_effective_locale(teshi_engine::EffectiveUiLocale::En);
+        let english: String = chat_panel_title(&mut app, area, ChatPlacement::Tab)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(english.contains("AI Chat"), "{english}");
+    }
 
     fn activity_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempfile::tempdir().unwrap();

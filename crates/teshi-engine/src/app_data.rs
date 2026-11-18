@@ -13,6 +13,7 @@ use teshi_core::authoring::{RequirementGroupMode, RequirementIterationFilter};
 
 use crate::fs_util::{with_exclusive_lock, write_json_unlocked};
 use crate::project_identity::ProjectIdentity;
+use crate::ui_locale::UiLocalePreference;
 
 const RECENT_MAX: usize = 10;
 const DESKTOP_MIGRATION_MARKER: &str = ".migrated-from-teshi-desktop";
@@ -73,6 +74,12 @@ pub struct AppSettings {
     /// upgrade never silently changes what the agent receives.
     #[serde(default = "default_inject_prompt_sections")]
     pub inject_prompt_sections: bool,
+    /// TUI display language preference (`system` / `en` / `zh-CN`).
+    ///
+    /// Also drives which `features/<locale>/` directory opens when language
+    /// subdirectories exist. Missing keys default to following the OS.
+    #[serde(default)]
+    pub ui_locale: UiLocalePreference,
 }
 
 impl Default for AppSettings {
@@ -83,6 +90,7 @@ impl Default for AppSettings {
             last_project_parent: None,
             requirements_views: HashMap::new(),
             inject_prompt_sections: default_inject_prompt_sections(),
+            ui_locale: UiLocalePreference::default(),
         }
     }
 }
@@ -839,6 +847,7 @@ mod tests {
     #[test]
     fn settings_default_keeps_prompt_sections_enabled() {
         assert!(AppSettings::default().inject_prompt_sections);
+        assert_eq!(AppSettings::default().ui_locale, UiLocalePreference::System);
     }
 
     #[test]
@@ -848,6 +857,28 @@ mod tests {
         let settings: AppSettings =
             serde_json::from_str(r#"{"last_project_parent":"C:/work"}"#).unwrap();
         assert!(settings.inject_prompt_sections);
+        assert_eq!(settings.ui_locale, UiLocalePreference::System);
+    }
+
+    #[test]
+    fn ui_locale_round_trips_through_settings() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let app = tmp.path().join("app");
+            unsafe { std::env::set_var("TESHI_APP_DATA_DIR", &app) };
+            fs::create_dir_all(&app).unwrap();
+
+            let mut settings = load_settings().unwrap();
+            settings.ui_locale = UiLocalePreference::ZhCn;
+            save_settings(&settings).unwrap();
+            assert_eq!(load_settings().unwrap().ui_locale, UiLocalePreference::ZhCn);
+
+            // Unrelated writes preserve the locale preference.
+            let project = tmp.path().join("project");
+            fs::create_dir_all(&project).unwrap();
+            remember_project_parent(&project).unwrap();
+            assert_eq!(load_settings().unwrap().ui_locale, UiLocalePreference::ZhCn);
+        });
     }
 
     #[test]

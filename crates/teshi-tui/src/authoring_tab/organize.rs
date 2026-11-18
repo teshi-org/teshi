@@ -234,9 +234,9 @@ impl AuthoringUiState {
     /// Name of the active tree view: Folders, Path, or Iteration.
     pub fn view_label(&self) -> &'static str {
         match (self.group_mode, self.is_project_scope()) {
-            (RequirementGroupMode::Iteration, _) => "Iteration",
-            (RequirementGroupMode::Path, true) => "Folders",
-            (RequirementGroupMode::Path, false) => "Path",
+            (RequirementGroupMode::Iteration, _) => crate::i18n::t("req.view.iteration"),
+            (RequirementGroupMode::Path, true) => crate::i18n::t("req.view.folders"),
+            (RequirementGroupMode::Path, false) => crate::i18n::t("req.view.path"),
         }
     }
 
@@ -248,23 +248,28 @@ impl AuthoringUiState {
     /// Tree title listing every active view setting in key order: `o`, `g`, `i`, `H`.
     pub fn tree_status_title(&self) -> String {
         let iteration = match &self.iteration_filter {
-            teshi_core::authoring::RequirementIterationFilter::All => "All",
+            teshi_core::authoring::RequirementIterationFilter::All => {
+                crate::i18n::t("req.iteration.all")
+            }
             teshi_core::authoring::RequirementIterationFilter::Unassigned => {
-                teshi_core::authoring::UNASSIGNED_ITERATION_LABEL
+                crate::i18n::t("req.iteration.unassigned")
             }
             teshi_core::authoring::RequirementIterationFilter::Named(name) => name.as_str(),
         };
-        let mut title = format!(
-            "{} · {} · Iteration: {iteration}",
-            self.project_scope_label(),
-            self.view_label()
+        let mut title = crate::i18n::fill(
+            crate::i18n::t("req.tree.status"),
+            &[
+                ("scope", self.project_scope_label()),
+                ("view", self.view_label()),
+                ("iteration", iteration),
+            ],
         );
         // Delivery state is recorded per project, so the filter only exists in project scope.
         if self.is_project_scope() {
             title.push_str(if self.show_completed {
-                " · All states"
+                crate::i18n::t("req.states.all")
             } else {
-                " · Pending only"
+                crate::i18n::t("req.states.pending")
             });
         }
         title

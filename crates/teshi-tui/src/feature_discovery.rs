@@ -29,7 +29,15 @@ pub(crate) fn default_feature_directory(root: &Path, locale: Option<&str>) -> Re
     {
         return Ok(path.clone());
     }
-    anyhow::bail!("No features language directory matches system language '{locale}'")
+    // English UI maps to en-US first; accept a bare `en` directory as fallback.
+    if locale.eq_ignore_ascii_case("en-US")
+        && let Some((_, path)) = languages
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("en"))
+    {
+        return Ok(path.clone());
+    }
+    anyhow::bail!("No features language directory matches UI language '{locale}'")
 }
 
 fn is_language_tag(name: &str) -> bool {
@@ -73,6 +81,17 @@ mod tests {
             root.path().join("features/zh-CN")
         );
         assert!(default_feature_directory(root.path(), Some("fr-FR")).is_err());
+    }
+
+    #[test]
+    fn english_ui_accepts_bare_en_directory() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("features/en")).unwrap();
+        std::fs::create_dir_all(root.path().join("features/zh-CN")).unwrap();
+        assert_eq!(
+            default_feature_directory(root.path(), Some("en-US")).unwrap(),
+            root.path().join("features/en")
+        );
     }
 
     #[test]

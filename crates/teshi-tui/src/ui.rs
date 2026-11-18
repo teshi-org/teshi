@@ -33,23 +33,46 @@ use dialog::{Dialog, DialogButton, FormDialog, FormField, ListDialog};
 use theme::ButtonTone;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
-const MAIN_TABS: &[(MainTab, &str)] = &[
-    (MainTab::Explore, " Explore [1] "),
-    (MainTab::MindMap, " MindMap [2] "),
-    (MainTab::Ai, " AI [3] "),
-    (MainTab::Requirements, " Requirements [4] "),
-    (MainTab::TestPoints, " Test Points [5] "),
-];
-const COMPACT_TABS: &[(MainTab, &str)] = &[
-    (MainTab::Explore, "Explore [1]"),
-    (MainTab::MindMap, "Map [2]"),
-    (MainTab::Ai, "AI [3]"),
-    (MainTab::Requirements, "Req [4]"),
-    (MainTab::TestPoints, "Points [5]"),
-];
-
-fn main_tabs(width: u16) -> &'static [(MainTab, &'static str)] {
-    if width < 85 { COMPACT_TABS } else { MAIN_TABS }
+fn main_tabs(width: u16) -> [(MainTab, &'static str); 5] {
+    let compact = width < 85;
+    [
+        (
+            MainTab::Explore,
+            crate::i18n::t(if compact {
+                "tab.explore.compact"
+            } else {
+                "tab.explore"
+            }),
+        ),
+        (
+            MainTab::MindMap,
+            crate::i18n::t(if compact {
+                "tab.mindmap.compact"
+            } else {
+                "tab.mindmap"
+            }),
+        ),
+        (
+            MainTab::Ai,
+            crate::i18n::t(if compact { "tab.ai.compact" } else { "tab.ai" }),
+        ),
+        (
+            MainTab::Requirements,
+            crate::i18n::t(if compact {
+                "tab.requirements.compact"
+            } else {
+                "tab.requirements"
+            }),
+        ),
+        (
+            MainTab::TestPoints,
+            crate::i18n::t(if compact {
+                "tab.test_points.compact"
+            } else {
+                "tab.test_points"
+            }),
+        ),
+    ]
 }
 const TAB_PADDING_LEFT: &str = " ";
 const TAB_PADDING_RIGHT: &str = " ";
@@ -61,16 +84,17 @@ fn register_tab_regions(app: &mut App, area: Rect) {
     }
 
     // Mirror `ratatui::Tabs` rendering: left padding, visible title, right
-    // padding, then a divider. Keeping these values beside `MAIN_TABS` and
+    // padding, then a divider. Keeping these values beside `main_tabs` and
     // applying them explicitly to the widget keeps rendering and hit-testing
     // on the same coordinate system.
+    let tabs = main_tabs(area.width);
     let mut x = area.left();
     let right = area.right();
     let padding_left_width = TAB_PADDING_LEFT.width() as u16;
     let padding_right_width = TAB_PADDING_RIGHT.width() as u16;
     let divider_width = TAB_DIVIDER.width() as u16;
 
-    for (index, &(tab, title)) in main_tabs(area.width).iter().enumerate() {
+    for (index, &(tab, title)) in tabs.iter().enumerate() {
         x = x.saturating_add(padding_left_width.min(right.saturating_sub(x)));
         if x >= right {
             break;
@@ -90,7 +114,7 @@ fn register_tab_regions(app: &mut App, area: Rect) {
         }
 
         x = x.saturating_add(padding_right_width.min(right.saturating_sub(x)));
-        if x >= right || index == MAIN_TABS.len() - 1 {
+        if x >= right || index == tabs.len() - 1 {
             break;
         }
         x = x.saturating_add(divider_width.min(right.saturating_sub(x)));
@@ -271,10 +295,8 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
     }
 
     let version_text = format!("v{}", app.version);
-    let project_label = format!(
-        " Project: {} ",
-        app.project_switch.active.identity.display_name()
-    );
+    let project_label = crate::i18n::t("footer.project")
+        .replace("{name}", &app.project_switch.active.identity.display_name());
     const META_GAP: u16 = 1;
     let version_width = if app.version.is_empty() {
         0
@@ -364,12 +386,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // discoverable and clickable. Exiting is a deliberate chord now, and the
     // label is the only place it is advertised. Tab footers render into the
     // remaining width and cannot cover the control.
-    const EXIT_LABEL: &str = " ^q 退出";
+    let exit_word = crate::i18n::t("footer.exit");
+    let exit_label_width = (" ^q ".width() + exit_word.width()) as u16;
     let full_footer = footer_row;
     // Very narrow terminals keep their tab footer intact: those rows already
     // shed their key hints, and the chord remains the affordance there.
     let exit_width = if full_footer.width >= 60 {
-        (EXIT_LABEL.width() as u16).min(full_footer.width)
+        exit_label_width.min(full_footer.width)
     } else {
         0
     };
@@ -426,11 +449,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             // their own controls.
             let mode = match app.authoring_ui.editor_mode {
                 _ if app.authoring_ui.focus != RequirementsFocus::Editor => "",
-                RequirementsEditorMode::Preview => "[PREVIEW]",
-                RequirementsEditorMode::Browse => "[BROWSE]",
-                RequirementsEditorMode::Insert => "[INSERT]",
-                RequirementsEditorMode::VisualChar => "[VISUAL]",
-                RequirementsEditorMode::VisualLine => "[V-LINE]",
+                RequirementsEditorMode::Preview => crate::i18n::t("mode.preview"),
+                RequirementsEditorMode::Browse => crate::i18n::t("mode.browse"),
+                RequirementsEditorMode::Insert => crate::i18n::t("mode.insert"),
+                RequirementsEditorMode::VisualChar => crate::i18n::t("mode.visual"),
+                RequirementsEditorMode::VisualLine => crate::i18n::t("mode.visual_line"),
             };
             let controls =
                 requirements_footer_controls(&app.authoring_ui, context_footer.width, footer.width);
@@ -442,10 +465,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                     frame,
                     app,
                     context_footer,
-                    "[INSERT] ",
+                    crate::i18n::t("mode.insert.bar"),
                     &[
-                        ("Save [Ctrl+s] ", Action::Save),
-                        ("Normal [Esc]", Action::TpExitInsert),
+                        (crate::i18n::t("tp.insert.save"), Action::Save),
+                        (crate::i18n::t("tp.insert.normal"), Action::TpExitInsert),
                     ],
                     false,
                 );
@@ -456,9 +479,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                     context_footer,
                     "",
                     &[
-                        (" Save", Action::Save),
-                        (" Approve", Action::TpApprove),
-                        (" Reject", Action::TpReject),
+                        (crate::i18n::t("footer.save"), Action::Save),
+                        (crate::i18n::t("tp.approve"), Action::TpApprove),
+                        (crate::i18n::t("tp.reject"), Action::TpReject),
                     ],
                     false,
                 );
@@ -466,39 +489,62 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 let compact = footer.width < 100;
                 let controls = [
                     (
-                        if compact { " Approve" } else { " Approve [a]" },
+                        if compact {
+                            crate::i18n::t("tp.approve")
+                        } else {
+                            crate::i18n::t("tp.approve.key")
+                        },
                         Action::TpApprove,
                     ),
                     (
-                        if compact { " Reject" } else { " Reject [r]" },
+                        if compact {
+                            crate::i18n::t("tp.reject")
+                        } else {
+                            crate::i18n::t("tp.reject.key")
+                        },
                         Action::TpReject,
                     ),
                     (
-                        if compact { " Batch" } else { " Batch [A]" },
+                        if compact {
+                            crate::i18n::t("tp.batch")
+                        } else {
+                            crate::i18n::t("tp.batch.key")
+                        },
                         Action::TpBatchApprove,
                     ),
                     (
                         if compact {
-                            " Continue"
+                            crate::i18n::t("tp.continue")
                         } else {
-                            " Continue [c]"
+                            crate::i18n::t("tp.continue.key")
                         },
                         Action::TpContinueGeneration,
                     ),
                     (
-                        if compact { " Filter" } else { " Filter [f]" },
+                        if compact {
+                            crate::i18n::t("tp.filter")
+                        } else {
+                            crate::i18n::t("tp.filter.key")
+                        },
                         Action::TpReviewFilter,
                     ),
-                    (if compact { " Save" } else { " Save [s]" }, Action::Save),
+                    (
+                        if compact {
+                            crate::i18n::t("footer.save")
+                        } else {
+                            crate::i18n::t("footer.save_key")
+                        },
+                        Action::Save,
+                    ),
                 ];
                 render_action_bar(
                     frame,
                     app,
                     context_footer,
                     if compact {
-                        "[NORMAL] "
+                        crate::i18n::t("mode.normal")
                     } else {
-                        "[NORMAL] i edit "
+                        crate::i18n::t("mode.normal.edit")
                     },
                     &controls,
                     false,
@@ -517,7 +563,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                     context_footer.height,
                 ),
                 "",
-                &[(" Save", Action::Save), (" Model", Action::ModelPanelOpen)],
+                &[
+                    (crate::i18n::t("footer.save"), Action::Save),
+                    (crate::i18n::t("action.model"), Action::ModelPanelOpen),
+                ],
                 false,
             );
             if context_footer.width > controls_width {
@@ -557,7 +606,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                         .fg(theme::PRIMARY)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("退出", Style::default().fg(theme::FOOTER_DESC)),
+                Span::styled(exit_word, Style::default().fg(theme::FOOTER_DESC)),
             ])),
             exit_area,
         );
@@ -663,11 +712,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 /// narrow terminals so the contextual controls stay reachable.
 fn render_app_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let actions = [
-        (" Sessions", Action::SessionPanelOpen),
-        (" Agents", Action::AgentPanelOpen),
-        (" Models m", Action::ModelPanelOpen),
-        (" Save", Action::Save),
-        (" Settings", Action::SettingsPanelOpen),
+        (crate::i18n::t("footer.sessions"), Action::SessionPanelOpen),
+        (crate::i18n::t("footer.agents"), Action::AgentPanelOpen),
+        (crate::i18n::t("footer.models"), Action::ModelPanelOpen),
+        (crate::i18n::t("footer.save"), Action::Save),
+        (crate::i18n::t("footer.settings"), Action::SettingsPanelOpen),
     ];
     render_action_bar(frame, app, area, "", &actions, false);
 }
@@ -892,18 +941,18 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
     let closing = request.action == Action::AgentClose;
     let (title, verb, consequence, confirm, tone) = if closing {
         (
-            "Confirm close",
-            "Close",
-            "Its history stays available in the session list.",
-            "Close [Enter/y]",
+            crate::i18n::t("dialog.close.title"),
+            crate::i18n::t("dialog.close.verb"),
+            crate::i18n::t("dialog.close.body"),
+            crate::i18n::t("dialog.close.confirm"),
             ButtonTone::Primary,
         )
     } else {
         (
-            "Confirm deletion",
-            "Delete",
-            "This cannot be undone.",
-            "Delete [Enter/y]",
+            crate::i18n::t("dialog.delete.title"),
+            crate::i18n::t("dialog.delete.verb"),
+            crate::i18n::t("dialog.delete.body"),
+            crate::i18n::t("dialog.delete.confirm"),
             ButtonTone::Danger,
         )
     };
@@ -914,7 +963,9 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
     if let Some(error) = request.error {
         body.push(Line::raw(""));
         body.push(Line::styled(
-            format!("Could not {}: {error}", verb.to_lowercase()),
+            crate::i18n::t("dialog.error")
+                .replace("{action}", &verb.to_lowercase())
+                .replace("{error}", &error.to_string()),
             Style::default().fg(theme::ERROR),
         ));
     }
@@ -933,7 +984,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
                     focused: true,
                 },
                 DialogButton {
-                    label: "Cancel [Esc/n]",
+                    label: crate::i18n::t("dialog.cancel"),
                     tone: ButtonTone::Warning,
                     focused: false,
                 },
@@ -965,7 +1016,7 @@ fn delete_dialog<'a>(title: &'a str, body: Vec<Line<'a>>, confirm: &'a str) -> D
                 focused: true,
             },
             DialogButton {
-                label: "Cancel [Esc]",
+                label: crate::i18n::t("dialog.cancel.esc"),
                 tone: ButtonTone::Warning,
                 focused: false,
             },
@@ -1616,16 +1667,20 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let searching = app.feature_browser.searching;
     let mut title_spans: Vec<Span<'static>> =
         if searching || !app.feature_browser.query.text().is_empty() {
-            let mut spans = vec![Span::raw("Features ".to_string())];
+            let mut spans = vec![Span::raw(
+                crate::i18n::t("features.title.prefix").to_string(),
+            )];
             spans.extend(search_query_spans(&app.feature_browser.query, searching));
             spans
         } else if let Some(catalog) = &app.lazy_features {
-            vec![Span::raw(format!(
-                "Features ({}) [/] File search",
-                catalog.paths.len()
-            ))]
+            vec![Span::raw(
+                crate::i18n::t("features.title.count")
+                    .replace("{count}", &catalog.paths.len().to_string()),
+            )]
         } else {
-            vec![Span::raw("Features [/] Search".to_string())]
+            vec![Span::raw(
+                crate::i18n::t("features.title.search").to_string(),
+            )]
         };
     let filter_active = app.filter_active();
     if filter_active {
@@ -1658,8 +1713,9 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             / 100) as usize;
         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         title.spans.push(Span::raw(format!(
-            " {} Loading...",
-            spinner[frame % spinner.len()]
+            " {} {}",
+            spinner[frame % spinner.len()],
+            crate::i18n::t("features.loading")
         )));
     }
     let block = explore_block(title, focused);
@@ -1719,25 +1775,25 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             || !app.git_status.deleted.is_empty();
         let searching = !app.feature_browser.query.text().is_empty();
         let text = if app.features_loading() {
-            "Scanning Feature files..."
+            crate::i18n::t("features.empty.scanning")
         } else if !has_any_files {
             app.lazy_features
                 .as_ref()
                 .and_then(|state| state.scan_error.as_deref())
-                .unwrap_or("(no features)")
+                .unwrap_or(crate::i18n::t("features.empty.none"))
         } else if filter_active && !app.feature_tags.index.is_complete() {
-            "Indexing tags..."
+            crate::i18n::t("features.empty.indexing")
         } else if filter_active && searching {
-            "No files match both tags and search"
+            crate::i18n::t("features.empty.tags_search")
         } else if filter_active {
-            "No files match the selected tags"
+            crate::i18n::t("features.empty.tags")
         } else if searching {
-            "No files match the search"
+            crate::i18n::t("features.empty.search")
         } else {
             app.lazy_features
                 .as_ref()
                 .and_then(|state| state.scan_error.as_deref())
-                .unwrap_or("(no features)")
+                .unwrap_or(crate::i18n::t("features.empty.none"))
         };
         frame.render_widget(Paragraph::new(text), tree_inner);
         return;
@@ -1844,9 +1900,9 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 app.lazy_features
                     .as_ref()
                     .and_then(|state| state.error.as_deref())
-                    .unwrap_or("Select a Feature; content loads on demand"),
+                    .unwrap_or(crate::i18n::t("scenarios.empty.select")),
             )
-            .block(explore_block("Feature content", false)),
+            .block(explore_block(crate::i18n::t("pane.feature_content"), false)),
             area,
         );
         return;
@@ -1874,7 +1930,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let mut lines = Vec::new();
         if deleted_scenarios.is_empty() {
             lines.push(Line::styled(
-                " (deleted Feature; see Git diff)",
+                crate::i18n::t("scenarios.deleted"),
                 Style::default().fg(theme::MUTED),
             ));
         } else {
@@ -2104,7 +2160,7 @@ fn explore_scenario_count(app: &App) -> usize {
 }
 
 fn explore_scenarios_title(app: &App) -> String {
-    format!("Scenarios ({})", explore_scenario_count(app))
+    crate::i18n::t("scenarios.title").replace("{count}", &explore_scenario_count(app).to_string())
 }
 
 /// Gherkin syntax spans for one source line. `keyword_kind` overrides the
@@ -2263,7 +2319,7 @@ fn render_git_steps(
     let mut step_rows = Vec::new();
     if !view.feature_diff_lines.is_empty() {
         lines.push(Line::styled(
-            " Feature",
+            crate::i18n::t("explore.feature"),
             Style::default()
                 .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
@@ -2275,7 +2331,7 @@ fn render_git_steps(
         && background.status != teshi_core::git::DiffStatus::Unchanged
     {
         lines.push(Line::styled(
-            " Background",
+            crate::i18n::t("explore.background"),
             Style::default()
                 .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
@@ -2477,9 +2533,9 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 app.lazy_features
                     .as_ref()
                     .and_then(|state| state.error.as_deref())
-                    .unwrap_or("Select a Feature; content loads on demand"),
+                    .unwrap_or(crate::i18n::t("scenarios.empty.select")),
             )
-            .block(explore_block("Feature content", false)),
+            .block(explore_block(crate::i18n::t("pane.feature_content"), false)),
             area,
         );
         return;
@@ -2599,7 +2655,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     // ── Normal (browse) mode ──────────────────────────────────────────
-    let block = explore_block("Steps", focused);
+    let block = explore_block(crate::i18n::t("steps.pane"), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -2620,7 +2676,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if background_steps.is_empty() && scenario_steps.is_empty() {
         lines.push(Line::styled(
-            " (no steps)",
+            crate::i18n::t("steps.empty"),
             Style::default().fg(theme::MUTED),
         ));
         line_idx += 1;
@@ -2632,7 +2688,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     let lang = GherkinLanguages::global().get(&f.language);
                     format!(" {}", lang.primary_structural(StructuralType::Background))
                 })
-                .unwrap_or_else(|| " Background:".to_string());
+                .unwrap_or_else(|| crate::i18n::t("explore.background_label").to_string());
             lines.push(Line::styled(
                 background_label,
                 Style::default()
@@ -2740,7 +2796,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     line_idx += 1;
                 }
                 lines.push(Line::styled(
-                    " Examples:",
+                    crate::i18n::t("explore.examples"),
                     Style::default()
                         .fg(theme::MUTED)
                         .add_modifier(Modifier::BOLD),
@@ -2863,7 +2919,7 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rec
     }
     let title = app
         .external_change_prompt_title()
-        .unwrap_or("Feature changed on disk");
+        .unwrap_or(crate::i18n::t("external_change.title"));
     let file_name = app
         .external_change_prompt_path()
         .unwrap_or_else(|| "feature".to_string());
@@ -2886,7 +2942,7 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rec
     let [content, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     let lines = vec![
-        Line::raw(format!("Detected external updates for {file_name}.")),
+        Line::raw(crate::i18n::t("external_change.body").replace("{file}", &file_name)),
         Line::raw(""),
     ];
     frame.render_widget(Paragraph::new(Text::from(lines)), content);
@@ -2896,8 +2952,14 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rec
         footer,
         "",
         &[
-            ("Reload [Enter] ", Action::ExternalChangeReload),
-            ("Keep [Esc]", Action::ExternalChangeKeepLocal),
+            (
+                crate::i18n::t("external_change.reload"),
+                Action::ExternalChangeReload,
+            ),
+            (
+                crate::i18n::t("external_change.keep"),
+                Action::ExternalChangeKeepLocal,
+            ),
         ],
         true,
     );
@@ -2921,7 +2983,7 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = theme::popup_block("Change Summary");
+    let block = theme::popup_block(crate::i18n::t("change_summary.title"));
     let [inner, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
     frame.render_widget(block, popup);
@@ -2997,8 +3059,11 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         footer,
         "",
         &[
-            ("Jump [Enter] ", Action::ChangeSummaryJump),
-            ("Close [Esc]", Action::ClearInputState),
+            (
+                crate::i18n::t("change_summary.jump"),
+                Action::ChangeSummaryJump,
+            ),
+            (crate::i18n::t("dialog.close.esc"), Action::ClearInputState),
         ],
         true,
     );
@@ -3020,8 +3085,15 @@ fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
 /// Renders the collapsible tree using `tui-tree-widget`.
 fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
     if !app.mindmap_within_budget() {
-        frame.render_widget(Paragraph::new("This Feature exceeds the interactive MindMap budget. Its scenarios and steps remain available in Explore.")
-            .wrap(ratatui::widgets::Wrap { trim: true }).block(theme::panel_block("MindMap [current Feature]", focused)), area);
+        frame.render_widget(
+            Paragraph::new(crate::i18n::t("mindmap.budget"))
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .block(theme::panel_block(
+                    crate::i18n::t("mindmap.pane.current"),
+                    focused,
+                )),
+            area,
+        );
         return;
     }
     let items = &app.mindmap_index.items;
@@ -3030,15 +3102,15 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
 
     // Build title with indicators when highlights/filter are active
     let mut title_parts: Vec<&str> = vec![if app.lazy_features.is_some() {
-        "MindMap [current Feature]"
+        crate::i18n::t("mindmap.pane.current")
     } else {
-        "MindMap"
+        crate::i18n::t("mindmap.pane")
     }];
     if app.mindmap_index.has_active_filter() {
-        title_parts.push("[filtered]");
+        title_parts.push(crate::i18n::t("mindmap.filtered"));
     }
     if app.mindmap_index.has_active_highlights() {
-        title_parts.push("[highlighted]");
+        title_parts.push(crate::i18n::t("mindmap.highlighted"));
     }
     let title = title_parts.join(" ");
 
@@ -3073,14 +3145,14 @@ fn render_mindmap_scenario_preview(
     }
     let Some(buffer) = app.preview_buffer.as_ref() else {
         // No preview available — render an empty placeholder panel
-        let title = "Preview";
+        let title = crate::i18n::t("preview.pane");
         let block = theme::panel_block(title, focused);
         frame.render_widget(block, area);
         return;
     };
 
     let title = if app.preview_title.is_empty() {
-        "Preview"
+        crate::i18n::t("preview.pane")
     } else {
         app.preview_title.as_str()
     };
@@ -3548,7 +3620,7 @@ fn render_scenario_dropdown(
                     if area.width < 25 {
                         "Close"
                     } else {
-                        "Close [Esc]"
+                        crate::i18n::t("dialog.close.esc")
                     },
                     Action::ScenarioDropdownClose,
                 ),
@@ -4033,7 +4105,10 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &mut App, editor_area:
         "",
         &[
             ("Confirm [Enter] ", Action::StepKeywordPickerConfirm),
-            ("Cancel [Esc]", Action::StepKeywordPickerCancel),
+            (
+                crate::i18n::t("dialog.cancel.esc"),
+                Action::StepKeywordPickerCancel,
+            ),
         ],
         true,
     );
@@ -4219,33 +4294,43 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect, compa
         .map(|f| f.scenario_count())
         .unwrap_or(0);
     let right = if let Some(summary) = &app.explore_run_summary {
-        let mut text = format!(
-            "{}/{} passed, {} failed",
-            summary.passed, summary.total, summary.failed
-        );
-        if summary.blocked > 0 {
-            text.push_str(&format!(", {} blocked", summary.blocked));
-        }
-        text
+        let template = if summary.blocked > 0 {
+            crate::i18n::t("explore.summary.blocked")
+        } else {
+            crate::i18n::t("explore.summary")
+        };
+        template
+            .replace("{passed}", &summary.passed.to_string())
+            .replace("{total}", &summary.total.to_string())
+            .replace("{failed}", &summary.failed.to_string())
+            .replace("{blocked}", &summary.blocked.to_string())
     } else {
-        format!("0/{total} 通过")
+        crate::i18n::t("explore.summary.idle").replace("{total}", &total.to_string())
     };
 
     let controls = [
         (
-            if compact { " Run" } else { " Run [r]" },
+            if compact {
+                crate::i18n::t("explore.run")
+            } else {
+                crate::i18n::t("explore.run.key")
+            },
             Action::RunScenario,
         ),
         (
             if compact {
-                " Detail"
+                crate::i18n::t("explore.detail")
             } else {
-                " Detail [Enter]"
+                crate::i18n::t("explore.detail.key")
             },
             Action::ToggleFailureDetail,
         ),
         (
-            if compact { " Edit" } else { " Edit [e]" },
+            if compact {
+                crate::i18n::t("explore.edit")
+            } else {
+                crate::i18n::t("explore.edit.key")
+            },
             Action::EnterEdit,
         ),
     ];
@@ -4290,26 +4375,26 @@ fn footer_pill(label: &'static str) -> Span<'static> {
 fn footer_hints(app: &App) -> Line<'static> {
     if app.is_editor_active() {
         if app.step_input_active {
-            return Line::raw("[INSERT] Enter commit · Esc normal · Ctrl+s save · Arrows move");
+            return Line::raw(crate::i18n::t("editor.hint.insert"));
         }
         return Line::from(vec![
-            footer_pill("[NORMAL] Edit [i/Enter] "),
+            footer_pill(crate::i18n::t("editor.hint.edit")),
             Span::raw(" "),
-            footer_pill(" Given/Then/And [Ctrl+g/t/a] "),
+            footer_pill(crate::i18n::t("editor.hint.keyword")),
             Span::raw(" "),
-            footer_pill(" Step [o/O] "),
+            footer_pill(crate::i18n::t("editor.hint.step")),
             Span::raw(" "),
-            footer_pill(" Delete [dd] "),
+            footer_pill(crate::i18n::t("editor.hint.delete")),
             Span::raw(" "),
-            footer_pill(" Copy/Paste [yy/p] "),
+            footer_pill(crate::i18n::t("editor.hint.copy_paste")),
             Span::raw(" "),
-            footer_pill(" MoveStep [Ctrl+j/k] "),
+            footer_pill(crate::i18n::t("editor.hint.move_step")),
             Span::raw(" "),
-            footer_pill(" Fold [Space] "),
+            footer_pill(crate::i18n::t("editor.hint.fold")),
             Span::raw(" "),
-            footer_pill(" FoldAll [Ctrl+Space] "),
+            footer_pill(crate::i18n::t("editor.hint.fold_all")),
             Span::raw(" "),
-            footer_pill(" Save [Ctrl+s] "),
+            footer_pill(crate::i18n::t("editor.hint.save")),
         ]);
     }
     match (app.active_tab, app.view_stage) {
@@ -4318,68 +4403,64 @@ fn footer_hints(app: &App) -> Line<'static> {
         {
             // AI chat input focused — show AI-style hints
             Line::from(vec![
-                footer_pill("[INPUT] Send [Enter] "),
+                footer_pill(crate::i18n::t("mindmap.ai.hint.send")),
                 Span::raw(" "),
-                footer_pill(" Back/Browse [Esc] "),
+                footer_pill(crate::i18n::t("mindmap.ai.hint.back")),
                 Span::raw(" "),
-                footer_pill(" Newline [Shift+Enter] "),
+                footer_pill(crate::i18n::t("mindmap.ai.hint.newline")),
             ])
         }
         (MainTab::MindMap, _) if app.mindmap_focus == MindMapFocus::AiPanel => {
             // AI panel focused but input not focused. The return control leads:
             // the combined footer can clip its tail on narrower terminals.
             Line::from(vec![
-                footer_pill("[NORMAL] Return Tree [Esc] "),
+                footer_pill(crate::i18n::t("mindmap.ai.hint.return_tree")),
                 Span::raw(" "),
-                footer_pill(" Input [i/Enter] "),
+                footer_pill(crate::i18n::t("mindmap.ai.hint.input")),
                 Span::raw(" "),
-                footer_pill(" Scroll [hjkl/Arrows] "),
+                footer_pill(crate::i18n::t("mindmap.ai.hint.scroll")),
             ])
         }
         (MainTab::MindMap, _) => {
             // Tree focused
             let mut hints = vec![
-                footer_pill(" Navigate [↑↓] "),
+                footer_pill(crate::i18n::t("footer.mindmap.navigate")),
                 Span::raw(" "),
-                footer_pill(" Toggle [Space] "),
+                footer_pill(crate::i18n::t("footer.mindmap.toggle")),
                 Span::raw(" "),
-                footer_pill(" Expand [→] "),
+                footer_pill(crate::i18n::t("footer.mindmap.expand")),
                 Span::raw(" "),
-                footer_pill(" Collapse [←] "),
+                footer_pill(crate::i18n::t("footer.mindmap.collapse")),
             ];
             if app.mindmap_ai_panel_visible {
                 hints.push(Span::raw(" "));
-                hints.push(footer_pill(" Focus Panel [Enter] "));
+                hints.push(footer_pill(crate::i18n::t("footer.mindmap.focus_panel")));
                 hints.push(Span::raw(" "));
-                hints.push(footer_pill(" Toggle Panel [p] "));
+                hints.push(footer_pill(crate::i18n::t("footer.mindmap.toggle_panel")));
             } else {
                 hints.push(Span::raw(" "));
-                hints.push(footer_pill(" Show Panel [p] "));
+                hints.push(footer_pill(crate::i18n::t("footer.mindmap.show_panel")));
             }
             Line::from(hints)
         }
         (MainTab::Explore, _) => Line::from(vec![
-            footer_pill(" Focus [Tab/←→] "),
+            footer_pill(crate::i18n::t("footer.explore.focus")),
             Span::raw(" "),
-            footer_pill(" Navigate [↑↓] "),
+            footer_pill(crate::i18n::t("footer.explore.navigate")),
             Span::raw(" "),
-            footer_pill(" Edit [e/→] "),
+            footer_pill(crate::i18n::t("footer.explore.edit")),
             Span::raw(" "),
-            footer_pill(" Detail [Enter] "),
+            footer_pill(crate::i18n::t("footer.explore.detail")),
             Span::raw(" "),
-            footer_pill(" Run [r] "),
+            footer_pill(crate::i18n::t("footer.explore.run")),
             Span::raw(" "),
-            footer_pill(" AI [a] "),
+            footer_pill(crate::i18n::t("footer.explore.ai")),
         ]),
-        (MainTab::Ai, _) if app.ai_input_focused => {
-            Line::raw("[INPUT] Enter send · Shift+Enter newline · Esc normal · Ctrl+v paste")
+        (MainTab::Ai, _) if app.ai_input_focused => Line::raw(crate::i18n::t("footer.ai.input")),
+        (MainTab::Ai, _) if app.ai_sidebar_visible => {
+            Line::raw(crate::i18n::t("footer.ai.normal_sidebar"))
         }
-        (MainTab::Ai, _) if app.ai_sidebar_visible => Line::raw(
-            "[NORMAL] i/Enter input · h chats · j/k/l/Arrows scroll · [/] agent · a new · x close",
-        ),
-        (MainTab::Ai, _) => {
-            Line::raw("[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close")
-        }
+        (MainTab::Ai, _) => Line::raw(crate::i18n::t("footer.ai.normal")),
         // These tabs render their contextual controls before `footer_hints`
         // is consulted; keep the arms exhaustive without reviving the old
         // text-only footer helpers.
@@ -4402,7 +4483,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = theme::popup_block(" Auth Management ");
+    let block = theme::popup_block(crate::i18n::t("auth.title"));
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -4412,12 +4493,10 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     match app.status.as_str() {
         s if s.starts_with("Auth: add provider") => {
             lines.push(Line::styled(
-                "Add Provider",
+                crate::i18n::t("auth.add.title"),
                 Style::default().add_modifier(Modifier::BOLD),
             ));
-            lines.push(Line::raw(
-                "Use 'teshi auth login' from the CLI to add a provider API key.",
-            ));
+            lines.push(Line::raw(crate::i18n::t("auth.add.hint")));
         }
         s if s.starts_with("Auth: remove provider") => {
             let provider = s
@@ -4425,26 +4504,24 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .and_then(|r| r.strip_suffix('\''))
                 .unwrap_or("?");
             lines.push(Line::styled(
-                format!("Remove Provider: {}", provider),
+                crate::i18n::t("auth.remove.title").replace("{provider}", provider),
                 Style::default()
                     .fg(theme::WARNING)
                     .add_modifier(Modifier::BOLD),
             ));
-            lines.push(Line::raw(
-                "Use 'teshi auth remove <provider>' from the CLI to remove.",
-            ));
+            lines.push(Line::raw(crate::i18n::t("auth.remove.hint")));
         }
         _ => {
             // Default: show shared model-profile overview
             lines.push(Line::styled(
-                "Model Profiles (shared store)",
+                crate::i18n::t("auth.overview.title"),
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(""));
 
             if app.model_profiles.is_empty() {
-                lines.push(Line::raw("  No model profiles configured."));
-                lines.push(Line::raw("  Use 'teshi auth login' or press m to add one."));
+                lines.push(Line::raw(crate::i18n::t("auth.empty")));
+                lines.push(Line::raw(crate::i18n::t("auth.empty.hint")));
             } else {
                 for profile in &app.model_profiles {
                     let has_key = !profile.api_key.is_empty();
@@ -4466,7 +4543,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!(" key: {}", key_status),
+                            format!("{}{}", crate::i18n::t("auth.key"), key_status),
                             Style::default().fg(key_color),
                         ),
                         Span::raw(format!(
@@ -4480,7 +4557,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             if let Some(ref active) = app.model_active_id {
                 lines.push(Line::raw(""));
                 lines.push(Line::from(vec![
-                    Span::raw("  Active id: "),
+                    Span::raw(crate::i18n::t("auth.active_id")),
                     Span::styled(active.as_str(), Style::default().fg(theme::PRIMARY)),
                 ]));
             }
@@ -4498,7 +4575,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app,
         footer,
         "",
-        &[("Close [Esc]", Action::AuthPanelClose)],
+        &[(crate::i18n::t("dialog.close.esc"), Action::AuthPanelClose)],
         true,
     );
 }
@@ -4517,16 +4594,18 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     match app.model_panel_mode {
         ModelPanelMode::List => render_model_list(frame, app, panel_area),
-        ModelPanelMode::Adding => render_model_form(frame, app, " Add Model Profile ", panel_area),
+        ModelPanelMode::Adding => {
+            render_model_form(frame, app, crate::i18n::t("model.panel.add"), panel_area)
+        }
         ModelPanelMode::Editing => {
-            render_model_form(frame, app, " Edit Model Profile ", panel_area)
+            render_model_form(frame, app, crate::i18n::t("model.panel.edit"), panel_area)
         }
     }
 }
 
 /// Renders the list of model profiles.
 fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let block = theme::popup_block(" Model Profiles ");
+    let block = theme::popup_block(crate::i18n::t("model.panel.title"));
     let [inner, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     frame.render_widget(block, area);
@@ -4539,10 +4618,10 @@ fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     lines.push(Line::raw(""));
 
     if app.model_profiles.is_empty() {
-        lines.push(Line::from(vec![Span::raw("  No model profiles found.")]));
+        lines.push(Line::from(vec![Span::raw(crate::i18n::t("model.empty"))]));
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Press 'a' to add one, or place a TOML file in",
+            crate::i18n::t("model.empty.hint"),
             Style::default().fg(theme::MUTED),
         )]));
         lines.push(Line::from(vec![Span::styled(
@@ -4561,7 +4640,11 @@ fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             } else {
                 "   "
             };
-            let active_mark = if is_active { "  [ACTIVE]" } else { "" };
+            let active_mark = if is_active {
+                crate::i18n::t("model.active")
+            } else {
+                ""
+            };
 
             let style = if i == app.model_panel_selection {
                 theme::selected_row(true)
@@ -4594,11 +4677,11 @@ fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         footer,
         "",
         &[
-            ("Add [a] ", Action::ModelPanelAdd),
-            ("Edit [e] ", Action::ModelPanelEdit),
-            ("Del [dd/Del] ", Action::ModelPanelDelete),
-            ("Use [Enter] ", Action::ModelPanelActivate),
-            ("Close [Esc]", Action::ModelPanelClose),
+            (crate::i18n::t("model.add"), Action::ModelPanelAdd),
+            (crate::i18n::t("model.edit"), Action::ModelPanelEdit),
+            (crate::i18n::t("model.delete"), Action::ModelPanelDelete),
+            (crate::i18n::t("model.use"), Action::ModelPanelActivate),
+            (crate::i18n::t("dialog.close.esc"), Action::ModelPanelClose),
         ],
         true,
     );
@@ -4613,13 +4696,28 @@ fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Re
 
     // 7 form fields
     let fields: [(&str, &str); 7] = [
-        ("Name", &app.model_form_name),
-        ("Provider", &app.model_form_provider),
-        ("Model", &app.model_form_model),
-        ("Base URL", &app.model_form_base_url),
-        ("API Key", &app.model_form_api_key),
-        ("Max Tokens", &app.model_form_max_tokens),
-        ("Temperature", &app.model_form_temperature),
+        (crate::i18n::t("model.field.name"), &app.model_form_name),
+        (
+            crate::i18n::t("model.field.provider"),
+            &app.model_form_provider,
+        ),
+        (crate::i18n::t("model.field.model"), &app.model_form_model),
+        (
+            crate::i18n::t("model.field.base_url"),
+            &app.model_form_base_url,
+        ),
+        (
+            crate::i18n::t("model.field.api_key"),
+            &app.model_form_api_key,
+        ),
+        (
+            crate::i18n::t("model.field.max_tokens"),
+            &app.model_form_max_tokens,
+        ),
+        (
+            crate::i18n::t("model.field.temperature"),
+            &app.model_form_temperature,
+        ),
     ];
 
     let mut lines: Vec<Line<'_>> = Vec::new();
@@ -4646,9 +4744,9 @@ fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Re
             input_with_cursor(value, app.model_form_cursor, inner.width.saturating_sub(16))
         } else if value.is_empty() {
             if focused {
-                "(type here...)".to_string()
+                crate::i18n::t("model.form.type_here").to_string()
             } else {
-                "(empty)".to_string()
+                crate::i18n::t("model.form.empty").to_string()
             }
         } else {
             // Mask API key when not focused
@@ -4679,8 +4777,14 @@ fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Re
         footer,
         "",
         &[
-            ("Save [Enter] ", Action::ModelPanelFormSubmit),
-            ("Cancel [Esc]", Action::ModelPanelFormCancel),
+            (
+                crate::i18n::t("model.form.save"),
+                Action::ModelPanelFormSubmit,
+            ),
+            (
+                crate::i18n::t("dialog.cancel.esc"),
+                Action::ModelPanelFormCancel,
+            ),
         ],
         true,
     );
@@ -4704,11 +4808,15 @@ fn session_relative_age(updated_at: &str) -> String {
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(updated);
     let seconds = now.saturating_sub(updated) / 1000;
-    match seconds {
-        0..=59 => "just now".to_string(),
-        60..=3599 => format!("{}m ago", seconds / 60),
-        3600..=86_399 => format!("{}h ago", seconds / 3600),
-        _ => format!("{}d ago", seconds / 86_400),
+    let (key, value) = match seconds {
+        0..=59 => ("age.just_now", None),
+        60..=3599 => ("age.minutes", Some(seconds / 60)),
+        3600..=86_399 => ("age.hours", Some(seconds / 3600)),
+        _ => ("age.days", Some(seconds / 86_400)),
+    };
+    match value {
+        Some(value) => crate::i18n::t(key).replace("{n}", &value.to_string()),
+        None => crate::i18n::t(key).to_string(),
     }
 }
 
@@ -4740,11 +4848,17 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Clear, panel_area);
 
     let title = if app.session_panel_legacy {
-        format!(" Legacy / Unassigned · {session_count} ")
+        crate::i18n::t("sessions.title.legacy").replace("{count}", &session_count.to_string())
     } else {
-        format!(
-            " Sessions · {} · {session_count} ",
-            app.project_switch.active.identity.display_name()
+        crate::i18n::fill(
+            crate::i18n::t("sessions.title"),
+            &[
+                (
+                    "project",
+                    &app.project_switch.active.identity.display_name(),
+                ),
+                ("count", &session_count.to_string()),
+            ],
         )
     };
     let block = theme::popup_block(title.as_str());
@@ -4759,19 +4873,15 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     if app.session_panel_legacy {
-        lines.push(Line::raw(" Loading keeps history unassigned."));
+        lines.push(Line::raw(crate::i18n::t("sessions.hint.legacy")));
     } else {
-        lines.push(Line::raw(
-            " Active project only. /sessions legacy for old history.",
-        ));
+        lines.push(Line::raw(crate::i18n::t("sessions.hint.scope")));
     }
 
     if app.session_list.is_empty() {
-        lines.push(Line::raw("  No saved sessions."));
+        lines.push(Line::raw(crate::i18n::t("sessions.empty")));
         lines.push(Line::raw(""));
-        lines.push(Line::raw(
-            "  Type /new to start a session that will be saved.",
-        ));
+        lines.push(Line::raw(crate::i18n::t("sessions.empty.hint")));
     } else {
         let visible_sessions = (inner.height.saturating_sub(1) as usize / 2).max(1);
         let start = app
@@ -4803,25 +4913,32 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .as_ref()
                 .and_then(|root| root.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unassigned".to_string());
+                .unwrap_or_else(|| crate::i18n::t("sessions.unassigned").to_string());
             let model = session
                 .model_label
                 .clone()
                 .or_else(|| session.acp_agent_id.clone())
                 .unwrap_or_else(|| "—".to_string());
             let first = session_label(
-                &format!(
-                    " {marker} {}  ·  {} msgs  ·  {}",
-                    session.display_title(),
-                    session.message_count,
-                    format_session_size(session.file_size())
+                &crate::i18n::fill(
+                    crate::i18n::t("sessions.row"),
+                    &[
+                        ("marker", marker),
+                        ("title", &session.display_title()),
+                        ("count", &session.message_count.to_string()),
+                        ("size", &format_session_size(session.file_size())),
+                    ],
                 ),
                 inner.width,
             );
             let second = session_label(
-                &format!(
-                    "     {dir}  ·  {}  ·  {model}",
-                    session_relative_age(&session.updated_at)
+                &crate::i18n::fill(
+                    crate::i18n::t("sessions.row.meta"),
+                    &[
+                        ("dir", &dir),
+                        ("age", &session_relative_age(&session.updated_at)),
+                        ("model", &model),
+                    ],
                 ),
                 inner.width,
             );
@@ -4849,9 +4966,18 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         footer,
         "",
         &[
-            ("Load [Enter] ", Action::SessionPanelActivate),
-            ("Delete [dd/Del] ", Action::SessionPanelDelete),
-            ("Close [Esc]", Action::SessionPanelClose),
+            (
+                crate::i18n::t("sessions.load"),
+                Action::SessionPanelActivate,
+            ),
+            (
+                crate::i18n::t("sessions.delete"),
+                Action::SessionPanelDelete,
+            ),
+            (
+                crate::i18n::t("dialog.close.esc"),
+                Action::SessionPanelClose,
+            ),
         ],
         true,
     );
@@ -4860,23 +4986,23 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// Render the quit confirmation popup panel.
 fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let message = if app.dirty {
-        "You have unsaved changes, quit anyway?"
+        crate::i18n::t("dialog.quit.body_dirty")
     } else {
-        "Quit Teshi and return to the shell?"
+        crate::i18n::t("dialog.quit.body")
     };
     // The arrow keys move the selection that Enter activates.
     let rects = Dialog {
-        title: "Quit Teshi?",
+        title: crate::i18n::t("dialog.quit.title"),
         warning: app.dirty,
         body: vec![dialog_question(message.to_string())],
         buttons: vec![
             DialogButton {
-                label: "[Yes]",
+                label: crate::i18n::t("dialog.quit.yes"),
                 tone: ButtonTone::Danger,
                 focused: app.quit_panel_selection == 0,
             },
             DialogButton {
-                label: "[No]",
+                label: crate::i18n::t("dialog.quit.no"),
                 tone: ButtonTone::Warning,
                 focused: app.quit_panel_selection == 1,
             },
@@ -4897,20 +5023,20 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// confirms, and the ACP session behind it is kept either way.
 fn render_interrupt_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let rects = Dialog {
-        title: "Interrupt the current run?",
+        title: crate::i18n::t("dialog.interrupt.title"),
         warning: false,
         body: vec![
-            dialog_question("The turn ends; the session and its answer are kept.".to_string()),
-            Line::styled("Enter/y interrupt · Esc/n keep running", theme::muted()),
+            dialog_question(crate::i18n::t("dialog.interrupt.body").to_string()),
+            Line::styled(crate::i18n::t("dialog.interrupt.hint"), theme::muted()),
         ],
         buttons: vec![
             DialogButton {
-                label: "[Interrupt]",
+                label: crate::i18n::t("dialog.interrupt.confirm"),
                 tone: ButtonTone::Danger,
                 focused: app.ai_interrupt_selection == 0,
             },
             DialogButton {
-                label: "[Continue]",
+                label: crate::i18n::t("dialog.interrupt.continue"),
                 tone: ButtonTone::Warning,
                 focused: app.ai_interrupt_selection == 1,
             },
@@ -4943,9 +5069,9 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let overridden = app.agent().backend.acp_controls().is_some()
         && std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto");
     let block = theme::popup_block(if overridden {
-        " Approvals (environment override: Auto) "
+        crate::i18n::t("approval.title_override")
     } else {
-        " Approval Mode "
+        crate::i18n::t("approval.title")
     });
     let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
         .areas(block.inner(panel_area));
@@ -5023,20 +5149,20 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app,
         footer,
         "",
-        &[("Close [Esc]", Action::ClearInputState)],
+        &[(crate::i18n::t("dialog.close.esc"), Action::ClearInputState)],
         true,
     );
 }
 
-/// Render the app Settings overlay (currently the system-prompt switch).
+/// Render the app Settings overlay (prompt injection + UI language).
 ///
 /// The layout mirrors iCode's settings dialog: a quiet card on the dialog
-/// surface, a tab-like header, one bordered section, and a row whose hint
-/// hangs under a `└─` glyph. The bottom border carries the save status and a
+/// surface, a tab-like header, bordered sections, and rows whose hints hang
+/// under a `└─` glyph. The bottom border carries the save status and a
 /// semantic Close control.
 fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.saturating_sub(2).min(80);
-    let panel_h = area.height.saturating_sub(2).min(18);
+    let panel_h = area.height.saturating_sub(2).min(22);
     if panel_w < 12 || panel_h < 5 {
         return;
     }
@@ -5045,9 +5171,9 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
     frame.render_widget(Clear, panel_area);
 
-    let status = " Changes are saved as you make them ";
-    let close = " Close ";
-    let block = theme::dialog_block(" Settings ", false)
+    let status = crate::i18n::t("settings.autosave");
+    let close = crate::i18n::t("settings.close_btn");
+    let block = theme::dialog_block(crate::i18n::t("settings.title"), false)
         .border_style(Style::default().fg(theme::PRIMARY_MUTED))
         .title_bottom(Line::styled(status, theme::muted()).left_aligned())
         .title_bottom(
@@ -5082,7 +5208,7 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         inner.width.saturating_sub(4),
         inner.height.saturating_sub(2),
     );
-    if content.width < 12 || content.height < 6 {
+    if content.width < 12 || content.height < 10 {
         return;
     }
 
@@ -5092,13 +5218,15 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Constraint::Length(1), // gap
         Constraint::Length(1), // subtitle
         Constraint::Length(1), // gap
-        Constraint::Min(3),    // section card
+        Constraint::Length(6), // AI Chat section
+        Constraint::Length(1), // gap
+        Constraint::Min(5),    // Language section
     ])
     .split(content);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " General ",
+            crate::i18n::t("settings.tab.general"),
             Style::default()
                 .fg(theme::PRIMARY)
                 .bg(theme::TAB_ACTIVE_BG)
@@ -5115,19 +5243,77 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "Control what Teshi adds to every AI conversation.",
+            crate::i18n::t("settings.subtitle"),
             theme::muted(),
         )),
         sections[3],
     );
 
-    let section = theme::panel_block(" AI Chat ", false).title_style(
+    render_settings_row(
+        frame,
+        app,
+        sections[5],
+        SettingsRow {
+            index: 0,
+            title: crate::i18n::t("settings.section.ai_chat"),
+            label: crate::i18n::t("settings.inject_prompt"),
+            hint: crate::i18n::t("settings.inject_prompt.hint"),
+            kind: SettingsRowKind::Checkbox(app.inject_prompt_sections),
+        },
+    );
+    render_settings_row(
+        frame,
+        app,
+        sections[7],
+        SettingsRow {
+            index: 1,
+            title: crate::i18n::t("settings.section.language"),
+            label: crate::i18n::t("settings.ui_locale"),
+            hint: crate::i18n::t("settings.ui_locale.hint"),
+            kind: SettingsRowKind::Value(crate::i18n::preference_label(app.ui_locale)),
+        },
+    );
+}
+
+/// One selectable row rendered inside a Settings section card.
+struct SettingsRow {
+    /// Index into [`App::SETTINGS_ROWS`], shared with activation and selection.
+    index: usize,
+    /// Bordered card title above the row.
+    title: &'static str,
+    /// Row label to the right of the marker (or checkbox).
+    label: &'static str,
+    /// Muted explanation wrapped under the `└─` glyph.
+    hint: &'static str,
+    /// How the row presents its current value.
+    kind: SettingsRowKind,
+}
+
+/// How the interactive Settings row presents its current value.
+enum SettingsRowKind {
+    Checkbox(bool),
+    Value(&'static str),
+}
+
+/// Render one Settings section card with its selectable row.
+///
+/// The row registers a modal click target so pointer activation shares the
+/// `SettingsPanelActivate(index)` path with Enter/Space.
+fn render_settings_row(frame: &mut Frame<'_>, app: &mut App, area: Rect, row: SettingsRow) {
+    let SettingsRow {
+        index: row_index,
+        title,
+        label,
+        hint,
+        kind,
+    } = row;
+    let section = theme::panel_block(title, false).title_style(
         Style::default()
             .fg(theme::SECONDARY)
             .add_modifier(Modifier::BOLD),
     );
-    let section_inner = section.inner(sections[5]);
-    frame.render_widget(section, sections[5]);
+    let section_inner = section.inner(area);
+    frame.render_widget(section, area);
     if section_inner.width < 8 || section_inner.height < 3 {
         return;
     }
@@ -5141,19 +5327,8 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
-    let selected = app.settings_panel_selection == 0;
-    let enabled = app.inject_prompt_sections;
+    let selected = app.settings_panel_selection == row_index;
     let marker = if selected { "\u{25b6}" } else { " " };
-    let (check, check_style) = if enabled {
-        (
-            "[x]",
-            Style::default()
-                .fg(theme::SUCCESS)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        ("[ ]", Style::default().fg(theme::MUTED))
-    };
     let hovered = app
         .mouse_position
         .is_some_and(|(mx, my)| my == body.y && mx >= body.x && mx < body.right());
@@ -5161,26 +5336,50 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if selected || hovered {
         label_style = label_style.add_modifier(Modifier::BOLD);
     }
+
+    let mut spans = vec![Span::styled(
+        format!(" {marker} "),
+        Style::default().fg(theme::PRIMARY),
+    )];
+    match kind {
+        SettingsRowKind::Checkbox(enabled) => {
+            let (check, check_style) = if enabled {
+                (
+                    "[x]",
+                    Style::default()
+                        .fg(theme::SUCCESS)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("[ ]", Style::default().fg(theme::MUTED))
+            };
+            spans.push(Span::styled(check, check_style));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(label, label_style));
+        }
+        SettingsRowKind::Value(value) => {
+            spans.push(Span::styled(label, label_style));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                value,
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {marker} "), Style::default().fg(theme::PRIMARY)),
-            Span::styled(check, check_style),
-            Span::raw(" "),
-            Span::styled("Inject Teshi prompt context", label_style),
-        ])),
+        Paragraph::new(Line::from(spans)),
         Rect::new(body.x, body.y, body.width, 1),
     );
     app.clickable_regions.push(ClickableRegion::ActionButton {
         rect: Rect::new(body.x, body.y, body.width, 1),
-        action: Action::SettingsPanelToggle,
+        action: Action::SettingsPanelActivate(row_index),
         modal: true,
     });
 
     let hint_width = body.width.saturating_sub(7) as usize;
     if body.height > 1 && hint_width > 0 {
-        let hint = "Adds project context, the authoring pipeline, generation status, \
-                    exploration, and ACP tool guidance to every AI conversation. Off sends \
-                    the agent profile prompt only.";
         let mut rows =
             chat::wrap_line_to_width(Line::from(Span::styled(hint, theme::muted())), hint_width);
         for (index, row) in rows.iter_mut().enumerate() {
@@ -5203,16 +5402,14 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel);
     let title = match app.agent_panel_mode {
-        crate::app::AgentPanelMode::SelectBackend => " Select Agent for this session ".to_string(),
-        crate::app::AgentPanelMode::InstalledAcp => format!(
-            " Installed ACP Agents ({}) ",
-            app.installed_acp_agents.len()
-        ),
-        crate::app::AgentPanelMode::Registry => format!(
-            " Official ACP Registry ({} agents) ",
-            app.acp_registry_agents.len()
-        ),
-        _ => " Agents ".to_string(),
+        crate::app::AgentPanelMode::SelectBackend => {
+            crate::i18n::t("agent.panel.select").to_string()
+        }
+        crate::app::AgentPanelMode::InstalledAcp => crate::i18n::t("agent.panel.installed")
+            .replace("{count}", &app.installed_acp_agents.len().to_string()),
+        crate::app::AgentPanelMode::Registry => crate::i18n::t("agent.panel.registry")
+            .replace("{count}", &app.acp_registry_agents.len().to_string()),
+        _ => crate::i18n::t("agent.panel.title").to_string(),
     };
     let block = theme::popup_block(title);
     let inner = block.inner(panel);
@@ -5223,16 +5420,19 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .areas(inner);
     let mut controls = vec![(
         if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
-            "Install [Enter] "
+            crate::i18n::t("agent.install")
         } else {
-            "Use [Enter] "
+            crate::i18n::t("agent.use")
         },
         Action::AgentPanelSelect,
     )];
     if app.agent_panel_mode == crate::app::AgentPanelMode::InstalledAcp {
-        controls.push(("Registry [i] ", Action::AgentPanelAdd));
+        controls.push((
+            crate::i18n::t("agent.registry.browse"),
+            Action::AgentPanelAdd,
+        ));
     }
-    controls.push(("Close [Esc]", Action::AgentPanelClose));
+    controls.push((crate::i18n::t("dialog.close.esc"), Action::AgentPanelClose));
     render_action_bar(frame, app, footer_area, "", &controls, true);
 
     let muted = Style::default().fg(theme::MUTED);
@@ -5255,13 +5455,13 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         };
         let active = if app.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Native
         {
-            " [selected]"
+            crate::i18n::t("agent.selected")
         } else {
             ""
         };
         lines.push(Line::from(vec![
             Span::raw(marker),
-            Span::styled("Teshi Native", rows(0)),
+            Span::styled(crate::i18n::t("agent.native"), rows(0)),
             Span::styled(active, Style::default().fg(theme::SUCCESS)),
         ]));
     }
@@ -5278,7 +5478,7 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     "  "
                 };
                 let active = if app.agent().selected_acp_id.as_deref() == Some(&agent.id) {
-                    " [selected]"
+                    crate::i18n::t("agent.selected")
                 } else {
                     ""
                 };
@@ -5286,7 +5486,7 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     Span::raw(marker),
                     Span::styled(agent.name.clone(), rows(row)),
                     Span::styled(format!(" ({}) ", agent.id), id_style),
-                    theme::chip("[installed]", theme::SUCCESS),
+                    theme::chip(crate::i18n::t("agent.installed"), theme::SUCCESS),
                     Span::styled(active, Style::default().fg(theme::SUCCESS)),
                 ]));
             }
@@ -5303,9 +5503,12 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .iter()
                     .any(|item| item.id == agent.id)
                 {
-                    ("[installed]", Style::default().fg(theme::SUCCESS))
+                    (
+                        crate::i18n::t("agent.installed"),
+                        Style::default().fg(theme::SUCCESS),
+                    )
                 } else {
-                    ("[available]", muted)
+                    (crate::i18n::t("agent.available"), muted)
                 };
                 lines.push(Line::from(vec![
                     Span::raw(marker),
@@ -5313,7 +5516,10 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     Span::styled(format!(" ({}) ", agent.id), id_style),
                     Span::styled(badge, badge_style),
                 ]));
-                let description = agent.description.as_deref().unwrap_or("No description");
+                let description = agent
+                    .description
+                    .as_deref()
+                    .unwrap_or(crate::i18n::t("agent.no_description"));
                 lines.push(Line::styled(
                     format!("   {}", truncate_str_to_width(description, detail_width)),
                     muted,
@@ -5326,13 +5532,11 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if lines.is_empty() {
         let label = match app.agent_panel_mode {
             crate::app::AgentPanelMode::Registry if app.acp_registry_rx.is_some() => {
-                "Loading official ACP Registry..."
+                crate::i18n::t("agent.registry.loading")
             }
-            crate::app::AgentPanelMode::Registry => "No agents published in the registry",
-            crate::app::AgentPanelMode::InstalledAcp => {
-                "No ACP agents installed · press i to browse the Registry"
-            }
-            _ => "No agents available",
+            crate::app::AgentPanelMode::Registry => crate::i18n::t("agent.registry.empty"),
+            crate::app::AgentPanelMode::InstalledAcp => crate::i18n::t("agent.installed.empty"),
+            _ => crate::i18n::t("agent.empty"),
         };
         frame.render_widget(
             Paragraph::new(Line::styled(label, muted)).alignment(Alignment::Center),
@@ -5400,7 +5604,7 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
     let panel_area = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel_area);
 
-    let block = theme::popup_block(" Agent Configuration ");
+    let block = theme::popup_block(crate::i18n::t("agent.config.title"));
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -5412,8 +5616,8 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         footer,
         "",
         &[
-            ("Apply [Enter] ", Action::AgentPanelSelect),
-            ("Close [Esc]", Action::AgentPanelClose),
+            (crate::i18n::t("agent.apply"), Action::AgentPanelSelect),
+            (crate::i18n::t("dialog.close.esc"), Action::AgentPanelClose),
         ],
         true,
     );
@@ -5483,7 +5687,7 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect
         };
 
         let desc = if profile.description.is_empty() {
-            "(no description)".to_string()
+            crate::i18n::t("agent.profile.no_desc").to_string()
         } else {
             profile.description.clone()
         };
@@ -5504,7 +5708,7 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect
 
     if app.agent_registry.is_empty() {
         lines.push(Line::styled(
-            "  No profiles",
+            crate::i18n::t("agent.profile.none"),
             Style::default().fg(theme::MUTED),
         ));
     }
@@ -5531,7 +5735,7 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     else {
         lines.extend(hatched_empty_lines(
             area.height as usize,
-            "No profile selected",
+            crate::i18n::t("agent.profile.empty"),
         ));
         frame.render_widget(Paragraph::new(Text::from(lines)), area);
         return;
@@ -5543,24 +5747,30 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let muted = Style::default().fg(theme::MUTED);
     let body = Style::default().fg(theme::FG);
 
-    lines.push(Line::styled("Profile", section));
+    lines.push(Line::styled(
+        crate::i18n::t("agent.profile.section"),
+        section,
+    ));
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("  Name: ", muted),
+        Span::styled(crate::i18n::t("agent.profile.name"), muted),
         Span::styled(profile.name.clone(), body),
     ]));
     let desc = if profile.description.is_empty() {
-        "(empty)".to_string()
+        crate::i18n::t("agent.profile.empty_value").to_string()
     } else {
         profile.description.clone()
     };
     lines.push(Line::from(vec![
-        Span::styled("  Description: ", muted),
+        Span::styled(crate::i18n::t("agent.profile.description"), muted),
         Span::styled(desc, body),
     ]));
 
     lines.push(Line::raw(""));
-    lines.push(Line::styled("System Prompt (preview)", section));
+    lines.push(Line::styled(
+        crate::i18n::t("agent.prompt.section"),
+        section,
+    ));
     let instr = &profile.system_prompt;
     let preview_lines = area.height.saturating_sub(14) as usize;
     let mut shown = 0usize;
@@ -5573,39 +5783,49 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
         shown += 1;
     }
     if shown == 0 {
-        lines.push(Line::styled("  (empty)", muted));
+        lines.push(Line::styled(
+            format!("  {}", crate::i18n::t("agent.profile.empty_value")),
+            muted,
+        ));
     }
 
     lines.push(Line::raw(""));
-    lines.push(Line::styled("Configuration", section));
+    lines.push(Line::styled(
+        crate::i18n::t("agent.config.section"),
+        section,
+    ));
     let tools_summary = match &profile.tools {
-        teshi_agent::definition::ToolPermission::All => "all tools".to_string(),
-        teshi_agent::definition::ToolPermission::None => "none".to_string(),
+        teshi_agent::definition::ToolPermission::All => {
+            crate::i18n::t("agent.tools.all").to_string()
+        }
+        teshi_agent::definition::ToolPermission::None => {
+            crate::i18n::t("agent.tools.none").to_string()
+        }
         teshi_agent::definition::ToolPermission::Whitelist(list) => {
-            format!("{} enabled", list.len())
+            crate::i18n::t("agent.tools.enabled").replace("{count}", &list.len().to_string())
         }
     };
     lines.push(Line::from(vec![
-        Span::styled("  Tools: ", muted),
+        Span::styled(crate::i18n::t("agent.tools.label"), muted),
         Span::styled(tools_summary, body),
     ]));
-    let skills_summary = "(configured in agent.yaml)".to_string();
+    let skills_summary = crate::i18n::t("agent.skills.hint").to_string();
     lines.push(Line::from(vec![
-        Span::styled("  Skills: ", muted),
+        Span::styled(crate::i18n::t("agent.skills.label"), muted),
         Span::styled(skills_summary, body),
     ]));
     let model_summary = if profile.model_ref.is_empty() {
-        "(active model profile)".to_string()
+        crate::i18n::t("agent.model.active").to_string()
     } else {
         profile.model_ref.clone()
     };
     lines.push(Line::from(vec![
-        Span::styled("  Model: ", muted),
+        Span::styled(crate::i18n::t("agent.model.label"), muted),
         Span::styled(model_summary, body),
     ]));
 
     lines.push(Line::raw(""));
-    lines.push(theme::action_line("Enter apply · Esc close"));
+    lines.push(theme::action_line(crate::i18n::t("agent.apply_hint")));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), area);
@@ -5774,12 +5994,17 @@ fn requirements_footer_controls(
     // The view switch leads the editor controls; Insert and Visual leave
     // through Normal mode, so they offer none.
     let view = match ui.editor_mode {
-        RequirementsEditorMode::Preview => {
-            Some((label(" Edit [e]", " Edit"), Action::ReqEnterEditView))
-        }
-        RequirementsEditorMode::Browse => {
-            Some((label(" Preview [Esc]", " Preview"), Action::ReqEnterPreview))
-        }
+        RequirementsEditorMode::Preview => Some((
+            label(crate::i18n::t("req.edit.key"), crate::i18n::t("req.edit")),
+            Action::ReqEnterEditView,
+        )),
+        RequirementsEditorMode::Browse => Some((
+            label(
+                crate::i18n::t("req.preview.esc"),
+                crate::i18n::t("req.preview"),
+            ),
+            Action::ReqEnterPreview,
+        )),
         _ => None,
     };
     // A test point is created from selected source text, which the preview lacks.
@@ -5787,57 +6012,108 @@ fn requirements_footer_controls(
     if width < 55 {
         return if tree {
             vec![
-                (" Actions", Action::ReqActionMenu),
-                (" New", Action::ReqNewDocument),
-                (" Filter", Action::ReqFilterOverlay),
+                (crate::i18n::t("req.actions"), Action::ReqActionMenu),
+                (crate::i18n::t("req.new"), Action::ReqNewDocument),
+                (crate::i18n::t("req.filter"), Action::ReqFilterOverlay),
             ]
         } else if point {
             vec![
-                (" Save", Action::Save),
-                (" New", Action::ReqNewDocument),
-                (" Point", Action::ReqNewTestPoint),
+                (crate::i18n::t("footer.save"), Action::Save),
+                (crate::i18n::t("req.new"), Action::ReqNewDocument),
+                (crate::i18n::t("req.point"), Action::ReqNewTestPoint),
             ]
         } else {
             vec![
-                (" Edit", Action::ReqEnterEditView),
-                (" Save", Action::Save),
-                (" New", Action::ReqNewDocument),
+                (crate::i18n::t("req.edit"), Action::ReqEnterEditView),
+                (crate::i18n::t("footer.save"), Action::Save),
+                (crate::i18n::t("req.new"), Action::ReqNewDocument),
             ]
         };
     }
     if !tree {
         return view
             .into_iter()
-            .chain([(label(" Save [Ctrl+s]", " Save"), Action::Save)])
-            .chain(point.then_some((label(" Point [n]", " Point"), Action::ReqNewTestPoint)))
+            .chain([(
+                label(
+                    crate::i18n::t("req.save.ctrl"),
+                    crate::i18n::t("footer.save"),
+                ),
+                Action::Save,
+            )])
+            .chain(point.then_some((
+                label(crate::i18n::t("req.point.key"), crate::i18n::t("req.point")),
+                Action::ReqNewTestPoint,
+            )))
             .chain([
                 (
-                    label(" Iteration [I]", " Iteration"),
+                    label(
+                        crate::i18n::t("req.iteration.key"),
+                        crate::i18n::t("req.iteration"),
+                    ),
                     Action::ReqEditIteration,
                 ),
                 (
-                    label(" Priority [Ctrl+p]", " Priority"),
+                    label(
+                        crate::i18n::t("req.priority.key"),
+                        crate::i18n::t("req.priority"),
+                    ),
                     Action::ReqEditPriority,
                 ),
-                (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+                (
+                    label(
+                        crate::i18n::t("req.new.doc.ctrl"),
+                        crate::i18n::t("req.new"),
+                    ),
+                    Action::ReqNewDocument,
+                ),
             ])
             .collect();
     }
     let mut controls = vec![
-        (label(" Scope [o]", " Scope"), Action::ReqProjectScope),
-        (label(" View [g]", " View"), Action::ReqGroupToggle),
-        (label(" Filter [i]", " Filter"), Action::ReqFilterOverlay),
+        (
+            label(crate::i18n::t("req.scope.key"), crate::i18n::t("req.scope")),
+            Action::ReqProjectScope,
+        ),
+        (
+            label(crate::i18n::t("req.view.key"), crate::i18n::t("req.view")),
+            Action::ReqGroupToggle,
+        ),
+        (
+            label(
+                crate::i18n::t("req.filter.key"),
+                crate::i18n::t("req.filter"),
+            ),
+            Action::ReqFilterOverlay,
+        ),
     ];
     if ui.is_project_scope() {
         controls.push((
-            label(" Completed [H]", " Completed"),
+            label(
+                crate::i18n::t("req.completed.key"),
+                crate::i18n::t("req.completed"),
+            ),
             Action::ReqCompletedToggle,
         ));
     }
     controls.extend([
-        (label(" Reload [R]", " Reload"), Action::ReqReloadStore),
-        (label(" Actions [Space]", " Actions"), Action::ReqActionMenu),
-        (label(" New doc [n]", " New"), Action::ReqNewDocument),
+        (
+            label(
+                crate::i18n::t("req.reload.key"),
+                crate::i18n::t("req.reload"),
+            ),
+            Action::ReqReloadStore,
+        ),
+        (
+            label(
+                crate::i18n::t("req.actions.space"),
+                crate::i18n::t("req.actions"),
+            ),
+            Action::ReqActionMenu,
+        ),
+        (
+            label(crate::i18n::t("req.new.doc.key"), crate::i18n::t("req.new")),
+            Action::ReqNewDocument,
+        ),
     ]);
     controls
 }
@@ -5897,7 +6173,10 @@ fn requirement_tree_title(ui: &crate::authoring_tab::AuthoringUiState) -> Line<'
         spans.push(Span::raw(format!(" · {}", ui.tree_status_title())));
         Line::from(spans)
     } else {
-        Line::from(format!("{} · [/] Search", ui.tree_status_title()))
+        Line::from(crate::i18n::fill(
+            crate::i18n::t("req.tree.title"),
+            &[("status", &ui.tree_status_title())],
+        ))
     }
 }
 
@@ -5916,19 +6195,20 @@ fn render_requirements_tree(
 
     if let Some(error) = &ui.project_identity_error {
         frame.render_widget(
-            Paragraph::new(format!("Project identity: {error}"))
-                .wrap(ratatui::widgets::Wrap { trim: false })
-                .style(Style::default().fg(theme::ERROR)),
+            Paragraph::new(crate::i18n::fill(
+                crate::i18n::t("req.tree.identity_error"),
+                &[("error", error)],
+            ))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(Style::default().fg(theme::ERROR)),
             inner,
         );
         return;
     }
     if !ui.discovered {
         frame.render_widget(
-            Paragraph::new(
-                "No requirement artifacts. Ctrl+n to create. Scope [o]: all / no project.",
-            )
-            .style(Style::default().fg(theme::MUTED)),
+            Paragraph::new(crate::i18n::t("req.tree.none"))
+                .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
@@ -5937,12 +6217,12 @@ fn render_requirements_tree(
     if ui.tree_items.is_empty() {
         ui.scroll_limits[0] = [0, 0];
         let message = if ui.search_active || !ui.search_query.text().is_empty() {
-            format!(
-                "No requirements match /{}\nEsc: clear search   Enter: keep filter",
-                ui.search_query.text()
+            crate::i18n::fill(
+                crate::i18n::t("req.tree.no_match"),
+                &[("query", ui.search_query.text())],
             )
         } else {
-            "No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project".to_string()
+            crate::i18n::t("req.tree.empty").to_string()
         };
         frame.render_widget(
             Paragraph::new(message)
@@ -6188,21 +6468,31 @@ fn render_requirements_editor(
     // The document title is the body's H1, which the editor and preview already
     // show; repeat it only when the body cannot be shown.
     let label = if meta.is_some() {
-        "Requirement"
+        crate::i18n::t("req.editor.title")
     } else {
-        "Source"
+        crate::i18n::t("req.source.title")
     };
     let display_title = match meta {
-        Some(meta) if missing => format!("{} (missing file)", meta.title),
+        Some(meta) if missing => format!("{}{}", meta.title, crate::i18n::t("req.missing_suffix")),
         _ if ui.buffer_dirty => format!("{label} *"),
         _ => label.to_string(),
     };
     let (mode, mode_color) = match ui.editor_mode {
-        crate::authoring_tab::RequirementsEditorMode::Preview => ("[PREVIEW]", theme::SUCCESS),
-        crate::authoring_tab::RequirementsEditorMode::Browse => ("[BROWSE]", theme::PRIMARY),
-        crate::authoring_tab::RequirementsEditorMode::Insert => ("[INSERT]", theme::ACCENT),
-        crate::authoring_tab::RequirementsEditorMode::VisualChar => ("[VISUAL]", theme::WARNING),
-        crate::authoring_tab::RequirementsEditorMode::VisualLine => ("[V-LINE]", theme::WARNING),
+        crate::authoring_tab::RequirementsEditorMode::Preview => {
+            (crate::i18n::t("mode.preview"), theme::SUCCESS)
+        }
+        crate::authoring_tab::RequirementsEditorMode::Browse => {
+            (crate::i18n::t("mode.browse"), theme::PRIMARY)
+        }
+        crate::authoring_tab::RequirementsEditorMode::Insert => {
+            (crate::i18n::t("mode.insert"), theme::ACCENT)
+        }
+        crate::authoring_tab::RequirementsEditorMode::VisualChar => {
+            (crate::i18n::t("mode.visual"), theme::WARNING)
+        }
+        crate::authoring_tab::RequirementsEditorMode::VisualLine => {
+            (crate::i18n::t("mode.visual_line"), theme::WARNING)
+        }
     };
     let mut heading = vec![Span::raw(format!("{display_title} "))];
     if let Some(priority) = priority {
@@ -6221,17 +6511,26 @@ fn render_requirements_editor(
             .and_then(|meta| meta.projects.get(id))
     {
         let label = match status {
-            teshi_core::authoring::RequirementProjectStatus::Planned => "[planned]",
-            teshi_core::authoring::RequirementProjectStatus::Implemented => "[implemented]",
-            teshi_core::authoring::RequirementProjectStatus::Verified => "[verified]",
+            teshi_core::authoring::RequirementProjectStatus::Planned => {
+                crate::i18n::t("req.status.planned")
+            }
+            teshi_core::authoring::RequirementProjectStatus::Implemented => {
+                crate::i18n::t("req.status.implemented")
+            }
+            teshi_core::authoring::RequirementProjectStatus::Verified => {
+                crate::i18n::t("req.status.verified")
+            }
         };
         heading.push(theme::chip(label, theme::MUTED));
         heading.push(Span::raw(" "));
     }
     heading.push(theme::chip(mode, mode_color));
     let priority_title = ui.current_document_meta().map(|_| {
-        let label = priority.map_or_else(|| "Unset".to_string(), |value| value.to_string());
-        format!(" Priority: {label} ")
+        let label = priority.map_or_else(
+            || crate::i18n::t("req.priority.unset").to_string(),
+            |value| value.to_string(),
+        );
+        crate::i18n::fill(crate::i18n::t("req.priority.title"), &[("value", &label)])
     });
     let heading_width = area.width.saturating_sub(2).saturating_sub(
         priority_title
@@ -6254,7 +6553,7 @@ fn render_requirements_editor(
 
     if missing {
         frame.render_widget(
-            Paragraph::new("Indexed document file is missing on disk.")
+            Paragraph::new(crate::i18n::t("req.missing_file"))
                 .style(Style::default().fg(theme::ERROR)),
             inner,
         );
@@ -6578,7 +6877,7 @@ fn render_requirements_linked(
     area: Rect,
     focused: bool,
 ) {
-    let block = theme::panel_block("Linked test points", focused);
+    let block = theme::panel_block(crate::i18n::t("req.linked.title"), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -6681,30 +6980,33 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             let title = app
                 .authoring_ui
                 .current_document_meta()
-                .map_or("Requirement", |doc| doc.title.as_str());
-            let body = vec![dialog_question(format!("{title} has unsaved changes."))];
+                .map_or(crate::i18n::t("req.editor.title"), |doc| doc.title.as_str());
+            let body = vec![dialog_question(crate::i18n::fill(
+                crate::i18n::t("req.overlay.unsaved.body"),
+                &[("title", title)],
+            ))];
             // Enter has no meaning here, so no button is shown as focused.
             render_confirm_dialog(
                 frame,
                 app,
                 area,
                 Dialog {
-                    title: "Unsaved requirement",
+                    title: crate::i18n::t("req.overlay.unsaved.title"),
                     warning: false,
                     body,
                     buttons: vec![
                         DialogButton {
-                            label: "[S] Save",
+                            label: crate::i18n::t("req.overlay.save"),
                             tone: ButtonTone::Primary,
                             focused: false,
                         },
                         DialogButton {
-                            label: "[D] Discard",
+                            label: crate::i18n::t("req.overlay.discard"),
                             tone: ButtonTone::Danger,
                             focused: false,
                         },
                         DialogButton {
-                            label: "[Esc] Cancel",
+                            label: crate::i18n::t("req.overlay.cancel"),
                             tone: ButtonTone::Warning,
                             focused: false,
                         },
@@ -6726,9 +7028,11 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 .enumerate()
                 .map(|(index, filter)| {
                     let label = match filter {
-                        teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
+                        teshi_core::authoring::RequirementIterationFilter::All => {
+                            crate::i18n::t("req.iteration.all").to_string()
+                        }
                         teshi_core::authoring::RequirementIterationFilter::Unassigned => {
-                            teshi_core::authoring::UNASSIGNED_ITERATION_LABEL.to_string()
+                            crate::i18n::t("req.iteration.unassigned").to_string()
                         }
                         teshi_core::authoring::RequirementIterationFilter::Named(name) => {
                             name.clone()
@@ -6742,11 +7046,11 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 app,
                 area,
                 ListDialog {
-                    title: "Filter iteration",
+                    title: crate::i18n::t("req.overlay.filter.title"),
                     rows,
                     selected: selection,
                     notes: Vec::new(),
-                    buttons: vec![cancel_button("Cancel [Esc]")],
+                    buttons: vec![cancel_button(crate::i18n::t("dialog.cancel.esc"))],
                 },
                 &[Action::OverlayCancel],
             );
@@ -6782,8 +7086,8 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     selected: selection,
                     notes: Vec::new(),
                     buttons: vec![
-                        confirm_button("Select [Enter]"),
-                        cancel_button("Close [Esc]"),
+                        confirm_button(crate::i18n::t("req.overlay.select")),
+                        cancel_button(crate::i18n::t("dialog.close.esc")),
                     ],
                 },
                 &[Action::OverlayConfirm, Action::OverlayCancel],
@@ -6812,19 +7116,22 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             let mut notes = Vec::new();
             if options.is_empty() {
                 notes.push(Line::styled(
-                    "No folders yet. Close, select Inbox, and choose New folder….",
+                    crate::i18n::t("req.overlay.folders.none"),
                     theme::muted(),
                 ));
             }
             notes.push(Line::styled(
                 if checked.is_empty() {
-                    "No folder checked: the requirement is listed in Inbox."
+                    crate::i18n::t("req.overlay.folders.none_checked")
                 } else {
-                    "The requirement is listed in every checked folder."
+                    crate::i18n::t("req.overlay.folders.checked")
                 },
                 theme::muted(),
             ));
-            let title = format!("Folders of {title}");
+            let title = crate::i18n::fill(
+                crate::i18n::t("req.overlay.folders.title"),
+                &[("title", &title)],
+            );
             render_picker_dialog(
                 frame,
                 app,
@@ -6835,9 +7142,9 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     selected: *selection,
                     notes,
                     buttons: vec![
-                        neutral_button("Toggle [Space]"),
-                        confirm_button("Save [Enter]"),
-                        cancel_button("Cancel [Esc]"),
+                        neutral_button(crate::i18n::t("req.overlay.toggle")),
+                        confirm_button(crate::i18n::t("req.overlay.save_enter")),
+                        cancel_button(crate::i18n::t("dialog.cancel.esc")),
                     ],
                 },
                 &[
@@ -6882,11 +7189,15 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     };
                     let mut spans = vec![Span::raw(format!(" {mark} ")), tag_span];
                     if !tag_style.is_default() {
-                        let color = tag_style.color.map_or("no color", |color| color.as_str());
+                        let color = tag_style
+                            .color
+                            .map_or(crate::i18n::t("req.overlay.tags.no_color"), |color| {
+                                color.as_str()
+                            });
                         let position = if tag_style.prefix {
-                            "before title"
+                            crate::i18n::t("req.overlay.tags.before")
                         } else {
-                            "after title"
+                            crate::i18n::t("req.overlay.tags.after")
                         };
                         spans.push(Span::styled(
                             format!("  {color} · {position}"),
@@ -6899,32 +7210,41 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             // The trailing row adds a tag; its index is `options.len()`.
             rows.push(picker_row(
                 match new_tag {
-                    Some(buffer) => format!(" New tag: {buffer}"),
-                    None => " ＋ New tag…".to_string(),
+                    Some(buffer) => crate::i18n::fill(
+                        crate::i18n::t("req.overlay.tags.new_buffer"),
+                        &[("buffer", buffer)],
+                    ),
+                    None => crate::i18n::t("req.overlay.tags.new").to_string(),
                 },
                 options.len() == *selection,
             ));
             let mut notes = Vec::new();
             if options.is_empty() {
-                notes.push(Line::styled("No tags yet.", theme::muted()));
+                notes.push(Line::styled(
+                    crate::i18n::t("req.overlay.tags.none"),
+                    theme::muted(),
+                ));
             }
             notes.push(Line::styled(
-                "Tags belong to the document, so every project sees the same set.",
+                crate::i18n::t("req.overlay.tags.note"),
                 theme::muted(),
             ));
             let (buttons, actions) = if new_tag.is_some() {
                 (
-                    vec![confirm_button("Add [Enter]"), cancel_button("Cancel [Esc]")],
+                    vec![
+                        confirm_button(crate::i18n::t("req.overlay.add")),
+                        cancel_button(crate::i18n::t("dialog.cancel.esc")),
+                    ],
                     vec![Action::OverlayConfirm, Action::OverlayCancel],
                 )
             } else {
                 (
                     vec![
-                        neutral_button("Toggle [Space]"),
-                        neutral_button("Color [c]"),
-                        neutral_button("Front [f]"),
-                        confirm_button("Save [Enter]"),
-                        cancel_button("Cancel [Esc]"),
+                        neutral_button(crate::i18n::t("req.overlay.toggle")),
+                        neutral_button(crate::i18n::t("req.overlay.color")),
+                        neutral_button(crate::i18n::t("req.overlay.front")),
+                        confirm_button(crate::i18n::t("req.overlay.save_enter")),
+                        cancel_button(crate::i18n::t("dialog.cancel.esc")),
                     ],
                     vec![
                         Action::OverlayInsert(' '),
@@ -6935,7 +7255,10 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     ],
                 )
             };
-            let title = format!("Tags of {title}");
+            let title = crate::i18n::fill(
+                crate::i18n::t("req.overlay.tags.title"),
+                &[("title", &title)],
+            );
             render_picker_dialog(
                 frame,
                 app,
@@ -6956,27 +7279,39 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 OrganizationForm::NewFolder {
                     parent_path, name, ..
                 } => (
-                    parent_path
-                        .as_ref()
-                        .map_or("New folder".to_string(), |parent| {
-                            format!("New subfolder in {parent}")
-                        }),
-                    vec![form_field("Name", name, true)],
+                    parent_path.as_ref().map_or(
+                        crate::i18n::t("req.overlay.folder.new").to_string(),
+                        |parent| {
+                            crate::i18n::fill(
+                                crate::i18n::t("req.overlay.folder.new_child"),
+                                &[("parent", parent)],
+                            )
+                        },
+                    ),
+                    vec![form_field(
+                        crate::i18n::t("req.overlay.field.name"),
+                        name,
+                        true,
+                    )],
                     vec![Line::styled(
-                        "Use / to create nested folders, e.g. Chat/Archive.",
+                        crate::i18n::t("req.overlay.folder.hint"),
                         theme::muted(),
                     )],
                     false,
                 ),
                 OrganizationForm::Rename { query, name, .. } => (
                     if *query {
-                        "Rename saved query".to_string()
+                        crate::i18n::t("req.overlay.rename.query").to_string()
                     } else {
-                        "Rename folder".to_string()
+                        crate::i18n::t("req.overlay.rename.folder").to_string()
                     },
-                    vec![form_field("Name", name, true)],
+                    vec![form_field(
+                        crate::i18n::t("req.overlay.field.name"),
+                        name,
+                        true,
+                    )],
                     vec![Line::styled(
-                        "Requirements and queries keep their references.",
+                        crate::i18n::t("req.overlay.rename.hint"),
                         theme::muted(),
                     )],
                     false,
@@ -6990,48 +7325,60 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     let mut notes = match app.authoring_ui.query_form_preview() {
                         Some(Ok(count)) => vec![Line::styled(
                             if count == 1 {
-                                "Matches 1 requirement".to_string()
+                                crate::i18n::t("req.overlay.query.matches_one").to_string()
                             } else {
-                                format!("Matches {count} requirements")
+                                crate::i18n::t("req.overlay.query.matches")
+                                    .replace("{count}", &count.to_string())
                             },
                             Style::default().fg(theme::SUCCESS),
                         )],
                         Some(Err(error)) => vec![Line::styled(
-                            format!("! {error}"),
+                            crate::i18n::fill(
+                                crate::i18n::t("req.overlay.query.error"),
+                                &[("error", &error.to_string())],
+                            ),
                             Style::default().fg(theme::ERROR),
                         )],
                         None => Vec::new(),
                     };
                     notes.extend(
                         [
-                            "Fields: status, priority, iteration, title, folder",
-                            "& = and, | = or, ! = not; & binds tighter than |",
-                            "Example: status=planned & priority=P1 | folder=AI/Chat",
+                            crate::i18n::t("req.overlay.query.help1"),
+                            crate::i18n::t("req.overlay.query.help2"),
+                            crate::i18n::t("req.overlay.query.help3"),
                         ]
                         .map(|help| Line::styled(help, theme::muted())),
                     );
                     (
                         if query_id.is_some() {
-                            "Edit saved query".to_string()
+                            crate::i18n::t("req.overlay.query.edit").to_string()
                         } else {
-                            "New saved query".to_string()
+                            crate::i18n::t("req.overlay.query.new").to_string()
                         },
                         vec![
-                            form_field("Name", name, !condition_focused),
-                            form_field("Condition", condition, *condition_focused),
+                            form_field(
+                                crate::i18n::t("req.overlay.field.name"),
+                                name,
+                                !condition_focused,
+                            ),
+                            form_field(
+                                crate::i18n::t("req.overlay.field.condition"),
+                                condition,
+                                *condition_focused,
+                            ),
                         ],
                         notes,
                         true,
                     )
                 }
             };
-            let mut buttons = vec![confirm_button("Save [Enter]")];
+            let mut buttons = vec![confirm_button(crate::i18n::t("req.overlay.save_enter"))];
             let mut actions = vec![Action::OverlayConfirm];
             if query {
-                buttons.push(neutral_button("Next field [Tab]"));
+                buttons.push(neutral_button(crate::i18n::t("req.overlay.next_field")));
                 actions.push(Action::OverlayMoveDown);
             }
-            buttons.push(cancel_button("Cancel [Esc]"));
+            buttons.push(cancel_button(crate::i18n::t("dialog.cancel.esc")));
             actions.push(Action::OverlayCancel);
             let rects = FormDialog {
                 title: &title,
@@ -7050,26 +7397,39 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         } => {
             let (title, body) = if *query {
                 (
-                    "Delete saved query",
+                    crate::i18n::t("req.overlay.query.delete.title"),
                     vec![
-                        dialog_question(format!("Delete saved query '{name}'?")),
-                        Line::styled("Requirements are not changed.", theme::muted()),
+                        dialog_question(crate::i18n::fill(
+                            crate::i18n::t("req.overlay.query.delete.body"),
+                            &[("name", name)],
+                        )),
+                        Line::styled(
+                            crate::i18n::t("req.overlay.query.delete.note"),
+                            theme::muted(),
+                        ),
                     ],
                 )
             } else {
                 (
-                    "Delete folder",
+                    crate::i18n::t("req.overlay.folder.delete.title"),
                     vec![
-                        dialog_question(format!("Delete folder '{name}' and its subfolders?")),
+                        dialog_question(crate::i18n::fill(
+                            crate::i18n::t("req.overlay.folder.delete.body"),
+                            &[("name", name)],
+                        )),
                         Line::styled(
                             match inbox_returns {
-                                0 => "No requirement returns to Inbox.".to_string(),
-                                1 => "1 requirement returns to Inbox.".to_string(),
-                                n => format!("{n} requirements return to Inbox."),
+                                0 => crate::i18n::t("req.overlay.folder.delete.none").to_string(),
+                                1 => crate::i18n::t("req.overlay.folder.delete.one").to_string(),
+                                n => crate::i18n::t("req.overlay.folder.delete.many")
+                                    .replace("{n}", &n.to_string()),
                             },
                             theme::muted(),
                         ),
-                        Line::styled("Requirement documents are never deleted.", theme::muted()),
+                        Line::styled(
+                            crate::i18n::t("req.overlay.folder.delete.note"),
+                            theme::muted(),
+                        ),
                     ],
                 )
             };
@@ -7077,34 +7437,34 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 frame,
                 app,
                 area,
-                delete_dialog(title, body, "Delete [Enter]"),
+                delete_dialog(title, body, crate::i18n::t("req.overlay.delete")),
                 &[Action::OverlayConfirm, Action::OverlayCancel],
             );
         }
         RequirementsOverlay::IterationEdit { buffer } => {
             // The iteration buffer only grows or shrinks at its end.
             let rects = FormDialog {
-                title: "Set iteration",
+                title: crate::i18n::t("req.overlay.iteration.title"),
                 fields: vec![FormField {
-                    label: "Iteration",
+                    label: crate::i18n::t("req.overlay.iteration.field"),
                     before: buffer,
                     after: "",
                     focused: true,
                 }],
                 notes: vec![Line::styled(
-                    "Leave it empty to mark the requirement Unassigned.",
+                    crate::i18n::t("req.overlay.iteration.hint"),
                     theme::muted(),
                 )],
                 buttons: vec![
-                    confirm_button("Confirm [Enter]"),
-                    cancel_button("Cancel [Esc]"),
+                    confirm_button(crate::i18n::t("req.overlay.confirm")),
+                    cancel_button(crate::i18n::t("dialog.cancel.esc")),
                 ],
             }
             .render(frame, area);
             register_dialog_buttons(app, rects, &[Action::OverlayConfirm, Action::OverlayCancel]);
         }
         RequirementsOverlay::PriorityEdit { selection, .. } => {
-            let rows = ["Unset", "P0", "P1", "P2", "P3"]
+            let rows = [crate::i18n::t("req.priority.unset"), "P0", "P1", "P2", "P3"]
                 .iter()
                 .enumerate()
                 .map(|(index, label)| picker_row(format!(" {label}"), index == *selection))
@@ -7114,24 +7474,27 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 app,
                 area,
                 ListDialog {
-                    title: "Requirement priority",
+                    title: crate::i18n::t("req.overlay.priority.title"),
                     rows,
                     selected: *selection,
                     notes: Vec::new(),
-                    buttons: vec![cancel_button("Cancel [Esc]")],
+                    buttons: vec![cancel_button(crate::i18n::t("dialog.cancel.esc"))],
                 },
                 &[Action::OverlayCancel],
             );
         }
         RequirementsOverlay::DeleteConfirmation { document_id, title } => {
             let body = vec![
-                dialog_question(format!("Delete requirement '{title}' ({document_id})?")),
+                dialog_question(crate::i18n::fill(
+                    crate::i18n::t("req.overlay.requirement.delete.body"),
+                    &[("title", title), ("id", document_id)],
+                )),
                 Line::styled(
-                    "This removes it from the global requirement library.",
+                    crate::i18n::t("req.overlay.requirement.delete.note1"),
                     theme::muted(),
                 ),
                 Line::styled(
-                    "Linked test points stay and become missing-source links.",
+                    crate::i18n::t("req.overlay.requirement.delete.note2"),
                     theme::muted(),
                 ),
             ];
@@ -7139,7 +7502,11 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 frame,
                 app,
                 area,
-                delete_dialog("Delete requirement", body, "Confirm [Enter]"),
+                delete_dialog(
+                    crate::i18n::t("req.overlay.requirement.delete.title"),
+                    body,
+                    crate::i18n::t("req.overlay.confirm"),
+                ),
                 &[Action::OverlayConfirm, Action::OverlayCancel],
             );
         }
@@ -7159,9 +7526,11 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         );
         frame.render_widget(Clear, panel_area);
         let filter = match &prompt.iteration {
-            teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
+            teshi_core::authoring::RequirementIterationFilter::All => {
+                crate::i18n::t("req.iteration.all").to_string()
+            }
             teshi_core::authoring::RequirementIterationFilter::Unassigned => {
-                teshi_core::authoring::UNASSIGNED_ITERATION_LABEL.to_string()
+                crate::i18n::t("req.iteration.unassigned").to_string()
             }
             teshi_core::authoring::RequirementIterationFilter::Named(name) => name.clone(),
         };
@@ -7171,21 +7540,27 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             .as_ref()
             .and_then(|a| a.index.store_id.as_ref())
             .map(|id| id.to_string())
-            .unwrap_or_else(|| "(uninitialized)".into());
+            .unwrap_or_else(|| crate::i18n::t("req.overlay.scope.uninitialized").into());
         let lines = vec![
-            Line::raw(format!(
-                "Requirement store: {}",
-                app.requirements_root.display()
+            Line::raw(crate::i18n::fill(
+                crate::i18n::t("req.overlay.scope.store"),
+                &[("path", &app.requirements_root.display().to_string())],
             )),
-            Line::raw(format!("Store ID: {store_id}")),
-            Line::raw(format!("Iteration scope: {filter}")),
-            Line::raw(format!(
-                "Project scope: {}",
-                app.authoring_ui.project_scope_label()
+            Line::raw(crate::i18n::fill(
+                crate::i18n::t("req.overlay.scope.store_id"),
+                &[("id", &store_id)],
+            )),
+            Line::raw(crate::i18n::fill(
+                crate::i18n::t("req.overlay.scope.iteration"),
+                &[("filter", &filter)],
+            )),
+            Line::raw(crate::i18n::fill(
+                crate::i18n::t("req.overlay.scope.project"),
+                &[("scope", app.authoring_ui.project_scope_label())],
             )),
             Line::raw(""),
         ];
-        let block = theme::popup_block(" Confirm generation source scope ");
+        let block = theme::popup_block(crate::i18n::t("req.overlay.scope.title"));
         let [content, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
             .areas(block.inner(panel_area));
         frame.render_widget(block, panel_area);
@@ -7196,9 +7571,18 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             footer,
             "",
             &[
-                ("Confirm [Enter] ", Action::GenerationScopeConfirm),
-                ("Iteration [i] ", Action::GenerationScopeChangeIteration),
-                ("Cancel [Esc]", Action::GenerationScopeCancel),
+                (
+                    crate::i18n::t("req.overlay.scope.confirm"),
+                    Action::GenerationScopeConfirm,
+                ),
+                (
+                    crate::i18n::t("req.overlay.scope.iteration_key"),
+                    Action::GenerationScopeChangeIteration,
+                ),
+                (
+                    crate::i18n::t("dialog.cancel.esc"),
+                    Action::GenerationScopeCancel,
+                ),
             ],
             true,
         );
@@ -7212,7 +7596,7 @@ fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selec
         return;
     }
     let footer = chat::wrap_line_to_width(
-        theme::action_line("[O] Open path · ↑/↓ select · Enter open · Esc cancel"),
+        theme::action_line(crate::i18n::t("project.picker.hint")),
         inner_width,
     );
     let mut rows = Vec::new();
@@ -7245,7 +7629,7 @@ fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selec
         }
     }
     if rows.is_empty() {
-        rows.push((None, Line::raw("No recent projects")));
+        rows.push((None, Line::raw(crate::i18n::t("project.recent.empty"))));
     }
     // Reserve the controls before allocating path rows. Wrapping and hit tests
     // share these physical rows, including continuation lines of long paths.
@@ -7285,7 +7669,7 @@ fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selec
     lines.extend(footer);
     frame.render_widget(Clear, panel);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::popup_block(" Open project ")),
+        Paragraph::new(lines).block(theme::popup_block(crate::i18n::t("project.open"))),
         panel,
     );
     if open_y < panel.bottom().saturating_sub(1) {
@@ -7306,20 +7690,23 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
             return;
         }
         SwitchOverlay::OpenPath { input } => (
-            " Open project path ",
+            crate::i18n::t("project.open_path"),
             vec![
-                Line::raw("Type a project directory and press Enter:"),
+                Line::raw(crate::i18n::t("project.open_path.prompt")),
                 Line::styled(format!("> {input}"), Style::default().fg(theme::FG)),
                 Line::raw(""),
-                theme::action_line("Enter open · Backspace edit · Esc cancel"),
+                theme::action_line(crate::i18n::t("project.open_path.hint")),
             ],
             area.width.min(100),
             6.min(area.height),
         ),
         SwitchOverlay::Dirty { target } => {
             let mut rows = vec![
-                Line::raw(format!("Switch to {}", target.root().display())),
-                Line::raw("Unsaved project state must be resolved first."),
+                Line::raw(crate::i18n::fill(
+                    crate::i18n::t("project.switch.to"),
+                    &[("path", &target.root().display().to_string())],
+                )),
+                Line::raw(crate::i18n::t("project.dirty.body")),
             ];
             if let Some(request) = &app.project_switch.pending {
                 rows.extend(request.dirty.iter().map(|item| {
@@ -7330,23 +7717,24 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
                 }));
             }
             rows.push(Line::raw(""));
-            rows.push(theme::action_line(
-                "[S] Save and switch   [D] Discard and switch   [Esc] Cancel",
-            ));
+            rows.push(theme::action_line(crate::i18n::t("project.dirty.hint")));
             (
-                " Resolve project state ",
+                crate::i18n::t("project.dirty.title"),
                 rows,
                 area.width.min(86),
                 10.min(area.height),
             )
         }
         SwitchOverlay::Busy { target } => (
-            " Stop project tasks ",
+            crate::i18n::t("project.busy.title"),
             vec![
-                Line::raw(format!("Switch to {}", target.root().display())),
-                Line::raw("A project-owned task is still running."),
-                Line::raw("[S] Stop tasks and switch   [Esc] Cancel"),
-                Line::raw("Wait for owned tasks to exit before switching."),
+                Line::raw(crate::i18n::fill(
+                    crate::i18n::t("project.switch.to"),
+                    &[("path", &target.root().display().to_string())],
+                )),
+                Line::raw(crate::i18n::t("project.busy.body")),
+                Line::raw(crate::i18n::t("project.busy.hint")),
+                Line::raw(crate::i18n::t("project.busy.wait")),
             ],
             area.width.min(86),
             8.min(area.height),
@@ -7482,13 +7870,15 @@ fn render_test_points_tree(
     focused: bool,
 ) {
     let filter_label = match ui.review_filter {
-        crate::test_points_tab::ReviewFilter::All => "all",
-        crate::test_points_tab::ReviewFilter::Proposed => "proposed",
-        crate::test_points_tab::ReviewFilter::Approved => "approved",
-        crate::test_points_tab::ReviewFilter::Rejected => "rejected",
-        crate::test_points_tab::ReviewFilter::NeedsReview => "needs review",
+        crate::test_points_tab::ReviewFilter::All => crate::i18n::t("tp.filter.all"),
+        crate::test_points_tab::ReviewFilter::Proposed => crate::i18n::t("tp.filter.proposed"),
+        crate::test_points_tab::ReviewFilter::Approved => crate::i18n::t("tp.filter.approved"),
+        crate::test_points_tab::ReviewFilter::Rejected => crate::i18n::t("tp.filter.rejected"),
+        crate::test_points_tab::ReviewFilter::NeedsReview => {
+            crate::i18n::t("tp.filter.needs_review")
+        }
     };
-    let title = format!("Test points ({filter_label})");
+    let title = crate::i18n::fill(crate::i18n::t("tp.tree.title"), &[("filter", filter_label)]);
     let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -7498,7 +7888,7 @@ fn render_test_points_tree(
 
     if artifacts.is_none() || ui.tree_items.is_empty() {
         frame.render_widget(
-            Paragraph::new("No test points yet. Create links from Requirements [4].")
+            Paragraph::new(crate::i18n::t("tp.tree.empty"))
                 .style(Style::default().fg(theme::MUTED)),
             inner,
         );
@@ -7521,9 +7911,9 @@ fn render_test_points_details(
     regions: &mut Vec<ClickableRegion>,
 ) {
     let title = if ui.editing {
-        "Intent & review [INSERT]"
+        crate::i18n::t("tp.details.title.edit")
     } else {
-        "Intent & review [NORMAL]"
+        crate::i18n::t("tp.details.title")
     };
     let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
@@ -7534,7 +7924,7 @@ fn render_test_points_details(
 
     let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
         frame.render_widget(
-            Paragraph::new("Select a test point in the tree.")
+            Paragraph::new(crate::i18n::t("tp.details.empty"))
                 .style(Style::default().fg(theme::MUTED)),
             inner,
         );
@@ -7544,7 +7934,7 @@ fn render_test_points_details(
         artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| &tp.id == tp_id))
     else {
         frame.render_widget(
-            Paragraph::new("Selected test point is unavailable.")
+            Paragraph::new(crate::i18n::t("tp.details.unavailable"))
                 .style(Style::default().fg(theme::ERROR)),
             inner,
         );
@@ -7554,7 +7944,7 @@ fn render_test_points_details(
     let fields = [
         (
             crate::test_points_tab::DetailField::Title,
-            "Title",
+            crate::i18n::t("tp.field.title"),
             if ui.detail_field == crate::test_points_tab::DetailField::Title && ui.field_dirty {
                 ui.field_buffer.clone()
             } else {
@@ -7563,7 +7953,7 @@ fn render_test_points_details(
         ),
         (
             crate::test_points_tab::DetailField::Objective,
-            "Objective",
+            crate::i18n::t("tp.field.objective"),
             if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
                 ui.field_buffer.clone()
             } else {
@@ -7572,7 +7962,7 @@ fn render_test_points_details(
         ),
         (
             crate::test_points_tab::DetailField::Preconditions,
-            "Preconditions",
+            crate::i18n::t("tp.field.preconditions"),
             if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
                 && ui.field_dirty
             {
@@ -7583,7 +7973,7 @@ fn render_test_points_details(
         ),
         (
             crate::test_points_tab::DetailField::ExpectedOutcomes,
-            "Expected",
+            crate::i18n::t("tp.field.expected"),
             if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
                 && ui.field_dirty
             {
@@ -7594,7 +7984,7 @@ fn render_test_points_details(
         ),
         (
             crate::test_points_tab::DetailField::Hierarchy,
-            "Hierarchy",
+            crate::i18n::t("tp.field.hierarchy"),
             if ui.detail_field == crate::test_points_tab::DetailField::Hierarchy && ui.field_dirty {
                 ui.field_buffer.clone()
             } else {
@@ -7648,15 +8038,15 @@ fn render_test_points_details(
     if !tp.scenario_refs.is_empty() {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "Realized scenarios [o]:",
+            crate::i18n::t("tp.realized"),
             Style::default().fg(theme::MUTED),
         ));
         for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
             scenario_rows.push((lines.len(), i));
-            let label = sc_ref
-                .scenario_name
-                .clone()
-                .unwrap_or_else(|| format!("line {}", sc_ref.scenario_line.unwrap_or(0)));
+            let label = sc_ref.scenario_name.clone().unwrap_or_else(|| {
+                crate::i18n::t("tp.line")
+                    .replace("{n}", &sc_ref.scenario_line.unwrap_or(0).to_string())
+            });
             let selected = i == ui.selected_scenario_ref_index;
             let style = if selected && focused {
                 theme::selected_row(true)
@@ -7697,7 +8087,7 @@ fn render_test_points_excerpts(
     focused: bool,
     regions: &mut Vec<ClickableRegion>,
 ) {
-    let block = theme::panel_block("Requirement excerpts", focused);
+    let block = theme::panel_block(crate::i18n::t("tp.excerpts.title"), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -7719,15 +8109,15 @@ fn render_test_points_excerpts(
     let mut excerpt_rows = Vec::new();
     if excerpts.is_empty() {
         lines.push(Line::styled(
-            " (no linked excerpts)",
+            crate::i18n::t("tp.excerpts.empty"),
             Style::default().fg(theme::MUTED),
         ));
     } else {
         for (i, excerpt) in excerpts.iter().enumerate() {
             excerpt_rows.push((lines.len(), i));
             let res_label = match excerpt.resolution {
-                teshi_core::authoring::ResolutionState::Resolved => "ok",
-                teshi_core::authoring::ResolutionState::Stale => "stale",
+                teshi_core::authoring::ResolutionState::Resolved => crate::i18n::t("tp.excerpt.ok"),
+                teshi_core::authoring::ResolutionState::Stale => crate::i18n::t("tp.excerpt.stale"),
             };
             let res_style = crate::test_points_tab::excerpt_resolution_style(excerpt.resolution);
             let doc =
@@ -7807,6 +8197,7 @@ mod truncate_tests {
     #[test]
     fn workspace_meta_pins_the_version_to_the_tab_row() {
         let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
         app.version = "0.7.10-local.20261014.1700+0800 (1234567)".into();
 
         // A wide row seats the project label left of the version.
@@ -7849,7 +8240,10 @@ mod truncate_tests {
             (crate::app::MainTab::Requirements, "New"),
             (crate::app::MainTab::TestPoints, "Approve"),
         ] {
+            // Labels follow the UI locale catalog; pin English so this test
+            // asserts the same strings on a zh-CN host as in CI.
             let mut app = App::from_args().expect("app init");
+            app.set_ui_locale(teshi_engine::UiLocalePreference::En);
             app.active_tab = tab;
             app.status_message = None;
             let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
@@ -7922,6 +8316,7 @@ mod truncate_tests {
         .enumerate()
         {
             let mut app = App::from_args().expect("app init");
+            app.set_ui_locale(teshi_engine::UiLocalePreference::ZhCn);
             app.active_tab = tab;
             app.status_message = None;
             let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -7949,12 +8344,54 @@ mod truncate_tests {
     }
 
     #[test]
+    fn ai_footer_input_badge_uses_the_input_label() {
+        let mut app = App::from_args().expect("app init");
+        app.ai_input_focused = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::pointer_controls::render_ai_footer(
+                    frame,
+                    &mut app,
+                    ratatui::layout::Rect::new(0, 0, 120, 1),
+                    false,
+                )
+            })
+            .unwrap();
+        let row: String = (0..120)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert!(row.starts_with("[INPUT] "), "{row}");
+
+        app.set_ui_locale(teshi_engine::UiLocalePreference::ZhCn);
+        // A fresh backend avoids stale wide-character continuation cells from
+        // the English frame.
+        let mut terminal = Terminal::new(TestBackend::new(120, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::pointer_controls::render_ai_footer(
+                    frame,
+                    &mut app,
+                    ratatui::layout::Rect::new(0, 0, 120, 1),
+                    false,
+                )
+            })
+            .unwrap();
+        let row: String = (0..120)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert!(row.starts_with("[输"), "{row}");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+    }
+
+    #[test]
     fn settings_panel_shows_the_prompt_section_switch_and_click_target() {
         let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
         app.settings_panel_active = true;
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let screen: String = (0..24)
+        let screen: String = (0..28)
             .map(|y| {
                 (0..100)
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())
@@ -7963,9 +8400,11 @@ mod truncate_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("Inject Teshi prompt context"), "{screen}");
+        assert!(screen.contains("UI Language"), "{screen}");
         for label in [
             " General ",
             " AI Chat ",
+            " Language ",
             "Control what Teshi adds to every AI conversation.",
             "└─",
         ] {
@@ -7990,7 +8429,14 @@ mod truncate_tests {
         assert!(app.clickable_regions.iter().any(|region| matches!(
             region,
             ClickableRegion::ActionButton {
-                action: Action::SettingsPanelToggle,
+                action: Action::SettingsPanelActivate(0),
+                ..
+            }
+        )));
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ActionButton {
+                action: Action::SettingsPanelActivate(1),
                 ..
             }
         )));

@@ -16,11 +16,16 @@ teshi path/to/file.feature # open a single file directly
 Without `-R`, all directory forms prefer the selected project's `features` folder:
 
 - Without language subdirectories, load all `.feature` files recursively under `features`.
-- With language directories such as `zh-CN` or `en-US`, load only the matching system UI
-  language and its descendants, excluding root-level files and other languages.
-- Match the complete language tag case-insensitively (`en-GB` does not fall back to `en-US`).
-  On Windows use the user's preferred UI language. An explicit `TESHI_FEATURE_LANGUAGE`
-  environment override is also supported, including for deterministic acceptance fixtures.
+- With language directories such as `zh-CN` or `en-US`, load only the directory that matches
+  the resolved TUI UI language (`/preferences` → UI Language, or `TESHI_LOCALE`) and its
+  descendants, excluding root-level files and other languages. Changing UI Language retargets
+  that directory in the open session (unless started with `-R`, or Feature buffers are dirty).
+  This applies to the project opened at startup: switching projects in-session scans the new
+  project root recursively. This does not rewrite Gherkin dialect keywords inside `.feature`
+  files.
+- Match the complete language tag case-insensitively. `en-US` also accepts a bare `en`
+  directory. An explicit `TESHI_FEATURE_LANGUAGE` environment override still wins for
+  Feature-directory selection (including deterministic acceptance fixtures).
 - Missing `features` loads only `.feature` files directly in the project root, including
   during background refresh. Subdirectories require `-R`/`--recursive`. If no files match,
   the project opens empty without creating `features`.

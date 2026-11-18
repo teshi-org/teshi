@@ -21,6 +21,7 @@ mod feature_discovery;
 pub(crate) mod feature_tags;
 mod generation_state;
 mod highlight;
+mod i18n;
 mod image_view;
 mod input;
 mod keymap;

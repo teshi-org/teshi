@@ -542,8 +542,10 @@ pub enum Action {
     /// Cancel the form and return to the list.
     AgentPanelFormCancel,
     // ── App Settings overlay actions ─────────────────────
-    /// Toggle the highlighted app-setting row (Enter/Space or a pointer click).
+    /// Toggle the highlighted app-setting row (Enter/Space).
     SettingsPanelToggle,
+    /// Pointer click on settings row `usize` (sets selection, then activates).
+    SettingsPanelActivate(usize),
     /// Close the app Settings overlay (the bottom-right Close control).
     SettingsPanelClose,
 }
