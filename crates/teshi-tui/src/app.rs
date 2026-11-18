@@ -16174,6 +16174,14 @@ mod tests {
             )
             .unwrap();
             assert!(app.feature_locale_follows_ui);
+            // Pin a known starting directory so the next switch is a real change
+            // even when the host OS already resolves to English.
+            app.set_ui_locale(teshi_engine::UiLocalePreference::ZhCn);
+            app.refresh_feature_directory_for_ui_locale();
+            assert_eq!(
+                app.feature_discovery_root.as_deref(),
+                Some(root.path().join("features/zh-CN").as_path())
+            );
             // Rows, run results and Git state from the previous catalog must not
             // survive a directory change.
             app.explore_selected_deleted_feature = Some(0);
