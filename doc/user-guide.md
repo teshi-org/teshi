@@ -18,10 +18,9 @@ UI Language localizes the tab bar, footers and action bars, Explore/MindMap/
 Requirements pane headings and empty states, the session browser, Test Points
 details, model/auth/agent overlays, project switch overlays, requirement overlay
 forms and dialogs, the chat panel header and composer chrome, the slash-command
-palette, and the Settings overlay. Fixed status notifications are localized too; messages that
-embed runtime values (errors, usage lines, counters) may remain English until
-their templates are migrated. Gherkin keywords inside `.feature` files are never
-rewritten.
+palette, and the Settings overlay. Status notifications are localized, including values such as
+counts and error text; the auth-overlay markers that the panel parses stay English.
+Gherkin keywords inside `.feature` files are never rewritten.
 
 Use `teshi .` for the same loading rules, or `teshi project/` to open another project.
 Use `teshi -R` or `teshi project/ -R` to recursively scan the entire target directory.

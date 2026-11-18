@@ -916,6 +916,185 @@ fn en(key: &str) -> Option<&'static str> {
         "status.yanked_requirement_selection" => "Yanked requirement selection",
         "status.dd_to_delete" => "`dd` to delete",
         "status.yy_to_copy" => "`yy` to copy",
+        "status.acp_registry_unavailable" => "ACP Registry unavailable: {error}",
+        "status.acp_approval_preference_could_not_be_restored" => {
+            "ACP approval preference could not be restored: {error}"
+        }
+        "status.acp_install_failed" => "ACP install failed: {error}",
+        "status.acp_installations_unavailable" => "ACP installations unavailable: {error}",
+        "status.acp_storage_unavailable" => "ACP storage unavailable: {error}",
+        "status.ai_applied_change_in" => "AI applied change \"{arg0}\" in {arg1}",
+        "status.ai_applied_filter" => "AI applied filter: {desc}",
+        "status.ai_applied_highlight_rule_s" => "AI applied {count} highlight rule(s)",
+        "status.ai_backend_unavailable" => "AI backend unavailable: {error}",
+        "status.ai_created_file" => "AI created file: {file_name}",
+        "status.ai_error" => "AI error: {error}",
+        "status.ai_error_message" => "AI error: {message}",
+        "status.ai_response_received" => "AI response received ({model})",
+        "status.ai_wants_to_y_accept_n_reject" => "AI wants to {arg0}. [Y] accept [N] reject",
+        "status.added_and_activated_profile" => "Added and activated profile: {arg0}",
+        "status.added_custom_acp_agent_use_agent_to_select_it" => {
+            "Added custom ACP Agent {name}. Use /agent to select it."
+        }
+        "status.advanced_to_scenario_planning_with_approved_test_point_s" => {
+            "Advanced to Scenario Planning with {arg0} approved test point(s)"
+        }
+        "status.agent_selected_but_preference_could_not_be_saved" => {
+            "Agent selected, but preference could not be saved: {error}"
+        }
+        "status.approved_test_point" => "Approved test point {tp_id}",
+        "status.batch_approved_test_point_s" => "Batch approved {count} test point(s)",
+        "status.cannot_derive_a_worktree_path_for_pass_one_explicitly" => {
+            "Cannot derive a worktree path for {arg0}; pass one explicitly"
+        }
+        "status.cannot_open" => "Cannot open {noun}: {error}",
+        "status.cannot_resolve_session_project" => "Cannot resolve session project: {error}",
+        "status.cannot_save_before_switching" => "Cannot save before switching: {error}",
+        "status.cannot_send_queued_message" => "Cannot send queued message: {error}",
+        "status.change_summary_change_s_navigate_enter_jump_esc_close" => {
+            "Change Summary — {arg0} change(s). ↑↓ navigate, Enter jump, Esc close."
+        }
+        "status.closed" => "Closed {name}",
+        "status.context_compacted_message_s_summary_token_window" => {
+            "Context compacted: {removed_count} message(s) → summary ({arg0} token window)"
+        }
+        "status.conversation_renamed_to" => "Conversation renamed to '{title}'",
+        "status.conversation_title_reset_to" => "Conversation title reset to '{arg0}'",
+        "status.copied_code_block_line_s" => "Copied code block ({lines} line(s))",
+        "status.copied_code_block_line_s_2" => "Copied code block {arg0} ({lines} line(s))",
+        "status.copied_last_assistant_response_s_to_clipboard" => {
+            "Copied last {arg0} assistant response(s) to clipboard"
+        }
+        "status.copied_session_id" => "Copied session ID {id}",
+        "status.copied_character_s" => "Copied {arg0} character(s)",
+        "status.copied_line_s" => "Copied {line_count} line(s)",
+        "status.could_not_apply_acp_file_change" => "Could not apply ACP file change: {error}",
+        "status.could_not_checkpoint_project_a" => "Could not checkpoint project A: {error}",
+        "status.could_not_copy_to_clipboard" => "Could not copy to clipboard: {error}",
+        "status.could_not_create_requirement" => "Could not create requirement: {error}",
+        "status.could_not_delete_requirement" => "Could not delete requirement: {error}",
+        "status.could_not_prepare_project_b" => "Could not prepare project B: {error}",
+        "status.could_not_reconnect_acp_for_profile" => {
+            "Could not reconnect ACP for profile {arg0}: {error}"
+        }
+        "status.could_not_resolve_project" => "Could not resolve project: {error}",
+        "status.could_not_save_requirement" => "Could not save requirement: {error}",
+        "status.could_not_save_test_point" => "Could not save test point: {error}",
+        "status.created_agent" => "Created agent {id}",
+        "status.created_proposed_test_point" => "Created proposed test point {id}",
+        "status.created_requirement_document_md" => "Created requirement document {id}.md",
+        "status.custom_acp_agent_failed" => "Custom ACP Agent failed: {error}",
+        "status.cut_character_s" => "Cut {arg0} character(s)",
+        "status.deleted_global_requirement" => "Deleted global requirement {document_id}",
+        "status.deleted_profile" => "Deleted profile: {name}",
+        "status.deleted_session" => "Deleted session {id}",
+        "status.direct_no_review_generation_traceability_confirm_source_scop" => {
+            "Direct (no-review) generation, traceability: {arg0} — confirm source scope (Enter confirm · Esc cancel · i change iteration)"
+        }
+        "status.exploration_terminated_url_is_not_in_the_whitelist" => {
+            "Exploration terminated: URL '{arg0}' is not in the whitelist"
+        }
+        "status.exploration_terminated_step_limit_exceeded" => {
+            "Exploration terminated: step limit ({arg0}) exceeded"
+        }
+        "status.failed_to_activate_profile" => "Failed to activate profile: {e}",
+        "status.failed_to_delete_profile" => "Failed to delete profile: {e}",
+        "status.failed_to_delete_session" => "Failed to delete session: {e}",
+        "status.failed_to_reload" => "Failed to reload {arg0}: {err}",
+        "status.failed_to_restore_generation_state" => "Failed to restore generation state: {e}",
+        "status.failed_to_save_active_profile" => "Failed to save active profile: {e}",
+        "status.failed_to_save_profile" => "Failed to save profile: {e}",
+        "status.feature_changed_on_disk_reload_enter_r_or_keep_local_esc_k" => {
+            "Feature changed on disk: {arg0}. Reload [Enter/r] or keep local [Esc/k]."
+        }
+        "status.feature_discovery_failed" => "Feature discovery failed: {error}",
+        "status.feature_loading_failed" => "Feature loading failed: {error}",
+        "status.generation_paused" => "Generation paused: {err}",
+        "status.installed_use_agent_to_select_it" => "Installed {arg0}. Use /agent to select it.",
+        "status.installing" => "Installing {arg0}...",
+        "status.iteration_is_not_in_the_current_requirement_store_choose_ano" => {
+            "Iteration '{name}' is not in the current requirement store; choose another scope"
+        }
+        "status.kept_local_buffer_for" => "Kept local buffer for {arg0}",
+        "status.llm_configured_model_base_url_provider" => {
+            "LLM configured: model={arg0}, base_url={arg1}, provider={arg2}"
+        }
+        "status.llm_not_configured" => "LLM not configured: {e}",
+        "status.loaded_session_with_messages" => "Loaded session with {arg0} messages",
+        "status.message_queued_unqueue_to_edit" => "Message queued ({arg0}) — /unqueue to edit",
+        "status.no_code_block_in_the_last_assistant_response" => {
+            "No code block {arg0} in the last assistant response"
+        }
+        "status.opened_requirement_excerpt_in" => "Opened requirement excerpt in {arg0}",
+        "status.opened_scenario_in" => "Opened scenario {arg0} in {arg1}",
+        "status.opened_in_the_system_viewer" => "Opened {noun} in the system viewer",
+        "status.plaintext_expand_needs_a_running_api_sidecar" => {
+            "Plaintext expand needs a running API sidecar: {err}"
+        }
+        "status.profile_has_no_api_key_set_one_or_use_teshi_llm_api_key" => {
+            "Profile '{arg0}' has no API key; set one or use TESHI_LLM_API_KEY"
+        }
+        "status.profile_saved_but_failed_to_activate" => {
+            "Profile saved but failed to activate: {e}"
+        }
+        "status.project_directory_does_not_exist" => "Project directory does not exist: {arg0}",
+        "status.project_switch_could_not_continue" => "Project switch could not continue: {error}",
+        "status.project_switch_stopped_owned_task_did_not_exit_within_s_proj" => {
+            "Project switch stopped: owned task did not exit within {arg0}s; project A remains active"
+        }
+        "status.rejected_ai_change" => "Rejected AI change: {desc}",
+        "status.rejected_test_point" => "Rejected test point {tp_id}",
+        "status.reloaded_from_disk" => "Reloaded from disk: {arg0}",
+        "status.requirement_library_refresh_failed" => {
+            "Requirement library refresh failed: {error}"
+        }
+        "status.requirement_library_reload_failed" => "Requirement library reload failed: {error}",
+        "status.requirement_scope" => "Requirement scope: {arg0}",
+        "status.resumed_session_from_messages" => "Resumed session from {arg0} messages",
+        "status.run_complete_passed_failed" => "Run complete: {passed} passed, {failed} failed",
+        "status.run_complete_passed_failed_blocked" => {
+            "Run complete: {passed} passed, {failed} failed, {blocked} blocked"
+        }
+        "status.run_not_started" => "Run not started: {first_line}",
+        "status.runner_error" => "Runner error: {message}",
+        "status.saved" => "Saved {arg0}",
+        "status.selected_acp_agent_remembered_for_new_sessions" => {
+            "Selected ACP Agent {arg0}; remembered for new sessions"
+        }
+        "status.session_belongs_to_another_project" => "Session belongs to another project: {arg0}",
+        "status.settings_applied_but_not_saved" => "Settings applied but not saved: {error}",
+        "status.step_keyword_set_to" => "Step keyword set to {keyword}",
+        "status.switched_project_but_recent_history_was_not_saved" => {
+            "Switched project, but recent history was not saved: {error}"
+        }
+        "status.switched_project" => "Switched project: {arg0}",
+        "status.switched_to_agent" => "Switched to agent: {arg0}",
+        "status.switched_to_model" => "Switched to model: {arg0}",
+        "status.switched_to" => "Switched to {arg0}",
+        "status.unknown_auth_subcommand_try_auth_auth_add_auth_status_auth_r" => {
+            "Unknown auth subcommand: '{arg0}'. Try: auth, auth add, auth status, auth remove <provider>"
+        }
+        "status.unknown_command" => "Unknown command: {other}",
+        "status.unsaved_project_state_s_save_switch_d_discard_switch_esc_can" => {
+            "Unsaved project state: {arg0} · S save & switch · D discard & switch · Esc cancel"
+        }
+        "status.updated_profile" => "Updated profile: {arg0}",
+        "status.view" => "View: {arg0}",
+        "status.workspace_has_a_single_member" => "Workspace {arg0} has a single member",
+        "status.worktree_not_created" => "Worktree not created: {error}",
+        "status.already_works_in_this_member_press_a_for_a_new_agent_in_anot" => {
+            "{arg0} already works in this member; press a for a new agent in another member"
+        }
+        "status.belongs_to_no_workspace" => "{arg0} belongs to no workspace",
+        "status.is_already_installed_use_agent_to_select_it" => {
+            "{arg0} is already installed. Use /agent to select it."
+        }
+        "status.now_works_in" => "{arg0} now works in {label}",
+        "status.now_works_in_workspace_created_for_it" => {
+            "{arg0} now works in {label}; workspace {arg1} created for it"
+        }
+        "status." => "{arg0} — {error}",
+        "status.images_attached" => "{count} images attached",
         _ => return None,
     })
 }
@@ -1718,6 +1897,173 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "status.yanked_requirement_selection" => "已复制需求选区",
         "status.dd_to_delete" => "`dd` 删除",
         "status.yy_to_copy" => "`yy` 复制",
+        "status.acp_registry_unavailable" => "ACP Registry 不可用：{error}",
+        "status.acp_approval_preference_could_not_be_restored" => "无法恢复 ACP 审批偏好：{error}",
+        "status.acp_install_failed" => "ACP 安装失败：{error}",
+        "status.acp_installations_unavailable" => "ACP 安装信息不可用：{error}",
+        "status.acp_storage_unavailable" => "ACP 存储不可用：{error}",
+        "status.ai_applied_change_in" => "AI 已在 {arg1} 中应用变更“{arg0}”",
+        "status.ai_applied_filter" => "AI 已应用筛选：{desc}",
+        "status.ai_applied_highlight_rule_s" => "AI 已应用 {count} 条高亮规则",
+        "status.ai_backend_unavailable" => "AI 后端不可用：{error}",
+        "status.ai_created_file" => "AI 已创建文件：{file_name}",
+        "status.ai_error" => "AI 错误：{error}",
+        "status.ai_error_message" => "AI 错误：{message}",
+        "status.ai_response_received" => "已收到 AI 回复（{model}）",
+        "status.ai_wants_to_y_accept_n_reject" => "AI 想要{arg0}。[Y] 接受 [N] 拒绝",
+        "status.added_and_activated_profile" => "已添加并启用配置：{arg0}",
+        "status.added_custom_acp_agent_use_agent_to_select_it" => {
+            "已添加自定义 ACP Agent {name}。使用 /agent 选择。"
+        }
+        "status.advanced_to_scenario_planning_with_approved_test_point_s" => {
+            "已进入场景规划，共批准 {arg0} 个测试点"
+        }
+        "status.agent_selected_but_preference_could_not_be_saved" => {
+            "Agent 已选择，但偏好保存失败：{error}"
+        }
+        "status.approved_test_point" => "已批准测试点 {tp_id}",
+        "status.batch_approved_test_point_s" => "已批量批准 {count} 个测试点",
+        "status.cannot_derive_a_worktree_path_for_pass_one_explicitly" => {
+            "无法为 {arg0} 推导 worktree 路径；请显式指定"
+        }
+        "status.cannot_open" => "无法打开 {noun}：{error}",
+        "status.cannot_resolve_session_project" => "无法解析会话项目：{error}",
+        "status.cannot_save_before_switching" => "切换前保存失败：{error}",
+        "status.cannot_send_queued_message" => "无法发送排队消息：{error}",
+        "status.change_summary_change_s_navigate_enter_jump_esc_close" => {
+            "变更摘要 — {arg0} 项变更。↑↓ 导航，Enter 跳转，Esc 关闭。"
+        }
+        "status.closed" => "已关闭 {name}",
+        "status.context_compacted_message_s_summary_token_window" => {
+            "上下文已压缩：{removed_count} 条消息 → 摘要（{arg0} token 窗口）"
+        }
+        "status.conversation_renamed_to" => "会话已重命名为“{title}”",
+        "status.conversation_title_reset_to" => "会话标题已重置为“{arg0}”",
+        "status.copied_code_block_line_s" => "已复制代码块（{lines} 行）",
+        "status.copied_code_block_line_s_2" => "已复制代码块 {arg0}（{lines} 行）",
+        "status.copied_last_assistant_response_s_to_clipboard" => {
+            "已复制最近 {arg0} 条助手回复到剪贴板"
+        }
+        "status.copied_session_id" => "已复制会话 ID {id}",
+        "status.copied_character_s" => "已复制 {arg0} 个字符",
+        "status.copied_line_s" => "已复制 {line_count} 行",
+        "status.could_not_apply_acp_file_change" => "无法应用 ACP 文件变更：{error}",
+        "status.could_not_checkpoint_project_a" => "无法检查点项目 A：{error}",
+        "status.could_not_copy_to_clipboard" => "无法复制到剪贴板：{error}",
+        "status.could_not_create_requirement" => "无法创建需求：{error}",
+        "status.could_not_delete_requirement" => "无法删除需求：{error}",
+        "status.could_not_prepare_project_b" => "无法准备项目 B：{error}",
+        "status.could_not_reconnect_acp_for_profile" => "无法为配置 {arg0} 重连 ACP：{error}",
+        "status.could_not_resolve_project" => "无法解析项目：{error}",
+        "status.could_not_save_requirement" => "无法保存需求：{error}",
+        "status.could_not_save_test_point" => "无法保存测试点：{error}",
+        "status.created_agent" => "已创建 Agent {id}",
+        "status.created_proposed_test_point" => "已创建待批准测试点 {id}",
+        "status.created_requirement_document_md" => "已创建需求文档 {id}.md",
+        "status.custom_acp_agent_failed" => "自定义 ACP Agent 失败：{error}",
+        "status.cut_character_s" => "已剪切 {arg0} 个字符",
+        "status.deleted_global_requirement" => "已删除全局需求 {document_id}",
+        "status.deleted_profile" => "已删除配置：{name}",
+        "status.deleted_session" => "已删除会话 {id}",
+        "status.direct_no_review_generation_traceability_confirm_source_scop" => {
+            "直接生成（免评审），可追溯性：{arg0} — 确认来源范围（Enter 确认 · Esc 取消 · i 修改迭代）"
+        }
+        "status.exploration_terminated_url_is_not_in_the_whitelist" => {
+            "探索已终止：URL“{arg0}”不在白名单中"
+        }
+        "status.exploration_terminated_step_limit_exceeded" => "探索已终止：超过步骤上限（{arg0}）",
+        "status.failed_to_activate_profile" => "启用配置失败：{e}",
+        "status.failed_to_delete_profile" => "删除配置失败：{e}",
+        "status.failed_to_delete_session" => "删除会话失败：{e}",
+        "status.failed_to_reload" => "重新加载 {arg0} 失败：{err}",
+        "status.failed_to_restore_generation_state" => "恢复生成状态失败：{e}",
+        "status.failed_to_save_active_profile" => "保存当前配置失败：{e}",
+        "status.failed_to_save_profile" => "保存配置失败：{e}",
+        "status.feature_changed_on_disk_reload_enter_r_or_keep_local_esc_k" => {
+            "功能在磁盘上已变更：{arg0}。重新加载 [Enter/r] 或保留本地 [Esc/k]。"
+        }
+        "status.feature_discovery_failed" => "功能发现失败：{error}",
+        "status.feature_loading_failed" => "功能加载失败：{error}",
+        "status.generation_paused" => "生成已暂停：{err}",
+        "status.installed_use_agent_to_select_it" => "已安装 {arg0}。使用 /agent 选择。",
+        "status.installing" => "正在安装 {arg0}...",
+        "status.iteration_is_not_in_the_current_requirement_store_choose_ano" => {
+            "迭代“{name}”不在当前需求库中；请选择其他范围"
+        }
+        "status.kept_local_buffer_for" => "已保留 {arg0} 的本地缓冲区",
+        "status.llm_configured_model_base_url_provider" => {
+            "LLM 已配置：model={arg0}，base_url={arg1}，provider={arg2}"
+        }
+        "status.llm_not_configured" => "LLM 未配置：{e}",
+        "status.loaded_session_with_messages" => "已加载含 {arg0} 条消息的会话",
+        "status.message_queued_unqueue_to_edit" => "消息已排队（{arg0}）— /unqueue 可编辑",
+        "status.no_code_block_in_the_last_assistant_response" => {
+            "最近一条助手回复中没有代码块 {arg0}"
+        }
+        "status.opened_requirement_excerpt_in" => "已在 {arg0} 中打开需求摘录",
+        "status.opened_scenario_in" => "已在 {arg1} 中打开场景 {arg0}",
+        "status.opened_in_the_system_viewer" => "已在系统查看器中打开 {noun}",
+        "status.plaintext_expand_needs_a_running_api_sidecar" => {
+            "展开明文需要运行中的 API sidecar：{err}"
+        }
+        "status.profile_has_no_api_key_set_one_or_use_teshi_llm_api_key" => {
+            "配置“{arg0}”没有 API Key；请设置或使用 TESHI_LLM_API_KEY"
+        }
+        "status.profile_saved_but_failed_to_activate" => "配置已保存但启用失败：{e}",
+        "status.project_directory_does_not_exist" => "项目目录不存在：{arg0}",
+        "status.project_switch_could_not_continue" => "项目切换无法继续：{error}",
+        "status.project_switch_stopped_owned_task_did_not_exit_within_s_proj" => {
+            "项目切换已停止：所属任务未在 {arg0} 秒内退出；项目 A 仍处于活动状态"
+        }
+        "status.rejected_ai_change" => "已拒绝 AI 变更：{desc}",
+        "status.rejected_test_point" => "已驳回测试点 {tp_id}",
+        "status.reloaded_from_disk" => "已从磁盘重新加载：{arg0}",
+        "status.requirement_library_refresh_failed" => "需求库刷新失败：{error}",
+        "status.requirement_library_reload_failed" => "需求库重新加载失败：{error}",
+        "status.requirement_scope" => "需求范围：{arg0}",
+        "status.resumed_session_from_messages" => "已从 {arg0} 条消息恢复会话",
+        "status.run_complete_passed_failed" => "运行完成：{passed} 通过，{failed} 失败",
+        "status.run_complete_passed_failed_blocked" => {
+            "运行完成：{passed} 通过，{failed} 失败，{blocked} 阻塞"
+        }
+        "status.run_not_started" => "运行未启动：{first_line}",
+        "status.runner_error" => "运行器错误：{message}",
+        "status.saved" => "已保存 {arg0}",
+        "status.selected_acp_agent_remembered_for_new_sessions" => {
+            "已选择 ACP Agent {arg0}；将用于新会话"
+        }
+        "status.session_belongs_to_another_project" => "会话属于另一个项目：{arg0}",
+        "status.settings_applied_but_not_saved" => "设置已应用但未保存：{error}",
+        "status.step_keyword_set_to" => "步骤关键字已设为 {keyword}",
+        "status.switched_project_but_recent_history_was_not_saved" => {
+            "已切换项目，但最近记录未保存：{error}"
+        }
+        "status.switched_project" => "已切换项目：{arg0}",
+        "status.switched_to_agent" => "已切换到 Agent：{arg0}",
+        "status.switched_to_model" => "已切换到模型：{arg0}",
+        "status.switched_to" => "已切换到 {arg0}",
+        "status.unknown_auth_subcommand_try_auth_auth_add_auth_status_auth_r" => {
+            "未知 auth 子命令：“{arg0}”。可尝试：auth、auth add、auth status、auth remove <provider>"
+        }
+        "status.unknown_command" => "未知命令：{other}",
+        "status.unsaved_project_state_s_save_switch_d_discard_switch_esc_can" => {
+            "未保存的项目状态：{arg0} · S 保存并切换 · D 放弃并切换 · Esc 取消"
+        }
+        "status.updated_profile" => "已更新配置：{arg0}",
+        "status.view" => "视图：{arg0}",
+        "status.workspace_has_a_single_member" => "工作区 {arg0} 只有一个成员",
+        "status.worktree_not_created" => "未创建 worktree：{error}",
+        "status.already_works_in_this_member_press_a_for_a_new_agent_in_anot" => {
+            "{arg0} 已在此成员中工作；按 a 在其他成员中新建 Agent"
+        }
+        "status.belongs_to_no_workspace" => "{arg0} 不属于任何工作区",
+        "status.is_already_installed_use_agent_to_select_it" => "{arg0} 已安装。使用 /agent 选择。",
+        "status.now_works_in" => "{arg0} 现在工作于 {label}",
+        "status.now_works_in_workspace_created_for_it" => {
+            "{arg0} 现在工作于 {label}；已为其创建工作区 {arg1}"
+        }
+        "status." => "{arg0} — {error}",
+        "status.images_attached" => "已附加 {count} 张图片",
         _ => return None,
     })
 }
@@ -1744,6 +2090,15 @@ pub fn fill(template: &str, pairs: &[(&str, &str)]) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Format one [`fill`] value for a status template.
+///
+/// Borrowing the value keeps field expressions such as `self.agent().title`
+/// movable-free; the helper also avoids the `format!("{}", value)` pattern that
+/// clippy flags as a useless format.
+pub fn arg<T: std::fmt::Display + ?Sized>(value: &T) -> String {
+    value.to_string()
 }
 
 /// Localized description for a slash command.
@@ -1803,6 +2158,34 @@ mod tests {
     fn unknown_keys_fall_back_to_the_key() {
         set_effective_locale(EffectiveUiLocale::En);
         assert_eq!(t("missing.key"), "missing.key");
+    }
+
+    #[test]
+    fn status_templates_fill_in_both_locales() {
+        set_effective_locale(EffectiveUiLocale::ZhCn);
+        assert_eq!(
+            fill(t("status.ai_error"), &[("error", "boom")]),
+            "AI 错误：boom"
+        );
+        assert_eq!(
+            fill(
+                t("status.run_complete_passed_failed"),
+                &[("passed", "2"), ("failed", "1")]
+            ),
+            "运行完成：2 通过，1 失败"
+        );
+        set_effective_locale(EffectiveUiLocale::En);
+        assert_eq!(
+            fill(t("status.ai_error"), &[("error", "boom")]),
+            "AI error: boom"
+        );
+        assert_eq!(
+            fill(
+                t("status.run_complete_passed_failed"),
+                &[("passed", "2"), ("failed", "1")]
+            ),
+            "Run complete: 2 passed, 1 failed"
+        );
     }
 
     #[test]
