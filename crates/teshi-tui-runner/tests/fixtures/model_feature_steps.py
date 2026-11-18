@@ -92,7 +92,11 @@ class World:
         raise AssertionError("connection deadline exceeded")
 
     def focus(self):
-        if any(label in self.op("screen") for label in ("Focus [Enter]", "Focus [i/Enter]")):
+        # Focus lives on the composer; Enter still focuses when unfocused.
+        screen = self.op("screen")
+        if "Type your message..." not in screen and any(
+            label in screen for label in ("Send", "[NORMAL]", "›")
+        ):
             self.op("key", "Enter")
         screen = self.op("screen")
         target = self.rejected_message if self.rejected_message and self.rejected_message in screen else "Type your message..."

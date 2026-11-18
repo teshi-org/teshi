@@ -17381,7 +17381,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(app.chat_history_rect.expect("chat renders").x, 2);
-        assert!(screen.contains("chats hidden [Ctrl+g]"), "{screen}");
+        assert!(
+            screen.contains(" Chats") || screen.contains(" 会话"),
+            "collapsed sidebar exposes the title-bar Chats chip: {screen}"
+        );
         assert!(
             !app.clickable_regions.iter().any(|region| matches!(
                 region,
@@ -19772,7 +19775,11 @@ mod tests {
                 .collect();
             assert_eq!(shown, "18a3f2c9b1d04e5f", "width {width}: {row}");
             assert_eq!(row.contains("Session:"), label, "width {width}: {row}");
-            assert_eq!(row.contains("chats hidden"), hint, "width {width}: {row}");
+            assert_eq!(
+                row.contains(" Chats") || row.contains(" 会话"),
+                hint,
+                "width {width}: {row}"
+            );
         }
     }
 

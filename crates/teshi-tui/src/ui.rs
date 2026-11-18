@@ -1068,9 +1068,10 @@ fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 3] {
     ])
     .areas(area);
     let max_scenario = (right.height * 40 / 100).max(3);
-    // Keep room for the border, one content row, and the in-pane action strip.
+    // Every row needs a slot: two borders, the in-pane action strip, and one
+    // row per scenario. Undercounting hides the last scenario behind the strip.
     let desired = (scenario_rows.min(u16::MAX as usize) as u16)
-        .saturating_add(2)
+        .saturating_add(3)
         .clamp(4, max_scenario);
     let scenario_height = desired.min(right.height.saturating_sub(3).max(3));
     let [scenario, steps] =
@@ -1780,7 +1781,10 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let focused = app.explore_focus == ColumnFocus::Scenario;
     let scenarios_title = explore_scenarios_title(app);
-    let block = explore_block(scenarios_title.as_str(), focused);
+    let run_summary = explore_run_summary_label(app);
+    let block = explore_block(scenarios_title.as_str(), focused).title_top(
+        Line::from(Span::styled(run_summary, Style::default().fg(theme::MUTED))).right_aligned(),
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -2054,6 +2058,29 @@ fn explore_scenario_count(app: &App) -> usize {
 
 fn explore_scenarios_title(app: &App) -> String {
     crate::i18n::t("scenarios.title").replace("{count}", &explore_scenario_count(app).to_string())
+}
+
+/// Tally shown on the right edge of the Scenarios pane title.
+///
+/// The tab footer no longer carries tab workflows, so the pane border keeps the
+/// last run's summary visible instead of dropping it.
+fn explore_run_summary_label(app: &App) -> String {
+    let total = explore_scenario_count(app);
+    match &app.explore_run_summary {
+        Some(summary) => {
+            let template = if summary.blocked > 0 {
+                crate::i18n::t("explore.summary.blocked")
+            } else {
+                crate::i18n::t("explore.summary")
+            };
+            template
+                .replace("{passed}", &summary.passed.to_string())
+                .replace("{total}", &summary.total.to_string())
+                .replace("{failed}", &summary.failed.to_string())
+                .replace("{blocked}", &summary.blocked.to_string())
+        }
+        None => crate::i18n::t("explore.summary.idle").replace("{total}", &total.to_string()),
+    }
 }
 
 /// Gherkin syntax spans for one source line. `keyword_kind` overrides the
@@ -5600,12 +5627,17 @@ fn render_requirement_scrollbars(
     area: Rect,
     extent: (usize, usize),
     offset: (usize, usize),
+    content_height: u16,
 ) {
     let viewport = requirement_viewport(area);
     let (width, height) = extent;
+    // The action strip takes a row from the pane interior. Limits, the thumb,
+    // and the drag math must agree with the rows actually painted, or the last
+    // line/item can never be reached.
+    let content_height = content_height.min(viewport.height);
     ui.scroll_limits[pane] = [
         width.saturating_sub(viewport.width as usize),
-        height.saturating_sub(viewport.height as usize),
+        height.saturating_sub(content_height as usize),
     ];
     ui.pane_bars[pane] = [None; 2];
 
@@ -5638,12 +5670,12 @@ fn render_requirement_scrollbars(
         );
         ui.pane_bars[pane][0] = Some(bar);
     }
-    if height > viewport.height as usize && viewport.height > 0 {
+    if height > content_height as usize && content_height > 0 {
         let rect = Rect::new(
             area.right().saturating_sub(1),
             viewport.y,
             1,
-            viewport.height,
+            content_height,
         );
         let bar = crate::app::ScrollbarBar {
             rect,
@@ -5654,7 +5686,7 @@ fn render_requirement_scrollbars(
         frame.render_widget(
             Paragraph::new(theme::scrollbar_lines(
                 height,
-                viewport.height as usize,
+                content_height as usize,
                 offset.1,
                 theme::ScrollAxis::Vertical,
                 state,
@@ -5836,6 +5868,7 @@ fn render_requirements_tree(
             max_start + viewport.height as usize,
         ),
         (0, ui.tree_state.get_offset()),
+        viewport.height,
     );
 
     let diag_lines: Vec<Line> = ui
@@ -6292,6 +6325,7 @@ fn render_requirements_editor(
         area,
         (viewport.width as usize, line_count),
         (0, scroll_row),
+        viewport.height,
     );
     if let Some(action_area) = action_area {
         render_action_bar(frame, regions, action_area, "", &editor_actions, false);
@@ -6341,6 +6375,7 @@ fn render_requirement_preview(
         area,
         (viewport.width as usize, total),
         (0, scroll),
+        viewport.height,
     );
 }
 
@@ -6549,6 +6584,7 @@ fn render_requirements_linked(
         area,
         (width, height),
         (ui.horizontal_scroll[2], ui.linked_scroll),
+        viewport.height,
     );
 }
 
@@ -7803,8 +7839,8 @@ mod truncate_tests {
     use std::path::PathBuf;
 
     use super::{
-        Line, Span, build_case_detail_lines, explore_panes, explore_scenarios_title, render,
-        truncate_line_to_cols,
+        Line, Span, build_case_detail_lines, explore_panes, explore_run_summary_label,
+        explore_scenarios_title, render, truncate_line_to_cols,
     };
     use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
     use crate::keymap::Action;
@@ -7816,14 +7852,20 @@ mod truncate_tests {
         let area = ratatui::layout::Rect::new(0, 0, 120, 30);
 
         let [_, scenario, steps] = explore_panes(area, 0, 1);
-        assert_eq!(scenario.height, 3, "one scenario plus borders");
-        assert_eq!(steps.height, 27);
+        assert_eq!(
+            scenario.height, 4,
+            "one scenario plus borders and the action strip"
+        );
+        assert_eq!(steps.height, 26);
         assert_eq!(scenario.y, area.y, "Scenarios sit above the Steps list");
         assert_eq!(steps.bottom(), area.bottom());
 
         let [_, scenario, steps] = explore_panes(area, 0, 0);
-        assert_eq!(scenario.height, 3, "an empty list still has borders");
-        assert_eq!(steps.height, 27);
+        assert_eq!(
+            scenario.height, 4,
+            "an empty list still has borders and the action strip"
+        );
+        assert_eq!(steps.height, 26);
 
         let [_, scenario, steps] = explore_panes(area, 0, 30);
         assert_eq!(scenario.height, 12, "the scenario pane caps at 40%");
@@ -8214,6 +8256,36 @@ mod truncate_tests {
     }
 
     #[test]
+    fn explore_scenarios_title_carries_the_last_run_summary() {
+        let mut app = App::from_args().expect("app init should work");
+        let feature = gherkin::parse_feature(
+            "Feature: A\n  Scenario: S1\n    Given a\n  Scenario: S2\n    Given b\n",
+            PathBuf::from("a.feature"),
+        );
+        app.project.features = vec![feature];
+        app.explore_selected_feature = 0;
+        assert_eq!(explore_run_summary_label(&app), "0/2 passed");
+        app.explore_run_summary = Some(crate::app::RunSummary {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            ..Default::default()
+        });
+        assert_eq!(explore_run_summary_label(&app), "1/2 passed, 1 failed");
+        app.explore_run_summary = Some(crate::app::RunSummary {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            blocked: 1,
+            ..Default::default()
+        });
+        assert_eq!(
+            explore_run_summary_label(&app),
+            "1/2 passed, 1 failed, 1 blocked"
+        );
+    }
+
+    #[test]
     fn test_explore_scenarios_title_counts_rule_nested_scenarios() {
         let mut app = App::from_args().expect("app init should work");
         let feature = gherkin::parse_feature(
@@ -8458,9 +8530,10 @@ Feature: Rule only
                 )
             })
             .expect("render");
-        assert_eq!(ui.scroll_limits[1], [0, 56]);
-        assert_eq!(ui.scroll_row, 54);
-        assert_eq!(terminal.backend().buffer()[(1, 1)].symbol(), "a");
+        // The in-pane action strip reserves one content row.
+        assert_eq!(ui.scroll_limits[1], [0, 57]);
+        assert_eq!(ui.scroll_row, 55);
+        assert_eq!(terminal.backend().buffer()[(1, 1)].symbol(), "j");
         assert!(
             (1..5).any(|y| terminal.backend().buffer()[(11, y)].bg == crate::theme::SCROLL_THUMB),
             "the vertical bar paints a solid thumb"
@@ -8664,8 +8737,8 @@ Feature: Rule only
                 )
             })
             .expect("render");
-        assert_eq!(ui.scroll_limits[1], [0, 2]);
-        assert_eq!(ui.scroll_row, 2);
+        assert_eq!(ui.scroll_limits[1], [0, 3]);
+        assert_eq!(ui.scroll_row, 3);
         ui.set_pane_scroll(1, 1, 0);
         terminal
             .draw(|frame| {
@@ -8684,7 +8757,15 @@ Feature: Rule only
         assert_eq!(ui.editor_position_at(0, 1), Some((0, 4)));
         assert_eq!(ui.editor_position_at(3, 0), Some((0, 2)));
         assert_eq!(ui.editor_position_at(4, 0), Some((0, 3)));
-        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "c");
+        // With the action strip, row 1 is the only content row above it.
+        let first_row: String = (1..8)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+            .collect();
+        // Wide glyphs paint a spacer cell, so compare the leading glyphs only.
+        assert!(
+            first_row.starts_with("ab中") && first_row.contains('文'),
+            "{first_row:?}"
+        );
         let mut narrow = Terminal::new(TestBackend::new(6, 4)).expect("terminal");
         narrow
             .draw(|frame| {
@@ -8771,7 +8852,8 @@ Feature: Rule only
         assert_eq!(ui.scroll_limits[0][0], 0, "wrapped labels never overflow");
         assert_eq!(ui.horizontal_scroll[0], 0);
         assert!(ui.pane_bars[0][0].is_none());
-        // Ten three-row (capped) items: the last item fits after scrolling.
+        // Ten three-row (capped) items: the action strip shortens the viewport,
+        // and the furthest start still admits the final item.
         assert_eq!(ui.scroll_limits[0][1], 9);
         let rows = tree_screen_rows(&terminal);
         assert!(rows[1].contains("long-i"), "{rows:#?}");
@@ -8791,7 +8873,8 @@ Feature: Rule only
         long_label_tree(&mut ui, 2);
         ui.tree_state
             .select(vec!["req-iter:long-iteration-0".to_string()]);
-        let mut terminal = Terminal::new(TestBackend::new(12, 8)).expect("terminal");
+        // Extra row keeps the action strip from covering the second tree item.
+        let mut terminal = Terminal::new(TestBackend::new(12, 9)).expect("terminal");
         terminal
             .draw(|frame| {
                 super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)

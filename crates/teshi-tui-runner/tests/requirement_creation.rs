@@ -176,8 +176,22 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
     terminal.key("4").unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("# Document 1", true, 10000).unwrap();
-    terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();
-    terminal.click_text("Save [Ctrl+s]", 10000).unwrap();
+    // Address the footer row directly: the tree's "Saved queries" row contains
+    // the same " Save" prefix, so a text lookup would click the tree instead.
+    terminal.expect_text(" Save", true, 10000).unwrap();
+    let screen = terminal.screen().unwrap();
+    let (row, footer) = screen.lines().enumerate().last().unwrap();
+    let byte = footer.find(" Save").expect("footer Save control");
+    let col = footer[..byte].chars().count();
+    terminal
+        .write(&format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            col + 1,
+            row + 1,
+            col + 1,
+            row + 1
+        ))
+        .unwrap();
     let wait_count = |count: usize| {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -194,7 +208,8 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
             }
             assert!(
                 Instant::now() < deadline,
-                "save did not persist {count} documents"
+                "save did not persist {count} documents\n{}",
+                terminal.screen().unwrap()
             );
             std::thread::sleep(Duration::from_millis(20));
         }

@@ -144,7 +144,10 @@ fn capture(terminal: &Terminal, stage: &str) {
 /// new agent).
 fn focus_composer(terminal: &Terminal) {
     terminal.key("Enter").unwrap();
-    terminal.expect_text("[INPUT]", true, WAIT_MS).unwrap();
+    // The placeholder only paints while the composer owns focus.
+    terminal
+        .expect_text("Type your message...", true, WAIT_MS)
+        .unwrap();
 }
 
 fn command(terminal: &Terminal, input: &str) {
@@ -181,6 +184,22 @@ fn click_footer(terminal: &Terminal, label: &str) {
             last_cell(screen, label)
         })
         .unwrap();
+}
+
+/// Opens the Feature editor from Explore.
+///
+/// `Edit` lives on the Scenarios pane action strip now. Narrow terminals draw
+/// only the focused pane, so walk focus from Features to Scenarios first.
+fn click_scenario_edit(terminal: &Terminal, cols: u16) {
+    if cols < 70 {
+        terminal.key("Ctrl+w").unwrap();
+        terminal.key("Right").unwrap();
+    }
+    // The scenario pane grows as the loaded list arrives, which moves the strip
+    // row; wait for the last scenario so the click lands on the settled layout.
+    terminal.expect_text("Beta", true, WAIT_MS).unwrap();
+    terminal.expect_text(" Edit", true, WAIT_MS).unwrap();
+    click_footer(terminal, " Edit");
 }
 
 /// Waits until `path` exists (or is gone) on disk.
@@ -480,7 +499,7 @@ fn step_keyword_pointer_cancel_and_confirm_save_only_selected_step() {
     for (cols, rows, stage) in [(150, 30, "normal"), (55, 16, "narrow")] {
         let fixture = Fixture::new(cols, rows);
         let terminal = fixture.launch();
-        click_footer(&terminal, "Edit");
+        click_scenario_edit(&terminal, cols);
         terminal.key("Ctrl+g").unwrap();
         terminal.key("Enter").unwrap();
         terminal.expect_text("Step keyword", true, WAIT_MS).unwrap();
@@ -523,7 +542,7 @@ fn external_change_pointer_keep_then_reload_resolves_dirty_feature() {
     for (cols, rows, stage) in [(150, 30, "normal"), (55, 16, "narrow")] {
         let fixture = Fixture::new(cols, rows);
         let terminal = fixture.launch();
-        click_footer(&terminal, "Edit");
+        click_scenario_edit(&terminal, cols);
         terminal.key("Enter").unwrap();
         terminal.write("LOCAL_ONLY_EDIT").unwrap();
         terminal.key("Enter").unwrap();

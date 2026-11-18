@@ -86,9 +86,17 @@ impl Fixture {
         }
     }
     fn launch(&self) -> Terminal {
-        let terminal = Terminal::launch(self.config.clone()).unwrap();
+        let terminal = self.launch_raw();
         terminal.expect_text("Alpha", true, 10000).unwrap();
         terminal
+    }
+    /// Launches without assuming which Explore pane is visible.
+    ///
+    /// Below 70 columns only the focused pane is drawn, and the first frame can
+    /// land at the terminal's default size before the configured resize, so a
+    /// caller that changes focus first must not gate on scenario text here.
+    fn launch_raw(&self) -> Terminal {
+        Terminal::launch(self.config.clone()).unwrap()
     }
     fn capture(&self, terminal: &Terminal, stage: &str) {
         let output = PathBuf::from(std::env::var_os("TESHI_EXPLORE_POINTER_ARTIFACTS").unwrap());
@@ -144,17 +152,16 @@ fn explore_run_and_detail_pointer_use_the_selected_scenario_at_normal_and_narrow
             fixture.config.cols = 55;
             fixture.config.rows = 16;
         }
-        let terminal = fixture.launch();
+        let terminal = fixture.launch_raw();
         if narrow {
             // doc-31/doc-36: below 70 columns only the focused pane is drawn,
             // so the scenario column has to be focused before it is clickable.
             terminal.key("Tab").unwrap();
             std::thread::sleep(Duration::from_millis(300));
         }
+        terminal.expect_text("Alpha", true, 10000).unwrap();
         terminal.click_text("Beta", 10000).unwrap();
-        terminal
-            .click_text(if narrow { " Run" } else { "Run [r]" }, 10000)
-            .unwrap();
+        terminal.click_text(" Run", 10000).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !fixture.trace.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -168,9 +175,7 @@ fn explore_run_and_detail_pointer_use_the_selected_scenario_at_normal_and_narrow
             fs::canonicalize(&fixture.project).unwrap()
         );
         terminal.expect_text("1 failed", true, 10000).unwrap();
-        terminal
-            .click_text(if narrow { " Detail" } else { "Detail [Enter]" }, 10000)
-            .unwrap();
+        terminal.click_text(" Detail", 10000).unwrap();
         terminal
             .expect_text("POINTER_FAILURE_EVIDENCE", true, 10000)
             .unwrap();
@@ -211,7 +216,7 @@ fn deleted_feature_pointer_shows_head_content_without_running_or_recreating_the_
     terminal.click_text("DELETED_SCENARIO", 10000).unwrap();
     terminal.expect_text("DELETED_STEP", true, 10000).unwrap();
     fixture.capture(&terminal, "deleted-head-preview");
-    terminal.click_text("Run [r]", 10000).unwrap();
+    terminal.click_text(" Run", 10000).unwrap();
     std::thread::sleep(Duration::from_millis(150));
     assert!(!fixture.trace.exists(), "deleted content reached runner");
     assert!(!deleted.exists(), "deleted source was recreated");
@@ -228,7 +233,7 @@ fn deleted_feature_pointer_shows_head_content_without_running_or_recreating_the_
 fn quit_modal_owns_pointer_and_no_keeps_unsaved_feature_content() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
-    terminal.click_text("Edit [e]", 10000).unwrap();
+    terminal.click_text(" Edit", 10000).unwrap();
     terminal.key("Enter").unwrap();
     terminal.write("POINTER_DIRTY").unwrap();
     terminal.key("Enter").unwrap();

@@ -181,7 +181,10 @@ fn capture(terminal: &Terminal, name: &str) {
 /// new agent).
 fn focus_composer(terminal: &Terminal) {
     terminal.key("Enter").unwrap();
-    terminal.expect_text("[INPUT]", true, 5000).unwrap();
+    // The composer placeholder only paints while the input owns focus.
+    terminal
+        .expect_text("Type your message...", true, 5000)
+        .unwrap();
 }
 
 fn command(terminal: &Terminal, command: &str) {
@@ -406,9 +409,12 @@ fn mindmap_tree_pointer_takes_keyboard_focus_from_ai_pane() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
     mindmap(&terminal);
+    // Enter focuses the AI panel, a second Enter arms the composer; the
+    // placeholder is the only text that marks an armed input now.
+    terminal.key("Enter").unwrap();
     terminal.key("Enter").unwrap();
     terminal
-        .expect_text("Return Tree [Esc]", true, 5000)
+        .expect_text("Type your message...", true, 5000)
         .unwrap();
     terminal.click_text("SHARED_ENTRY", 5000).unwrap();
     capture(&terminal, "mindmap-tree-click-from-ai-focus");
@@ -460,7 +466,10 @@ fn ai_input_pointer_click_takes_text_focus() {
     let terminal = fixture.launch();
     terminal.key("3").unwrap();
     terminal.expect_text("AI Chat", true, 5000).unwrap();
-    terminal.expect_text("Focus [i/Enter]", true, 5000).unwrap();
+    // The composer starts blurred: its focus placeholder is absent.
+    terminal
+        .expect_text("Type your message...", false, 5000)
+        .unwrap();
     let (col, row) = locate(&terminal, "╭────────────────");
     terminal
         .write(&format!(
@@ -472,7 +481,9 @@ fn ai_input_pointer_click_takes_text_focus() {
         ))
         .unwrap();
     capture(&terminal, "ai-input-pointer-focus");
-    terminal.expect_text("Send [Enter]", true, 1000).unwrap();
+    terminal
+        .expect_text("Type your message...", true, 1000)
+        .unwrap();
     terminal.write("POINTER_INPUT_TEXT").unwrap();
     terminal
         .expect_text("POINTER_INPUT_TEXT", true, 5000)

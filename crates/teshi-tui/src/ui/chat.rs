@@ -789,17 +789,17 @@ pub(super) fn render_chat_panel(
 /// approval badge, so the session ID outlives the agent name and sidebar hint
 /// on narrow panels instead of being clipped mid-ID.
 fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line<'static> {
-    // Block titles start after the left corner; approval and Chats chips keep
-    // a one-cell gap so the session ID never lands under a clickable control.
+    // Block titles start after the left corner. Each chip reserve already keeps
+    // its own gap, so do not subtract a second shared gap or the session ID
+    // loses its last column on a 40-wide panel beside Manual.
     let title_x = area.x + 1;
     let approval_reserve = approval_badge_label(app)
         .map(|label| label.width() as u16 + 2)
         .unwrap_or(0);
     let chats_reserve = chats_chip_reserve(app, area, placement);
-    let room =
-        area.width
-            .saturating_sub(2 + approval_reserve + chats_reserve)
-            .saturating_sub(u16::from(approval_reserve > 0 || chats_reserve > 0)) as usize;
+    let room = area
+        .width
+        .saturating_sub(2 + approval_reserve + chats_reserve) as usize;
 
     let mut title = Line::from(Span::styled(
         crate::i18n::t("chat.panel.title"),
