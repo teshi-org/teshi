@@ -61,7 +61,24 @@ teshi update --force-close           # close remaining processes from this insta
 teshi update --retry-install --force-close
 ```
 
-`teshi update` starts installation automatically after it finds a verified candidate. `--yes` is retained for compatibility and does not bypass operating-system elevation, process coordination, or installation ownership checks. `--check` remains metadata-only and never downloads or installs a payload. `--json` prints one final object; progress still goes to stderr.
+`teshi update` starts installation automatically after it finds a verified candidate. Before
+checking GitHub or downloading, it enumerates processes that belong to the exact installation
+being updated. On an interactive terminal it lists their PIDs and executable paths and asks
+`Close them and continue? [y/N]`; only an explicit `y`/`yes` grants the verified force close
+(and the graceful request still runs first). `--json` and other non-interactive invocations
+never prompt: they fail with exit code 1 and a `busy` error that names every process and the
+next command, so no payload is downloaded and no helper transaction starts. `--check` never
+runs this preflight. `--yes` is retained for compatibility and does not bypass operating-system
+elevation, process coordination, or installation ownership checks. `--json` prints one final
+object; progress still goes to stderr.
+
+A pending update asks long-running console processes to exit through an
+installation-scoped marker (`exit-request.json` next to the transaction). The TUI observes it
+and routes through the ordinary quit ladder, so unsaved work still asks first; desktop windows
+receive a normal close request, and registered daemons get a verified HTTP shutdown. Processes
+with no graceful channel (for example MCP servers) are reported and require
+`--force-close`. `teshi update --status` prints `Next:` with the exact retry command and
+whether a verified payload is cached.
 
 | Exit code | Meaning |
 |-----------|---------|

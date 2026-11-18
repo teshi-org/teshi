@@ -391,9 +391,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         footer_row,
     );
     // Quit stays pinned to the bottom-right of every tab so it is always
-    // discoverable and clickable. The label is an action name only — keyboard
-    // chords live in the docs, not in the footer strip. Tab footers render
-    // into the remaining width and cannot cover the control.
+    // discoverable and clickable. The label advertises Ctrl+Q (matching the
+    // host-safe `:q` docs) so the chord is visible without leaving the strip.
+    // Tab footers render into the remaining width and cannot cover the control.
     let exit_label = format!(" {} ", crate::i18n::t("footer.exit"));
     let exit_label_width = exit_label.width() as u16;
     let full_footer = footer_row;
@@ -415,10 +415,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
-    // Tab workflows live in pane strips, so the footer left side stays empty.
+    // Tab workflows live in pane strips; the global strip is Settings only.
     // Give the global strip the full remaining width when it fits; narrow
     // terminals drop it rather than back-filling contextual controls.
-    const APP_ACTIONS_WIDTH: u16 = 40;
+    const APP_ACTIONS_WIDTH: u16 = 20;
     let app_footer = (footer.width >= APP_ACTIONS_WIDTH).then_some(footer);
 
     if app.command_line.is_some() {
@@ -552,17 +552,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_pointer_feedback(frame, app);
 }
 
-/// Draw the compact global action strip (Sessions / Agents / Models / Save / Settings).
+/// Draw the compact global action strip (Settings only).
 ///
-/// The strip owns the footer row (aside from Exit). Labels are action names only.
+/// The strip owns the footer row (aside from Exit). Settings advertises its
+/// F10 chord — the same binding icode surfaces in its Textual footer.
 fn render_app_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let actions = [
-        (crate::i18n::t("footer.sessions"), Action::SessionPanelOpen),
-        (crate::i18n::t("footer.agents"), Action::AgentPanelOpen),
-        (crate::i18n::t("footer.models"), Action::ModelPanelOpen),
-        (crate::i18n::t("footer.save"), Action::Save),
-        (crate::i18n::t("footer.settings"), Action::SettingsPanelOpen),
-    ];
+    let actions = [(crate::i18n::t("footer.settings"), Action::SettingsPanelOpen)];
     render_action_bar(frame, &mut app.clickable_regions, area, "", &actions, false);
 }
 
@@ -7999,8 +7994,8 @@ mod truncate_tests {
 
     #[test]
     fn global_footer_lists_semantic_actions_on_every_tab() {
-        // Contextual workflows live in pane strips; the footer left side stays
-        // empty on every tab when the global strip fits.
+        // Contextual workflows live in pane strips; the global footer keeps
+        // Settings (with its F10 chord) and Exit (with Ctrl+Q) only.
         for tab in [
             crate::app::MainTab::Explore,
             crate::app::MainTab::MindMap,
@@ -8021,38 +8016,47 @@ mod truncate_tests {
                 .map(|x| buffer[(x, 23)].symbol())
                 .collect::<String>();
             assert!(
-                !text.contains("Navigate") && !text.contains('['),
-                "footer left stays free of key tips on {tab:?}: {text}"
+                !text.contains("Navigate")
+                    && !text.contains("Sessions")
+                    && !text.contains("Agents")
+                    && !text.contains("Models")
+                    && !text.contains("Save"),
+                "footer left keeps Settings only on {tab:?}: {text}"
             );
             assert!(
-                text.contains("Sessions"),
-                "the global strip stays on {tab:?}: {text}"
+                text.contains("Settings [F10]"),
+                "the Settings control stays on {tab:?}: {text}"
             );
-            for label in ["Agents", "Models", "Save", "Settings"] {
-                assert!(text.contains(label), "{tab:?}: {text}");
-            }
-            for (label, action) in [
-                ("Sessions", Action::SessionPanelOpen),
-                ("Agents", Action::AgentPanelOpen),
-                ("Models", Action::ModelPanelOpen),
-                ("Save", Action::Save),
-                ("Settings", Action::SettingsPanelOpen),
-            ] {
-                let byte = text.rfind(label).unwrap();
-                let offset = unicode_width::UnicodeWidthStr::width(&text[..byte]) as u16;
-                assert_eq!(
-                    buffer[(offset, 23)].fg,
-                    crate::theme::PRIMARY,
-                    "{tab:?} {label} keeps semantic emphasis: {text}"
-                );
-                assert!(
-                    app.clickable_regions.iter().any(|region| matches!(
-                        region,
-                        ClickableRegion::ActionButton { action: found, .. } if found == &action
-                    )),
-                    "{label} is clickable"
-                );
-            }
+            assert!(
+                text.contains("Exit [Ctrl+Q]"),
+                "Exit advertises Ctrl+Q on {tab:?}: {text}"
+            );
+            // footer_line paints bracketed chords in PRIMARY; the action name
+            // stays FOOTER_DESC so the key tip is the discoverable accent.
+            let byte = text.find("[F10]").unwrap();
+            let offset = unicode_width::UnicodeWidthStr::width(&text[..byte]) as u16;
+            assert_eq!(
+                buffer[(offset, 23)].fg,
+                crate::theme::PRIMARY,
+                "{tab:?} Settings advertises F10: {text}"
+            );
+            let exit_byte = text.find("[Ctrl+Q]").unwrap();
+            let exit_offset = unicode_width::UnicodeWidthStr::width(&text[..exit_byte]) as u16;
+            assert_eq!(
+                buffer[(exit_offset, 23)].fg,
+                crate::theme::PRIMARY,
+                "{tab:?} Exit advertises Ctrl+Q: {text}"
+            );
+            assert!(
+                app.clickable_regions.iter().any(|region| matches!(
+                    region,
+                    ClickableRegion::ActionButton {
+                        action: Action::SettingsPanelOpen,
+                        ..
+                    }
+                )),
+                "Settings is clickable"
+            );
             let exit = app
                 .clickable_regions
                 .iter()
@@ -8107,7 +8111,10 @@ mod truncate_tests {
                 .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
                 .collect::<String>();
             assert!(label.contains('退'), "tab {index}: {label}");
-            assert!(!label.contains("^q"), "tab {index}: {label}");
+            assert!(
+                label.contains("Ctrl+Q"),
+                "tab {index} advertises the quit chord: {label}"
+            );
         }
     }
 
@@ -8240,8 +8247,7 @@ mod truncate_tests {
             .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
             .collect::<String>();
         assert!(row.starts_with(":wq"), "{row}");
-        assert!(row.contains("Exit"), "{row}");
-        assert!(!row.contains("^q"), "{row}");
+        assert!(row.contains("Exit [Ctrl+Q]"), "{row}");
         assert!(
             !app.clickable_regions.iter().any(|region| matches!(
                 region,

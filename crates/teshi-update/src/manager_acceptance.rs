@@ -475,23 +475,34 @@ end;
         ],
         &project,
     );
+    // Without consent (non-TTY) the CLI refuses before staging and names the
+    // blocker; no helper transaction starts, so the old bundle is untouched.
     let retry = run_update_with_wait(&cli, &["--retry-install", "--json"], "1");
     assert_eq!(
         retry.status.code(),
-        Some(3),
+        Some(1),
         "{}\n{}",
         String::from_utf8_lossy(&retry.stdout),
         String::from_utf8_lossy(&retry.stderr)
     );
-    await_helper(&root, UpdateStatus::Errored);
+    let value: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(value["status"], "errored");
+    assert_eq!(value["error"]["code"], "busy", "{value}");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains(&blocker_id.pid.to_string()), "{message}");
+    assert!(message.contains("--force-close"), "{message}");
     assert!(
         blocker.0.try_wait().unwrap().is_none(),
         "default update must not force-close MCP"
     );
-    let failure = crate::diagnostics::last_failure(&root).unwrap();
-    assert_eq!(failure.stage, "process_exit");
-    assert!(failure.error.message.contains(&blocker_id.pid.to_string()));
-    assert!(failure.error.message.contains("--force-close"));
+    let status = run_update(&cli, &["--status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(
+        value["next_step"]
+            .as_str()
+            .is_some_and(|step| step.contains("--force-close")),
+        "{value}"
+    );
     verify_bundle(&root, &old).unwrap();
     let retry = run_update_with_wait(&cli, &["--retry-install", "--force-close", "--json"], "1");
     assert_eq!(

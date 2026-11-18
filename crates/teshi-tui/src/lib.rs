@@ -368,6 +368,15 @@ pub fn run() -> Result<()> {
     guard.enable_mouse_capture()?;
     let mut terminal_title = terminal_title::TerminalTitle::new();
     let test_frame_path = std::env::var_os("TESHI_TEST_FRAME_PATH").map(std::path::PathBuf::from);
+    // A pending installation update asks console processes to exit through an
+    // installation-scoped marker; source builds resolve no root and never watch.
+    let mut update_exit = teshi_update::install::Installation::detect(
+        &std::env::current_exe()?,
+        &teshi_core::version::build_identity(),
+    )
+    .ok()
+    .and_then(|installation| installation.root)
+    .map(|root| teshi_update::processes::ExitRequestWatcher::new(&root));
 
     while !app.should_quit {
         app.poll_runner_events();
@@ -384,6 +393,11 @@ pub fn run() -> Result<()> {
         app.poll_external_feature_changes();
         app.poll_external_requirement_changes();
         app.poll_status_message_expiry();
+        if let Some(watcher) = update_exit.as_mut()
+            && watcher.poll().is_some()
+        {
+            app.request_update_exit();
+        }
         app.screenshot.poll();
         app.inline_images.poll();
         app.poll_web_review();

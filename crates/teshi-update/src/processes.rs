@@ -243,7 +243,188 @@ pub fn request_daemon_shutdown(endpoint: &DaemonEndpoint) -> Result<()> {
     Ok(())
 }
 
-/// Attempts a verified daemon request and a normal desktop-window close.
+/// Directory under an installation root holding updater state.
+const UPDATE_STATE: &str = ".teshi-update";
+/// Exit-request marker read by long-running Teshi processes.
+const EXIT_REQUEST: &str = "exit-request.json";
+/// Requests older than this are ignored, even after a crashed helper.
+pub const EXIT_REQUEST_TTL_SECS: i64 = 600;
+
+/// Installation-scoped request for long-running Teshi processes to exit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitRequest {
+    /// Protocol version; only `1` is accepted.
+    pub schema: u32,
+    /// Pending transaction that asked for the exit.
+    pub transaction: String,
+    /// Unix time of the request.
+    pub requested_at: i64,
+}
+
+/// Removes the request when the close phase ends, on success or failure.
+pub struct ExitRequestGuard {
+    path: PathBuf,
+}
+impl Drop for ExitRequestGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Publishes an exit request owned by the pending transaction.
+///
+/// # Errors
+/// Rejects linked paths and invalid transaction identifiers.
+pub fn publish_exit_request(root: &Path, transaction: &str, now: i64) -> Result<ExitRequestGuard> {
+    if !transaction.starts_with("transaction-") || transaction.contains(['/', '\\', ':']) {
+        return Err(crate::invalid("Invalid update transaction id"));
+    }
+    let relative = Path::new(UPDATE_STATE);
+    reject_links(root, relative)?;
+    private_directory(&root.join(relative))?;
+    let relative = relative.join(EXIT_REQUEST);
+    reject_links(root, &relative)?;
+    let path = root.join(&relative);
+    write_json(
+        &path,
+        &ExitRequest {
+            schema: 1,
+            transaction: transaction.into(),
+            requested_at: now,
+        },
+    )?;
+    Ok(ExitRequestGuard { path })
+}
+
+/// Reads a fresh exit request that matches the pending transaction.
+///
+/// The pending tie keeps a marker left by an interrupted update from quitting a
+/// later session; the TTL covers a helper that died before cleaning it up.
+pub fn exit_requested(root: &Path, now: i64) -> Option<ExitRequest> {
+    let relative = Path::new(UPDATE_STATE).join(EXIT_REQUEST);
+    reject_links(root, &relative).ok()?;
+    let data = fs::read(root.join(&relative)).ok()?;
+    if data.len() > 4096 {
+        return None;
+    }
+    let request: ExitRequest = serde_json::from_slice(&data).ok()?;
+    if request.schema != 1
+        || request.requested_at > now
+        || now - request.requested_at > EXIT_REQUEST_TTL_SECS
+    {
+        return None;
+    }
+    let pending = root.join(UPDATE_STATE).join("pending.json");
+    let pending: String = serde_json::from_slice(&fs::read(pending).ok()?).ok()?;
+    (pending == request.transaction).then_some(request)
+}
+
+/// Polls the installation for one exit request, delivering each request once.
+pub struct ExitRequestWatcher {
+    root: PathBuf,
+    next_poll: Instant,
+    delivered: Option<(String, i64)>,
+}
+
+impl ExitRequestWatcher {
+    /// Watches one installation root; source builds simply have no root.
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            next_poll: Instant::now(),
+            delivered: None,
+        }
+    }
+
+    /// Returns a request at most once per `(transaction, requested_at)` pair.
+    ///
+    /// The latch prevents a still-present marker from forcing a second quit
+    /// past the unsaved-work confirmation.
+    pub fn poll(&mut self) -> Option<ExitRequest> {
+        let now = Instant::now();
+        if now < self.next_poll {
+            return None;
+        }
+        self.next_poll = now + Duration::from_millis(500);
+        let request = exit_requested(&self.root, chrono::Utc::now().timestamp())?;
+        let key = (request.transaction.clone(), request.requested_at);
+        if self.delivered.as_ref() == Some(&key) {
+            return None;
+        }
+        self.delivered = Some(key);
+        Some(request)
+    }
+}
+
+/// Running processes belonging to this executable's installation, if marked.
+///
+/// # Errors
+/// Returns installation, process enumeration and filesystem errors.
+pub fn installation_processes_for(
+    executable: &Path,
+    identity: &teshi_core::version::BuildIdentity,
+) -> Result<Vec<ProcessIdentity>> {
+    let installation = crate::install::Installation::detect(executable, identity)?;
+    match (installation.root.as_deref(), installation.bundle.as_ref()) {
+        (Some(root), Some(bundle)) => installation_processes(root, bundle),
+        _ => processes_for_images(&[executable.to_path_buf()]),
+    }
+}
+
+/// One `PID <pid> <path>` line per process, for prompts and errors.
+pub fn describe_processes(processes: &[ProcessIdentity]) -> String {
+    processes
+        .iter()
+        .map(|process| format!("PID {} {}", process.pid, process.executable.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Actionable description of the processes still holding this installation.
+pub fn busy_message(processes: &[ProcessIdentity], force_close: bool) -> String {
+    let mut message = String::from("Teshi processes from this installation are still running:");
+    if !processes.is_empty() {
+        message.push_str(&format!("\n{}", describe_processes(processes)));
+    }
+    if force_close {
+        message.push_str(
+            "\nForce close did not finish. Retry `teshi update --force-close`, or close the processes listed above. Unsaved work may be lost.",
+        );
+    } else {
+        message.push_str(
+            "\nClose them and retry, or allow a verified force close with `teshi update --force-close` (cached payload: `teshi update --retry-install --force-close`). Unsaved work may be lost.",
+        );
+    }
+    message
+}
+
+/// Whether a preflight may continue with the running installation processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosePlan {
+    /// Nothing is running.
+    Proceed,
+    /// Graceful exit first, then a verified force close after the timeout.
+    ForceClose,
+    /// Refuse before downloading; the caller reports the process list.
+    Stop,
+}
+
+/// Decides how to handle `occupying` running processes.
+///
+/// `consent` is the answer to an explicit prompt; `None` means non-interactive.
+pub fn plan_close(occupying: usize, force_close: bool, consent: Option<bool>) -> ClosePlan {
+    if occupying == 0 {
+        return ClosePlan::Proceed;
+    }
+    if force_close || consent == Some(true) {
+        ClosePlan::ForceClose
+    } else {
+        ClosePlan::Stop
+    }
+}
+
+/// Attempts a verified daemon request, a normal desktop-window close, and the
+/// installation-wide exit request that console apps observe.
 /// Returns diagnostic text; an unsuccessful request never counts as process exit.
 pub(crate) fn request_exit(root: &Path, process: &ProcessIdentity) -> String {
     use std::io::Read;
@@ -379,6 +560,114 @@ mod tests {
             server.join().unwrap();
             assert!(is_running(&process).unwrap());
         }
+    }
+
+    fn exit_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".teshi-update")).unwrap();
+        write_json(
+            &root.path().join(".teshi-update/pending.json"),
+            &"transaction-test",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn exit_request_needs_a_matching_pending_transaction_and_fresh_timestamp() {
+        let root = exit_root();
+        let now = chrono::Utc::now().timestamp();
+        let guard = publish_exit_request(root.path(), "transaction-test", now).unwrap();
+        assert_eq!(
+            exit_requested(root.path(), now).unwrap().transaction,
+            "transaction-test"
+        );
+        assert!(
+            exit_requested(root.path(), now + EXIT_REQUEST_TTL_SECS + 1).is_none(),
+            "stale requests never quit a later session"
+        );
+        assert!(
+            exit_requested(root.path(), now - 1).is_none(),
+            "future timestamps are rejected"
+        );
+        drop(guard);
+        assert!(
+            exit_requested(root.path(), now).is_none(),
+            "the guard removes the marker"
+        );
+
+        let guard = publish_exit_request(root.path(), "transaction-other", now).unwrap();
+        assert!(
+            exit_requested(root.path(), now).is_none(),
+            "only the pending transaction may quit participants"
+        );
+        drop(guard);
+        assert!(publish_exit_request(root.path(), "../escape", now).is_err());
+    }
+
+    #[test]
+    fn watcher_delivers_one_request_once_and_rearms_for_the_next() {
+        let root = exit_root();
+        let now = chrono::Utc::now().timestamp();
+        let guard = publish_exit_request(root.path(), "transaction-test", now).unwrap();
+        let mut watcher = ExitRequestWatcher::new(root.path());
+        assert!(watcher.poll().is_some(), "the first poll delivers");
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            watcher.poll().is_none(),
+            "the same request is never delivered twice"
+        );
+
+        drop(guard);
+        // A later transaction is a distinct request even within the same second.
+        let guard = publish_exit_request(root.path(), "transaction-second", now).unwrap();
+        write_json(
+            &root.path().join(".teshi-update/pending.json"),
+            &"transaction-second",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            watcher.poll().is_some(),
+            "a new request re-arms the watcher"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn close_plan_requires_consent_before_anything_runs() {
+        assert_eq!(plan_close(0, false, None), ClosePlan::Proceed);
+        assert_eq!(plan_close(0, true, None), ClosePlan::Proceed);
+        assert_eq!(plan_close(2, true, None), ClosePlan::ForceClose);
+        assert_eq!(plan_close(2, false, Some(true)), ClosePlan::ForceClose);
+        assert_eq!(plan_close(2, false, Some(false)), ClosePlan::Stop);
+        assert_eq!(plan_close(2, false, None), ClosePlan::Stop);
+    }
+
+    #[test]
+    fn busy_message_names_each_process_and_both_retry_paths() {
+        let processes = vec![
+            ProcessIdentity {
+                pid: 11,
+                executable: PathBuf::from("/opt/teshi/teshi"),
+                started: "start-1".into(),
+            },
+            ProcessIdentity {
+                pid: 12,
+                executable: PathBuf::from("/opt/teshi/teshi-update-helper"),
+                started: "start-2".into(),
+            },
+        ];
+        let message = busy_message(&processes, false);
+        assert!(message.contains("PID 11 /opt/teshi/teshi"), "{message}");
+        assert!(message.contains("PID 12 /opt/teshi/teshi-update-helper"));
+        assert!(message.contains("teshi update --force-close"));
+        assert!(message.contains("teshi update --retry-install --force-close"));
+        assert!(message.contains("Unsaved work"));
+        assert_eq!(
+            describe_processes(&processes),
+            "PID 11 /opt/teshi/teshi\nPID 12 /opt/teshi/teshi-update-helper"
+        );
     }
 }
 #[cfg(not(windows))]

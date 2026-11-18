@@ -89,8 +89,8 @@ fn en(key: &str) -> Option<&'static str> {
         }
         "settings.close_btn" => " Close ",
         "settings.autosave" => " Changes are saved as you make them ",
-        "footer.exit" => "Exit",
-        "footer.settings" => " Settings",
+        "footer.exit" => "Exit [Ctrl+Q]",
+        "footer.settings" => " Settings [F10]",
         "footer.sessions" => " Sessions",
         "footer.agents" => " Agents",
         "footer.models" => " Models",
@@ -1057,6 +1057,9 @@ fn en(key: &str) -> Option<&'static str> {
         "status.run_not_started" => "Run not started: {first_line}",
         "status.runner_error" => "Runner error: {message}",
         "status.saved" => "Saved {arg0}",
+        "status.update_exit_requested" => {
+            "An update is waiting; Teshi will close so it can replace its files"
+        }
         "status.selected_acp_agent_remembered_for_new_sessions" => {
             "Selected ACP Agent {arg0}; remembered for new sessions"
         }
@@ -1143,8 +1146,8 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         }
         "settings.close_btn" => " 关闭 ",
         "settings.autosave" => " 更改会立即保存 ",
-        "footer.exit" => "退出",
-        "footer.settings" => " 设置",
+        "footer.exit" => "退出 [Ctrl+Q]",
+        "footer.settings" => " 设置 [F10]",
         "footer.sessions" => " 会话",
         "footer.agents" => " Agents",
         "footer.models" => " 模型",
@@ -2033,6 +2036,7 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "status.run_not_started" => "运行未启动：{first_line}",
         "status.runner_error" => "运行器错误：{message}",
         "status.saved" => "已保存 {arg0}",
+        "status.update_exit_requested" => "更新正在等待，Teshi 将退出以便替换文件",
         "status.selected_acp_agent_remembered_for_new_sessions" => {
             "已选择 ACP Agent {arg0}；将用于新会话"
         }

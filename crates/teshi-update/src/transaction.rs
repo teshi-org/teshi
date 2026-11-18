@@ -347,10 +347,20 @@ fn close_installation_processes(
     let deadline = Instant::now() + participant_wait();
     let mut requested = BTreeSet::new();
     let mut audit = Vec::new();
+    // Published lazily so an idle installation never leaves a marker behind;
+    // the guard removes it on every exit path, including errors.
+    let mut exit_request: Option<crate::processes::ExitRequestGuard> = None;
     loop {
         let processes = crate::processes::installation_processes(root, old)?;
         if processes.is_empty() {
             return Ok(());
+        }
+        if exit_request.is_none() {
+            exit_request = Some(crate::processes::publish_exit_request(
+                root,
+                id,
+                chrono::Utc::now().timestamp(),
+            )?);
         }
         for process in &processes {
             if requested.insert((process.pid, process.started.clone())) {
@@ -377,17 +387,10 @@ fn close_installation_processes(
             if processes.is_empty() {
                 return Ok(());
             }
-            let description = processes
-                .iter()
-                .map(|process| format!("{} ({})", process.pid, process.executable.display()))
-                .collect::<Vec<_>>()
-                .join(", ");
             if !force {
                 return Err(UpdateError::new(
                     ErrorCode::Busy,
-                    format!(
-                        "Teshi processes are still running: {description}. Close them or retry with --force-close; unsaved work may be lost."
-                    ),
+                    crate::processes::busy_message(&processes, false),
                 ));
             }
             for process in processes {
@@ -404,7 +407,10 @@ fn close_installation_processes(
             if !remaining.is_empty() {
                 return Err(UpdateError::new(
                     ErrorCode::Busy,
-                    format!("New installation processes appeared during close: {remaining:?}"),
+                    format!(
+                        "New installation processes appeared during close.\n{}",
+                        crate::processes::busy_message(&remaining, true)
+                    ),
                 ));
             }
             return Ok(());

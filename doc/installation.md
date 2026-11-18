@@ -60,12 +60,17 @@ when no updater is running. Removing a cache entry requires downloading it again
 remove installation `.teshi-update/pending.json` or transaction journals to clear cache.
 
 Closing the TUI or browser does not necessarily stop its background daemon or MCP server.
-The updater now requests graceful shutdown of registered daemons from the same install
-and reports remaining processes. Use `teshi daemon stop` from that daemon's project, or
+When `teshi update` finds processes from the installation it is about to replace, it lists
+their PIDs and paths and, on an interactive terminal, asks whether to close them before
+downloading anything. A TUI exits on its own when it observes the pending update's
+exit request (unsaved work still asks first); desktop windows receive a normal close request,
+and registered daemons are asked to shut down over their verified loopback endpoint. Use
+`teshi daemon stop` from that daemon's project for a daemon that does not respond, or
 explicitly run `teshi update --force-close` / `teshi update --retry-install --force-close`
-to permit termination after the graceful-exit deadline. Force close can lose unsaved work;
-it targets verified process generations in that installation, not other Teshi copies.
-The setup.exe-only self-update eligibility rules above still apply.
+to permit termination after the graceful-exit deadline. Non-interactive runs fail fast with
+the process list and that next step instead of waiting for the helper timeout. Force close can
+lose unsaved work; it targets verified process generations in that installation, not other
+Teshi copies. The setup.exe-only self-update eligibility rules above still apply.
 
 MSI installations skip the updater's installation-level process and daemon registration.
 Running `teshi web` and stopping its daemon do not require write access to the MSI

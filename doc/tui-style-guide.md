@@ -10,7 +10,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 3. Rounded borders; `▌` for user messages and for the finished answer (green), `│` guides for chat activity and unfinished replies. Keep header/status/footer rows one line high.
 4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Chat conversation rows use the quieter CHAT_CHIP_BG/FG fill. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
-6. Footer action labels use PRIMARY bold on a full-width FOOTER_BG strip; status text uses FOOTER_DESC. Do not paint keyboard chords into the footer. Pane action strips (bottom row inside a panel) reuse the same PRIMARY bold labels on FOOTER_BG for the reserved row only.
+6. Footer action labels use PRIMARY bold on a full-width FOOTER_BG strip; status text uses FOOTER_DESC. The global footer advertises chords only on **Settings [F10]** and **Exit [Ctrl+Q]**; other pane action strips keep action names without chords. Pane action strips (bottom row inside a panel) reuse the same PRIMARY bold labels on FOOTER_BG for the reserved row only.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
 9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Vertical scrollbars are a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Horizontal scrollbars use a `▄` half-block foreground on one row with the same track/thumb colours, keeping the bar visually thin while preserving the full-row pointer target. Never draw a bar with `─`, `━`, `│`, or `┃`.
@@ -179,20 +179,19 @@ AI [3]
 │ New [a] Close[x]│││› Continue the review…              Send ↵ ││
 │                 ││╰──────────────────────────────────────────╯│
 ╰─────────────────╯╰────────────────────────────────────────────╯
-                                      Sessions Agents Models Save Settings Exit
+                                      Settings [F10]              Exit [Ctrl+Q]
 ```
 
 `:` from any Normal/Browse mode replaces the active tab's footer bar with the
 command-line prompt until Enter runs it or Esc closes it. The prompt keeps the
-**Exit** control on the right and needs no control chord, so `:q` stays usable
-where a host terminal also binds `Ctrl+Q`. The prompt itself is not advertised
-in the footer beyond the `:` you type. Footer labels are action names only —
-keyboard chords do not appear in the strip.
+**Exit [Ctrl+Q]** control on the right and needs no control chord, so `:q` stays
+usable where a host terminal also binds `Ctrl+Q`. The prompt itself is not
+advertised in the footer beyond the `:` you type.
 
 ```text
 Command line prompt
 ━━━━━━━━━━━━━━━━━━━
-:wq▏                                                            Exit
+:wq▏                                                     Exit [Ctrl+Q]
 ```
 
 ```text
@@ -202,7 +201,7 @@ Requirements [4]
 │Shared visual language ││# Shared visual language││                  │
 │ Filter  New  Actions  ││ Edit  Point  New       ││                  │
 ╰───────────────────────╯╰───────────────────────╯╰──────────────────╯
-                                      Sessions Agents Models Save Settings Exit
+                                      Settings [F10]              Exit [Ctrl+Q]
 ```
 
 ```text
@@ -212,7 +211,7 @@ Test Points [5]
 │Visual style       ││Focus is visible          ││                    │
 │ Approve Reject Filter││Verify panel focus     ││                    │
 ╰───────────────────╯╰─────────────────────────╯╰────────────────────╯
-                                      Sessions Agents Models Save Settings Exit
+                                      Settings [F10]              Exit [Ctrl+Q]
 ```
 
 ```text
