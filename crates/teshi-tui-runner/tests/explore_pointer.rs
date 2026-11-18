@@ -156,8 +156,24 @@ fn explore_run_and_detail_pointer_use_the_selected_scenario_at_normal_and_narrow
         if narrow {
             // doc-31/doc-36: below 70 columns only the focused pane is drawn,
             // so the scenario column has to be focused before it is clickable.
-            terminal.key("Tab").unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            // The project load can still reset focus to Features, and Tab from
+            // Steps clamps; alternate Tab/Shift+Tab until Scenarios paints.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                terminal.key("Tab").unwrap();
+                if terminal.expect_text("Alpha", true, 500).is_ok() {
+                    break;
+                }
+                terminal.key("Shift+Tab").unwrap();
+                if terminal.expect_text("Alpha", true, 500).is_ok() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "narrow Explore never painted the Scenarios pane:\n{}",
+                    terminal.screen().unwrap()
+                );
+            }
         }
         terminal.expect_text("Alpha", true, 10000).unwrap();
         terminal.click_text("Beta", 10000).unwrap();
