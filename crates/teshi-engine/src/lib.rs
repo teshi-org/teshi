@@ -26,6 +26,7 @@ pub mod runner_protocol;
 mod screen;
 mod sidecar;
 mod terminal;
+pub mod ui_locale;
 pub mod validation;
 mod venv;
 mod watcher;
@@ -146,6 +147,10 @@ pub use sidecar::{
     BrowserStartResult, ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
+pub use ui_locale::{
+    effective_from_system_locale, resolve_effective_ui_locale, resolve_feature_discovery_locale,
+    EffectiveUiLocale, UiLocalePreference, TESHI_FEATURE_LANGUAGE_ENV, TESHI_LOCALE_ENV,
+};
 pub use validation::{
     discover_feature_files, display_feature_path, resolve_feature_path, validate_feature_scope,
 };
