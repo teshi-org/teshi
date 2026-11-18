@@ -63,7 +63,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "preferences",
-        "Teshi settings: extra AI system-prompt sections",
+        "Teshi settings: UI language and AI prompt sections",
     ),
     ("agent-profile", "Select Native agent profile"),
     (
@@ -462,28 +462,7 @@ impl AgentThread {
             // Title generation is a side call: a failure leaves the fallback
             // label in place and must not surface as a chat error.
             crate::chat_title::PollResult::Failed => {}
-            // The model translated a Chinese conversation into English. Drop a
-            // matching incumbent too, so the Chinese first-message label
-            // replaces it instead of freezing the wrong language in place.
-            crate::chat_title::PollResult::Rejected => {
-                self.drop_title_in_wrong_language();
-            }
         }
-    }
-
-    /// Clear a generated title written in a different language than the
-    /// conversation. Returns true when a label was dropped.
-    fn drop_title_in_wrong_language(&mut self) -> bool {
-        let language = crate::chat_title::conversation_language(self.messages());
-        let mismatched = self
-            .generated_title
-            .as_deref()
-            .is_some_and(|title| !crate::chat_title::title_matches_language(title, language));
-        if mismatched {
-            self.generated_title = None;
-            self.refresh_display_title();
-        }
-        mismatched
     }
 
     /// Adopt a title published by the external agent; `None` clears it.
@@ -1317,6 +1296,9 @@ pub struct App {
     runner_cancel: Option<Sender<()>>,
     last_external_check: Instant,
     pub(crate) feature_discovery_root: Option<PathBuf>,
+    /// When true, UI locale changes recompute `features/<locale>/` discovery.
+    /// Cleared for explicit `-R` scans that intentionally ignore language dirs.
+    feature_locale_follows_ui: bool,
     feature_discovery_worker: Option<crate::feature_discovery::BackgroundDiscovery>,
     pub(crate) lazy_features: Option<crate::lazy_features::LazyFeatures>,
     external_change_prompt: Option<ExternalChangePrompt>,
@@ -1425,6 +1407,13 @@ pub struct App {
     /// loaded by the interactive loop, not by the library constructors, so
     /// unit tests never read the user's real settings file.
     pub inject_prompt_sections: bool,
+    /// Persisted UI locale preference (`system` / `en` / `zh-CN`).
+    ///
+    /// `App::from_project_directory` reads it once because Feature discovery
+    /// must know the locale before the first paint; the interactive loop then
+    /// reloads it and installs the string catalogs. Test-only constructors keep
+    /// `system` so they never read the developer's settings file.
+    pub ui_locale: teshi_engine::UiLocalePreference,
     // ── Model profile state ─────────────────────────────────
     pub model_profiles: Vec<crate::profiles::ModelProfile>,
     pub model_active_id: Option<String>,
@@ -1976,6 +1965,7 @@ impl App {
 
         self.project = prepared.project;
         self.feature_discovery_root = None;
+        self.feature_locale_follows_ui = false;
         self.feature_discovery_worker = None;
         self.lazy_features = prepared.lazy_features;
         self.git_status = prepared.git_status;
@@ -2535,14 +2525,20 @@ impl App {
     ) -> Result<Self> {
         let identity = teshi_engine::ProjectIdentity::new(root)?;
         let root = identity.root();
-        let locale = std::env::var("TESHI_FEATURE_LANGUAGE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(sys_locale::get_locale);
+        // Feature language follows the resolved UI locale unless
+        // TESHI_FEATURE_LANGUAGE overrides it. Gherkin dialect inside files
+        // is unchanged.
+        let preference = teshi_engine::load_settings()
+            .map(|settings| settings.ui_locale)
+            .unwrap_or_default();
+        let locale = teshi_engine::resolve_feature_discovery_locale(
+            preference,
+            sys_locale::get_locale().as_deref(),
+        );
         let discovery_root = if recursive {
             root.to_path_buf()
         } else {
-            crate::feature_discovery::default_feature_directory(root, locale.as_deref())?
+            crate::feature_discovery::default_feature_directory(root, Some(locale.as_str()))?
         };
         let scan_recursively = recursive || discovery_root != root;
         let project = BddProject {
@@ -2558,6 +2554,12 @@ impl App {
             project,
         )?;
         app.feature_discovery_root = Some(discovery_root.clone());
+        // `-R` keeps the whole project root; otherwise locale changes may retarget
+        // features/<locale>/ without reopening the project.
+        app.feature_locale_follows_ui = !recursive;
+        // Keep the preference that drove Feature discovery; catalogs are
+        // installed later by `load_app_preferences` before the first paint.
+        app.ui_locale = preference;
         // Deleted Files must still be reported for a recursive project even though
         // only the selected Feature is parsed.
         app.git_status.scope = if scan_recursively {
@@ -2725,6 +2727,7 @@ impl App {
             runner_cancel: None,
             last_external_check: Instant::now(),
             feature_discovery_root: None,
+            feature_locale_follows_ui: false,
             feature_discovery_worker: None,
             lazy_features: None,
             external_change_prompt: None,
@@ -2786,6 +2789,7 @@ impl App {
             config,
             auth_panel_active: false,
             inject_prompt_sections: true,
+            ui_locale: teshi_engine::UiLocalePreference::System,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -2957,6 +2961,7 @@ impl App {
             runner_cancel: None,
             last_external_check: Instant::now(),
             feature_discovery_root: None,
+            feature_locale_follows_ui: false,
             feature_discovery_worker: None,
             lazy_features: None,
             external_change_prompt: None,
@@ -3001,6 +3006,7 @@ impl App {
             config,
             auth_panel_active: false,
             inject_prompt_sections: true,
+            ui_locale: teshi_engine::UiLocalePreference::System,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -3163,6 +3169,7 @@ impl App {
             runner_cancel: None,
             last_external_check: Instant::now(),
             feature_discovery_root: None,
+            feature_locale_follows_ui: false,
             feature_discovery_worker: None,
             lazy_features: None,
             external_change_prompt: None,
@@ -3207,6 +3214,7 @@ impl App {
             config,
             auth_panel_active: false,
             inject_prompt_sections: true,
+            ui_locale: teshi_engine::UiLocalePreference::System,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -4366,18 +4374,13 @@ impl App {
     /// Newest-wins: any earlier refresh is cancelled first, and a missing model
     /// configuration silently leaves the fallback label in place.
     fn start_title_refresh(&mut self, agent_idx: usize) {
-        // A title generated before a language fix (or by an earlier model) may
-        // be in the wrong language; clear it so this refresh starts fresh
-        // instead of being asked to preserve it.
-        self.agents[agent_idx].drop_title_in_wrong_language();
-        let (transcript, language, existing) = {
+        let (transcript, existing) = {
             let agent = &self.agents[agent_idx];
             if !agent.allows_auto_title() {
                 return;
             }
             (
                 crate::chat_title::conversation_transcript(agent.messages()),
-                crate::chat_title::conversation_language(agent.messages()),
                 agent.generated_title.clone(),
             )
         };
@@ -4390,7 +4393,7 @@ impl App {
         };
         self.agents[agent_idx].cancel_title_job();
         self.agents[agent_idx].title_job =
-            crate::chat_title::start_job(config, transcript, language, existing.as_deref());
+            crate::chat_title::start_job(config, transcript, existing.as_deref());
     }
 
     pub fn poll_llm_events(&mut self) {
@@ -9476,8 +9479,13 @@ impl App {
         if self.settings_panel_active {
             return match action {
                 Action::SettingsPanelToggle => {
-                    if self.settings_panel_selection == 0 {
-                        self.toggle_inject_prompt_sections();
+                    self.activate_settings_selection();
+                    Ok(())
+                }
+                Action::SettingsPanelActivate(index) => {
+                    if index < Self::SETTINGS_ROWS {
+                        self.settings_panel_selection = index;
+                        self.activate_settings_selection();
                     }
                     Ok(())
                 }
@@ -11638,6 +11646,7 @@ impl App {
             | Action::AgentPanelFormCancel
             // Settings actions are handled in their own intercept — unreachable here.
             | Action::SettingsPanelToggle
+            | Action::SettingsPanelActivate(_)
             | Action::SettingsPanelClose => {}
         }
         self.clamp_cursor();
@@ -14400,7 +14409,9 @@ impl App {
     // ── Slash command handlers ─────────────────────────────────────────
 
     /// Number of rows in the app Settings overlay.
-    pub(crate) const SETTINGS_ROWS: usize = 1;
+    ///
+    /// 0 = inject prompt sections, 1 = UI language.
+    pub(crate) const SETTINGS_ROWS: usize = 2;
 
     /// Whether any prompt or overlay already owns keyboard input.
     ///
@@ -14435,11 +14446,20 @@ impl App {
         }
         self.settings_panel_active = true;
         self.settings_panel_selection = 0;
-        self.status = "Settings: ↑↓ move · Enter/Space toggle · Esc close".into();
+        self.status = crate::i18n::t("settings.status.open").into();
     }
 
     pub fn close_settings_panel(&mut self) {
         self.settings_panel_active = false;
+    }
+
+    /// Activate the highlighted Settings row (keyboard Enter/Space or a click).
+    pub(crate) fn activate_settings_selection(&mut self) {
+        match self.settings_panel_selection {
+            0 => self.toggle_inject_prompt_sections(),
+            1 => self.cycle_ui_locale(),
+            _ => {}
+        }
     }
 
     /// Sets the system-prompt injection preference in memory only.
@@ -14458,11 +14478,11 @@ impl App {
     /// Flips the system-prompt injection preference and persists it.
     fn toggle_inject_prompt_sections(&mut self) {
         let enabled = !self.inject_prompt_sections;
-        self.inject_prompt_sections = enabled;
+        self.set_inject_prompt_sections(enabled);
         self.status = if enabled {
-            "System-prompt sections: On".into()
+            crate::i18n::t("settings.status.inject_on").into()
         } else {
-            "System-prompt sections: Off (agent profile prompt only)".into()
+            crate::i18n::t("settings.status.inject_off").into()
         };
         let result = teshi_engine::load_settings().and_then(|mut settings| {
             settings.inject_prompt_sections = enabled;
@@ -14473,13 +14493,140 @@ impl App {
         }
     }
 
-    /// Loads the persisted injection preference once at interactive startup.
+    /// Apply a UI locale preference in memory and refresh catalogs.
+    pub fn set_ui_locale(&mut self, preference: teshi_engine::UiLocalePreference) {
+        self.ui_locale = preference;
+        crate::i18n::apply_preference(preference);
+    }
+
+    /// Cycle system → en → zh-CN, persist, and retarget Feature discovery when allowed.
+    fn cycle_ui_locale(&mut self) {
+        let next = self.ui_locale.next();
+        self.set_ui_locale(next);
+        let label = crate::i18n::preference_label(next);
+        let result = teshi_engine::load_settings().and_then(|mut settings| {
+            settings.ui_locale = next;
+            teshi_engine::save_settings(&settings)
+        });
+        match result {
+            Ok(()) => {
+                self.status = crate::i18n::t("settings.status.locale").replace("{value}", label);
+                self.refresh_feature_directory_for_ui_locale();
+            }
+            Err(error) => {
+                self.status = format!("Settings applied but not saved: {error}");
+            }
+        }
+    }
+
+    /// Recompute `features/<locale>/` after a UI language change.
+    ///
+    /// No-op for `-R` sessions, when the directory is unchanged, or when the
+    /// editor has unsaved Feature buffers (avoid discarding edits).
+    pub(crate) fn refresh_feature_directory_for_ui_locale(&mut self) {
+        if !self.feature_locale_follows_ui {
+            return;
+        }
+        let locale = teshi_engine::resolve_feature_discovery_locale(
+            self.ui_locale,
+            sys_locale::get_locale().as_deref(),
+        );
+        let discovery_root = match crate::feature_discovery::default_feature_directory(
+            &self.project.root_dir,
+            Some(locale.as_str()),
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                self.status = format!(
+                    "{} — {error}",
+                    crate::i18n::t("settings.status.locale_dir_missing")
+                );
+                return;
+            }
+        };
+        if self.feature_discovery_root.as_ref() == Some(&discovery_root) {
+            return;
+        }
+        if self.dirty || self.buffer_dirty.iter().any(|dirty| *dirty) {
+            self.status = crate::i18n::t("settings.status.locale_dir_dirty").into();
+            return;
+        }
+
+        let scan_recursively = discovery_root != self.project.root_dir;
+        self.feature_discovery_root = Some(discovery_root.clone());
+        self.feature_discovery_worker = None;
+        self.lazy_features = Some(crate::lazy_features::LazyFeatures::new(
+            discovery_root.clone(),
+            scan_recursively,
+        ));
+        self.project.features.clear();
+        self.buffers.clear();
+        self.buffer_dirty.clear();
+        self.disk_stamps.clear();
+        self.active_buffer_idx = None;
+        self.file_path = None;
+        self.buffer = EditorBuffer::from_string(String::new());
+        self.step_index = StepIndex::build(&self.project);
+        self.mindmap_index = crate::mindmap::build_index(&self.project);
+        self.tree_state = crate::mindmap::init_tree_state(&mut self.mindmap_index);
+        self.explore_selected_feature = 0;
+        self.feature_browser = crate::feature_browser::FeatureBrowser::default();
+        let scope = if scan_recursively {
+            teshi_core::git::GitProjectScope::Recursive
+        } else {
+            teshi_core::git::GitProjectScope::CurrentFiles
+        };
+        // Rows, run results and an in-flight Git projection all belong to the
+        // previous catalog. Keeping them would let an old worker overwrite the
+        // new model and leave index-based selections pointing at other files.
+        self.git_status =
+            teshi_core::git::FeatureGitStatusModel::empty_for_project(&self.project, scope);
+        self.git_status_rx = None;
+        self.git_status_refresh_requested = false;
+        self.git_status_deadline_clear();
+        self.git_status_revision = 0;
+        self.explore_selected_deleted_feature = None;
+        self.explore_selected_scenario = 0;
+        self.explore_selected_step = 0;
+        self.explore_horizontal_scroll = [0; 3];
+        self.explore_horizontal_scroll_grab = None;
+        self.explore_viewports = Default::default();
+        self.explore_feature_scenario_memory.clear();
+        self.explore_scenario_step_memory.clear();
+        self.explore_case_map.clear();
+        self.explore_case_status.clear();
+        self.explore_case_details.clear();
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
+        self.explore_run_summary = None;
+        self.explore_diff_lines = None;
+        self.pending_change_summary.clear();
+        self.change_summary_visible = false;
+        self.change_summary_selection = 0;
+        self.external_change_prompt = None;
+        self.scenario_fold.clear();
+        self.capture_index = Default::default();
+        self.explore_captures.clear();
+        self.normalize_explore_selection();
+        self.status = crate::i18n::t("settings.status.locale_dir_switched")
+            .replace("{path}", &discovery_root.display().to_string());
+    }
+
+    /// Loads persisted app Settings once at interactive startup.
     ///
     /// `App::from_cli` and the test constructors deliberately skip this so
     /// library tests never read the developer's real `settings.json`.
     pub fn load_inject_prompt_sections(&mut self) {
+        self.load_app_preferences();
+    }
+
+    /// Loads inject-prompt and UI-locale preferences from user settings.
+    pub fn load_app_preferences(&mut self) {
         if let Ok(settings) = teshi_engine::load_settings() {
             self.set_inject_prompt_sections(settings.inject_prompt_sections);
+            self.set_ui_locale(settings.ui_locale);
+        } else {
+            crate::i18n::apply_preference(self.ui_locale);
         }
     }
 
@@ -14518,9 +14665,7 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.settings_panel_selection == 0 {
-                    self.toggle_inject_prompt_sections();
-                }
+                self.activate_settings_selection();
             }
             // The overlay covers the app, so it swallows every other key; only
             // the host-safe quit chord stays live.
@@ -15569,6 +15714,80 @@ mod tests {
         app.session_panel_active = false;
         app.handle_action(Action::SettingsPanelOpen).unwrap();
         assert!(app.settings_panel_active);
+    }
+
+    #[test]
+    fn refresh_feature_directory_follows_ui_locale() {
+        with_app_data_dir(|_| {
+            let root = tempdir().unwrap();
+            let store = tempdir().unwrap();
+            teshi_engine::initialize_requirement_store(store.path()).unwrap();
+            for language in ["zh-CN", "en-US"] {
+                std::fs::create_dir_all(root.path().join("features").join(language)).unwrap();
+                std::fs::write(
+                    root.path()
+                        .join("features")
+                        .join(language)
+                        .join("demo.feature"),
+                    "Feature: Demo\n  Scenario: Ready\n    Given a fixture\n",
+                )
+                .unwrap();
+            }
+            let mut app = App::from_project_directory(
+                root.path(),
+                crate::config::AppConfig {
+                    default_provider: None,
+                    providers: Default::default(),
+                },
+                false,
+                false,
+                store.path().to_path_buf(),
+            )
+            .unwrap();
+            assert!(app.feature_locale_follows_ui);
+            // Rows, run results and Git state from the previous catalog must not
+            // survive a directory change.
+            app.explore_selected_deleted_feature = Some(0);
+            app.explore_selected_scenario = 3;
+            app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+            app.refresh_feature_directory_for_ui_locale();
+            assert_eq!(
+                app.feature_discovery_root.as_deref(),
+                Some(root.path().join("features/en-US").as_path())
+            );
+            assert!(app.explore_selected_deleted_feature.is_none());
+            assert_eq!(app.explore_selected_scenario, 0);
+            assert!(app.git_status.deleted.is_empty());
+            app.set_ui_locale(teshi_engine::UiLocalePreference::ZhCn);
+            app.refresh_feature_directory_for_ui_locale();
+            assert_eq!(
+                app.feature_discovery_root.as_deref(),
+                Some(root.path().join("features/zh-CN").as_path())
+            );
+        });
+    }
+
+    #[test]
+    fn settings_panel_cycles_ui_locale_and_persists() {
+        with_app_data_dir(|_| {
+            let (mut app, _project, _store) = slash_test_app();
+            app.open_settings_panel();
+            assert_eq!(app.ui_locale, teshi_engine::UiLocalePreference::System);
+
+            assert!(
+                app.handle_settings_panel_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            );
+            assert_eq!(app.settings_panel_selection, 1);
+            assert!(
+                app.handle_settings_panel_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            );
+            assert_eq!(app.ui_locale, teshi_engine::UiLocalePreference::En);
+            assert_eq!(
+                teshi_engine::load_settings().unwrap().ui_locale,
+                teshi_engine::UiLocalePreference::En
+            );
+            assert!(app.status.contains("English") || app.status.contains("UI language"));
+        });
     }
 
     #[test]
@@ -19171,27 +19390,6 @@ mod tests {
         agent.apply_agent_title(None);
         assert_eq!(agent.title, "Generated");
         assert!(agent.allows_auto_title());
-    }
-
-    #[test]
-    fn a_generated_title_in_the_wrong_language_is_dropped() {
-        let (mut app, _project, _store) = session_id_title_app();
-        app.agent_mut().messages_mut().push(AiChatMessage {
-            role: AiRole::User,
-            content: "修复登录接口的超时问题".into(),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            source: None,
-            activity: None,
-        });
-        app.agent_mut().generated_title = Some("Fix login timeout".into());
-        app.agent_mut().refresh_display_title();
-        assert_eq!(app.agent().title, "Fix login timeout");
-
-        assert!(app.agent_mut().drop_title_in_wrong_language());
-        assert!(app.agent().generated_title.is_none());
-        assert_eq!(app.agent().title, "修复登录接口的超时问题");
     }
 
     #[test]
@@ -23138,6 +23336,7 @@ mod tests {
             runner_cancel: None,
             last_external_check: Instant::now(),
             feature_discovery_root: None,
+            feature_locale_follows_ui: false,
             feature_discovery_worker: None,
             lazy_features: None,
             external_change_prompt: None,
@@ -23199,6 +23398,7 @@ mod tests {
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
             inject_prompt_sections: true,
+            ui_locale: teshi_engine::UiLocalePreference::System,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
@@ -23356,6 +23556,7 @@ Feature: B
             runner_cancel: None,
             last_external_check: Instant::now(),
             feature_discovery_root: None,
+            feature_locale_follows_ui: false,
             feature_discovery_worker: None,
             lazy_features: None,
             external_change_prompt: None,
@@ -23417,6 +23618,7 @@ Feature: B
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
             inject_prompt_sections: true,
+            ui_locale: teshi_engine::UiLocalePreference::System,
             model_profiles: crate::profiles::load_all(),
             model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
