@@ -673,6 +673,7 @@ pub(super) fn render_chat_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_approval_badge(frame, app, area);
+    render_chats_chip(frame, app, area, placement);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -788,12 +789,17 @@ pub(super) fn render_chat_panel(
 /// approval badge, so the session ID outlives the agent name and sidebar hint
 /// on narrow panels instead of being clipped mid-ID.
 fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line<'static> {
-    // Block titles start after the left corner; the badge keeps a one-cell gap.
+    // Block titles start after the left corner; approval and Chats chips keep
+    // a one-cell gap so the session ID never lands under a clickable control.
     let title_x = area.x + 1;
-    let room = match approval_badge_label(app) {
-        Some(label) => area.width.saturating_sub(label.width() as u16 + 4),
-        None => area.width.saturating_sub(2),
-    } as usize;
+    let approval_reserve = approval_badge_label(app)
+        .map(|label| label.width() as u16 + 2)
+        .unwrap_or(0);
+    let chats_reserve = chats_chip_reserve(app, area, placement);
+    let room =
+        area.width
+            .saturating_sub(2 + approval_reserve + chats_reserve)
+            .saturating_sub(u16::from(approval_reserve > 0 || chats_reserve > 0)) as usize;
 
     let mut title = Line::from(Span::styled(
         crate::i18n::t("chat.panel.title"),
@@ -854,9 +860,6 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
             crate::i18n::t("chat.agent.suffix"),
             &[("name", &app.active_agent_profile().name)],
         ));
-    }
-    if placement == ChatPlacement::Tab && app.ai_sidebar_collapsed {
-        optional.push(crate::i18n::t("chat.chats_hidden").to_string());
     }
     for segment in optional {
         if title.width() + segment.width() <= room {
@@ -1062,6 +1065,49 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new(Line::styled(label, style)),
         Rect::new(badge_x, area.y, width, 1),
     );
+}
+
+/// Columns reserved on the chat title for the Chats chip, including a gap.
+fn chats_chip_reserve(_app: &App, area: Rect, placement: ChatPlacement) -> u16 {
+    if placement != ChatPlacement::Tab || super::ai_sidebar_width(area.width).is_none() {
+        return 0;
+    }
+    let width = crate::i18n::t("chat.chats_chip").width() as u16;
+    if width == 0 { 0 } else { width + 1 }
+}
+
+/// Title-bar toggle for the agent sidebar on the AI tab.
+///
+/// Sits immediately left of the approval badge (or at the right edge when the
+/// badge is absent). Only drawn when this chat panel is wide enough for a sidebar.
+fn render_chats_chip(frame: &mut Frame<'_>, app: &mut App, area: Rect, placement: ChatPlacement) {
+    let reserve = chats_chip_reserve(app, area, placement);
+    if reserve == 0 {
+        return;
+    }
+    let label = crate::i18n::t("chat.chats_chip");
+    let width = label.width() as u16;
+    let approval_width = approval_badge_label(app)
+        .map(|badge| badge.width() as u16 + 2)
+        .unwrap_or(0);
+    let chip_x = area.right().saturating_sub(approval_width + width + 1);
+    if chip_x <= area.x + 1 {
+        return;
+    }
+    let rect = Rect::new(chip_x, area.y, width, 1);
+    app.clickable_regions.push(ClickableRegion::ActionButton {
+        rect,
+        action: crate::keymap::Action::AiToggleSidebar,
+        modal: false,
+    });
+    let mut style = fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG);
+    if app
+        .mouse_position
+        .is_some_and(|(x, y)| rect.contains(ratatui::layout::Position::new(x, y)))
+    {
+        style = style.bg(theme::HOVER_BG);
+    }
+    frame.render_widget(Paragraph::new(Line::styled(label, style)), rect);
 }
 
 /// Replaces the trailing cells of a code block's language row with the copy

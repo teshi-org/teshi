@@ -10,7 +10,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 3. Rounded borders; `▌` for user messages and for the finished answer (green), `│` guides for chat activity and unfinished replies. Keep header/status/footer rows one line high.
 4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Chat conversation rows use the quieter CHAT_CHIP_BG/FG fill. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
-6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
+6. Footer action labels use PRIMARY bold on a full-width FOOTER_BG strip; status text uses FOOTER_DESC. Do not paint keyboard chords into the footer. Pane action strips (bottom row inside a panel) reuse the same PRIMARY bold labels on FOOTER_BG for the reserved row only.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
 9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Vertical scrollbars are a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Horizontal scrollbars use a `▄` half-block foreground on one row with the same track/thumb colours, keeping the bar visually thin while preserving the full-row pointer target. Never draw a bar with `─`, `━`, `│`, or `┃`.
@@ -172,19 +172,20 @@ AI [3]
 │ New [a] Close[x]│││› Continue the review…              Send ↵ ││
 │                 ││╰──────────────────────────────────────────╯│
 ╰─────────────────╯╰────────────────────────────────────────────╯
- Focus [Enter]   Clear [Esc]   Model [m]   Quit [Ctrl+Q]
+                                      Sessions Agents Models Save Settings Exit
 ```
 
 `:` from any Normal/Browse mode replaces the active tab's footer bar with the
 command-line prompt until Enter runs it or Esc closes it. The prompt keeps the
-`^q 退出` control on the right and needs no control chord, so `:q` stays usable
+**Exit** control on the right and needs no control chord, so `:q` stays usable
 where a host terminal also binds `Ctrl+Q`. The prompt itself is not advertised
-in the footer beyond the `:` you type.
+in the footer beyond the `:` you type. Footer labels are action names only —
+keyboard chords do not appear in the strip.
 
 ```text
 Command line prompt
 ━━━━━━━━━━━━━━━━━━━
-:wq▏                                                          ^q 退出
+:wq▏                                                            Exit
 ```
 
 ```text
@@ -192,9 +193,9 @@ Requirements [4]
 ━━━━━━━━━━━━━━━━━━
 ╭Requirements · All──────╮╭Shared visual language──╮╭Linked test points╮
 │Shared visual language ││# Shared visual language││                  │
+│ Filter  New  Actions  ││ Edit  Point  New       ││                  │
 ╰───────────────────────╯╰───────────────────────╯╰──────────────────╯
- [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration
- [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move
+                                      Sessions Agents Models Save Settings Exit
 ```
 
 ```text
@@ -202,7 +203,16 @@ Test Points [5]
 ━━━━━━━━━━━━━━━━━
 ╭Test Points────────╮╭Details───────────────────╮╭Requirement excerpts╮
 │Visual style       ││Focus is visible          ││                    │
-│  Focus is visible ││Verify panel focus        ││                    │
+│ Approve Reject Filter││Verify panel focus     ││                    │
 ╰───────────────────╯╰─────────────────────────╯╰────────────────────╯
- Focus [Tab]   Approve [a]   Reject [r]   Batch [A]   Continue [c]
+                                      Sessions Agents Models Save Settings Exit
+```
+
+```text
+Explore scenarios pane strip
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭Scenarios (3)──────────────╮
+│ Login succeeds            │
+│ Run  Detail  Edit         │
+╰───────────────────────────╯
 ```

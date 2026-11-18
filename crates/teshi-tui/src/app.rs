@@ -903,6 +903,9 @@ fn empty_running_detail(case_id: String) -> CaseDetail {
 
 #[derive(Debug, Clone, Default)]
 pub struct RunSummary {
+    /// Scenario count for the last Explore run. Still filled by the runner;
+    /// the Explore pane strip no longer paints this summary.
+    #[allow(dead_code)]
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -19599,7 +19602,7 @@ mod tests {
             text.contains("Explore"),
             "the tab row stays visible: {text}"
         );
-        assert!(text.contains("^q"), "the footer stays visible: {text}");
+        assert!(text.contains("Exit"), "the footer stays visible: {text}");
         assert!(text.contains("drop.png"), "{text}");
         assert!(text.contains("no image protocol"), "{text}");
         let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
