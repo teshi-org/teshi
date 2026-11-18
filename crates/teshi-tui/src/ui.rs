@@ -9109,6 +9109,30 @@ Feature: Rule only
     }
 
     #[test]
+    fn requirements_tree_keeps_the_status_badge_with_the_title() {
+        // doc-101: a CJK title carries no interior whitespace, so the wrapper
+        // broke right after `✓ ` and drew the badge as a row of its own.
+        let title = "创建新的requirement应该自动聚焦到右侧编辑窗口，且是Insert状态";
+        let label = Line::from(vec![
+            Span::styled("✓ ", ratatui::style::Style::default()),
+            Span::raw(title),
+        ]);
+        let rows: Vec<String> = super::wrap_tree_label(label, 30, 3)
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            rows[0].starts_with("✓ 创建"),
+            "the badge stays on the title row: {rows:#?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.trim() != "✓"),
+            "no badge-only row: {rows:#?}"
+        );
+    }
+
+    #[test]
     fn requirements_tree_marks_each_entry_with_a_left_rail() {
         let mut ui = crate::authoring_tab::AuthoringUiState::empty();
         // One single-row entry, then a wrapped one, then another single-row one.

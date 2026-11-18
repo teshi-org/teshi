@@ -2733,13 +2733,23 @@ fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u
     input_rows(input, cursor_char_idx, width).1
 }
 
+/// A preferred whitespace break must leave at least this many cells on the row.
+///
+/// Rows that open with a short badge or bullet (`✓ `, `- `) are often followed
+/// by content with no interior whitespace, such as a CJK title. Breaking at that
+/// first space stranded the badge on a row of its own, so a break point is only
+/// taken once the row already carries real content.
+const MIN_PREFERRED_BREAK_COLUMNS: usize = 4;
+
 /// Wraps one styled line into rows no wider than `width` display cells.
 ///
 /// Breaks after the last whitespace when possible and hard-breaks otherwise,
 /// measuring with `unicode-width` so double-width CJK characters are never
-/// split. The line's own style is folded into each span, and lines whose style
-/// sets a background are padded to `width` so block surfaces stay rectangular.
-/// A `width` of `0` returns the line unchanged.
+/// split. A whitespace break is only preferred once the row holds at least
+/// [`MIN_PREFERRED_BREAK_COLUMNS`] cells, so a leading badge or bullet stays
+/// attached to its content. The line's own style is folded into each span, and
+/// lines whose style sets a background are padded to `width` so block surfaces
+/// stay rectangular. A `width` of `0` returns the line unchanged.
 pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![line];
@@ -2769,7 +2779,9 @@ pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<
         if c.is_whitespace() && row_width + w > width {
             row.push((c, style));
             row_width += w;
-            break_at = Some(row.len());
+            if row_width >= MIN_PREFERRED_BREAK_COLUMNS {
+                break_at = Some(row.len());
+            }
             continue;
         }
         while row_width + w > width && !row.is_empty() {
@@ -2780,7 +2792,7 @@ pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<
         }
         row.push((c, style));
         row_width += w;
-        if c.is_whitespace() {
+        if c.is_whitespace() && row_width >= MIN_PREFERRED_BREAK_COLUMNS {
             break_at = Some(row.len());
         }
     }
@@ -4422,6 +4434,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_wrap_keeps_a_leading_badge_with_its_content() {
+        // doc-101: a badge followed by a run with no interior whitespace (a CJK
+        // title) used to break right after the badge and draw it alone.
+        let badge = |title: &str| {
+            Line::from(vec![
+                Span::styled("✓ ", Style::default()),
+                Span::raw(title.to_string()),
+            ])
+        };
+        assert_eq!(
+            row_texts(&wrap_line_to_width(badge("你好"), 4)),
+            vec!["✓ 你", "好"]
+        );
+        assert_eq!(
+            row_texts(&wrap_line_to_width(badge("创建新的"), 6)),
+            vec!["✓ 创建", "新的"]
+        );
     }
 
     #[test]
