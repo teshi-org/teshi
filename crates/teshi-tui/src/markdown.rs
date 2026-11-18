@@ -739,9 +739,14 @@ fn try_table(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     lines.push(rule("┌", "┬", "┐"));
 
     for (ri, row) in cells.iter().enumerate() {
+        // `cells[1]` is the Markdown `|---|` row: it becomes the divider above
+        // the first data row instead of a row of its own.
         if ri == 1 {
-            lines.push(rule("├", "┼", "┤"));
             continue;
+        }
+        // Every row gets a divider so adjacent data rows never blur together.
+        if ri > 1 {
+            lines.push(rule("├", "┼", "┤"));
         }
 
         let base_style = if ri == 0 {
@@ -823,9 +828,14 @@ fn render_compact_table(
     let mut lines = Vec::new();
     lines.push(rule("┌", "┬", "┐"));
     for (row_index, row) in rows.iter().enumerate() {
+        // The Markdown `|---|` row is the divider above the first data row.
         if row_index == 1 {
-            lines.push(rule("├", "┼", "┤"));
             continue;
+        }
+        // Wrapped cells can make a row several lines tall, so the divider marks
+        // the row boundary rather than every drawn line.
+        if row_index > 1 {
+            lines.push(rule("├", "┼", "┤"));
         }
         let base_style = if row_index == 0 {
             header_style
@@ -1404,8 +1414,9 @@ mod tests {
     fn test_table() {
         let text = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
         let lines = render_markdown(text);
-        // Top rule + header + separator + 2 data rows + bottom rule = 6 lines
-        assert_eq!(lines.len(), 6);
+        // Top rule + header + divider + 2 data rows with a divider between them
+        // + bottom rule: every row boundary is visible.
+        assert_eq!(lines.len(), 7);
         assert!(lines[0].spans[0].content.starts_with('┌'));
         // Header should be bold
         assert!(
@@ -1416,8 +1427,9 @@ mod tests {
         );
         assert!(lines[2].spans[0].content.starts_with('├'));
         assert!(lines[3].spans.iter().any(|s| s.content.contains("Alice")));
-        assert!(lines[4].spans.iter().any(|s| s.content.contains("Bob")));
-        assert!(lines[5].spans[0].content.starts_with('└'));
+        assert!(lines[4].spans[0].content.starts_with('├'));
+        assert!(lines[5].spans.iter().any(|s| s.content.contains("Bob")));
+        assert!(lines[6].spans[0].content.starts_with('└'));
         // Every row must have the same display width so the box lines up.
         let widths: Vec<usize> = lines.iter().map(Line::width).collect();
         assert!(widths.iter().all(|w| *w == widths[0]), "got {widths:?}");
@@ -1728,6 +1740,55 @@ mod tests {
                 UnicodeWidthStr::width(rule.as_str()),
                 rows[1].width(),
                 "{rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_table_row_boundary_gets_a_divider() {
+        // doc-105: only the header had a rule under it, so adjacent data rows
+        // blurred together. Both the natural-width and the compact renderers
+        // must draw a divider at every row boundary, not at every wrapped line.
+        let text = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |\n| Carol | 41 |";
+        let rows: Vec<String> = render_markdown(text)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(rows.len(), 9, "{rows:#?}");
+        for (row, glyph) in [
+            (0, '┌'),
+            (2, '├'),
+            (3, '│'),
+            (4, '├'),
+            (5, '│'),
+            (6, '├'),
+            (7, '│'),
+            (8, '└'),
+        ] {
+            assert!(
+                rows[row].starts_with(glyph),
+                "row {row} should start with {glyph}: {}",
+                rows[row]
+            );
+        }
+        let widths: Vec<usize> = render_markdown(text)
+            .iter()
+            .map(ratatui::text::Line::width)
+            .collect();
+        assert!(widths.iter().all(|width| *width == widths[0]), "{widths:?}");
+
+        // The compact renderer wraps cells, so it draws one divider per logical
+        // row: header, then each data row.
+        let wide = "| ID | 优先级 | 需求 |\n|---|---|---|\n| doc-16 | P0 | 端到端硬超时、取消与执行隔离 |\n| doc-17 | P0 | 协议级健康检查与安全恢复 |";
+        for limit in [30u16, 34, 40] {
+            let compact: Vec<String> = render_markdown_width(wide, limit)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(
+                compact.iter().filter(|row| row.starts_with('├')).count(),
+                2,
+                "limit {limit}: {compact:#?}"
             );
         }
     }
