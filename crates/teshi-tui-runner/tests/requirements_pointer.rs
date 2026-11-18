@@ -177,32 +177,45 @@ impl Fixture {
             .unwrap();
     }
 
-    /// Clicks an editor command such as Save or Iteration.
+    /// Clicks a pane action chip or the global footer command by label.
     ///
-    /// The footer lists editor commands only while the editor owns the keyboard,
-    /// and the bare labels also match tree rows ("Saved queries") and the scope
-    /// title ("Iteration: All"). Focus the editor through `anchor`, then click the
-    /// footer entry by its shortcut hint, which normal widths always draw.
-    fn click_editor_action(
-        &self,
-        terminal: &Terminal,
-        anchor: &str,
-        label: &str,
-        shortcut: &str,
-        stage: &str,
-    ) {
+    /// Commands now render on the focused pane's action strip, and Save stays on
+    /// the global footer; both draw the bare label, so the last matching row is
+    /// the control rather than a tree row ("Saved queries") or the tab bar.
+    /// Panes that a narrow terminal does not draw are revealed through `anchor`
+    /// first.
+    fn click_editor_action(&self, terminal: &Terminal, anchor: &str, label: &str, stage: &str) {
         self.reveal(terminal, anchor);
-        if self.config.cols < 60 {
-            // Only the focused pane is drawn, and its footer omits the hints.
-            self.click(terminal, label, stage);
-            return;
-        }
-        let entry = format!("{label} [{shortcut}]");
-        if !terminal.screen().unwrap().contains(&entry) {
+        if self.config.cols >= 60 && !terminal.screen().unwrap().contains(label) {
             terminal.click_text(anchor, 1500).unwrap();
-            terminal.expect_text(&entry, true, 1500).unwrap();
+            terminal.expect_text(label, true, 1500).unwrap();
         }
-        self.click(terminal, &entry, stage);
+        self.click_control(terminal, label, stage);
+    }
+
+    /// Clicks `label` on the lowest screen row that carries it.
+    fn click_control(&self, terminal: &Terminal, label: &str, stage: &str) {
+        self.capture(terminal, &format!("{stage}-before"));
+        let screen = terminal.screen().unwrap();
+        let rows: Vec<&str> = screen.lines().collect();
+        let (row, line) = rows
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| line.contains(label))
+            .unwrap_or_else(|| panic!("control {label:?} is absent:\n{screen}"));
+        let index = line.find(label).unwrap();
+        let col = line[..index].chars().count();
+        terminal
+            .write(&format!(
+                "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+                col + 1,
+                row + 1,
+                col + 1,
+                row + 1
+            ))
+            .unwrap();
+        self.capture(terminal, &format!("{stage}-after"));
     }
 
     fn reveal(&self, terminal: &Terminal, text: &str) {
@@ -326,7 +339,7 @@ fn new_document(narrow: bool) {
     let terminal = fixture.launch();
     fixture.click_new(&terminal);
     terminal.expect_text("# Document 1", true, 1500).unwrap();
-    fixture.click_editor_action(&terminal, "# Document 1", "Save", "Ctrl+s", "save-new");
+    fixture.click_editor_action(&terminal, "# Document 1", " Save", "save-new");
     wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     let body = documents::document_path(&fixture.store, "doc-1").expect("doc-1 is indexed");
     assert_eq!(fs::read_to_string(body).unwrap(), "# Document 1\n\n");
@@ -365,11 +378,13 @@ fn filter_and_group(narrow: bool) {
     fixture.reveal(&terminal, "beta body");
     terminal.expect_text("beta body", true, 1500).unwrap();
     fixture.focus_tree(&terminal);
-    fixture.click(&terminal, "View", "group-iterations");
+    // Grouping is a tree command; the strip no longer carries a View chip.
+    terminal.key("g").unwrap();
     fixture.reveal(&terminal, "Sprint A");
     terminal.expect_text("Sprint A", true, 1500).unwrap();
     terminal.expect_text("Sprint B", true, 1500).unwrap();
-    fixture.click(&terminal, "View", "group-paths");
+    fixture.focus_tree(&terminal);
+    terminal.key("g").unwrap();
     terminal.expect_text("Sprint B", false, 1500).unwrap();
     fixture.click(&terminal, "Filter", "filter-unassigned");
     fixture.click(&terminal, "Unassigned", "choose-unassigned");
@@ -387,7 +402,8 @@ fn filter_and_group(narrow: bool) {
 fn iteration(narrow: bool) {
     let fixture = Fixture::new("iteration-modal", narrow);
     let terminal = fixture.launch();
-    fixture.click_editor_action(&terminal, "alpha first", "Iteration", "I", "open-iteration");
+    fixture.focus_tree(&terminal);
+    terminal.key("I").unwrap();
     terminal.expect_text("Set iteration", true, 1500).unwrap();
     // An underlying tab and row remain visible while the modal owns input.
     terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
@@ -403,13 +419,8 @@ fn iteration(narrow: bool) {
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
         ALPHA
     );
-    fixture.click_editor_action(
-        &terminal,
-        "alpha first",
-        "Iteration",
-        "I",
-        "reopen-iteration",
-    );
+    fixture.focus_tree(&terminal);
+    terminal.key("I").unwrap();
     terminal.write("discarded").unwrap();
     fixture.click(&terminal, "Cancel", "cancel-iteration");
     terminal.expect_text("Set iteration", false, 1500).unwrap();
@@ -475,19 +486,9 @@ fn create_point(narrow: bool) {
     fixture.edit_alpha_source(&terminal);
     terminal.drag_text("alpha first", 1500).unwrap();
     fixture.capture(&terminal, "source-selection");
-    // The compact Points tab shares the button's prefix. Resolve the actual
-    // footer row rather than allowing a text match to click the tab instead.
-    let screen = terminal.screen().unwrap();
-    let (row, footer) = screen.lines().enumerate().last().unwrap();
-    let col = footer.find("Point").unwrap();
-    fixture.capture(&terminal, "create-point-before");
-    terminal
-        .write(&format!("\x1b[<0;{};{}M", col + 1, row + 1))
-        .unwrap();
-    terminal
-        .write(&format!("\x1b[<0;{};{}m", col + 1, row + 1))
-        .unwrap();
-    fixture.capture(&terminal, "create-point-after");
+    // Point lives on the editor pane action strip; the tab bar's "Points" tab
+    // shares the prefix, so target the lowest row that carries the chip.
+    fixture.click_control(&terminal, " Point", "create-point");
     wait_until(|| fixture.points().test_points.len() == 3);
     let points = fixture.points();
     let created = points.test_points.last().unwrap();
@@ -543,13 +544,7 @@ fn dirty_modal(narrow: bool, save: bool) {
             ALPHA
         }
     );
-    fixture.click_editor_action(
-        &terminal,
-        "# Document 1",
-        "Save",
-        "Ctrl+s",
-        "save-new-after-dirty",
-    );
+    fixture.click_editor_action(&terminal, "# Document 1", " Save", "save-new-after-dirty");
     wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     fixture.capture(&terminal, "dirty-resolution-persisted");
     fixture.finish(terminal);
@@ -602,8 +597,7 @@ fn priority_roundtrip(narrow: bool) {
     fixture.click_editor_action(
         &terminal,
         "draft alpha first",
-        "Save",
-        "Ctrl+s",
+        " Save",
         "priority-save-body",
     );
     wait_until(|| {

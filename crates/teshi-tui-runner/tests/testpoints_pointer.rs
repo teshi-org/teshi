@@ -302,12 +302,16 @@ fn region(screen: &str, x0: usize, x1: usize, y0: usize, y1: usize) -> String {
         .join("\n")
 }
 
-fn click_footer(terminal: &Terminal, text: &str) {
+fn click_action(terminal: &Terminal, text: &str) {
     let screen = terminal.screen().unwrap();
-    let (row, line) = screen.lines().enumerate().last().unwrap();
-    let index = line
-        .find(text)
-        .unwrap_or_else(|| panic!("footer control {text:?} is absent:\n{screen}"));
+    let rows: Vec<&str> = screen.lines().collect();
+    let (row, line) = rows
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| line.contains(text))
+        .unwrap_or_else(|| panic!("action control {text:?} is absent:\n{screen}"));
+    let index = line.find(text).unwrap();
     let col = line[..index].chars().count();
     terminal
         .write(&format!(
@@ -541,16 +545,16 @@ fn testpoint_excerpt_and_realized_scenario_rows_select_before_navigation() {
 fn testpoint_review_filter_batch_and_save_buttons_persist_their_targets() {
     let fixture = Fixture::new("review-controls", 150, 30);
     let terminal = fixture.launch();
-    click_footer(&terminal, "Approve");
+    click_action(&terminal, "Approve");
     fixture.wait(&terminal, "approve", || {
         fixture.point(0)["review_state"] == "approved"
     });
     terminal.click_text("POINT_01", 1000).unwrap();
-    click_footer(&terminal, "Reject");
+    click_action(&terminal, "Reject");
     fixture.wait(&terminal, "reject", || {
         fixture.point(1)["review_state"] == "rejected"
     });
-    click_footer(&terminal, "Filter");
+    click_action(&terminal, "Filter");
     fixture.wait(&terminal, "filter-proposed", || {
         terminal
             .screen()
@@ -558,14 +562,14 @@ fn testpoint_review_filter_batch_and_save_buttons_persist_their_targets() {
             .contains("Test points (proposed)")
     });
     assert!(!pane(&terminal.screen().unwrap(), 0, 30).contains("POINT_01"));
-    click_footer(&terminal, "Batch");
+    terminal.key("A").unwrap();
     fixture.wait(&terminal, "batch", || {
         fixture.point(2)["review_state"] == "approved"
     });
     assert_eq!(fixture.point(1)["review_state"], "rejected");
     assert_eq!(fixture.point(40)["review_state"], "proposed");
     terminal.click_text("POINT_40", 1000).unwrap();
-    click_footer(&terminal, "Approve");
+    click_action(&terminal, "Approve");
     fixture.capture(&terminal, "stale-approve-denied");
     assert_eq!(fixture.point(40)["review_state"], "proposed");
     terminal.click_text("Objective:", 1000).unwrap();
@@ -576,12 +580,12 @@ fn testpoint_review_filter_batch_and_save_buttons_persist_their_targets() {
     terminal
         .expect_text("Intent & review [NORMAL]", true, 2000)
         .unwrap();
-    click_footer(&terminal, "Save");
+    click_action(&terminal, "Save");
     fixture.wait(&terminal, "save", || {
         fixture.point(40)["objective"] == "OBJECTIVE_40Z"
     });
     let before = fixture.records();
-    click_footer(&terminal, "Continue");
+    terminal.key("c").unwrap();
     fixture.capture(&terminal, "continue-without-active-generation");
     assert_eq!(fixture.records(), before);
     fixture.finish(&terminal);
@@ -594,37 +598,39 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     let terminal = fixture.launch();
     terminal.resize(55, 16).unwrap();
     fixture.capture(&terminal, "narrow");
-    for control in ["Approve", "Reject", "Batch", "Continue", "Filter", "Save"] {
-        let screen = terminal.screen().unwrap();
+    // Approve/Reject/Filter live on the tree pane strip; Batch/Continue stay on
+    // the keyboard. Save remains on the global footer strip when width allows.
+    let screen = terminal.screen().unwrap();
+    for control in ["Approve", "Reject", "Filter", "Save"] {
         assert!(
-            screen.lines().last().unwrap().contains(control),
-            "narrow footer missing {control}:\n{screen}"
+            screen.contains(control),
+            "narrow layout missing {control}:\n{screen}"
         );
     }
-    click_footer(&terminal, "Approve");
+    click_action(&terminal, "Approve");
     fixture.wait(&terminal, "narrow-approve", || {
         fixture.point(0)["review_state"] == "approved"
     });
-    click_footer(&terminal, "Filter");
+    click_action(&terminal, "Filter");
     terminal
         .expect_text("Test points (proposed)", true, 3000)
         .unwrap();
-    click_footer(&terminal, "Reject");
+    click_action(&terminal, "Reject");
     fixture.wait(&terminal, "narrow-filter-reject", || {
         fixture.point(1)["review_state"] == "rejected"
     });
     for label in ["approved", "rejected", "needs review", "all"] {
-        click_footer(&terminal, "Filter");
+        click_action(&terminal, "Filter");
         terminal
             .expect_text(&format!("Test points ({label})"), true, 3000)
             .unwrap();
     }
-    click_footer(&terminal, "Batch");
+    terminal.key("A").unwrap();
     fixture.wait(&terminal, "narrow-batch", || {
         fixture.point(2)["review_state"] == "approved"
     });
     let batch = fixture.records();
-    click_footer(&terminal, "Continue");
+    terminal.key("c").unwrap();
     fixture.capture(&terminal, "narrow-continue-without-active-generation");
     assert_eq!(fixture.records(), batch);
     // Below 70 columns only the focused pane is drawn; focus the review pane.
@@ -636,7 +642,7 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     terminal.write("Z").unwrap();
     terminal.key("Escape").unwrap();
     terminal.expect_text("[NORMAL]", true, 2000).unwrap();
-    click_footer(&terminal, "Save");
+    click_action(&terminal, "Save");
     fixture.wait(&terminal, "narrow-save-resets-reviewed-intent", || {
         fixture.point(0)["objective"] == "OBJECTIVE_00Z"
             && fixture.point(0)["review_state"] == "proposed"

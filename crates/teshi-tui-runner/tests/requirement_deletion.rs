@@ -26,7 +26,7 @@ fn document_path(store: &Path, id: &str) -> Option<PathBuf> {
 
 /// Deletion lives in the tree's Actions menu rather than on the footer.
 fn open_delete_confirmation(terminal: &Terminal) -> anyhow::Result<()> {
-    terminal.click_text("Actions [Space]", 5000)?;
+    terminal.click_text(" Actions", 5000)?;
     terminal.click_text("Delete requirement…", 5000)?;
     terminal.expect_text("global requirement library", true, 5000)?;
     Ok(())

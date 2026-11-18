@@ -271,7 +271,7 @@ class World:
             assert self.header(screen).lstrip().startswith("╭"), screen
             assert "[/]" not in screen, screen
             # The tab row and the footer stay visible around the viewer.
-            assert "MindMap" in screen and "^q" in screen, screen
+            assert "MindMap" in screen and ("Exit" in screen or "^q" in screen), screen
         elif action == "close_explore":
             self.key("Escape")
             self.wait(lambda screen: "Screenshot " not in screen and "Steps" in screen,

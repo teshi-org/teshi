@@ -198,7 +198,10 @@ fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
     terminal.expect_text("hjkl q12345", true, 10000).unwrap();
     capture(&terminal, "vim-mindmap-input");
     terminal.key("Escape").unwrap();
-    terminal.expect_text("[INPUT]", false, 10000).unwrap();
+    // Blur keeps the draft; an inert character proves the next keystroke is a
+    // shortcut rather than typed text.
+    terminal.write("z").unwrap();
+    terminal.expect_text("hjkl q12345z", false, 10000).unwrap();
     prefix(&terminal, "Left");
 
     terminal.key("4").unwrap();
@@ -208,6 +211,8 @@ fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
     terminal.key("PageUp").unwrap();
     expect_editor_text(&terminal, "Req 25", true, 10000);
     prefix(&terminal, "Right");
+    // Browse mode owns G/gg motion; Preview keeps the document read-only.
+    terminal.key("e").unwrap();
     terminal.key("G").unwrap();
     terminal.expect_text("body 55", true, 10000).unwrap();
     terminal.write("gg").unwrap();
@@ -216,11 +221,12 @@ fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
 
     terminal.key("3").unwrap();
     terminal.key("i").unwrap();
-    terminal.expect_text("[INPUT]", true, 10000).unwrap();
     terminal.write("hjkl q12345").unwrap();
     terminal.expect_text("hjkl q12345", true, 10000).unwrap();
     terminal.key("Escape").unwrap();
-    terminal.expect_text("[NORMAL]", true, 10000).unwrap();
+    // Blur keeps the draft; an inert character must not land in it.
+    terminal.write("z").unwrap();
+    terminal.expect_text("hjkl q12345z", false, 10000).unwrap();
     capture(&terminal, "vim-ai-modes");
     fixture.unchanged();
     terminal.key("ctrl+q").unwrap();
@@ -245,7 +251,7 @@ fn bare_q_and_ctrl_c_stay_in_the_app_while_ctrl_q_exits() {
 fn bottom_right_exit_control_quits_on_click() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
-    terminal.expect_text("^q", true, 10000).unwrap();
+    terminal.expect_text("Exit", true, 10000).unwrap();
     // Address the bottom-right cell directly: text lookup counts characters,
     // and the footer's wide glyphs shift that count away from the real column.
     let (col, row) = (148_u16, 30_u16);
@@ -482,7 +488,8 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
     // One notch per event: a loaded runner may coalesce bursts, so keep
     // scrolling until the list reaches its last scenario.
     let wheel_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    terminal.scroll_at(45, 5, false, false).unwrap();
+    // Scenarios start one column right of the pane border at 150 columns.
+    terminal.scroll_at(60, 5, false, false).unwrap();
     loop {
         let visible = terminal.screen().unwrap();
         if visible.contains("scenario 30") {
@@ -492,7 +499,7 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
             std::time::Instant::now() < wheel_deadline,
             "scenario wheel did not reach the bottom: {visible}"
         );
-        terminal.scroll_at(45, 5, false, false).unwrap();
+        terminal.scroll_at(60, 5, false, false).unwrap();
     }
     capture(&terminal, "explore-scenario-wheel");
     let scrolled = terminal.screen().unwrap();
@@ -510,7 +517,7 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
     );
     terminal.click_text("scenario 30", 10000).unwrap();
     terminal.expect_text("Given step 30", true, 10000).unwrap();
-    terminal.scroll_at(45, 5, false, true).unwrap();
+    terminal.scroll_at(60, 5, false, true).unwrap();
     capture(&terminal, "explore-scenario-horizontal-wheel");
     terminal.expect_text("Given step 30", true, 1000).unwrap();
     fixture.unchanged();
@@ -741,15 +748,19 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
     // Opening the loaded store hands focus to the tree, so let the document
     // render before moving to the editor or the chord lands too early.
     terminal.expect_text("body 01", true, 10000).unwrap();
-    // Footer controls follow the focused pane; the tree opens first.
+    // Footer controls follow the focused pane; the tree opens first. The editor
+    // strip only paints once the document pane owns focus, so wait for its
+    // Edit action before sampling the baseline frame.
     prefix(&terminal, "Right");
-    terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();
+    terminal.expect_text(" Edit", true, 10000).unwrap();
+    // Let the focus border and strip settle before the baseline screenshot.
+    std::thread::sleep(Duration::from_millis(200));
     let screen = terminal.screen().unwrap();
     let (row, col) = screen
         .lines()
         .enumerate()
         .find_map(|(row, line)| {
-            line.find("Save [Ctrl+s]")
+            line.find(" Save")
                 .map(|byte| (row + 1, line[..byte].chars().count() + 1))
         })
         .unwrap();
@@ -762,7 +773,9 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
     std::thread::sleep(Duration::from_millis(200));
     terminal.screenshot(&hover).unwrap();
     capture(&terminal, "footer-hover");
-    terminal.write("\x1b[<35;149;15M").unwrap();
+    // Park the pointer over document text: neutral, and clear of the scrollbar
+    // column and the pane action strip.
+    terminal.write("\x1b[<35;60;15M").unwrap();
     std::thread::sleep(Duration::from_millis(200));
     terminal.screenshot(&after).unwrap();
     capture(&terminal, "footer-hover-exit");

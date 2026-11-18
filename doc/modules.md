@@ -246,7 +246,7 @@ Built with **ratatui 0.29**. Uses `render_stateful_widget` for tree state.
 [0] Tab bar (Explore | Mind Map | AI | Requirements | Test Points)
 [1] Horizontal separator
 [2] Main panel → render_main_panel → dispatch by active tab
-[3] Footer (status / agent prompt / explore footer / AI footer / key hints)
+[3] Footer (status / command line / global Sessions·Agents·Models·Save·Settings·Exit; tab workflows use pane strips)
 ```
 
 ### Panels

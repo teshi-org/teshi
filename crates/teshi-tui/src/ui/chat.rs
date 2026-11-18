@@ -673,6 +673,7 @@ pub(super) fn render_chat_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_approval_badge(frame, app, area);
+    render_chats_chip(frame, app, area, placement);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -788,12 +789,17 @@ pub(super) fn render_chat_panel(
 /// approval badge, so the session ID outlives the agent name and sidebar hint
 /// on narrow panels instead of being clipped mid-ID.
 fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line<'static> {
-    // Block titles start after the left corner; the badge keeps a one-cell gap.
+    // Block titles start after the left corner. Each chip reserve already keeps
+    // its own gap, so do not subtract a second shared gap or the session ID
+    // loses its last column on a 40-wide panel beside Manual.
     let title_x = area.x + 1;
-    let room = match approval_badge_label(app) {
-        Some(label) => area.width.saturating_sub(label.width() as u16 + 4),
-        None => area.width.saturating_sub(2),
-    } as usize;
+    let approval_reserve = approval_badge_label(app)
+        .map(|label| label.width() as u16 + 2)
+        .unwrap_or(0);
+    let chats_reserve = chats_chip_reserve(app, area, placement);
+    let room = area
+        .width
+        .saturating_sub(2 + approval_reserve + chats_reserve) as usize;
 
     let mut title = Line::from(Span::styled(
         crate::i18n::t("chat.panel.title"),
@@ -854,9 +860,6 @@ fn chat_panel_title(app: &mut App, area: Rect, placement: ChatPlacement) -> Line
             crate::i18n::t("chat.agent.suffix"),
             &[("name", &app.active_agent_profile().name)],
         ));
-    }
-    if placement == ChatPlacement::Tab && app.ai_sidebar_collapsed {
-        optional.push(crate::i18n::t("chat.chats_hidden").to_string());
     }
     for segment in optional {
         if title.width() + segment.width() <= room {
@@ -1062,6 +1065,49 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new(Line::styled(label, style)),
         Rect::new(badge_x, area.y, width, 1),
     );
+}
+
+/// Columns reserved on the chat title for the Chats chip, including a gap.
+fn chats_chip_reserve(_app: &App, area: Rect, placement: ChatPlacement) -> u16 {
+    if placement != ChatPlacement::Tab || super::ai_sidebar_width(area.width).is_none() {
+        return 0;
+    }
+    let width = crate::i18n::t("chat.chats_chip").width() as u16;
+    if width == 0 { 0 } else { width + 1 }
+}
+
+/// Title-bar toggle for the agent sidebar on the AI tab.
+///
+/// Sits immediately left of the approval badge (or at the right edge when the
+/// badge is absent). Only drawn when this chat panel is wide enough for a sidebar.
+fn render_chats_chip(frame: &mut Frame<'_>, app: &mut App, area: Rect, placement: ChatPlacement) {
+    let reserve = chats_chip_reserve(app, area, placement);
+    if reserve == 0 {
+        return;
+    }
+    let label = crate::i18n::t("chat.chats_chip");
+    let width = label.width() as u16;
+    let approval_width = approval_badge_label(app)
+        .map(|badge| badge.width() as u16 + 2)
+        .unwrap_or(0);
+    let chip_x = area.right().saturating_sub(approval_width + width + 1);
+    if chip_x <= area.x + 1 {
+        return;
+    }
+    let rect = Rect::new(chip_x, area.y, width, 1);
+    app.clickable_regions.push(ClickableRegion::ActionButton {
+        rect,
+        action: crate::keymap::Action::AiToggleSidebar,
+        modal: false,
+    });
+    let mut style = fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG);
+    if app
+        .mouse_position
+        .is_some_and(|(x, y)| rect.contains(ratatui::layout::Position::new(x, y)))
+    {
+        style = style.bg(theme::HOVER_BG);
+    }
+    frame.render_widget(Paragraph::new(Line::styled(label, style)), rect);
 }
 
 /// Replaces the trailing cells of a code block's language row with the copy
@@ -2733,13 +2779,23 @@ fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u
     input_rows(input, cursor_char_idx, width).1
 }
 
+/// A preferred whitespace break must leave at least this many cells on the row.
+///
+/// Rows that open with a short badge or bullet (`✓ `, `- `) are often followed
+/// by content with no interior whitespace, such as a CJK title. Breaking at that
+/// first space stranded the badge on a row of its own, so a break point is only
+/// taken once the row already carries real content.
+const MIN_PREFERRED_BREAK_COLUMNS: usize = 4;
+
 /// Wraps one styled line into rows no wider than `width` display cells.
 ///
 /// Breaks after the last whitespace when possible and hard-breaks otherwise,
 /// measuring with `unicode-width` so double-width CJK characters are never
-/// split. The line's own style is folded into each span, and lines whose style
-/// sets a background are padded to `width` so block surfaces stay rectangular.
-/// A `width` of `0` returns the line unchanged.
+/// split. A whitespace break is only preferred once the row holds at least
+/// [`MIN_PREFERRED_BREAK_COLUMNS`] cells, so a leading badge or bullet stays
+/// attached to its content. The line's own style is folded into each span, and
+/// lines whose style sets a background are padded to `width` so block surfaces
+/// stay rectangular. A `width` of `0` returns the line unchanged.
 pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![line];
@@ -2769,7 +2825,9 @@ pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<
         if c.is_whitespace() && row_width + w > width {
             row.push((c, style));
             row_width += w;
-            break_at = Some(row.len());
+            if row_width >= MIN_PREFERRED_BREAK_COLUMNS {
+                break_at = Some(row.len());
+            }
             continue;
         }
         while row_width + w > width && !row.is_empty() {
@@ -2780,7 +2838,7 @@ pub(crate) fn wrap_line_to_width(line: Line<'static>, width: usize) -> Vec<Line<
         }
         row.push((c, style));
         row_width += w;
-        if c.is_whitespace() {
+        if c.is_whitespace() && row_width >= MIN_PREFERRED_BREAK_COLUMNS {
             break_at = Some(row.len());
         }
     }
@@ -4422,6 +4480,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_wrap_keeps_a_leading_badge_with_its_content() {
+        // doc-101: a badge followed by a run with no interior whitespace (a CJK
+        // title) used to break right after the badge and draw it alone.
+        let badge = |title: &str| {
+            Line::from(vec![
+                Span::styled("✓ ", Style::default()),
+                Span::raw(title.to_string()),
+            ])
+        };
+        assert_eq!(
+            row_texts(&wrap_line_to_width(badge("你好"), 4)),
+            vec!["✓ 你", "好"]
+        );
+        assert_eq!(
+            row_texts(&wrap_line_to_width(badge("创建新的"), 6)),
+            vec!["✓ 创建", "新的"]
+        );
     }
 
     #[test]

@@ -198,6 +198,85 @@ impl Fixture {
         self.capture(terminal, &format!("{name}-after"));
     }
 
+    /// Focuses the composer by clicking its prompt cell.
+    ///
+    /// The footer no longer carries Focus/Blur chips; the composer and `Esc`
+    /// are the pointer and keyboard equivalents.
+    fn focus_composer(&self, terminal: &Terminal, name: &str) {
+        self.capture(terminal, &format!("{name}-before"));
+        let screen = terminal.screen().unwrap();
+        let rows: Vec<&str> = screen.lines().collect();
+        let (row, line) = rows
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| line.contains('›'))
+            .unwrap_or_else(|| panic!("composer prompt is absent:\n{screen}"));
+        let index = line.find('›').unwrap();
+        let col = line[..index].chars().count();
+        terminal
+            .write(&format!(
+                "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+                col + 1,
+                row + 1,
+                col + 1,
+                row + 1
+            ))
+            .unwrap();
+        // An empty composer paints its focus placeholder; a draft keeps its text
+        // and only the border changes, so settle before typing either way.
+        if screen.contains("Type your message...") {
+            terminal
+                .expect_text("Type your message...", true, 2000)
+                .unwrap();
+        } else {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        self.capture(terminal, &format!("{name}-after"));
+    }
+
+    /// Blurs the composer with `Esc`, the documented keyboard equivalent.
+    ///
+    /// An unfocused AI composer sends `Esc` to the quit confirmation, so only
+    /// press it when the focus placeholder shows that the input owns keys.
+    fn blur_composer(&self, terminal: &Terminal, name: &str) {
+        self.capture(terminal, &format!("{name}-before"));
+        if !terminal.screen().unwrap().contains("Type your message...") {
+            self.capture(terminal, &format!("{name}-after"));
+            return;
+        }
+        terminal.key("Escape").unwrap();
+        terminal
+            .expect_text("Type your message...", false, 2000)
+            .unwrap();
+        self.capture(terminal, &format!("{name}-after"));
+    }
+
+    /// Opens the model picker from the chat toolbar chip above the composer.
+    fn click_model_chip(&self, terminal: &Terminal, name: &str) {
+        self.capture(terminal, &format!("{name}-before"));
+        let screen = terminal.screen().unwrap();
+        let rows: Vec<&str> = screen.lines().collect();
+        let (row, line) = rows
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| line.contains("Model "))
+            .unwrap_or_else(|| panic!("model chip is absent:\n{screen}"));
+        let index = line.find("Model ").unwrap();
+        let col = line[..index].chars().count();
+        terminal
+            .write(&format!(
+                "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+                col + 1,
+                row + 1,
+                col + 1,
+                row + 1
+            ))
+            .unwrap();
+        self.capture(terminal, &format!("{name}-after"));
+    }
+
     fn background(&self, terminal: &Terminal) {
         terminal
             .write("\x1b[<0;2;1M\x1b[<0;2;1m\x1b[<65;2;1M")
@@ -432,7 +511,7 @@ fn footer_and_threads(narrow: bool) {
     let fixture = Fixture::new("threads-footer", narrow);
     let provider = OwnedProvider::new(None, fixture.artifacts.join("provider-trace.jsonl"));
     let terminal = fixture.launch(Some(&provider), false);
-    fixture.click_footer(&terminal, "Focus", "focus");
+    fixture.focus_composer(&terminal, "focus");
     terminal.write("THREAD_ORIGINAL").unwrap();
     if narrow {
         // doc-31/doc-36: below 70 columns the sidebar is hidden, so agent
@@ -507,22 +586,22 @@ fn footer_and_threads(narrow: bool) {
         fixture.click(&terminal, "Close [Enter/y]", "confirm-close-third");
         terminal.expect_text("Agent 2", false, 5000).unwrap();
     }
-    fixture.click_footer(&terminal, "Blur", "blur");
-    fixture.click_footer(&terminal, "Model", "model");
+    fixture.blur_composer(&terminal, "blur");
+    fixture.click_model_chip(&terminal, "model");
     terminal.expect_text("Model", true, 5000).unwrap();
     fixture.capture(&terminal, "model-visible");
     terminal.key("Escape").unwrap();
-    fixture.click_footer(&terminal, "Focus", "focus-before-send");
+    fixture.focus_composer(&terminal, "focus-before-send");
     fixture.click(&terminal, "Send", "send");
     expect_wrapped_marker(&terminal, "POINTER_REPLY_COMPLETE");
     fixture.capture(&terminal, "reply-visible");
-    fixture.click_footer(&terminal, "Blur", "blur-before-quit");
+    fixture.blur_composer(&terminal, "blur-before-quit");
     if fixture.narrow {
         // The pinned exit control starts at 60 columns; narrow terminals keep
         // the chord as their exit affordance.
         terminal.key("ctrl+q").unwrap();
     } else {
-        fixture.click(&terminal, "^q", "quit");
+        fixture.click_footer(&terminal, "Exit", "quit");
     }
     terminal.expect_exit(0, 10000).unwrap();
     assert_eq!(fs::read_to_string(&fixture.source).unwrap(), ORIGINAL);
@@ -540,15 +619,15 @@ fn slash_rows(narrow: bool) {
     let fixture = Fixture::new("slash", narrow);
     let provider = OwnedProvider::new(None, fixture.artifacts.join("provider-trace.jsonl"));
     let terminal = fixture.launch(Some(&provider), false);
-    fixture.click_footer(&terminal, "Focus", "focus");
+    fixture.focus_composer(&terminal, "focus");
     terminal.write("/model").unwrap();
     terminal.expect_text("/models", true, 5000).unwrap();
     fixture.click(&terminal, "/models", "choose-models");
     fixture.click(&terminal, "Select", "select-command");
     terminal.expect_text("Model Profiles", true, 5000).unwrap();
     terminal.key("Escape").unwrap();
-    fixture.click_footer(&terminal, "Blur", "blur-after-model");
-    fixture.click_footer(&terminal, "Focus", "focus-dismiss");
+    fixture.blur_composer(&terminal, "blur-after-model");
+    fixture.focus_composer(&terminal, "focus-dismiss");
     terminal.write("/copy").unwrap();
     fixture.click(&terminal, "Dismiss", "dismiss");
     assert!(!terminal.screen().unwrap().contains(" Select"));
@@ -566,7 +645,7 @@ fn permission(narrow: bool, allow: bool) {
         narrow,
     );
     let terminal = fixture.launch(None, true);
-    fixture.click_footer(&terminal, "Focus", "focus");
+    fixture.focus_composer(&terminal, "focus");
     terminal.write("Inspect owned project").unwrap();
     fixture.click(&terminal, "Send", "send");
     terminal.expect_text("Allow once", true, 5000).unwrap();
@@ -628,7 +707,7 @@ fn pending_change(narrow: bool, accept: bool, inspect_diff: bool) {
         fixture.artifacts.join("provider-trace.jsonl"),
     );
     let terminal = fixture.launch(Some(&provider), false);
-    fixture.click_footer(&terminal, "Focus", "focus");
+    fixture.focus_composer(&terminal, "focus");
     terminal
         .write("Change the step in the owned project")
         .unwrap();

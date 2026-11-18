@@ -108,7 +108,11 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
     capture(&terminal, "blurred");
     for _ in 0..2 {
         terminal.key("Enter").unwrap();
-        terminal.expect_text("Send [Enter]", true, 5000).unwrap();
+        // The composer placeholder only paints while the input owns focus; the
+        // Send button paints in both states, so it cannot gate the repaint.
+        terminal
+            .expect_text("Type your message...", true, 5000)
+            .unwrap();
         assert_eq!(input_title(&terminal), before);
         let focused_svg = root.path().join("focused.svg");
         terminal.screenshot(&focused_svg).unwrap();
@@ -119,7 +123,9 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
         );
         capture(&terminal, "focused");
         terminal.key("Escape").unwrap();
-        terminal.expect_text("Focus [i/Enter]", true, 5000).unwrap();
+        terminal
+            .expect_text("Type your message...", false, 5000)
+            .unwrap();
         assert_eq!(input_title(&terminal), before);
     }
 }

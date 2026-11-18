@@ -152,7 +152,10 @@ fn acp_chat_copy_command_and_selection_round_trip() {
     let screenshot = std::fs::read_to_string(&selection_screenshot).unwrap();
     assert!(screenshot.contains("WRAPPED_REPLY_01"));
     save_viewport(&terminal, root.path(), "acp-original-selection");
-    terminal.expect_text("Focus [i/Enter]", true, 5000).unwrap();
+    // Selecting transcript text blurs the composer; its focus placeholder goes.
+    terminal
+        .expect_text("Type your message...", false, 5000)
+        .unwrap();
     clipboard
         .set_text("CHAT_SELECTION_AFTER_DRAG_SENTINEL")
         .unwrap();
@@ -629,7 +632,10 @@ fn command(terminal: &Terminal, text: &str) {
 /// commands.
 fn focus_composer(terminal: &Terminal) {
     terminal.key("Enter").unwrap();
-    terminal.expect_text("[INPUT]", true, 10000).unwrap();
+    // The composer placeholder only paints while the input owns focus.
+    terminal
+        .expect_text("Type your message...", true, 10000)
+        .unwrap();
 }
 
 fn close_chat(terminal: &Terminal) {

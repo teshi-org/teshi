@@ -5,7 +5,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AiStatus, App, ChangeKind, ClickableRegion};
 use crate::keymap::Action;
@@ -69,7 +68,7 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     );
     super::render_action_bar(
         frame,
-        app,
+        &mut app.clickable_regions,
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
         "",
         &[
@@ -116,7 +115,7 @@ pub(super) fn render_slash_suggestions(
     );
     super::render_action_bar(
         frame,
-        app,
+        &mut app.clickable_regions,
         Rect::new(area.x, area.bottom() - 1, area.width, 1),
         "",
         &[
@@ -129,86 +128,9 @@ pub(super) fn render_slash_suggestions(
 
 /// Keep every review decision visible and isolate its pointer ownership.
 /// Draw the AI footer using the same rectangles for text and pointer actions.
-pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect, compact: bool) {
-    let first = if app.ai_input_focused {
-        (
-            if compact {
-                crate::i18n::t("chat.send")
-            } else {
-                crate::i18n::t("chat.send.key")
-            },
-            Action::AiSendMessage,
-        )
-    } else {
-        (
-            if compact {
-                crate::i18n::t("chat.focus")
-            } else {
-                crate::i18n::t("chat.focus.key")
-            },
-            Action::AiFocusInput,
-        )
-    };
-    let mut controls = vec![
-        first,
-        (
-            if compact {
-                crate::i18n::t("chat.blur")
-            } else {
-                crate::i18n::t("chat.blur.key")
-            },
-            Action::AiBlurInput,
-        ),
-        (
-            if compact || app.ai_input_focused {
-                crate::i18n::t("chat.model_chip")
-            } else {
-                crate::i18n::t("chat.model_chip.key")
-            },
-            Action::ModelPanelOpen,
-        ),
-    ];
-    // The toggle only advertises a surface this terminal can actually show.
-    if super::ai_sidebar_width(frame.area().width).is_some() {
-        controls.push((
-            if compact {
-                crate::i18n::t("chat.chats_chip")
-            } else {
-                crate::i18n::t("chat.chats_chip.key")
-            },
-            Action::AiToggleSidebar,
-        ));
-    }
-    let mode = if app.ai_sidebar_focused {
-        crate::i18n::t("mode.chats")
-    } else if app.ai_input_focused {
-        crate::i18n::t("mode.input")
-    } else {
-        crate::i18n::t("mode.normal")
-    };
-    super::render_action_bar(frame, app, area, mode, &controls, false);
-    let used = mode.width() as u16
-        + controls
-            .iter()
-            .map(|(label, _)| label.width() as u16)
-            .sum::<u16>();
-    let hint = if app.ai_input_focused {
-        crate::i18n::t("chat.hint.chats_normal")
-    } else if app.ai_sidebar_focused {
-        crate::i18n::t("chat.hint.chats_browse")
-    } else if app.ai_sidebar_visible {
-        crate::i18n::t("chat.hint.normal_sidebar")
-    } else {
-        crate::i18n::t("chat.hint.normal")
-    };
-    if used + 2 < area.width {
-        frame.render_widget(
-            Paragraph::new(hint).style(theme::muted()),
-            Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
-        );
-    }
-}
-
+///
+/// Labels are action names only. When the global app strip is visible, Model is
+/// omitted here to avoid duplicating that destination.
 pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.has_agent_change_prompt() && !app.has_acp_permission_prompt() {
         return;
@@ -247,7 +169,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         app.clickable_regions.clear();
         super::render_action_bar(
             frame,
-            app,
+            &mut app.clickable_regions,
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
             "",
             &[
@@ -323,7 +245,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         let compact = inner.width < 70;
         super::render_action_bar(
             frame,
-            app,
+            &mut app.clickable_regions,
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
             "",
             &[
@@ -392,7 +314,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         frame.render_widget(Paragraph::new(Text::from(lines)), body);
         super::render_action_bar(
             frame,
-            app,
+            &mut app.clickable_regions,
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
             "",
             &[
