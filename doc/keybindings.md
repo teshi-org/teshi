@@ -93,7 +93,10 @@ work while the prompt is open, and a left click closes it.
 | Esc | Clear the current interaction state |
 
 Features occupy the left column. In the right column, Scenarios sit above
-Steps; Tab/Shift+Tab and the pane chords follow that visual order.
+Steps; Tab/Shift+Tab and the pane chords follow that visual order. The
+Scenarios title carries the last run's tally on its right edge (for example
+`1/2 passed, 1 failed`), and its bottom row holds **Run**, **Detail**, and
+**Edit**.
 
 ### Feature editor: Normal
 
