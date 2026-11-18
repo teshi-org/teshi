@@ -729,7 +729,7 @@ pub enum ViewStage {
 pub enum ModelPanelMode {
     /// Show the list of profiles.
     List,
-    /// Show the "Add model" form.
+    /// Show the add-model form.
     Adding,
     /// Show the "Edit model" form.
     Editing,
@@ -1869,7 +1869,8 @@ impl App {
             )
             && self.project_switch.pending.is_some()
         {
-            self.status = "A project switch is already being prepared".to_string();
+            self.status =
+                crate::i18n::t("status.a_project_switch_is_already_being_prepared").to_string();
             self.set_status_message(self.status.clone());
             return Ok(());
         }
@@ -1895,7 +1896,9 @@ impl App {
         let decision = self.project_switch.begin(target.clone(), dirty, busy);
         match decision {
             crate::project_context::SwitchDecision::Noop => {
-                self.status = "Already on that project; active work was preserved".to_string();
+                self.status =
+                    crate::i18n::t("status.already_on_that_project_active_work_was_preserved")
+                        .to_string();
             }
             crate::project_context::SwitchDecision::NeedsConfirmation => {
                 let labels = self
@@ -1911,7 +1914,10 @@ impl App {
                     })
                     .unwrap_or_default();
                 self.status = if labels.is_empty() {
-                    "Project switch needs running tasks stopped: S stop · Esc cancel".to_string()
+                    crate::i18n::t(
+                        "status.project_switch_needs_running_tasks_stopped_s_stop_esc_cancel",
+                    )
+                    .to_string()
                 } else {
                     format!(
                         "Unsaved project state: {} · S save & switch · D discard & switch · Esc cancel",
@@ -1932,7 +1938,8 @@ impl App {
         // boundary even if no tasks were busy when the request first began.
         if self.project_tasks_busy() {
             self.project_switch.overlay = crate::project_context::SwitchOverlay::Busy { target };
-            self.status = "Project-owned tasks must stop before switching".to_string();
+            self.status =
+                crate::i18n::t("status.project_owned_tasks_must_stop_before_switching").to_string();
             return Ok(());
         }
         // Completed ACP sessions and idle native transports are project-owned
@@ -1945,7 +1952,8 @@ impl App {
             self.project_switch.overlay = crate::project_context::SwitchOverlay::Busy { target };
             self.project_switch
                 .start_quiesce_wait(PROJECT_SWITCH_STOP_TIMEOUT);
-            self.status = "Waiting for project-owned Agent backends to exit".to_string();
+            self.status = crate::i18n::t("status.waiting_for_project_owned_agent_backends_to_exit")
+                .to_string();
             return Ok(());
         }
         if let Err(error) = self.save_sessions(true) {
@@ -2221,19 +2229,21 @@ impl App {
                     if let Some(target) = self.project_switch.picker_target() {
                         self.request_project_switch(target.root())?;
                     } else {
-                        self.status = "No recent project is available".to_string();
+                        self.status =
+                            crate::i18n::t("status.no_recent_project_is_available").to_string();
                         self.project_switch.cancel();
                     }
                 }
                 Action::ClearInputState | Action::OverlayCancel => {
                     self.project_switch.cancel();
-                    self.status = "Project switch canceled".to_string();
+                    self.status = crate::i18n::t("status.project_switch_canceled").to_string();
                 }
                 Action::OverlayInsert('o' | 'O') => {
                     self.project_switch.begin_open_path();
-                    self.status =
-                        "Type a project directory and press Enter to open it; Esc cancels"
-                            .to_string();
+                    self.status = crate::i18n::t(
+                        "status.type_a_project_directory_and_press_enter_to_open_it_esc_canc",
+                    )
+                    .to_string();
                 }
                 _ => {}
             },
@@ -2250,15 +2260,17 @@ impl App {
                         .trim()
                         .to_string();
                     if input.is_empty() {
-                        self.status =
-                            "Enter a project directory or press Esc to cancel".to_string();
+                        self.status = crate::i18n::t(
+                            "status.enter_a_project_directory_or_press_esc_to_cancel",
+                        )
+                        .to_string();
                     } else {
                         self.request_project_switch(PathBuf::from(input))?;
                     }
                 }
                 Action::ClearInputState | Action::OverlayCancel => {
                     self.project_switch.cancel();
-                    self.status = "Project switch canceled".to_string();
+                    self.status = crate::i18n::t("status.project_switch_canceled").to_string();
                 }
                 _ => {}
             },
@@ -2279,14 +2291,14 @@ impl App {
                 }
                 Action::ClearInputState | Action::OverlayCancel => {
                     self.project_switch.cancel();
-                    self.status = "Project switch canceled".to_string();
+                    self.status = crate::i18n::t("status.project_switch_canceled").to_string();
                 }
                 _ => {}
             },
             SwitchOverlay::Busy { .. } => match action {
                 Action::ClearInputState | Action::OverlayCancel => {
                     self.project_switch.cancel();
-                    self.status = "Project switch canceled".to_string();
+                    self.status = crate::i18n::t("status.project_switch_canceled").to_string();
                 }
                 Action::Save | Action::OverlayInsert('s' | 'S') => {
                     self.cancel_project_tasks();
@@ -2294,12 +2306,15 @@ impl App {
                         .start_quiesce_wait(PROJECT_SWITCH_STOP_TIMEOUT);
                     if let Some(cancel) = self.runner_cancel.as_ref() {
                         let _ = cancel.send(());
-                        self.status =
-                            "Stop requested for the project-owned runner; waiting for exit"
-                                .to_string();
+                        self.status = crate::i18n::t(
+                            "status.stop_requested_for_the_project_owned_runner_waiting_for_exit",
+                        )
+                        .to_string();
                     } else if self.runner_rx.is_some() {
-                        self.status = "Runner is still active; wait for its owned process to exit"
-                            .to_string();
+                        self.status = crate::i18n::t(
+                            "status.runner_is_still_active_wait_for_its_owned_process_to_exit",
+                        )
+                        .to_string();
                     } else {
                         self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
                         self.explore_state = None;
@@ -2389,7 +2404,9 @@ impl App {
                 return Ok(());
             };
             self.project_switch.overlay = SwitchOverlay::Dirty { target };
-            self.status = "Tasks stopped; resolve unsaved state before switching".to_string();
+            self.status =
+                crate::i18n::t("status.tasks_stopped_resolve_unsaved_state_before_switching")
+                    .to_string();
         }
         Ok(())
     }
@@ -3676,9 +3693,10 @@ impl App {
                 }
             }
             Ok(_) => {
-                self.status =
-                    "LLM not configured: set an API key on a model profile or TESHI_LLM_API_KEY"
-                        .to_string();
+                self.status = crate::i18n::t(
+                    "status.llm_not_configured_set_an_api_key_on_a_model_profile_or_tesh",
+                )
+                .to_string();
             }
             Err(e) => {
                 self.status = format!("LLM not configured: {e}");
@@ -3724,7 +3742,7 @@ impl App {
                 source: Some("agent_progress".into()),
                 activity: None,
             });
-            self.status = "AI request cancelled".to_string();
+            self.status = crate::i18n::t("status.ai_request_cancelled").to_string();
         }
         self.selection_anchor = None;
         self.selection_end = None;
@@ -3749,7 +3767,7 @@ impl App {
         };
         self.restore_ai_draft(self.selected_agent, &joined);
         self.ai_input_focused = true;
-        self.status = "Queued message restored for editing".to_string();
+        self.status = crate::i18n::t("status.queued_message_restored_for_editing").to_string();
     }
 
     /// Whether the selected agent has a pending ACP permission prompt. The
@@ -3785,9 +3803,9 @@ impl App {
         };
         self.agents[agent_idx].tool_status = None;
         self.status = if resolved {
-            "Permission sent to ACP agent...".to_string()
+            crate::i18n::t("status.permission_sent_to_acp_agent").to_string()
         } else {
-            "ACP permission request is no longer pending".to_string()
+            crate::i18n::t("status.acp_permission_request_is_no_longer_pending").to_string()
         };
     }
 
@@ -4063,13 +4081,13 @@ impl App {
     fn cmd_worktree(&mut self, argument: &str) -> Result<()> {
         let mut parts = argument.split_whitespace();
         let Some(branch) = parts.next() else {
-            self.status = "Usage: /worktree <branch> [path]".to_string();
+            self.status = crate::i18n::t("status.usage_worktree_branch_path").to_string();
             self.set_status_message(self.status.clone());
             return Ok(());
         };
         let explicit = parts.next().map(PathBuf::from);
         if parts.next().is_some() {
-            self.status = "Usage: /worktree <branch> [path]".to_string();
+            self.status = crate::i18n::t("status.usage_worktree_branch_path").to_string();
             self.set_status_message(self.status.clone());
             return Ok(());
         }
@@ -4210,7 +4228,7 @@ impl App {
         }
         self.insert_ai_text(&text);
         self.status = match count {
-            1 => "Image attached".to_string(),
+            1 => crate::i18n::t("status.image_attached").to_string(),
             count => format!("{count} images attached"),
         };
     }
@@ -4490,7 +4508,7 @@ impl App {
                         self.agents[i].total_output_tokens += output_tokens.unwrap_or(0) as u64;
                         if i == self.selected_agent {
                             self.status = if interrupted {
-                                "Task interrupted — /retry to continue".into()
+                                crate::i18n::t("status.task_interrupted_retry_to_continue").into()
                             } else {
                                 format!("AI response received ({model})")
                             };
@@ -4586,9 +4604,10 @@ impl App {
                         match decision {
                             AgentBackendDecision::Continue { allow_tools } => {
                                 if !allow_tools && i == self.selected_agent {
-                                    self.status =
-                                        "Tool call limit reached, requesting final response…"
-                                            .to_string();
+                                    self.status = crate::i18n::t(
+                                        "status.tool_call_limit_reached_requesting_final_response",
+                                    )
+                                    .to_string();
                                 }
                                 self.send_backend_followup(i, allow_tools);
                             }
@@ -4610,7 +4629,7 @@ impl App {
                                 self.agents[i].status = AiStatus::Idle;
                                 self.agents[i].tool_status = None;
                                 if i == self.selected_agent {
-                                    self.status = "Review proposed test points in Test Points tab [5], then press c to continue generation".to_string();
+                                    self.status = crate::i18n::t("status.review_proposed_test_points_in_test_points_tab_5_then_press").to_string();
                                 }
                             }
                             AgentBackendDecision::StopEmptyProject => {
@@ -4618,13 +4637,13 @@ impl App {
                                 self.agents[i].status = AiStatus::Idle;
                                 self.agents[i].tool_status = None;
                                 if i == self.selected_agent {
-                                    self.status = "The project directory has no .feature files. Add one to begin.".to_string();
+                                    self.status = crate::i18n::t("status.the_project_directory_has_no_feature_files_add_one_to_begin").to_string();
                                 }
                             }
                             AgentBackendDecision::StopAfterFailure => {
                                 self.agents[i].status = AiStatus::Error;
                                 self.status =
-                                    "AI error: model kept calling tools after final-response limit"
+                                    crate::i18n::t("status.ai_error_model_kept_calling_tools_after_final_response_limit")
                                         .to_string();
                             }
                             AgentBackendDecision::Cancelled => {}
@@ -4700,9 +4719,10 @@ impl App {
                         self.agents[i].status = AiStatus::AwaitingApproval;
                         self.agents[i].tool_status = None;
                         if i == self.selected_agent {
-                            self.status =
-                                "ACP agent requests permission — Enter to allow, Esc to reject"
-                                    .to_string();
+                            self.status = crate::i18n::t(
+                                "status.acp_agent_requests_permission_enter_to_allow_esc_to_reject",
+                            )
+                            .to_string();
                         }
                     }
                     Ok(Some(
@@ -4720,7 +4740,9 @@ impl App {
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
                         if i == self.selected_agent {
-                            self.status = "AI error: background LLM thread has exited".to_string();
+                            self.status =
+                                crate::i18n::t("status.ai_error_background_llm_thread_has_exited")
+                                    .to_string();
                         }
                         break;
                     }
@@ -5200,7 +5222,7 @@ impl App {
         }
         match self.authoring_ui.confirm_overlay() {
             Ok(()) => {
-                self.status = "Requirements view updated".to_string();
+                self.status = crate::i18n::t("status.requirements_view_updated").to_string();
             }
             Err(msg) => {
                 self.status = msg;
@@ -5239,7 +5261,7 @@ impl App {
         self.generation_paused_reason = None;
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Gathering;
         self.persist_generation_state()?;
-        self.status = "Generation source scope confirmed".to_string();
+        self.status = crate::i18n::t("status.generation_source_scope_confirmed").to_string();
         self.dispatch_user_message(prompt.pending_user_message)
     }
 
@@ -5278,8 +5300,10 @@ impl App {
             return Ok(false);
         }
         if !restore_draft && !self.agents[agent_idx].backend.is_connected() {
-            self.status =
-                "Queued message paused: configure an Agent, then send a message to resume".into();
+            self.status = crate::i18n::t(
+                "status.queued_message_paused_configure_an_agent_then_send_a_message",
+            )
+            .into();
             return Ok(false);
         }
         let images = match self.prepare_prompt_images(agent_idx, &user_msg) {
@@ -5318,7 +5342,7 @@ impl App {
         self.agents[agent_idx].status = AiStatus::Waiting;
         self.agents[agent_idx].partial_response_mut().clear();
         self.agents[agent_idx].pending_acp_permission = None;
-        self.status = "Sending message to AI...".to_string();
+        self.status = crate::i18n::t("status.sending_message_to_ai").to_string();
 
         if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Native
             && !crate::llm::is_configured()
@@ -5334,7 +5358,7 @@ impl App {
             });
             self.agents[agent_idx].status = AiStatus::Idle;
             self.agents[agent_idx].partial_response_mut().clear();
-            self.status = "AI not configured".to_string();
+            self.status = crate::i18n::t("status.ai_not_configured").to_string();
         } else if self.agents[agent_idx].backend.is_connected() {
             self.compact_context_if_needed(agent_idx);
             let mut messages = self.build_chat_messages_for_agent(agent_idx);
@@ -5358,7 +5382,7 @@ impl App {
         } else {
             self.agents[agent_idx].status = AiStatus::Error;
             self.agents[agent_idx].partial_response_mut().clear();
-            self.status = "AI error: LLM handle not available".to_string();
+            self.status = crate::i18n::t("status.ai_error_llm_handle_not_available").to_string();
         }
         self.quit_pending_confirm = false;
         Ok(true)
@@ -5464,7 +5488,10 @@ impl App {
     /// Intentionally ignores `approval_mode`: Auto/Bypass cannot trigger this gate.
     fn continue_test_point_generation(&mut self) -> Result<()> {
         if self.review_policy == teshi_agent::pipeline::ReviewPolicy::Direct {
-            self.status = "Direct (no-review) generation has no Test Points review gate; send the generation request to continue.".into();
+            self.status = crate::i18n::t(
+                "status.direct_no_review_generation_has_no_test_points_review_gate_s",
+            )
+            .into();
             return Ok(());
         }
         let test_points: Vec<teshi_core::authoring::TestPoint> = self
@@ -5805,15 +5832,19 @@ impl App {
                 self.agents[agent_idx].status = AiStatus::Waiting;
                 self.agents[agent_idx].tool_status = Some("Teshi is thinking...".into());
                 if !allow_tools {
-                    self.status = "Tool call limit reached, requesting final response…".to_string();
+                    self.status =
+                        crate::i18n::t("status.tool_call_limit_reached_requesting_final_response")
+                            .to_string();
                 }
                 self.send_backend_followup(agent_idx, allow_tools);
             }
             AgentBackendDecision::StopEmptyProject => {
                 self.agents[agent_idx].status = AiStatus::Idle;
                 self.agents[agent_idx].tool_status = None;
-                self.status =
-                    "The project directory has no .feature files. Add one to begin.".to_string();
+                self.status = crate::i18n::t(
+                    "status.the_project_directory_has_no_feature_files_add_one_to_begin",
+                )
+                .to_string();
             }
             _ => {}
         }
@@ -5886,7 +5917,7 @@ impl App {
             return;
         }
         if !self.agents[agent_idx].backend.is_connected() {
-            self.status = "AI not configured".to_string();
+            self.status = crate::i18n::t("status.ai_not_configured").to_string();
             return;
         }
         self.compact_context_if_needed(agent_idx);
@@ -6192,8 +6223,10 @@ impl App {
             || self.runner_rx.is_some()
             || !self.pending_agent_changes.is_empty()
         {
-            self.status =
-                "Save current edits and finish pending work before switching Feature".into();
+            self.status = crate::i18n::t(
+                "status.save_current_edits_and_finish_pending_work_before_switching",
+            )
+            .into();
             return;
         }
         self.explore_edit_mode = false;
@@ -6235,9 +6268,10 @@ impl App {
             || self.runner_rx.is_some()
             || !self.pending_agent_changes.is_empty()
         {
-            self.status =
-                "Feature load deferred: save edits and finish pending work, then select again"
-                    .into();
+            self.status = crate::i18n::t(
+                "status.feature_load_deferred_save_edits_and_finish_pending_work_the",
+            )
+            .into();
             return;
         }
         self.install_lazy_feature(feature, source);
@@ -6294,7 +6328,8 @@ impl App {
         // Captures belong to this Feature now; the Explore markers would
         // otherwise wait for the next viewer open.
         self.refresh_capture_index();
-        self.status = "Feature loaded; AST and MindMap scope: current Feature".into();
+        self.status =
+            crate::i18n::t("status.feature_loaded_ast_and_mindmap_scope_current_feature").into();
     }
 
     /// Whether the active project is waiting for a background Feature scan.
@@ -6323,9 +6358,10 @@ impl App {
                     .map(|meta| (meta.id.clone(), meta.revision.clone()));
                 self.status =
                     if self.authoring_ui.buffer_dirty && before.is_some() && after != before {
-                        "Requirement changed on disk; unsaved edits kept".to_string()
+                        crate::i18n::t("status.requirement_changed_on_disk_unsaved_edits_kept")
+                            .to_string()
                     } else {
-                        "Requirement library refreshed".to_string()
+                        crate::i18n::t("status.requirement_library_refreshed").to_string()
                     };
                 self.set_status_message(self.status.clone());
             }
@@ -6513,7 +6549,9 @@ impl App {
         self.bump_git_status_revision();
         self.rebuild_project_views(None);
         self.refresh_git_status();
-        self.status = "Removed externally deleted Feature; on-disk run evidence retained".into();
+        self.status =
+            crate::i18n::t("status.removed_externally_deleted_feature_on_disk_run_evidence_reta")
+                .into();
     }
 
     /// Clear the temporary status message if its 3-second lifespan has elapsed.
@@ -6554,13 +6592,13 @@ impl App {
     /// Clear all MindMap highlights (called by Agent tools).
     pub fn clear_mindmap_highlights(&mut self) {
         self.mindmap_index.clear_highlights();
-        self.set_status_message("AI cleared highlights".into());
+        self.set_status_message(crate::i18n::t("status.ai_cleared_highlights").into());
     }
 
     /// Clear the MindMap filter (called by Agent tools).
     pub fn clear_mindmap_filter(&mut self) {
         self.mindmap_index.clear_filter();
-        self.set_status_message("AI cleared filter".into());
+        self.set_status_message(crate::i18n::t("status.ai_cleared_filter").into());
     }
 
     /// Get the context window size, preferring the active model profile's setting.
@@ -7066,14 +7104,15 @@ impl App {
     pub fn toggle_explore_diff_view(&mut self) {
         if self.active_tab == MainTab::Explore && self.explore_diff_lines.is_some() {
             self.explore_diff_lines = None;
-            self.status = "Exited diff view".to_string();
+            self.status = crate::i18n::t("status.exited_diff_view").to_string();
         } else if self.has_agent_change_prompt() {
             if let Some(diff) = self.pending_change_diffs.first() {
                 self.explore_diff_lines = Some(diff.clone());
             }
             self.active_tab = MainTab::Explore;
             self.explore_focus = ColumnFocus::Step;
-            self.status = "Diff view — explore tab shows changes. [D] to close.".to_string();
+            self.status =
+                crate::i18n::t("status.diff_view_explore_tab_shows_changes_d_to_close").to_string();
         }
     }
 
@@ -7799,7 +7838,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|summary| summary.failed > 0 || summary.blocked > 0);
                 if !success && !explained {
-                    self.status = "Runner exited with error".to_string();
+                    self.status = crate::i18n::t("status.runner_exited_with_error").to_string();
                 }
                 self.runner_rx = None;
             }
@@ -7825,20 +7864,22 @@ impl App {
 
     fn start_explore_run(&mut self) {
         if !self.ensure_selected_feature() {
-            self.status = "Select a Feature and wait for it to load before running".into();
+            self.status =
+                crate::i18n::t("status.select_a_feature_and_wait_for_it_to_load_before_running")
+                    .into();
             return;
         }
         if self.runner_rx.is_some() {
-            self.status = "Runner already active".to_string();
+            self.status = crate::i18n::t("status.runner_already_active").to_string();
             return;
         }
         if self.explore_selected_deleted_feature.is_some() {
-            self.status = "Deleted Feature cannot be run".to_string();
+            self.status = crate::i18n::t("status.deleted_feature_cannot_be_run").to_string();
             return;
         }
         let cases = self.build_explore_cases();
         if cases.is_empty() {
-            self.status = "No scenarios to run".to_string();
+            self.status = crate::i18n::t("status.no_scenarios_to_run").to_string();
             return;
         }
         // Routing is validated before any state changes, so an unroutable
@@ -7869,7 +7910,7 @@ impl App {
         }
         self.runner_rx = Some(rx);
         self.runner_cancel = Some(cancel);
-        self.status = "Run started".to_string();
+        self.status = crate::i18n::t("status.run_started").to_string();
     }
 
     fn build_explore_cases(&self) -> Vec<RunCase> {
@@ -7926,13 +7967,16 @@ impl App {
             self.explore_detail_open = true;
             self.explore_detail_case = Some(key);
         } else {
-            self.status = "No run details for selection".to_string();
+            self.status = crate::i18n::t("status.no_run_details_for_selection").to_string();
         }
     }
 
     fn toggle_inspector_plaintext(&mut self) {
         let Some(key) = self.explore_detail_case else {
-            self.status = "Open run details first (Enter), then press p to expand secrets".into();
+            self.status = crate::i18n::t(
+                "status.open_run_details_first_enter_then_press_p_to_expand_secrets",
+            )
+            .into();
             return;
         };
         let Some(detail) = self.explore_case_details.get_mut(&key) else {
@@ -7940,7 +7984,7 @@ impl App {
         };
         if detail.inspector_plaintext {
             detail.inspector_plaintext = false;
-            self.status = "Hiding plaintext secrets".into();
+            self.status = crate::i18n::t("status.hiding_plaintext_secrets").into();
             return;
         }
         let root = self.project.root_dir.clone();
@@ -7950,7 +7994,7 @@ impl App {
             .map(|exchange| exchange.exchange_id.clone())
             .collect();
         if ids.is_empty() {
-            self.status = "No HTTP exchanges to expand".into();
+            self.status = crate::i18n::t("status.no_http_exchanges_to_expand").into();
             return;
         }
         for (index, id) in ids.iter().enumerate() {
@@ -7982,7 +8026,7 @@ impl App {
         if let Some(detail) = self.explore_case_details.get_mut(&key) {
             detail.inspector_plaintext = true;
         }
-        self.status = "Showing plaintext secrets (p to hide)".into();
+        self.status = crate::i18n::t("status.showing_plaintext_secrets_p_to_hide").into();
     }
 
     fn persist_explore_memory(&mut self) {
@@ -8186,13 +8230,13 @@ impl App {
 
     fn explore_enter_edit(&mut self) {
         if self.explore_selected_deleted_feature.is_some() {
-            self.status = "Deleted Feature cannot be edited".to_string();
+            self.status = crate::i18n::t("status.deleted_feature_cannot_be_edited").to_string();
             return;
         }
         let changes = self.explore_changed_steps();
         let selected_line = if let Some(change) = changes.get(self.explore_selected_step) {
             if matches!(change.kind, ChangeKind::Deleted) {
-                self.status = "Deleted Step is read-only".into();
+                self.status = crate::i18n::t("status.deleted_step_is_read_only").into();
                 return;
             }
             let matches: Vec<_> = self
@@ -8217,7 +8261,7 @@ impl App {
             self.explore_selected_step_line()
         };
         let Some(line) = selected_line else {
-            self.status = "No step to edit".to_string();
+            self.status = crate::i18n::t("status.no_step_to_edit").to_string();
             return;
         };
         if self.active_buffer_idx != Some(self.explore_selected_feature) {
@@ -8244,7 +8288,7 @@ impl App {
         self.explore_edit_mode = true;
         self.explore_detail_open = false;
         self.explore_detail_case = None;
-        self.status = "Explore edit mode".to_string();
+        self.status = crate::i18n::t("status.explore_edit_mode").to_string();
     }
 
     fn explore_exit_edit(&mut self) {
@@ -8253,7 +8297,7 @@ impl App {
         self.pending_char = None;
         self.explore_edit_mode = false;
         self.editor_focus_scenario_row = None;
-        self.status = "Explore mode".to_string();
+        self.status = crate::i18n::t("status.explore_mode").to_string();
     }
 
     // ── Stage transitions ───────────────────────────────────────────
@@ -8639,11 +8683,15 @@ impl App {
         self.screenshot.index = start.unwrap_or(0);
         self.screenshot.refs = refs;
         if self.screenshot.refs.is_empty() {
-            self.set_status_message("No captured screenshots for this scenario".to_string());
+            self.set_status_message(
+                crate::i18n::t("status.no_captured_screenshots_for_this_scenario").to_string(),
+            );
             return;
         }
         if step_text.is_some() && start.is_none() {
-            self.set_status_message("No capture for this step; showing the first one".to_string());
+            self.set_status_message(
+                crate::i18n::t("status.no_capture_for_this_step_showing_the_first_one").to_string(),
+            );
         }
         self.load_selected_screenshot();
     }
@@ -8880,11 +8928,11 @@ impl App {
                 self.clear_step_input_state();
                 self.clear_step_keyword_picker();
                 self.rebuild_preview();
-                self.status = "Back to tree + preview".to_string();
+                self.status = crate::i18n::t("status.back_to_tree_preview").to_string();
             }
             ViewStage::TreeAndEditor => {
                 self.view_stage = ViewStage::TreeOnly;
-                self.status = "Preview closed".to_string();
+                self.status = crate::i18n::t("status.preview_closed").to_string();
             }
             ViewStage::TreeOnly => {}
         }
@@ -9051,7 +9099,7 @@ impl App {
             self.editor_goto_line(line);
         }
         self.rebuild_preview();
-        self.status = "Location switched".to_string();
+        self.status = crate::i18n::t("status.location_switched").to_string();
         self.quit_pending_confirm = false;
     }
 
@@ -9464,7 +9512,7 @@ impl App {
                 Action::GenerationScopeConfirm => self.confirm_generation_scope(),
                 Action::GenerationScopeCancel => {
                     self.generation_scope_prompt = None;
-                    self.status = "Generation canceled".to_string();
+                    self.status = crate::i18n::t("status.generation_canceled").to_string();
                     Ok(())
                 }
                 Action::GenerationScopeChangeIteration => {
@@ -9661,7 +9709,7 @@ impl App {
             }
             Action::AiSuggest => {
                 if self.active_tab == MainTab::Explore {
-                    self.status = "AI suggest: not implemented".to_string();
+                    self.status = crate::i18n::t("status.ai_suggest_not_implemented").to_string();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -9691,7 +9739,7 @@ impl App {
                     if !self.start_agent_backend(self.selected_agent) {
                         return Ok(());
                     }
-                    self.status = "Sending MindMap context to AI...".to_string();
+                    self.status = crate::i18n::t("status.sending_mindmap_context_to_ai").to_string();
 
                     if self.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Native
                         && !self.agent().backend.is_connected()
@@ -9707,7 +9755,7 @@ impl App {
                             });
                         self.agent_mut().status = AiStatus::Idle;
                         self.agent_mut().partial_response_mut().clear();
-                        self.status = "AI not configured".to_string();
+                        self.status = crate::i18n::t("status.ai_not_configured").to_string();
                     } else if self.agent().backend.is_connected() {
                         let messages = self.build_chat_messages_for_agent(self.selected_agent);
                         let profile = self.agent_profile(self.selected_agent);
@@ -9732,7 +9780,7 @@ impl App {
                     } else {
                         self.agent_mut().status = AiStatus::Error;
                         self.agent_mut().partial_response_mut().clear();
-                        self.status = "AI error: LLM handle not available".to_string();
+                        self.status = crate::i18n::t("status.ai_error_llm_handle_not_available").to_string();
                     }
                 }
                 self.quit_pending_confirm = false;
@@ -9865,7 +9913,7 @@ impl App {
                 self.model_form_api_key.clear();
                 self.model_form_max_tokens = String::from("4096");
                 self.model_form_temperature = String::from("0.7");
-                self.status = "Fill in the fields and press Enter to save.".to_string();
+                self.status = crate::i18n::t("status.fill_in_the_fields_and_press_enter_to_save").to_string();
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelEdit => {
@@ -9883,7 +9931,7 @@ impl App {
                     self.model_form_base_url = profile.base_url;
                     self.model_form_api_key = profile.api_key;
                     self.model_form_max_tokens = profile.max_output_tokens.to_string();
-                    self.status = "Edit the fields and press Enter to save.".to_string();
+                    self.status = crate::i18n::t("status.edit_the_fields_and_press_enter_to_save").to_string();
                 }
                 self.quit_pending_confirm = false;
             }
@@ -9929,7 +9977,7 @@ impl App {
                 self.model_form_editing_id = None;
                 self.model_panel_mode = ModelPanelMode::List;
                 self.status =
-                    "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
+                    crate::i18n::t("status.model_profiles_m_a_add_e_edit_select_enter_activate_esc_clos")
                         .to_string();
                 self.quit_pending_confirm = false;
             }
@@ -9986,7 +10034,7 @@ impl App {
             Action::ModelPanelFormSubmit => {
                 let name = self.model_form_name.trim().to_string();
                 if name.is_empty() {
-                    self.status = "Name is required.".to_string();
+                    self.status = crate::i18n::t("status.name_is_required").to_string();
                     self.quit_pending_confirm = false;
                     return Ok(());
                 }
@@ -9997,7 +10045,7 @@ impl App {
                 };
                 let model = self.model_form_model.trim().to_string();
                 if model.is_empty() {
-                    self.status = "Model identifier is required.".to_string();
+                    self.status = crate::i18n::t("status.model_identifier_is_required").to_string();
                     self.quit_pending_confirm = false;
                     return Ok(());
                 }
@@ -10018,7 +10066,7 @@ impl App {
                     {
                         Some(p) => p,
                         None => {
-                            self.status = "Profile not found for editing.".to_string();
+                            self.status = crate::i18n::t("status.profile_not_found_for_editing").to_string();
                             self.quit_pending_confirm = false;
                             return Ok(());
                         }
@@ -10117,7 +10165,7 @@ impl App {
             }
             Action::EnterEdit => {
                 if !self.ensure_selected_feature() {
-                    self.status = "Select a Feature and wait for it to load before editing".into();
+                    self.status = crate::i18n::t("status.select_a_feature_and_wait_for_it_to_load_before_editing").into();
                     return Ok(());
                 }
                 if self.active_tab == MainTab::Explore {
@@ -10145,7 +10193,7 @@ impl App {
             Action::TreeCollapse => self.tree_collapse(),
             Action::TreeToggle => self.tree_toggle(),
             Action::TreeOpen => {
-                self.status = "MindMap is display-only".to_string();
+                self.status = crate::i18n::t("status.mindmap_is_display_only").to_string();
                 self.quit_pending_confirm = false;
             }
             Action::TreeHome => self.tree_home(),
@@ -10372,16 +10420,16 @@ impl App {
                             | crate::authoring_tab::RequirementsEditorMode::VisualLine
                     ) {
                     match ch {
-                        'd' => "Vim pending: dd delete".to_string(),
-                        'y' => "Vim pending: yy yank".to_string(),
-                        'g' => "Vim pending: gg top".to_string(),
-                        _ => "Vim pending command".to_string(),
+                        'd' => crate::i18n::t("status.vim_pending_dd_delete").to_string(),
+                        'y' => crate::i18n::t("status.vim_pending_yy_yank").to_string(),
+                        'g' => crate::i18n::t("status.vim_pending_gg_top").to_string(),
+                        _ => crate::i18n::t("status.vim_pending_command").to_string(),
                     }
                 } else {
                     match ch {
-                        'd' => "`dd` to delete".to_string(),
-                        'y' => "`yy` to copy".to_string(),
-                        _ => "Pending command".to_string(),
+                        'd' => crate::i18n::t("status.dd_to_delete").to_string(),
+                        'y' => crate::i18n::t("status.yy_to_copy").to_string(),
+                        _ => crate::i18n::t("status.pending_command").to_string(),
                     }
                 };
                 self.quit_pending_confirm = false;
@@ -10426,8 +10474,8 @@ impl App {
                 } else if self.step_input_active {
                     self.step_input_active = false;
                     self.focus_slot = BddFocusSlot::Body;
-                    self.status = "Edit committed".to_string();
-                    self.set_status_message("Edit committed".to_string());
+                    self.status = crate::i18n::t("status.edit_committed").to_string();
+                    self.set_status_message(crate::i18n::t("status.edit_committed").to_string());
                 }
             }
             Action::Backspace => {
@@ -10485,7 +10533,7 @@ impl App {
                         self.status = format!("Created proposed test point {id}");
                     } else {
                         self.status =
-                            "Select non-empty requirement text to create a test point".to_string();
+                            crate::i18n::t("status.select_non_empty_requirement_text_to_create_a_test_point").to_string();
                     }
                     self.quit_pending_confirm = false;
                 }
@@ -10589,7 +10637,7 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.vim_yank_line();
                     self.pending_char = None;
-                    self.status = "Yanked requirement line".to_string();
+                    self.status = crate::i18n::t("status.yanked_requirement_line").to_string();
                 }
             }
             Action::ReqVimPasteAfter => {
@@ -10617,7 +10665,7 @@ impl App {
             Action::ReqVimVisualLine => self.authoring_ui.enter_visual_line(),
             Action::ReqVimVisualYank => {
                 if self.authoring_ui.yank_visual_selection() {
-                    self.status = "Yanked requirement selection".to_string();
+                    self.status = crate::i18n::t("status.yanked_requirement_selection").to_string();
                 }
                 self.authoring_ui.exit_visual_mode();
                 self.pending_char = None;
@@ -10638,9 +10686,9 @@ impl App {
             Action::ReqProjectLink => {
                 self.status = match self.authoring_ui.toggle_current_project_link() {
                     Ok(linked) => if linked {
-                        "Linked requirement to current project"
+                        crate::i18n::t("status.linked_requirement_to_current_project")
                     } else {
-                        "Unlinked requirement from current project"
+                        crate::i18n::t("status.unlinked_requirement_from_current_project")
                     }
                     .into(),
                     Err(error) => error.to_string(),
@@ -10670,9 +10718,9 @@ impl App {
             Action::ReqCompletedToggle => {
                 if self.active_tab == MainTab::Requirements {
                     self.status = match self.authoring_ui.toggle_completed() {
-                        Ok(true) => "Showing implemented and verified requirements".into(),
-                        Ok(false) => "Showing pending requirements only".into(),
-                        Err(_) => "Completed filter applies to Current project only".into(),
+                        Ok(true) => crate::i18n::t("status.showing_implemented_and_verified_requirements").into(),
+                        Ok(false) => crate::i18n::t("status.showing_pending_requirements_only").into(),
+                        Err(_) => crate::i18n::t("status.completed_filter_applies_to_current_project_only").into(),
                     };
                 }
             }
@@ -10733,7 +10781,7 @@ impl App {
                     if self.authoring_ui.selected_document_id.is_some() {
                         self.authoring_ui.open_iteration_editor();
                     } else {
-                        self.status = "Select a requirement document to set its iteration".into();
+                        self.status = crate::i18n::t("status.select_a_requirement_document_to_set_its_iteration").into();
                     }
                     self.quit_pending_confirm = false;
                 }
@@ -10741,7 +10789,7 @@ impl App {
             Action::ReqReloadStore => {
                 if self.active_tab == MainTab::Requirements {
                     self.status = match self.authoring_ui.reload_from_disk() {
-                        Ok(()) => "Requirement library reloaded".to_string(),
+                        Ok(()) => crate::i18n::t("status.requirement_library_reloaded").to_string(),
                         Err(error) => format!("Requirement library reload failed: {error}"),
                     };
                     self.set_status_message(self.status.clone());
@@ -10753,7 +10801,7 @@ impl App {
                     if self.authoring_ui.selected_document_id.is_some() {
                         self.authoring_ui.open_priority_editor();
                     } else {
-                        self.status = "Select a requirement document to set its priority".into();
+                        self.status = crate::i18n::t("status.select_a_requirement_document_to_set_its_priority").into();
                     }
                     self.quit_pending_confirm = false;
                 }
@@ -10785,7 +10833,7 @@ impl App {
                 if self.active_tab == MainTab::TestPoints {
                     self.commit_test_point_field_edit()?;
                     let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
-                        self.status = "Select a test point to approve".to_string();
+                        self.status = crate::i18n::t("status.select_a_test_point_to_approve").to_string();
                         self.quit_pending_confirm = false;
                         return Ok(());
                     };
@@ -10809,7 +10857,7 @@ impl App {
                     self.status = if approved {
                         format!("Approved test point {tp_id}")
                     } else {
-                        "Cannot approve: resolve stale links or review state".to_string()
+                        crate::i18n::t("status.cannot_approve_resolve_stale_links_or_review_state").to_string()
                     };
                     self.quit_pending_confirm = false;
                 }
@@ -10818,7 +10866,7 @@ impl App {
                 if self.active_tab == MainTab::TestPoints {
                     self.commit_test_point_field_edit()?;
                     let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
-                        self.status = "Select a test point to reject".to_string();
+                        self.status = crate::i18n::t("status.select_a_test_point_to_reject").to_string();
                         self.quit_pending_confirm = false;
                         return Ok(());
                     };
@@ -10842,7 +10890,7 @@ impl App {
                     self.status = if rejected {
                         format!("Rejected test point {tp_id}")
                     } else {
-                        "Cannot reject this test point".to_string()
+                        crate::i18n::t("status.cannot_reject_this_test_point").to_string()
                     };
                     self.quit_pending_confirm = false;
                 }
@@ -10877,7 +10925,7 @@ impl App {
                     let artifacts = self.authoring_ui.artifacts.as_ref();
                     self.test_points_ui.rebuild_tree(artifacts);
                     self.reload_test_point_field_buffer();
-                    self.status = "Cycled test-point review filter".to_string();
+                    self.status = crate::i18n::t("status.cycled_test_point_review_filter").to_string();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -10908,7 +10956,7 @@ impl App {
                 let row = self.step_input_row;
                 let line = self.buffer.line(row);
                 if current_step_keyword_index(&line, self.buffer.language()).is_none() {
-                    self.status = "New line is available on step lines only".to_string();
+                    self.status = crate::i18n::t("status.new_line_is_available_on_step_lines_only").to_string();
                     self.quit_pending_confirm = false;
                     return Ok(());
                 }
@@ -10923,7 +10971,7 @@ impl App {
                 self.step_input_min_col = self.cursor_col;
                 self.focus_slot = BddFocusSlot::Body;
                 self.mark_current_buffer_dirty();
-                self.status = "Inserted new step line".to_string();
+                self.status = crate::i18n::t("status.inserted_new_step_line").to_string();
                 self.quit_pending_confirm = false;
             }
             Action::Save => self.save()?,
@@ -10963,7 +11011,7 @@ impl App {
             Action::StepKeywordPickerConfirm => self.confirm_step_keyword_picker(),
             Action::StepKeywordPickerCancel => {
                 self.clear_step_keyword_picker();
-                self.status = "Step keyword selection canceled".to_string();
+                self.status = crate::i18n::t("status.step_keyword_selection_canceled").to_string();
                 self.quit_pending_confirm = false;
             }
             Action::AiPaste(text) => {
@@ -10999,7 +11047,7 @@ impl App {
                     agent.input.set_text(input);
                     agent.input.set_cursor(cursor);
                     self.sync_composer_atoms();
-                    self.status = "Image removed".to_string();
+                    self.status = crate::i18n::t("status.image_removed").to_string();
                 }
                 self.quit_pending_confirm = false;
             }
@@ -11043,7 +11091,7 @@ impl App {
                     }
                     None => {
                         if !self.attach_clipboard_images() {
-                            self.status = "The clipboard holds no text or image".to_string();
+                            self.status = crate::i18n::t("status.the_clipboard_holds_no_text_or_image").to_string();
                             self.set_status_message(self.status.clone());
                         }
                     }
@@ -11071,7 +11119,7 @@ impl App {
             Action::AiSendMessage => {
                 if self.agent().input.trim().is_empty() {
                     self.ai_input_focused = false;
-                    self.status = "Input deactivated".to_string();
+                    self.status = crate::i18n::t("status.input_deactivated").to_string();
                     return Ok(());
                 }
                 let paused_queue =
@@ -11288,7 +11336,7 @@ impl App {
                         }
                     }
                     None => {
-                        self.status = "Code block is no longer available".to_string();
+                        self.status = crate::i18n::t("status.code_block_is_no_longer_available").to_string();
                         self.set_status_message(self.status.clone());
                     }
                 }
@@ -11321,9 +11369,9 @@ impl App {
                     self.ai_sidebar_focused = false;
                 }
                 self.status = if self.ai_sidebar_collapsed {
-                    "Chat sidebar hidden".to_string()
+                    crate::i18n::t("status.chat_sidebar_hidden").to_string()
                 } else {
-                    "Chat sidebar shown".to_string()
+                    crate::i18n::t("status.chat_sidebar_shown").to_string()
                 };
                 self.quit_pending_confirm = false;
             }
@@ -11439,7 +11487,7 @@ impl App {
                     ) {
                         self.ai_interrupt_confirm = true;
                         self.ai_interrupt_selection = 0;
-                        self.status = "Interrupt the current run?".to_string();
+                        self.status = crate::i18n::t("status.interrupt_the_current_run").to_string();
                     }
                 } else {
                     self.withdraw_queued_message();
@@ -11471,7 +11519,7 @@ impl App {
             Action::AgentClose => {
                 self.clear_chat_selection();
                 if self.agents.len() <= 1 {
-                    self.status = "Cannot close the last agent".to_string();
+                    self.status = crate::i18n::t("status.cannot_close_the_last_agent").to_string();
                 } else {
                     // Only the closing conversation needs a final checkpoint;
                     // the others keep their periodic saves.
@@ -11578,13 +11626,13 @@ impl App {
                     && self.mindmap_focus == MindMapFocus::AiPanel
                 {
                     self.mindmap_focus = MindMapFocus::Main;
-                    self.status = "Focus returned to tree".to_string();
+                    self.status = crate::i18n::t("status.focus_returned_to_tree").to_string();
                 } else if self.active_tab == MainTab::MindMap
                     && self.mindmap_ai_panel_visible
                     && self.mindmap_focus == MindMapFocus::Main
                 {
                     self.mindmap_ai_panel_visible = false;
-                    self.status = "AI preview panel closed".to_string();
+                    self.status = crate::i18n::t("status.ai_preview_panel_closed").to_string();
                 } else if self.active_tab == MainTab::Ai {
                     // If AI is streaming, cancel the LLM request
                     if self.agent().status == AiStatus::Waiting
@@ -11603,9 +11651,9 @@ impl App {
                             source: None,
                             activity: None,
                         });
-                        self.status = "AI request cancelled".to_string();
+                        self.status = crate::i18n::t("status.ai_request_cancelled").to_string();
                     } else {
-                        self.status = "Input cleared".to_string();
+                        self.status = crate::i18n::t("status.input_cleared").to_string();
                     }
                     self.agent_mut().input.set_text(String::new());
                     self.agent_mut().partial_response_mut().clear();
@@ -11616,7 +11664,7 @@ impl App {
                     if self.step_input_active || self.step_keyword_picker.is_some() {
                         self.clear_step_input_state();
                         self.clear_step_keyword_picker();
-                        self.status = "Input state cleared".to_string();
+                        self.status = crate::i18n::t("status.input_state_cleared").to_string();
                     } else if self.explore_detail_open {
                         self.explore_detail_open = false;
                         self.explore_detail_case = None;
@@ -11711,7 +11759,10 @@ impl App {
                     .authoring_ui
                     .save_current_document(&self.project.root_dir)
                 {
-                    Ok(()) => self.status = "Saved requirement document".to_string(),
+                    Ok(()) => {
+                        self.status =
+                            crate::i18n::t("status.saved_requirement_document").to_string()
+                    }
                     Err(error) => self.status = format!("Could not save requirement: {error}"),
                 }
                 self.set_status_message(self.status.clone());
@@ -11725,7 +11776,7 @@ impl App {
                     &self.project.root_dir,
                     artifacts,
                 )?;
-                self.status = "Saved test points".to_string();
+                self.status = crate::i18n::t("status.saved_test_points").to_string();
             }
             return Ok(());
         }
@@ -11743,7 +11794,9 @@ impl App {
             }
             self.sync_editor_to_project();
         } else {
-            self.status = "No file path: run with `cargo run -- path/to/file.feature`".to_string();
+            self.status =
+                crate::i18n::t("status.no_file_path_run_with_cargo_run_path_to_file_feature")
+                    .to_string();
         }
         Ok(())
     }
@@ -11802,7 +11855,7 @@ impl App {
                 self.save()?;
                 self.quit();
             }
-            "" => self.set_status_message("Type q, w, wq, or x".to_string()),
+            "" => self.set_status_message(crate::i18n::t("status.type_q_w_wq_or_x").to_string()),
             other => self.set_status_message(format!("Unknown command: {other}")),
         }
         Ok(())
@@ -11968,11 +12021,11 @@ impl App {
             }
         }
         self.status = match tab {
-            MainTab::MindMap => "Switched to MindMap tab",
-            MainTab::Explore => "Switched to Explore tab",
-            MainTab::Ai => "Switched to AI tab",
-            MainTab::Requirements => "Switched to Requirements tab",
-            MainTab::TestPoints => "Switched to Test Points tab",
+            MainTab::MindMap => crate::i18n::t("status.switched_to_mindmap_tab"),
+            MainTab::Explore => crate::i18n::t("status.switched_to_explore_tab"),
+            MainTab::Ai => crate::i18n::t("status.switched_to_ai_tab"),
+            MainTab::Requirements => crate::i18n::t("status.switched_to_requirements_tab"),
+            MainTab::TestPoints => crate::i18n::t("status.switched_to_test_points_tab"),
         }
         .to_string();
     }
@@ -12328,7 +12381,9 @@ impl App {
                 .context("requirement excerpt not found")?
                 .clone();
             if excerpt.resolution != teshi_core::authoring::ResolutionState::Resolved {
-                self.status = "Requirement link is stale — resolve in Requirements tab".to_string();
+                self.status =
+                    crate::i18n::t("status.requirement_link_is_stale_resolve_in_requirements_tab")
+                        .to_string();
                 return Ok(());
             }
             (tp_id, excerpt)
@@ -12533,7 +12588,7 @@ impl App {
 
     fn begin_step_or_title_edit(&mut self) -> Result<()> {
         if !self.is_editor_active() {
-            self.status = "Enter editor mode first".to_string();
+            self.status = crate::i18n::t("status.enter_editor_mode_first").to_string();
             return Ok(());
         }
         let line = self.buffer.line(self.cursor_row);
@@ -12545,9 +12600,12 @@ impl App {
                         buffer_row: self.cursor_row,
                         selected: idx,
                     });
-                    self.status = "Select step keyword (↑↓ Enter, Esc cancel)".to_string();
+                    self.status =
+                        crate::i18n::t("status.select_step_keyword_enter_esc_cancel").to_string();
                 } else {
-                    self.status = "Step keyword list is available on step lines only".to_string();
+                    self.status =
+                        crate::i18n::t("status.step_keyword_list_is_available_on_step_lines_only")
+                            .to_string();
                 }
             }
             BddFocusSlot::Body => {
@@ -12555,7 +12613,8 @@ impl App {
                 let Some(body_start) =
                     line_body_edit_min_col_in_buffer(&self.buffer, self.cursor_row)
                 else {
-                    self.status = "No editable text region on this line".to_string();
+                    self.status =
+                        crate::i18n::t("status.no_editable_text_region_on_this_line").to_string();
                     self.quit_pending_confirm = false;
                     return Ok(());
                 };
@@ -12565,8 +12624,8 @@ impl App {
                 let end = self.buffer.line_len_chars(self.cursor_row);
                 self.cursor_col = end;
                 self.desired_col = end;
-                self.status = "Editing active".to_string();
-                self.set_status_message("Editing active".to_string());
+                self.status = crate::i18n::t("status.editing_active").to_string();
+                self.set_status_message(crate::i18n::t("status.editing_active").to_string());
             }
         }
         self.pending_char = None;
@@ -12585,13 +12644,14 @@ impl App {
             self.quit_pending_confirm = false;
             self.status = format!("Step keyword set to {keyword}");
         } else {
-            self.status = "Step keyword shortcuts work on step lines only".to_string();
+            self.status =
+                crate::i18n::t("status.step_keyword_shortcuts_work_on_step_lines_only").to_string();
         }
     }
 
     fn insert_step(&mut self, above: bool) {
         if !self.is_editor_active() {
-            self.status = "Enter editor mode first".to_string();
+            self.status = crate::i18n::t("status.enter_editor_mode_first").to_string();
             return;
         }
         self.push_undo();
@@ -12602,7 +12662,8 @@ impl App {
         };
         let Some(row) = inserted_row else {
             let _ = self.undo_stack.pop();
-            self.status = "No scenario selected for step insertion".to_string();
+            self.status =
+                crate::i18n::t("status.no_scenario_selected_for_step_insertion").to_string();
             return;
         };
         self.cursor_row = row;
@@ -12611,21 +12672,21 @@ impl App {
         self.clear_structural_state();
         let _ = self.begin_step_or_title_edit();
         self.status = if above {
-            "Inserted step above".to_string()
+            crate::i18n::t("status.inserted_step_above").to_string()
         } else {
-            "Inserted step below".to_string()
+            crate::i18n::t("status.inserted_step_below").to_string()
         };
     }
 
     fn insert_scenario(&mut self) {
         if !self.is_editor_active() {
-            self.status = "Enter editor mode first".to_string();
+            self.status = crate::i18n::t("status.enter_editor_mode_first").to_string();
             return;
         }
         self.push_undo();
         let Some(row) = insert_scenario_after_current(&mut self.buffer, self.cursor_row) else {
             let _ = self.undo_stack.pop();
-            self.status = "No scenario selected".to_string();
+            self.status = crate::i18n::t("status.no_scenario_selected").to_string();
             return;
         };
         self.cursor_row = row;
@@ -12635,12 +12696,12 @@ impl App {
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
         let _ = self.begin_step_or_title_edit();
-        self.status = "Inserted scenario".to_string();
+        self.status = crate::i18n::t("status.inserted_scenario").to_string();
     }
 
     fn delete_current_node(&mut self) {
         if !self.is_editor_active() {
-            self.status = "Enter editor mode first".to_string();
+            self.status = crate::i18n::t("status.enter_editor_mode_first").to_string();
             return;
         }
         let line = self.buffer.line(self.cursor_row);
@@ -12655,7 +12716,8 @@ impl App {
         };
         let Some(row) = target_row else {
             let _ = self.undo_stack.pop();
-            self.status = "Delete works on steps or scenario headers".to_string();
+            self.status =
+                crate::i18n::t("status.delete_works_on_steps_or_scenario_headers").to_string();
             return;
         };
         self.cursor_row = row;
@@ -12664,12 +12726,12 @@ impl App {
         self.focus_slot = BddFocusSlot::Body;
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
-        self.status = "Deleted node".to_string();
+        self.status = crate::i18n::t("status.deleted_node").to_string();
     }
 
     fn copy_current_step(&mut self) {
         let Some(lines) = crate::bdd_nav::step_block_lines(&self.buffer, self.cursor_row) else {
-            self.status = "Copy works on steps only".to_string();
+            self.status = crate::i18n::t("status.copy_works_on_steps_only").to_string();
             return;
         };
         self.clipboard = Some(lines.join("\n"));
@@ -12677,21 +12739,21 @@ impl App {
         self.quit_pending_confirm = false;
         self.selection_anchor = None;
         self.selection_end = None;
-        self.status = "Step copied".to_string();
+        self.status = crate::i18n::t("status.step_copied").to_string();
     }
 
     fn paste_step(&mut self) {
         if !self.is_editor_active() {
-            self.status = "Enter editor mode first".to_string();
+            self.status = crate::i18n::t("status.enter_editor_mode_first").to_string();
             return;
         }
         let Some(clipboard) = self.clipboard.clone() else {
-            self.status = "Clipboard is empty".to_string();
+            self.status = crate::i18n::t("status.clipboard_is_empty").to_string();
             return;
         };
         let scenario_row = scenario_header_for_row(&self.buffer, self.cursor_row);
         let Some(scenario_row) = scenario_row else {
-            self.status = "Paste works inside a scenario".to_string();
+            self.status = crate::i18n::t("status.paste_works_inside_a_scenario").to_string();
             return;
         };
         let block_lines = clipboard
@@ -12761,7 +12823,7 @@ impl App {
         self.focus_slot = BddFocusSlot::Body;
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
-        self.status = "Step pasted".to_string();
+        self.status = crate::i18n::t("status.step_pasted").to_string();
     }
 
     fn clear_chat_selection(&mut self) {
@@ -12821,13 +12883,14 @@ impl App {
                     && self.mindmap_focus == MindMapFocus::AiPanel))
         {
             let Some(text) = crate::ui::chat::selected_chat_text(self) else {
-                self.status = "Chat selection is no longer available".to_string();
+                self.status =
+                    crate::i18n::t("status.chat_selection_is_no_longer_available").to_string();
                 self.set_status_message(self.status.clone());
                 self.clear_chat_selection();
                 return Ok(());
             };
             if text.is_empty() {
-                self.status = "No chat selection to copy".to_string();
+                self.status = crate::i18n::t("status.no_chat_selection_to_copy").to_string();
                 self.set_status_message(self.status.clone());
                 return Ok(());
             }
@@ -12841,7 +12904,7 @@ impl App {
         }
         let text = self.selection_text();
         if text.is_empty() {
-            self.status = "No selection to copy".to_string();
+            self.status = crate::i18n::t("status.no_selection_to_copy").to_string();
             self.set_status_message(self.status.clone());
             return Ok(());
         }
@@ -13355,7 +13418,7 @@ impl App {
                         {
                             self.editor_focus_scenario_row = Some(buf_row);
                             self.scroll_row = buf_row;
-                            self.status = "Focused scenario".to_string();
+                            self.status = crate::i18n::t("status.focused_scenario").to_string();
                         }
                     }
                 } else {
@@ -13881,8 +13944,10 @@ impl App {
             }
             ClickableRegion::ProjectOpenPath { .. } => {
                 self.project_switch.begin_open_path();
-                self.status =
-                    "Type a project directory and press Enter to open it; Esc cancels".to_string();
+                self.status = crate::i18n::t(
+                    "status.type_a_project_directory_and_press_enter_to_open_it_esc_canc",
+                )
+                .to_string();
             }
             ClickableRegion::ProjectControl { .. } => {
                 self.cmd_project(None)?;
@@ -13931,7 +13996,7 @@ impl App {
 
     fn move_step_block(&mut self, down: bool) {
         if !self.is_editor_active() {
-            self.status = "Enter editor mode first".to_string();
+            self.status = crate::i18n::t("status.enter_editor_mode_first").to_string();
             return;
         }
         self.push_undo();
@@ -13943,9 +14008,9 @@ impl App {
         let Some(row) = moved_to else {
             let _ = self.undo_stack.pop();
             self.status = if down {
-                "Step cannot move further down".to_string()
+                crate::i18n::t("status.step_cannot_move_further_down").to_string()
             } else {
-                "Step cannot move further up".to_string()
+                crate::i18n::t("status.step_cannot_move_further_up").to_string()
             };
             return;
         };
@@ -13956,22 +14021,22 @@ impl App {
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = if down {
-            "Moved step down".to_string()
+            crate::i18n::t("status.moved_step_down").to_string()
         } else {
-            "Moved step up".to_string()
+            crate::i18n::t("status.moved_step_up").to_string()
         };
     }
 
     fn toggle_current_scenario_fold(&mut self) {
         let Some(scenario_row) = scenario_header_for_row(&self.buffer, self.cursor_row) else {
-            self.status = "Fold works inside a scenario".to_string();
+            self.status = crate::i18n::t("status.fold_works_inside_a_scenario").to_string();
             return;
         };
         if self.scenario_fold.insert(scenario_row) {
-            self.status = "Scenario folded".to_string();
+            self.status = crate::i18n::t("status.scenario_folded").to_string();
         } else {
             self.scenario_fold.remove(&scenario_row);
-            self.status = "Scenario expanded".to_string();
+            self.status = crate::i18n::t("status.scenario_expanded").to_string();
         }
         if self.hidden_editor_rows().contains(&self.cursor_row) {
             self.cursor_row = scenario_row;
@@ -14009,7 +14074,7 @@ impl App {
         }
         self.pending_char = None;
         self.quit_pending_confirm = false;
-        self.status = "All scenarios folded".to_string();
+        self.status = crate::i18n::t("status.all_scenarios_folded").to_string();
     }
 
     fn run_background(&mut self) {
@@ -14018,19 +14083,19 @@ impl App {
             return;
         }
         let Some((feature_idx, scenario_idx)) = self.current_editor_scenario() else {
-            self.status = "No scenario selected to run".to_string();
+            self.status = crate::i18n::t("status.no_scenario_selected_to_run").to_string();
             return;
         };
         self.explore_selected_feature = feature_idx;
         self.explore_selected_scenario = scenario_idx;
         self.explore_selected_step = 0;
         self.start_explore_run();
-        self.status = "Background run started".to_string();
+        self.status = crate::i18n::t("status.background_run_started").to_string();
     }
 
     fn undo(&mut self) {
         let Some(snapshot) = self.undo_stack.pop() else {
-            self.status = "Nothing to undo".to_string();
+            self.status = crate::i18n::t("status.nothing_to_undo").to_string();
             return;
         };
         self.redo_stack
@@ -14043,7 +14108,7 @@ impl App {
 
     fn redo(&mut self) {
         let Some(snapshot) = self.redo_stack.pop() else {
-            self.status = "Nothing to redo".to_string();
+            self.status = crate::i18n::t("status.nothing_to_redo").to_string();
             return;
         };
         self.undo_stack
@@ -14085,7 +14150,7 @@ impl App {
             self.desired_col = 0;
             self.focus_slot = BddFocusSlot::Body;
             self.mark_current_buffer_dirty();
-            self.status = "Step keyword updated".to_string();
+            self.status = crate::i18n::t("status.step_keyword_updated").to_string();
         }
         self.step_keyword_picker = None;
         self.pending_char = None;
@@ -14392,9 +14457,9 @@ impl App {
     fn open_auth_panel(&mut self, subcommand: &str) {
         self.auth_panel_active = true;
         self.status = match subcommand {
-            "" => "Auth panel opened. Press Esc to close.".into(),
+            "" => crate::i18n::t("status.auth_panel_opened_press_esc_to_close").into(),
             "add" => "Auth: add provider mode.".into(),
-            "status" => "Auth: showing provider status.".into(),
+            "status" => crate::i18n::t("status.auth_showing_provider_status").into(),
             cmd if cmd.starts_with("remove ") => {
                 let provider = cmd.strip_prefix("remove ").unwrap_or("?");
                 format!("Auth: remove provider '{}'.", provider)
@@ -14697,10 +14762,10 @@ impl App {
         self.agent_profile_panel_active = true;
         self.status = match mode {
             AgentPanelMode::SelectBackend => {
-                "Select Agent: ↑↓ move · Enter select · Esc close".into()
+                crate::i18n::t("status.select_agent_move_enter_select_esc_close").into()
             }
             AgentPanelMode::InstalledAcp => {
-                "ACP Agents: ↑↓ move · Enter select · i Registry · Esc close".into()
+                crate::i18n::t("status.acp_agents_move_enter_select_i_registry_esc_close").into()
             }
             _ => String::new(),
         };
@@ -14713,7 +14778,7 @@ impl App {
         }
         self.acp_registry_agents.clear();
         self.agent_panel_mode = AgentPanelMode::Registry;
-        self.status = "Loading official ACP Registry...".into();
+        self.status = crate::i18n::t("status.loading_official_acp_registry").into();
         let (tx, rx) = std::sync::mpsc::channel();
         self.acp_registry_rx = Some(rx);
         let registry_url = std::env::var("TESHI_ACP_REGISTRY_URL")
@@ -14751,7 +14816,7 @@ impl App {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.acp_install_rx = None;
-                    self.status = "ACP install failed: worker stopped".into();
+                    self.status = crate::i18n::t("status.acp_install_failed_worker_stopped").into();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -14766,7 +14831,8 @@ impl App {
                     && self.agent_panel_mode == AgentPanelMode::Registry
                 {
                     self.acp_registry_agents = agents;
-                    self.status = "ACP Registry: ↑↓ move · Enter install · Esc close".into();
+                    self.status =
+                        crate::i18n::t("status.acp_registry_move_enter_install_esc_close").into();
                 }
             }
             Ok(Err(error)) => {
@@ -14784,7 +14850,9 @@ impl App {
                     && self.agent_panel_mode == AgentPanelMode::Registry
                 {
                     self.agent_profile_panel_active = false;
-                    self.status = "ACP Registry unavailable: fetch worker stopped".into();
+                    self.status =
+                        crate::i18n::t("status.acp_registry_unavailable_fetch_worker_stopped")
+                            .into();
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -14814,7 +14882,9 @@ impl App {
                 "Selected ACP Agent {}; remembered for new sessions",
                 agent.name
             ),
-            None => "Selected Teshi Native; remembered for new sessions".into(),
+            None => {
+                crate::i18n::t("status.selected_teshi_native_remembered_for_new_sessions").into()
+            }
         };
         if let Some(root) = self.agent().selection_root.as_ref() {
             let selection = match self.agent().selected_acp_id.clone() {
@@ -14929,11 +14999,11 @@ impl App {
             agent.chat.turns.clear();
             agent.chat.thoughts.clear();
             agent.chat.groups.clear();
-            self.status = "Thinking and tool details toggled".into();
+            self.status = crate::i18n::t("status.thinking_and_tool_details_toggled").into();
             return Ok(());
         }
         if command == "rename" {
-            self.status = "Usage: /rename <title> · /rename --clear".into();
+            self.status = crate::i18n::t("status.usage_rename_title_rename_clear").into();
             return Ok(());
         }
         if let Some(argument) = command.strip_prefix("rename ") {
@@ -14942,7 +15012,8 @@ impl App {
             let argument = argument.trim();
             if argument == "--clear" {
                 if self.agent().custom_title.is_none() {
-                    self.status = "No custom conversation title to clear".into();
+                    self.status =
+                        crate::i18n::t("status.no_custom_conversation_title_to_clear").into();
                 } else {
                     self.agent_mut().clear_custom_title();
                     self.save_sessions(true)?;
@@ -14951,7 +15022,7 @@ impl App {
                 return Ok(());
             }
             if argument.is_empty() {
-                self.status = "Conversation title cannot be empty".into();
+                self.status = crate::i18n::t("status.conversation_title_cannot_be_empty").into();
                 return Ok(());
             }
             let title: String = argument
@@ -14965,10 +15036,12 @@ impl App {
         }
         if command == "unqueue" {
             if !self.agent().input.is_empty() {
-                self.status =
-                    "Keep or clear the current draft before editing a queued message".into();
+                self.status = crate::i18n::t(
+                    "status.keep_or_clear_the_current_draft_before_editing_a_queued_mess",
+                )
+                .into();
             } else if self.agent().chat.queue.is_empty() {
-                self.status = "No queued messages".into();
+                self.status = crate::i18n::t("status.no_queued_messages").into();
             } else {
                 self.withdraw_queued_message();
             }
@@ -15045,7 +15118,7 @@ impl App {
                 .iter()
                 .position(|m| *m == current)
                 .unwrap_or(0);
-            self.status = "Approval mode".to_string();
+            self.status = crate::i18n::t("status.approval_mode").to_string();
             return Ok(());
         }
         if command == "agent" || command == "agents" {
@@ -15058,7 +15131,7 @@ impl App {
         }
         if let Some(spec) = command.strip_prefix("acp add ") {
             let Some((id, command_json)) = spec.split_once(' ') else {
-                self.status = "Usage: /acp add <id> [\"program\",\"arg\",...]".into();
+                self.status = crate::i18n::t("status.usage_acp_add_id_program_arg").into();
                 return Ok(());
             };
             let result = (|| -> Result<String> {
@@ -15086,7 +15159,8 @@ impl App {
                         || (self.agent().profile_id.is_none() && p.id == "default")
                 })
                 .unwrap_or(0);
-            self.status = "Agent profiles: ↑↓ select · Enter apply · Esc close".to_string();
+            self.status =
+                crate::i18n::t("status.agent_profiles_select_enter_apply_esc_close").to_string();
             return Ok(());
         }
         // Direct (no-review) generation is an explicit UI/CLI choice, recorded
@@ -15148,26 +15222,32 @@ impl App {
                 iteration: self.authoring_ui.iteration_filter.clone(),
                 pending_user_message,
             });
-            self.status =
-                "Confirm generation source scope (Enter confirm · Esc cancel · i change iteration)"
-                    .to_string();
+            self.status = crate::i18n::t(
+                "status.confirm_generation_source_scope_enter_confirm_esc_cancel_i_c",
+            )
+            .to_string();
             return Ok(());
         }
         if command == "review-strict" {
             self.revoke_direct_authorization();
-            self.status = "Switched back to Strict review (human approval required). Restart generation with /generate to follow the review flow.".to_string();
+            self.status = crate::i18n::t(
+                "status.switched_back_to_strict_review_human_approval_required_resta",
+            )
+            .to_string();
             return Ok(());
         }
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /preferences, /generate, /generate-direct, /review-strict, /continue".to_string();
+        self.status =
+            crate::i18n::t("status.unknown_slash_command_try_new_exit_resume_retry_copy_copy_co")
+                .to_string();
         Ok(())
     }
 
     fn continue_interrupted_task(&mut self) -> Result<()> {
         if !self.agent().task_interrupted() {
-            self.status = "No interrupted ACP task to continue".into();
+            self.status = crate::i18n::t("status.no_interrupted_acp_task_to_continue").into();
             return Ok(());
         }
         // Dispatch through the existing backend without replacing its ACP session.
@@ -15180,7 +15260,8 @@ impl App {
         }
         let recent = teshi_engine::load_recent_project_entries().unwrap_or_default();
         self.project_switch.begin_picker(recent);
-        self.status = "Project picker: ↑/↓ select · Enter open · Esc cancel".to_string();
+        self.status =
+            crate::i18n::t("status.project_picker_select_enter_open_esc_cancel").to_string();
         Ok(())
     }
 
@@ -15208,7 +15289,7 @@ impl App {
         *self.agent_mut() = AgentThread::new_with_selection(id, &format!("Agent {}", id + 1), root);
         self.agent_mut().profile_id = profile_id;
         self.agent_mut().member_dir = member_dir;
-        self.status = "New session started".to_string();
+        self.status = crate::i18n::t("status.new_session_started").to_string();
         if self.ai_input_focused {
             self.focus_ai_input();
         }
@@ -15240,7 +15321,7 @@ impl App {
                 self.agent().messages().len()
             );
         } else {
-            self.status = "No saved sessions found".to_string();
+            self.status = crate::i18n::t("status.no_saved_sessions_found").to_string();
         }
         Ok(())
     }
@@ -15251,7 +15332,9 @@ impl App {
             None | Some("") => 1,
             Some(value) => match value.parse::<usize>() {
                 Ok(0) | Err(_) => {
-                    self.status = "Usage: /copy [N] where N is a positive integer".to_string();
+                    self.status =
+                        crate::i18n::t("status.usage_copy_n_where_n_is_a_positive_integer")
+                            .to_string();
                     self.set_status_message(self.status.clone());
                     return Ok(());
                 }
@@ -15260,7 +15343,8 @@ impl App {
         };
         let texts = completed_assistant_responses(self.agent().messages(), n);
         if texts.is_empty() {
-            self.status = "No completed assistant responses to copy".to_string();
+            self.status =
+                crate::i18n::t("status.no_completed_assistant_responses_to_copy").to_string();
             self.set_status_message(self.status.clone());
             return Ok(());
         }
@@ -15280,7 +15364,9 @@ impl App {
             None | Some("") => 0,
             Some(value) => match value.parse::<usize>() {
                 Ok(0) | Err(_) => {
-                    self.status = "Usage: /copy-code [N] where N is a positive integer".to_string();
+                    self.status =
+                        crate::i18n::t("status.usage_copy_code_n_where_n_is_a_positive_integer")
+                            .to_string();
                     self.set_status_message(self.status.clone());
                     return Ok(());
                 }
@@ -15298,7 +15384,8 @@ impl App {
             })
             .map(|message| message.content.clone());
         let Some(content) = content else {
-            self.status = "No assistant response to copy a code block from".to_string();
+            self.status = crate::i18n::t("status.no_assistant_response_to_copy_a_code_block_from")
+                .to_string();
             self.set_status_message(self.status.clone());
             return Ok(());
         };
@@ -15332,8 +15419,9 @@ impl App {
         self.model_panel_selection = 0;
         self.model_panel_mode = ModelPanelMode::List;
         self.model_profiles = crate::profiles::load_all();
-        self.status = "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
-            .to_string();
+        self.status =
+            crate::i18n::t("status.model_profiles_m_a_add_e_edit_select_enter_activate_esc_clos")
+                .to_string();
         Ok(())
     }
 
@@ -15349,10 +15437,11 @@ impl App {
             self.project_sessions()
         };
         self.status = if legacy {
-            "Legacy / Unassigned. Loading keeps history unassigned. Enter load · Esc close"
+            crate::i18n::t("status.legacy_unassigned_loading_keeps_history_unassigned_enter_loa")
                 .to_string()
         } else {
-            "Sessions for the active project. /sessions legacy shows unassigned history".to_string()
+            crate::i18n::t("status.sessions_for_the_active_project_sessions_legacy_shows_unassi")
+                .to_string()
         };
         Ok(())
     }
@@ -15381,12 +15470,18 @@ impl App {
     fn restore_session(&mut self, session: crate::session::Session, legacy: bool) -> bool {
         self.pending_session_restore = None;
         if session.project_root.is_none() && !legacy {
-            self.status = "Unassigned session: use /sessions legacy to load it explicitly".into();
+            self.status = crate::i18n::t(
+                "status.unassigned_session_use_sessions_legacy_to_load_it_explicitly",
+            )
+            .into();
             self.set_status_message(self.status.clone());
             return false;
         }
         if session.project_root.is_some() && legacy {
-            self.status = "Project-owned sessions cannot be loaded from the Legacy view".into();
+            self.status = crate::i18n::t(
+                "status.project_owned_sessions_cannot_be_loaded_from_the_legacy_view",
+            )
+            .into();
             self.set_status_message(self.status.clone());
             return false;
         }
@@ -15426,8 +15521,10 @@ impl App {
             ));
             self.session_panel_active = true;
             self.session_panel_legacy = legacy;
-            self.status =
-                "Waiting for the previous Agent to exit before loading history; Esc cancels".into();
+            self.status = crate::i18n::t(
+                "status.waiting_for_the_previous_agent_to_exit_before_loading_histor",
+            )
+            .into();
             self.set_status_message(self.status.clone());
             return false;
         }
@@ -15474,7 +15571,7 @@ impl App {
         self.ai_input_focused = false;
         self.session_panel_active = false;
         self.status = if legacy {
-            "Loaded legacy session; history remains unassigned".into()
+            crate::i18n::t("status.loaded_legacy_session_history_remains_unassigned").into()
         } else {
             format!(
                 "Loaded session with {} messages",
@@ -15788,6 +15885,17 @@ mod tests {
             );
             assert!(app.status.contains("English") || app.status.contains("UI language"));
         });
+    }
+
+    #[test]
+    fn status_messages_follow_the_ui_locale() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.set_ui_locale(teshi_engine::UiLocalePreference::ZhCn);
+        app.execute_slash_command("details").unwrap();
+        assert_eq!(app.status, "已切换思考与工具详情");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.execute_slash_command("details").unwrap();
+        assert_eq!(app.status, "Thinking and tool details toggled");
     }
 
     #[test]

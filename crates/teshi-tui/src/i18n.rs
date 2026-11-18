@@ -581,6 +581,341 @@ fn en(key: &str) -> Option<&'static str> {
         "req.overlay.scope.confirm" => "Confirm [Enter] ",
         "req.overlay.scope.iteration_key" => "Iteration [i] ",
         "req.overlay.scope.uninitialized" => "(uninitialized)",
+        "status.a_project_switch_is_already_being_prepared" => {
+            "A project switch is already being prepared"
+        }
+        "status.acp_agents_move_enter_select_i_registry_esc_close" => {
+            "ACP Agents: ↑↓ move · Enter select · i Registry · Esc close"
+        }
+        "status.acp_registry_unavailable_fetch_worker_stopped" => {
+            "ACP Registry unavailable: fetch worker stopped"
+        }
+        "status.acp_registry_move_enter_install_esc_close" => {
+            "ACP Registry: ↑↓ move · Enter install · Esc close"
+        }
+        "status.acp_agent_requests_permission_enter_to_allow_esc_to_reject" => {
+            "ACP agent requests permission — Enter to allow, Esc to reject"
+        }
+        "status.acp_install_failed_worker_stopped" => "ACP install failed: worker stopped",
+        "status.acp_permission_request_is_no_longer_pending" => {
+            "ACP permission request is no longer pending"
+        }
+        "status.ai_cleared_filter" => "AI cleared filter",
+        "status.ai_cleared_highlights" => "AI cleared highlights",
+        "status.ai_error_llm_handle_not_available" => "AI error: LLM handle not available",
+        "status.ai_error_background_llm_thread_has_exited" => {
+            "AI error: background LLM thread has exited"
+        }
+        "status.ai_error_model_kept_calling_tools_after_final_response_limit" => {
+            "AI error: model kept calling tools after final-response limit"
+        }
+        "status.ai_not_configured" => "AI not configured",
+        "status.ai_preview_panel_closed" => "AI preview panel closed",
+        "status.ai_request_cancelled" => "AI request cancelled",
+        "status.ai_suggest_not_implemented" => "AI suggest: not implemented",
+        "status.add_model" => "Add model",
+        "status.agent_profiles_select_enter_apply_esc_close" => {
+            "Agent profiles: ↑↓ select · Enter apply · Esc close"
+        }
+        "status.all_scenarios_folded" => "All scenarios folded",
+        "status.already_on_that_project_active_work_was_preserved" => {
+            "Already on that project; active work was preserved"
+        }
+        "status.approval_mode" => "Approval mode",
+        "status.auth_panel_opened_press_esc_to_close" => "Auth panel opened. Press Esc to close.",
+        "status.auth_showing_provider_status" => "Auth: showing provider status.",
+        "status.back_to_tree_preview" => "Back to tree + preview",
+        "status.background_run_started" => "Background run started",
+        "status.cannot_approve_resolve_stale_links_or_review_state" => {
+            "Cannot approve: resolve stale links or review state"
+        }
+        "status.cannot_close_the_last_agent" => "Cannot close the last agent",
+        "status.cannot_reject_this_test_point" => "Cannot reject this test point",
+        "status.chat_selection_is_no_longer_available" => "Chat selection is no longer available",
+        "status.chat_sidebar_hidden" => "Chat sidebar hidden",
+        "status.chat_sidebar_shown" => "Chat sidebar shown",
+        "status.clipboard_is_empty" => "Clipboard is empty",
+        "status.code_block_is_no_longer_available" => "Code block is no longer available",
+        "status.completed_filter_applies_to_current_project_only" => {
+            "Completed filter applies to Current project only"
+        }
+        "status.confirm_generation_source_scope_enter_confirm_esc_cancel_i_c" => {
+            "Confirm generation source scope (Enter confirm · Esc cancel · i change iteration)"
+        }
+        "status.conversation_title_cannot_be_empty" => "Conversation title cannot be empty",
+        "status.copy_works_on_steps_only" => "Copy works on steps only",
+        "status.cycled_test_point_review_filter" => "Cycled test-point review filter",
+        "status.delete_works_on_steps_or_scenario_headers" => {
+            "Delete works on steps or scenario headers"
+        }
+        "status.deleted_feature_cannot_be_edited" => "Deleted Feature cannot be edited",
+        "status.deleted_feature_cannot_be_run" => "Deleted Feature cannot be run",
+        "status.deleted_step_is_read_only" => "Deleted Step is read-only",
+        "status.deleted_node" => "Deleted node",
+        "status.diff_view_explore_tab_shows_changes_d_to_close" => {
+            "Diff view — explore tab shows changes. [D] to close."
+        }
+        "status.direct_no_review_generation_has_no_test_points_review_gate_s" => {
+            "Direct (no-review) generation has no Test Points review gate; send the generation request to continue."
+        }
+        "status.edit_committed" => "Edit committed",
+        "status.edit_the_fields_and_press_enter_to_save" => {
+            "Edit the fields and press Enter to save."
+        }
+        "status.editing_active" => "Editing active",
+        "status.enter_a_project_directory_or_press_esc_to_cancel" => {
+            "Enter a project directory or press Esc to cancel"
+        }
+        "status.enter_editor_mode_first" => "Enter editor mode first",
+        "status.exited_diff_view" => "Exited diff view",
+        "status.explore_edit_mode" => "Explore edit mode",
+        "status.explore_mode" => "Explore mode",
+        "status.feature_load_deferred_save_edits_and_finish_pending_work_the" => {
+            "Feature load deferred: save edits and finish pending work, then select again"
+        }
+        "status.feature_loaded_ast_and_mindmap_scope_current_feature" => {
+            "Feature loaded; AST and MindMap scope: current Feature"
+        }
+        "status.fill_in_the_fields_and_press_enter_to_save" => {
+            "Fill in the fields and press Enter to save."
+        }
+        "status.focus_returned_to_tree" => "Focus returned to tree",
+        "status.focused_scenario" => "Focused scenario",
+        "status.fold_works_inside_a_scenario" => "Fold works inside a scenario",
+        "status.generation_canceled" => "Generation canceled",
+        "status.generation_source_scope_confirmed" => "Generation source scope confirmed",
+        "status.hiding_plaintext_secrets" => "Hiding plaintext secrets",
+        "status.image_attached" => "Image attached",
+        "status.image_removed" => "Image removed",
+        "status.input_cleared" => "Input cleared",
+        "status.input_deactivated" => "Input deactivated",
+        "status.input_state_cleared" => "Input state cleared",
+        "status.inserted_new_step_line" => "Inserted new step line",
+        "status.inserted_scenario" => "Inserted scenario",
+        "status.inserted_step_above" => "Inserted step above",
+        "status.inserted_step_below" => "Inserted step below",
+        "status.interrupt_the_current_run" => "Interrupt the current run?",
+        "status.keep_or_clear_the_current_draft_before_editing_a_queued_mess" => {
+            "Keep or clear the current draft before editing a queued message"
+        }
+        "status.llm_not_configured_set_an_api_key_on_a_model_profile_or_tesh" => {
+            "LLM not configured: set an API key on a model profile or TESHI_LLM_API_KEY"
+        }
+        "status.legacy_unassigned_loading_keeps_history_unassigned_enter_loa" => {
+            "Legacy / Unassigned. Loading keeps history unassigned. Enter load · Esc close"
+        }
+        "status.linked_requirement_to_current_project" => "Linked requirement to current project",
+        "status.loaded_legacy_session_history_remains_unassigned" => {
+            "Loaded legacy session; history remains unassigned"
+        }
+        "status.loading_official_acp_registry" => "Loading official ACP Registry...",
+        "status.location_switched" => "Location switched",
+        "status.mindmap_is_display_only" => "MindMap is display-only",
+        "status.model_identifier_is_required" => "Model identifier is required.",
+        "status.model_profiles_m_a_add_e_edit_select_enter_activate_esc_clos" => {
+            "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
+        }
+        "status.moved_step_down" => "Moved step down",
+        "status.moved_step_up" => "Moved step up",
+        "status.name_is_required" => "Name is required.",
+        "status.new_line_is_available_on_step_lines_only" => {
+            "New line is available on step lines only"
+        }
+        "status.new_session_started" => "New session started",
+        "status.no_http_exchanges_to_expand" => "No HTTP exchanges to expand",
+        "status.no_assistant_response_to_copy_a_code_block_from" => {
+            "No assistant response to copy a code block from"
+        }
+        "status.no_capture_for_this_step_showing_the_first_one" => {
+            "No capture for this step; showing the first one"
+        }
+        "status.no_captured_screenshots_for_this_scenario" => {
+            "No captured screenshots for this scenario"
+        }
+        "status.no_chat_selection_to_copy" => "No chat selection to copy",
+        "status.no_completed_assistant_responses_to_copy" => {
+            "No completed assistant responses to copy"
+        }
+        "status.no_custom_conversation_title_to_clear" => "No custom conversation title to clear",
+        "status.no_editable_text_region_on_this_line" => "No editable text region on this line",
+        "status.no_file_path_run_with_cargo_run_path_to_file_feature" => {
+            "No file path: run with `cargo run -- path/to/file.feature`"
+        }
+        "status.no_interrupted_acp_task_to_continue" => "No interrupted ACP task to continue",
+        "status.no_queued_messages" => "No queued messages",
+        "status.no_recent_project_is_available" => "No recent project is available",
+        "status.no_run_details_for_selection" => "No run details for selection",
+        "status.no_saved_sessions_found" => "No saved sessions found",
+        "status.no_scenario_selected" => "No scenario selected",
+        "status.no_scenario_selected_for_step_insertion" => {
+            "No scenario selected for step insertion"
+        }
+        "status.no_scenario_selected_to_run" => "No scenario selected to run",
+        "status.no_scenarios_to_run" => "No scenarios to run",
+        "status.no_selection_to_copy" => "No selection to copy",
+        "status.no_step_to_edit" => "No step to edit",
+        "status.nothing_to_redo" => "Nothing to redo",
+        "status.nothing_to_undo" => "Nothing to undo",
+        "status.open_run_details_first_enter_then_press_p_to_expand_secrets" => {
+            "Open run details first (Enter), then press p to expand secrets"
+        }
+        "status.paste_works_inside_a_scenario" => "Paste works inside a scenario",
+        "status.pending_command" => "Pending command",
+        "status.permission_sent_to_acp_agent" => "Permission sent to ACP agent...",
+        "status.preview_closed" => "Preview closed",
+        "status.profile_not_found_for_editing" => "Profile not found for editing.",
+        "status.project_picker_select_enter_open_esc_cancel" => {
+            "Project picker: ↑/↓ select · Enter open · Esc cancel"
+        }
+        "status.project_switch_canceled" => "Project switch canceled",
+        "status.project_switch_needs_running_tasks_stopped_s_stop_esc_cancel" => {
+            "Project switch needs running tasks stopped: S stop · Esc cancel"
+        }
+        "status.project_owned_sessions_cannot_be_loaded_from_the_legacy_view" => {
+            "Project-owned sessions cannot be loaded from the Legacy view"
+        }
+        "status.project_owned_tasks_must_stop_before_switching" => {
+            "Project-owned tasks must stop before switching"
+        }
+        "status.queued_message_paused_configure_an_agent_then_send_a_message" => {
+            "Queued message paused: configure an Agent, then send a message to resume"
+        }
+        "status.queued_message_restored_for_editing" => "Queued message restored for editing",
+        "status.removed_externally_deleted_feature_on_disk_run_evidence_reta" => {
+            "Removed externally deleted Feature; on-disk run evidence retained"
+        }
+        "status.requirement_changed_on_disk_unsaved_edits_kept" => {
+            "Requirement changed on disk; unsaved edits kept"
+        }
+        "status.requirement_library_refreshed" => "Requirement library refreshed",
+        "status.requirement_library_reloaded" => "Requirement library reloaded",
+        "status.requirement_link_is_stale_resolve_in_requirements_tab" => {
+            "Requirement link is stale — resolve in Requirements tab"
+        }
+        "status.requirements_view_updated" => "Requirements view updated",
+        "status.review_proposed_test_points_in_test_points_tab_5_then_press" => {
+            "Review proposed test points in Test Points tab [5], then press c to continue generation"
+        }
+        "status.run_started" => "Run started",
+        "status.runner_already_active" => "Runner already active",
+        "status.runner_exited_with_error" => "Runner exited with error",
+        "status.runner_is_still_active_wait_for_its_owned_process_to_exit" => {
+            "Runner is still active; wait for its owned process to exit"
+        }
+        "status.save_current_edits_and_finish_pending_work_before_switching" => {
+            "Save current edits and finish pending work before switching Feature"
+        }
+        "status.saved_requirement_document" => "Saved requirement document",
+        "status.saved_test_points" => "Saved test points",
+        "status.scenario_expanded" => "Scenario expanded",
+        "status.scenario_folded" => "Scenario folded",
+        "status.select_agent_move_enter_select_esc_close" => {
+            "Select Agent: ↑↓ move · Enter select · Esc close"
+        }
+        "status.select_a_feature_and_wait_for_it_to_load_before_editing" => {
+            "Select a Feature and wait for it to load before editing"
+        }
+        "status.select_a_feature_and_wait_for_it_to_load_before_running" => {
+            "Select a Feature and wait for it to load before running"
+        }
+        "status.select_a_requirement_document_to_set_its_iteration" => {
+            "Select a requirement document to set its iteration"
+        }
+        "status.select_a_requirement_document_to_set_its_priority" => {
+            "Select a requirement document to set its priority"
+        }
+        "status.select_a_test_point_to_approve" => "Select a test point to approve",
+        "status.select_a_test_point_to_reject" => "Select a test point to reject",
+        "status.select_non_empty_requirement_text_to_create_a_test_point" => {
+            "Select non-empty requirement text to create a test point"
+        }
+        "status.select_step_keyword_enter_esc_cancel" => {
+            "Select step keyword (↑↓ Enter, Esc cancel)"
+        }
+        "status.selected_teshi_native_remembered_for_new_sessions" => {
+            "Selected Teshi Native; remembered for new sessions"
+        }
+        "status.sending_mindmap_context_to_ai" => "Sending MindMap context to AI...",
+        "status.sending_message_to_ai" => "Sending message to AI...",
+        "status.sessions_for_the_active_project_sessions_legacy_shows_unassi" => {
+            "Sessions for the active project. /sessions legacy shows unassigned history"
+        }
+        "status.showing_implemented_and_verified_requirements" => {
+            "Showing implemented and verified requirements"
+        }
+        "status.showing_pending_requirements_only" => "Showing pending requirements only",
+        "status.showing_plaintext_secrets_p_to_hide" => "Showing plaintext secrets (p to hide)",
+        "status.step_cannot_move_further_down" => "Step cannot move further down",
+        "status.step_cannot_move_further_up" => "Step cannot move further up",
+        "status.step_copied" => "Step copied",
+        "status.step_keyword_list_is_available_on_step_lines_only" => {
+            "Step keyword list is available on step lines only"
+        }
+        "status.step_keyword_selection_canceled" => "Step keyword selection canceled",
+        "status.step_keyword_shortcuts_work_on_step_lines_only" => {
+            "Step keyword shortcuts work on step lines only"
+        }
+        "status.step_keyword_updated" => "Step keyword updated",
+        "status.step_pasted" => "Step pasted",
+        "status.stop_requested_for_the_project_owned_runner_waiting_for_exit" => {
+            "Stop requested for the project-owned runner; waiting for exit"
+        }
+        "status.switched_back_to_strict_review_human_approval_required_resta" => {
+            "Switched back to Strict review (human approval required). Restart generation with /generate to follow the review flow."
+        }
+        "status.switched_to_ai_tab" => "Switched to AI tab",
+        "status.switched_to_explore_tab" => "Switched to Explore tab",
+        "status.switched_to_mindmap_tab" => "Switched to MindMap tab",
+        "status.switched_to_requirements_tab" => "Switched to Requirements tab",
+        "status.switched_to_test_points_tab" => "Switched to Test Points tab",
+        "status.task_interrupted_retry_to_continue" => "Task interrupted — /retry to continue",
+        "status.tasks_stopped_resolve_unsaved_state_before_switching" => {
+            "Tasks stopped; resolve unsaved state before switching"
+        }
+        "status.the_clipboard_holds_no_text_or_image" => "The clipboard holds no text or image",
+        "status.the_project_directory_has_no_feature_files_add_one_to_begin" => {
+            "The project directory has no .feature files. Add one to begin."
+        }
+        "status.thinking_and_tool_details_toggled" => "Thinking and tool details toggled",
+        "status.tool_call_limit_reached_requesting_final_response" => {
+            "Tool call limit reached, requesting final response…"
+        }
+        "status.type_a_project_directory_and_press_enter_to_open_it_esc_canc" => {
+            "Type a project directory and press Enter to open it; Esc cancels"
+        }
+        "status.type_q_w_wq_or_x" => "Type q, w, wq, or x",
+        "status.unassigned_session_use_sessions_legacy_to_load_it_explicitly" => {
+            "Unassigned session: use /sessions legacy to load it explicitly"
+        }
+        "status.unknown_slash_command_try_new_exit_resume_retry_copy_copy_co" => {
+            "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /copy-code, /models, /sessions, /project, /approval, /agent, /preferences, /generate, /generate-direct, /review-strict, /continue"
+        }
+        "status.unlinked_requirement_from_current_project" => {
+            "Unlinked requirement from current project"
+        }
+        "status.usage_acp_add_id_program_arg" => "Usage: /acp add <id> [\"program\",\"arg\",...]",
+        "status.usage_copy_n_where_n_is_a_positive_integer" => {
+            "Usage: /copy [N] where N is a positive integer"
+        }
+        "status.usage_copy_code_n_where_n_is_a_positive_integer" => {
+            "Usage: /copy-code [N] where N is a positive integer"
+        }
+        "status.usage_rename_title_rename_clear" => "Usage: /rename <title> · /rename --clear",
+        "status.usage_worktree_branch_path" => "Usage: /worktree <branch> [path]",
+        "status.vim_pending_command" => "Vim pending command",
+        "status.vim_pending_dd_delete" => "Vim pending: dd delete",
+        "status.vim_pending_gg_top" => "Vim pending: gg top",
+        "status.vim_pending_yy_yank" => "Vim pending: yy yank",
+        "status.waiting_for_project_owned_agent_backends_to_exit" => {
+            "Waiting for project-owned Agent backends to exit"
+        }
+        "status.waiting_for_the_previous_agent_to_exit_before_loading_histor" => {
+            "Waiting for the previous Agent to exit before loading history; Esc cancels"
+        }
+        "status.yanked_requirement_line" => "Yanked requirement line",
+        "status.yanked_requirement_selection" => "Yanked requirement selection",
+        "status.dd_to_delete" => "`dd` to delete",
+        "status.yy_to_copy" => "`yy` to copy",
         _ => return None,
     })
 }
@@ -1092,6 +1427,297 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "req.overlay.scope.confirm" => "确认 [Enter] ",
         "req.overlay.scope.iteration_key" => "迭代 [i] ",
         "req.overlay.scope.uninitialized" => "(未初始化)",
+        "status.a_project_switch_is_already_being_prepared" => "正在准备项目切换",
+        "status.acp_agents_move_enter_select_i_registry_esc_close" => {
+            "ACP Agent：↑↓ 移动 · Enter 选择 · i Registry · Esc 关闭"
+        }
+        "status.acp_registry_unavailable_fetch_worker_stopped" => {
+            "ACP Registry 不可用：获取线程已停止"
+        }
+        "status.acp_registry_move_enter_install_esc_close" => {
+            "ACP Registry：↑↓ 移动 · Enter 安装 · Esc 关闭"
+        }
+        "status.acp_agent_requests_permission_enter_to_allow_esc_to_reject" => {
+            "ACP Agent 请求权限 — Enter 允许，Esc 拒绝"
+        }
+        "status.acp_install_failed_worker_stopped" => "ACP 安装失败：线程已停止",
+        "status.acp_permission_request_is_no_longer_pending" => "ACP 权限请求已失效",
+        "status.ai_cleared_filter" => "AI 已清除筛选",
+        "status.ai_cleared_highlights" => "AI 已清除高亮",
+        "status.ai_error_llm_handle_not_available" => "AI 错误：LLM 句柄不可用",
+        "status.ai_error_background_llm_thread_has_exited" => "AI 错误：后台 LLM 线程已退出",
+        "status.ai_error_model_kept_calling_tools_after_final_response_limit" => {
+            "AI 错误：模型在最终回复上限后仍持续调用工具"
+        }
+        "status.ai_not_configured" => "AI 未配置",
+        "status.ai_preview_panel_closed" => "AI 预览面板已关闭",
+        "status.ai_request_cancelled" => "AI 请求已取消",
+        "status.ai_suggest_not_implemented" => "AI 建议：尚未实现",
+        "status.add_model" => "添加模型",
+        "status.agent_profiles_select_enter_apply_esc_close" => {
+            "Agent 配置：↑↓ 选择 · Enter 应用 · Esc 关闭"
+        }
+        "status.all_scenarios_folded" => "已折叠全部场景",
+        "status.already_on_that_project_active_work_was_preserved" => {
+            "已在该项目中；现有工作已保留"
+        }
+        "status.approval_mode" => "审批模式",
+        "status.auth_panel_opened_press_esc_to_close" => "已打开认证面板。按 Esc 关闭。",
+        "status.auth_showing_provider_status" => "认证：正在显示提供方状态。",
+        "status.back_to_tree_preview" => "返回树 + 预览",
+        "status.background_run_started" => "后台运行已开始",
+        "status.cannot_approve_resolve_stale_links_or_review_state" => {
+            "无法批准：请先处理失效链接或评审状态"
+        }
+        "status.cannot_close_the_last_agent" => "无法关闭最后一个 Agent",
+        "status.cannot_reject_this_test_point" => "无法驳回该测试点",
+        "status.chat_selection_is_no_longer_available" => "聊天选区已失效",
+        "status.chat_sidebar_hidden" => "会话侧栏已隐藏",
+        "status.chat_sidebar_shown" => "会话侧栏已显示",
+        "status.clipboard_is_empty" => "剪贴板为空",
+        "status.code_block_is_no_longer_available" => "代码块已失效",
+        "status.completed_filter_applies_to_current_project_only" => "“已完成”筛选仅适用于当前项目",
+        "status.confirm_generation_source_scope_enter_confirm_esc_cancel_i_c" => {
+            "确认生成来源范围（Enter 确认 · Esc 取消 · i 修改迭代）"
+        }
+        "status.conversation_title_cannot_be_empty" => "会话标题不能为空",
+        "status.copy_works_on_steps_only" => "只能在步骤上复制",
+        "status.cycled_test_point_review_filter" => "已切换测试点评审筛选",
+        "status.delete_works_on_steps_or_scenario_headers" => "只能删除步骤或场景标题",
+        "status.deleted_feature_cannot_be_edited" => "已删除的功能无法编辑",
+        "status.deleted_feature_cannot_be_run" => "已删除的功能无法运行",
+        "status.deleted_step_is_read_only" => "已删除的步骤为只读",
+        "status.deleted_node" => "已删除节点",
+        "status.diff_view_explore_tab_shows_changes_d_to_close" => {
+            "差异视图 — 探索页显示变更。[D] 关闭。"
+        }
+        "status.direct_no_review_generation_has_no_test_points_review_gate_s" => {
+            "直接生成（免评审）没有测试点评审环节；发送生成请求即可继续。"
+        }
+        "status.edit_committed" => "编辑已提交",
+        "status.edit_the_fields_and_press_enter_to_save" => "编辑字段后按 Enter 保存。",
+        "status.editing_active" => "正在编辑",
+        "status.enter_a_project_directory_or_press_esc_to_cancel" => "输入项目目录，或按 Esc 取消",
+        "status.enter_editor_mode_first" => "请先进入编辑器模式",
+        "status.exited_diff_view" => "已退出差异视图",
+        "status.explore_edit_mode" => "探索编辑模式",
+        "status.explore_mode" => "探索模式",
+        "status.feature_load_deferred_save_edits_and_finish_pending_work_the" => {
+            "功能加载已推迟：请保存编辑并完成待处理工作后重新选择"
+        }
+        "status.feature_loaded_ast_and_mindmap_scope_current_feature" => {
+            "功能已加载；AST 与思维导图范围为当前功能"
+        }
+        "status.fill_in_the_fields_and_press_enter_to_save" => "填写字段后按 Enter 保存。",
+        "status.focus_returned_to_tree" => "焦点已回到树",
+        "status.focused_scenario" => "已聚焦场景",
+        "status.fold_works_inside_a_scenario" => "折叠仅适用于场景内",
+        "status.generation_canceled" => "生成已取消",
+        "status.generation_source_scope_confirmed" => "生成来源范围已确认",
+        "status.hiding_plaintext_secrets" => "正在隐藏明文密钥",
+        "status.image_attached" => "已添加图片",
+        "status.image_removed" => "已移除图片",
+        "status.input_cleared" => "输入已清空",
+        "status.input_deactivated" => "输入已失焦",
+        "status.input_state_cleared" => "输入状态已清除",
+        "status.inserted_new_step_line" => "已插入新步骤行",
+        "status.inserted_scenario" => "已插入场景",
+        "status.inserted_step_above" => "已在上方插入步骤",
+        "status.inserted_step_below" => "已在下方插入步骤",
+        "status.interrupt_the_current_run" => "中断当前运行？",
+        "status.keep_or_clear_the_current_draft_before_editing_a_queued_mess" => {
+            "编辑排队消息前，请保留或清除当前草稿"
+        }
+        "status.llm_not_configured_set_an_api_key_on_a_model_profile_or_tesh" => {
+            "LLM 未配置：请在模型配置中设置 API Key，或设置 TESHI_LLM_API_KEY"
+        }
+        "status.legacy_unassigned_loading_keeps_history_unassigned_enter_loa" => {
+            "旧版 / 未分配。加载后历史仍保持未分配。Enter 加载 · Esc 关闭"
+        }
+        "status.linked_requirement_to_current_project" => "已关联需求到当前项目",
+        "status.loaded_legacy_session_history_remains_unassigned" => {
+            "已加载旧版会话；历史仍保持未分配"
+        }
+        "status.loading_official_acp_registry" => "正在加载官方 ACP Registry...",
+        "status.location_switched" => "位置已切换",
+        "status.mindmap_is_display_only" => "思维导图仅供查看",
+        "status.model_identifier_is_required" => "模型标识为必填项。",
+        "status.model_profiles_m_a_add_e_edit_select_enter_activate_esc_clos" => {
+            "模型配置 [m]。a 添加 · e 编辑 · ↑↓ 选择 · Enter 启用 · Esc 关闭"
+        }
+        "status.moved_step_down" => "步骤已下移",
+        "status.moved_step_up" => "步骤已上移",
+        "status.name_is_required" => "名称为必填项。",
+        "status.new_line_is_available_on_step_lines_only" => "仅步骤行支持换行",
+        "status.new_session_started" => "已开始新会话",
+        "status.no_http_exchanges_to_expand" => "没有可展开的 HTTP 交互",
+        "status.no_assistant_response_to_copy_a_code_block_from" => "没有可复制代码块的助手回复",
+        "status.no_capture_for_this_step_showing_the_first_one" => "该步骤没有截图；显示第一张",
+        "status.no_captured_screenshots_for_this_scenario" => "该场景没有截图",
+        "status.no_chat_selection_to_copy" => "没有可复制的聊天选区",
+        "status.no_completed_assistant_responses_to_copy" => "没有可复制的已完成助手回复",
+        "status.no_custom_conversation_title_to_clear" => "没有可清除的自定义会话标题",
+        "status.no_editable_text_region_on_this_line" => "该行没有可编辑的文本区域",
+        "status.no_file_path_run_with_cargo_run_path_to_file_feature" => {
+            "没有文件路径：请使用 `cargo run -- path/to/file.feature` 运行"
+        }
+        "status.no_interrupted_acp_task_to_continue" => "没有可继续的中断 ACP 任务",
+        "status.no_queued_messages" => "没有排队消息",
+        "status.no_recent_project_is_available" => "没有可用的最近项目",
+        "status.no_run_details_for_selection" => "当前选择没有运行详情",
+        "status.no_saved_sessions_found" => "未找到已保存的会话",
+        "status.no_scenario_selected" => "未选择场景",
+        "status.no_scenario_selected_for_step_insertion" => "未选择用于插入步骤的场景",
+        "status.no_scenario_selected_to_run" => "未选择要运行的场景",
+        "status.no_scenarios_to_run" => "没有可运行的场景",
+        "status.no_selection_to_copy" => "没有可复制的选区",
+        "status.no_step_to_edit" => "没有可编辑的步骤",
+        "status.nothing_to_redo" => "没有可重做的操作",
+        "status.nothing_to_undo" => "没有可撤销的操作",
+        "status.open_run_details_first_enter_then_press_p_to_expand_secrets" => {
+            "请先打开运行详情（Enter），再按 p 展开密钥"
+        }
+        "status.paste_works_inside_a_scenario" => "粘贴仅适用于场景内",
+        "status.pending_command" => "待处理命令",
+        "status.permission_sent_to_acp_agent" => "权限已发送给 ACP Agent...",
+        "status.preview_closed" => "预览已关闭",
+        "status.profile_not_found_for_editing" => "未找到要编辑的配置。",
+        "status.project_picker_select_enter_open_esc_cancel" => {
+            "项目选择：↑/↓ 选择 · Enter 打开 · Esc 取消"
+        }
+        "status.project_switch_canceled" => "项目切换已取消",
+        "status.project_switch_needs_running_tasks_stopped_s_stop_esc_cancel" => {
+            "切换项目前需停止运行中的任务：S 停止 · Esc 取消"
+        }
+        "status.project_owned_sessions_cannot_be_loaded_from_the_legacy_view" => {
+            "属于项目的会话不能从旧版视图加载"
+        }
+        "status.project_owned_tasks_must_stop_before_switching" => "切换前必须停止属于该项目的任务",
+        "status.queued_message_paused_configure_an_agent_then_send_a_message" => {
+            "排队消息已暂停：请配置 Agent 后发送消息以继续"
+        }
+        "status.queued_message_restored_for_editing" => "排队消息已取回编辑",
+        "status.removed_externally_deleted_feature_on_disk_run_evidence_reta" => {
+            "已移除外部删除的功能；磁盘上的运行证据仍保留"
+        }
+        "status.requirement_changed_on_disk_unsaved_edits_kept" => {
+            "需求在磁盘上已变更；未保存的编辑已保留"
+        }
+        "status.requirement_library_refreshed" => "需求库已刷新",
+        "status.requirement_library_reloaded" => "需求库已重新加载",
+        "status.requirement_link_is_stale_resolve_in_requirements_tab" => {
+            "需求链接已失效 — 请在需求页处理"
+        }
+        "status.requirements_view_updated" => "需求视图已更新",
+        "status.review_proposed_test_points_in_test_points_tab_5_then_press" => {
+            "请在测试点页 [5] 审阅提议的测试点，然后按 c 继续生成"
+        }
+        "status.run_started" => "运行已开始",
+        "status.runner_already_active" => "运行器已在运行",
+        "status.runner_exited_with_error" => "运行器异常退出",
+        "status.runner_is_still_active_wait_for_its_owned_process_to_exit" => {
+            "运行器仍在运行；请等待其所属进程退出"
+        }
+        "status.save_current_edits_and_finish_pending_work_before_switching" => {
+            "切换功能前请保存当前编辑并完成待处理工作"
+        }
+        "status.saved_requirement_document" => "需求文档已保存",
+        "status.saved_test_points" => "测试点已保存",
+        "status.scenario_expanded" => "场景已展开",
+        "status.scenario_folded" => "场景已折叠",
+        "status.select_agent_move_enter_select_esc_close" => {
+            "选择 Agent：↑↓ 移动 · Enter 选择 · Esc 关闭"
+        }
+        "status.select_a_feature_and_wait_for_it_to_load_before_editing" => {
+            "请选择功能并等待加载完成后再编辑"
+        }
+        "status.select_a_feature_and_wait_for_it_to_load_before_running" => {
+            "请选择功能并等待加载完成后再运行"
+        }
+        "status.select_a_requirement_document_to_set_its_iteration" => "请选择需求文档以设置迭代",
+        "status.select_a_requirement_document_to_set_its_priority" => "请选择需求文档以设置优先级",
+        "status.select_a_test_point_to_approve" => "请选择要批准的测试点",
+        "status.select_a_test_point_to_reject" => "请选择要驳回的测试点",
+        "status.select_non_empty_requirement_text_to_create_a_test_point" => {
+            "请选择非空需求文本以创建测试点"
+        }
+        "status.select_step_keyword_enter_esc_cancel" => "选择步骤关键字（↑↓ Enter，Esc 取消）",
+        "status.selected_teshi_native_remembered_for_new_sessions" => {
+            "已选择 Teshi Native；将用于新会话"
+        }
+        "status.sending_mindmap_context_to_ai" => "正在向 AI 发送思维导图上下文...",
+        "status.sending_message_to_ai" => "正在向 AI 发送消息...",
+        "status.sessions_for_the_active_project_sessions_legacy_shows_unassi" => {
+            "当前项目的会话。旧版历史请用 /sessions legacy"
+        }
+        "status.showing_implemented_and_verified_requirements" => "正在显示已实现和已验证的需求",
+        "status.showing_pending_requirements_only" => "仅显示未完成的需求",
+        "status.showing_plaintext_secrets_p_to_hide" => "正在显示明文密钥（按 p 隐藏）",
+        "status.step_cannot_move_further_down" => "步骤无法继续下移",
+        "status.step_cannot_move_further_up" => "步骤无法继续上移",
+        "status.step_copied" => "步骤已复制",
+        "status.step_keyword_list_is_available_on_step_lines_only" => {
+            "步骤关键字列表仅在步骤行可用"
+        }
+        "status.step_keyword_selection_canceled" => "已取消步骤关键字选择",
+        "status.step_keyword_shortcuts_work_on_step_lines_only" => "步骤关键字快捷键仅在步骤行生效",
+        "status.step_keyword_updated" => "步骤关键字已更新",
+        "status.step_pasted" => "步骤已粘贴",
+        "status.stop_requested_for_the_project_owned_runner_waiting_for_exit" => {
+            "已请求停止项目运行器；正在等待退出"
+        }
+        "status.switched_back_to_strict_review_human_approval_required_resta" => {
+            "已切回严格评审（需人工批准）。使用 /generate 重新开始以走评审流程。"
+        }
+        "status.switched_to_ai_tab" => "已切换到 AI 页",
+        "status.switched_to_explore_tab" => "已切换到探索页",
+        "status.switched_to_mindmap_tab" => "已切换到思维导图页",
+        "status.switched_to_requirements_tab" => "已切换到需求页",
+        "status.switched_to_test_points_tab" => "已切换到测试点页",
+        "status.task_interrupted_retry_to_continue" => "任务已中断 — 使用 /retry 继续",
+        "status.tasks_stopped_resolve_unsaved_state_before_switching" => {
+            "任务已停止；请先处理未保存状态再切换"
+        }
+        "status.the_clipboard_holds_no_text_or_image" => "剪贴板中没有文本或图片",
+        "status.the_project_directory_has_no_feature_files_add_one_to_begin" => {
+            "项目目录中没有 .feature 文件。添加一个即可开始。"
+        }
+        "status.thinking_and_tool_details_toggled" => "已切换思考与工具详情",
+        "status.tool_call_limit_reached_requesting_final_response" => {
+            "已达工具调用上限，正在请求最终回复…"
+        }
+        "status.type_a_project_directory_and_press_enter_to_open_it_esc_canc" => {
+            "输入项目目录并按 Enter 打开；Esc 取消"
+        }
+        "status.type_q_w_wq_or_x" => "输入 q、w、wq 或 x",
+        "status.unassigned_session_use_sessions_legacy_to_load_it_explicitly" => {
+            "未分配会话：请用 /sessions legacy 显式加载"
+        }
+        "status.unknown_slash_command_try_new_exit_resume_retry_copy_copy_co" => {
+            "未知斜杠命令。可尝试 /new、/exit、/resume、/retry、/copy、/copy-code、/models、/sessions、/project、/approval、/agent、/preferences、/generate、/generate-direct、/review-strict、/continue"
+        }
+        "status.unlinked_requirement_from_current_project" => "已取消需求与当前项目的关联",
+        "status.usage_acp_add_id_program_arg" => "用法：/acp add <id> [\"program\",\"arg\",...]",
+        "status.usage_copy_n_where_n_is_a_positive_integer" => "用法：/copy [N]，N 为正整数",
+        "status.usage_copy_code_n_where_n_is_a_positive_integer" => {
+            "用法：/copy-code [N]，N 为正整数"
+        }
+        "status.usage_rename_title_rename_clear" => "用法：/rename <title> · /rename --clear",
+        "status.usage_worktree_branch_path" => "用法：/worktree <branch> [path]",
+        "status.vim_pending_command" => "Vim 待处理命令",
+        "status.vim_pending_dd_delete" => "Vim 待处理：dd 删除",
+        "status.vim_pending_gg_top" => "Vim 待处理：gg 顶部",
+        "status.vim_pending_yy_yank" => "Vim 待处理：yy 复制",
+        "status.waiting_for_project_owned_agent_backends_to_exit" => {
+            "正在等待项目所属 Agent 后端退出"
+        }
+        "status.waiting_for_the_previous_agent_to_exit_before_loading_histor" => {
+            "正在等待上一个 Agent 退出后再加载历史；Esc 取消"
+        }
+        "status.yanked_requirement_line" => "已复制需求行",
+        "status.yanked_requirement_selection" => "已复制需求选区",
+        "status.dd_to_delete" => "`dd` 删除",
+        "status.yy_to_copy" => "`yy` 复制",
         _ => return None,
     })
 }
