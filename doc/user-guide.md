@@ -102,10 +102,12 @@ Conversations are checkpointed as one JSON file per session:
 | macOS | `dirs::config_dir()/teshi/sessions` |
 
 `TESHI_SESSION_DIR` overrides the directory. Each file holds the visible transcript (including
-tool calls), unsent drafts, completed-answer marks, titles, `project_root`, `backend_kind`, and
-`acp_agent_id` when the conversation uses an installed ACP agent. Teshi does not store the ACP
-agent's own session id: resuming an ACP conversation starts a fresh agent session, and its first
-prompt re-seeds the saved transcript as `[Restored conversation history]`. Installed ACP agents and
+tool calls), unsent drafts, completed-answer marks, titles, `project_root`, `backend_kind`,
+`acp_agent_id`, and the remote ACP `sessionId` (`acp_session_id`) when the conversation uses an
+installed ACP agent. On resume, Teshi reloads its own transcript for the UI and asks the agent to
+restore that remote session via `session/resume` when advertised, otherwise `session/load`. If the
+agent cannot restore the session, Teshi starts a fresh ACP session and re-seeds the saved
+transcript as `[Restored conversation history]` on the first prompt. Installed ACP agents and
 their per-agent model, session-option, and approval preferences live in the ACP store
 (`%LOCALAPPDATA%\teshi\acp` on Windows; `TESHI_ACP_STORE_DIR` overrides it), not in the session
 files.

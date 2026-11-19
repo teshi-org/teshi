@@ -66,8 +66,11 @@ confirmation) ends that turn, not the conversation:
 
 The connection is torn down only for a real transport failure, a project switch,
 `/new`, an explicit stop, or an agent that does not acknowledge the cancel within
-the cancel budget. A new process has no remote history, so its first prompt is
-re-seeded with the saved transcript as `[Restored conversation history]`.
+the cancel budget. When a conversation checkpoint includes an ACP `sessionId`,
+the next process prefers `session/resume`, then `session/load`, so the agent
+keeps its remote context while Teshi keeps showing its own transcript. Only when
+restore is unavailable or fails does the first prompt fall back to re-seeding
+the saved transcript as `[Restored conversation history]`.
 
 ## Registry role
 

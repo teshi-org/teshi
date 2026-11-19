@@ -25,6 +25,12 @@ pub struct Session {
     /// Installed ACP agent ID used for this conversation.
     #[serde(default)]
     pub acp_agent_id: Option<String>,
+    /// Remote ACP `sessionId` for `session/resume` or `session/load`.
+    ///
+    /// Distinct from Teshi's local [`Session::id`] file name. Absent in legacy
+    /// checkpoints and native conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session_id: Option<String>,
     /// Workspace member directory the conversation ran in; absent when it ran
     /// in the project root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +148,7 @@ impl Session {
             project_root: None,
             backend_kind: None,
             acp_agent_id: None,
+            acp_session_id: None,
             member_dir: None,
             pending_messages: Default::default(),
             completed_answers: Vec::new(),
@@ -247,6 +254,7 @@ mod tests {
         assert!(session.project_root.is_none());
         assert!(session.backend_kind.is_none());
         assert!(session.acp_agent_id.is_none());
+        assert!(session.acp_session_id.is_none());
     }
 
     #[test]

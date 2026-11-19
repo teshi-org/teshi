@@ -316,6 +316,93 @@ fn fresh_acp_process_receives_saved_context_only_on_first_prompt() {
     }
 }
 
+fn backend_with_restore(mode: &str, restore_session_id: &str) -> AgentBackendRuntime {
+    let mut config = fixture_config(mode, Vec::new(), HashMap::new());
+    config.restore_session_id = Some(restore_session_id.into());
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    backend.configure_acp(config).unwrap();
+    backend
+}
+
+fn history_messages() -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::text("user", "previous question"),
+        ChatMessage::text("assistant", "previous answer"),
+        ChatMessage::text("user", "current question"),
+    ]
+}
+
+#[test]
+fn resume_restores_remote_context_without_text_reseeding() {
+    let mut backend = backend_with_restore("resume_then_prompt", "saved-session");
+    backend.connect_acp().unwrap();
+    let controls = wait_controls(&backend, |s| s.ready);
+    assert!(controls.remote_context_restored);
+    assert_eq!(controls.session_id.as_deref(), Some("saved-session"));
+    backend.start().unwrap();
+    backend.submit_turn(None, history_messages(), None).unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::MessageChunk { content } if content == "restored-ok"
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn load_restores_remote_context_and_mutes_replay_from_ui_events() {
+    let mut backend = backend_with_restore("load_then_prompt", "saved-session");
+    backend.connect_acp().unwrap();
+    let controls = wait_controls(&backend, |s| s.ready);
+    assert!(controls.remote_context_restored);
+    assert_eq!(controls.session_id.as_deref(), Some("saved-session"));
+    // Replay frames must not surface as live message chunks before the turn.
+    let mut leaked = Vec::new();
+    while let Ok(Some(event)) = backend.try_next_event() {
+        leaked.push(event);
+    }
+    assert!(
+        !leaked
+            .iter()
+            .any(|e| matches!(e, AgentBackendEvent::MessageChunk { .. })),
+        "session/load replay leaked into UI events: {leaked:?}"
+    );
+    backend.start().unwrap();
+    backend.submit_turn(None, history_messages(), None).unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::MessageChunk { content } if content == "restored-ok"
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn failed_session_load_falls_back_to_new_and_text_seed() {
+    let mut backend = backend_with_restore("load_missing", "saved-session");
+    backend.connect_acp().unwrap();
+    let controls = wait_controls(&backend, |s| s.ready);
+    assert!(!controls.remote_context_restored);
+    assert_eq!(controls.session_id.as_deref(), Some("fake-session"));
+    // A failed restore falls back to a fresh session that is still usable, so
+    // it must not put the connected chip into an error state.
+    assert_eq!(controls.error, None);
+    backend.start().unwrap();
+    backend.submit_turn(None, history_messages(), None).unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::MessageChunk { content } if content == "seeded-ok"
+        )),
+        "{events:?}"
+    );
+}
+
 /// Same as [`backend`] but wired with an interactive permission host, the
 /// configuration the TUI uses for its Manual approval mode.
 fn backend_with_permission_host(mode: &str) -> AgentBackendRuntime {

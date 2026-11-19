@@ -128,13 +128,44 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "init rejected"}})
         else:
             result = {"protocolVersion": 1, "agentInfo": {"name": "fake-agent"}}
+            capabilities = {}
             if mode == "images":
-                result["agentCapabilities"] = {"promptCapabilities": {"image": True}}
+                capabilities["promptCapabilities"] = {"image": True}
+            if mode in ("resume_session", "resume_then_prompt"):
+                capabilities["sessionCapabilities"] = {"resume": {}}
+            if mode in ("load_session", "load_then_prompt", "load_missing"):
+                capabilities["loadSession"] = True
+            if capabilities:
+                result["agentCapabilities"] = capabilities
             send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+    elif method == "session/resume":
+        assert mode in ("resume_session", "resume_then_prompt"), mode
+        params = message["params"]
+        assert params["sessionId"] == "saved-session"
+        assert params["cwd"]
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "saved-session"}})
+    elif method == "session/load":
+        assert mode in ("load_session", "load_then_prompt", "load_missing"), mode
+        params = message["params"]
+        if mode == "load_missing":
+            send({"jsonrpc": "2.0", "id": message["id"], "error": {
+                "code": -32000, "message": "session not found"}})
+            continue
+        assert params["sessionId"] == "saved-session"
+        # Replay one historical turn before answering, as the protocol allows.
+        send_update("saved-session", {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "replayed user"}})
+        send_update("saved-session", {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "replayed agent"}})
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "saved-session"}})
     elif method == "session/new":
         if mode.startswith("mcp_"):
             mcp_server = message["params"]["mcpServers"][0]
             assert mcp_server["name"] == "teshi-authoring"
+        if mode in ("resume_session", "resume_then_prompt", "load_session", "load_then_prompt"):
+            raise AssertionError("restore-capable modes must not fall back to session/new")
         if mode == "session_failed":
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "session rejected"}})
         else:
@@ -179,6 +210,24 @@ for line in sys.stdin:
             "sessionUpdate": "current_mode_update", "currentModeId": approval}}})
     elif method == "session/prompt":
         prompt_count += 1
+        if mode in ("resume_then_prompt", "load_then_prompt", "resume_session", "load_session"):
+            assert message["params"]["sessionId"] == "saved-session"
+            prompt = message["params"]["prompt"][0]["text"]
+            assert "[Restored conversation history]" not in prompt, prompt
+            send_update("saved-session", {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "restored-ok"}})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
+        if mode == "load_missing":
+            assert message["params"]["sessionId"] == "fake-session"
+            prompt = message["params"]["prompt"][0]["text"]
+            assert "[Restored conversation history]" in prompt, prompt
+            send_update("fake-session", {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "seeded-ok"}})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
         if mode == "images":
             summary = [
                 block["type"] if block["type"] == "text"

@@ -9,7 +9,7 @@ use std::{
 };
 
 use agent_client_protocol::schema::v1::{
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, ResumeSessionRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -81,6 +81,21 @@ impl InitializeResult {
             .pointer("/promptCapabilities/image")
             .and_then(Value::as_bool)
             == Some(true)
+    }
+
+    /// Whether the agent advertises top-level `loadSession` for `session/load`.
+    pub fn supports_load_session(&self) -> bool {
+        self.capabilities
+            .get("loadSession")
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+
+    /// Whether the agent advertises `sessionCapabilities.resume` for `session/resume`.
+    pub fn supports_resume_session(&self) -> bool {
+        self.capabilities
+            .pointer("/sessionCapabilities/resume")
+            .is_some_and(Value::is_object)
     }
 }
 
@@ -428,24 +443,111 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         .await
     }
 
+    /// Load a previously persisted ACP session without MCP servers.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, or remote session errors.
     pub async fn load_session(&self, id: &str, cwd: PathBuf) -> AcpResult<AcpSession> {
+        self.load_session_with_mcp(id, cwd, Vec::new()).await
+    }
+
+    /// Load a previously persisted ACP session and attach MCP servers.
+    ///
+    /// Requires `agentCapabilities.loadSession`. The agent may replay history
+    /// through `session/update` before answering; callers that already own a
+    /// local transcript should ignore those updates for UI purposes.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, or remote session errors.
+    pub async fn load_session_with_mcp(
+        &self,
+        id: &str,
+        cwd: PathBuf,
+        servers: Vec<crate::McpServer>,
+    ) -> AcpResult<AcpSession> {
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "session/load",
+        )
+        .await?;
         let init = self
             .initialized
             .lock()
             .await
             .clone()
             .ok_or_else(|| AcpError::InitializeFailed("missing initialize result".into()))?;
-        if init
-            .capabilities
-            .get("loadSession")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if !init.supports_load_session() {
             return Err(AcpError::CapabilityUnsupported("session/load"));
         }
-        let params = serialize_params(LoadSessionRequest::new(id.to_string(), cwd.clone()))?;
+        let params = serialize_params(
+            LoadSessionRequest::new(id.to_string(), cwd.clone()).mcp_servers(servers),
+        )?;
         let result = self
             .request_with_timeout("session/load", params, self.config.request_timeout)
+            .await?;
+        let session_id = result
+            .get("sessionId")
+            .or_else(|| result.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .to_string();
+        self.set_state(AcpLifecycle::Ready).await;
+        Ok(AcpSession {
+            id: session_id,
+            cwd,
+            config: crate::session_config::SessionConfig::from_response(&result),
+        })
+    }
+
+    /// Resume an ACP session without replaying history or attaching MCP servers.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, or remote session errors.
+    pub async fn resume_session(&self, id: &str, cwd: PathBuf) -> AcpResult<AcpSession> {
+        self.resume_session_with_mcp(id, cwd, Vec::new()).await
+    }
+
+    /// Resume an ACP session without replaying history, attaching MCP servers.
+    ///
+    /// Requires `agentCapabilities.sessionCapabilities.resume`. Prefer this over
+    /// [`Self::load_session_with_mcp`] when the client already displays a local
+    /// transcript and only needs the agent's remote context restored.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, or remote session errors.
+    pub async fn resume_session_with_mcp(
+        &self,
+        id: &str,
+        cwd: PathBuf,
+        servers: Vec<crate::McpServer>,
+    ) -> AcpResult<AcpSession> {
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "session/resume",
+        )
+        .await?;
+        let init = self
+            .initialized
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| AcpError::InitializeFailed("missing initialize result".into()))?;
+        if !init.supports_resume_session() {
+            return Err(AcpError::CapabilityUnsupported("session/resume"));
+        }
+        let params = serialize_params(
+            ResumeSessionRequest::new(id.to_string(), cwd.clone()).mcp_servers(servers),
+        )?;
+        let result = self
+            .request_with_timeout("session/resume", params, self.config.request_timeout)
             .await?;
         let session_id = result
             .get("sessionId")
