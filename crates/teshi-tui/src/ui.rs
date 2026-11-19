@@ -742,7 +742,9 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
             | ClickableRegion::QuitConfirmNo { rect }
             | ClickableRegion::AiInterruptConfirm { rect }
             | ClickableRegion::AiInterruptContinue { rect }
-            | ClickableRegion::ExploreHorizontalScrollbar { rect, .. } => *rect,
+            | ClickableRegion::ExploreHorizontalScrollbar { rect, .. }
+            | ClickableRegion::ExploreDetailTab { rect, .. }
+            | ClickableRegion::ExploreDetailItem { rect, .. } => *rect,
             ClickableRegion::ExploreFeature {
                 row_y,
                 col_x,
@@ -4053,6 +4055,12 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
     if body_area.height == 0 {
         return;
     }
+    if !app.explore_edit_mode && area.width > 0 && area.height > 0 {
+        // Broad target registered first; tabs and items layered above it win
+        // the reverse-order hit test.
+        app.clickable_regions
+            .push(ClickableRegion::ExploreDetailPane { rect: area });
+    }
 
     let scenario = app
         .project
@@ -4087,6 +4095,7 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         width: body_area.width,
         height: body_area.height - header_height,
     };
+    let (tabs_line, tab_hits) = detail_tabs_line(app, &tabs, active_tab, header_area.width);
     let header = vec![
         detail_scenario_line(scenario_name, status, duration, header_area.width),
         detail_step_line(
@@ -4095,22 +4104,35 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
             runner.as_deref(),
             header_area.width,
         ),
-        detail_tabs_line(app, &tabs, active_tab, header_area.width),
+        tabs_line,
     ];
     frame.render_widget(
         Paragraph::new(Text::from(truncate_lines(header, header_area.width))),
         header_area,
     );
+    if !app.explore_edit_mode && header_height == 3 {
+        for hit in tab_hits {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreDetailTab {
+                    tab: hit.tab,
+                    rect: Rect::new(
+                        header_area.x + hit.x,
+                        header_area.y + 2,
+                        hit.width.min(header_area.width.saturating_sub(hit.x)),
+                        1,
+                    ),
+                });
+        }
+    }
 
     let pixels = app.inline_images.has_pixels();
     let preview_rows = (content_area.height / 2).clamp(4, 10);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut selected_line = None;
-    let mut preview = None;
+    let mut content = DetailContent::default();
     match active_tab {
         Some(crate::app::RunDetailTab::Screenshots) => {
             let shots = app.detail_screenshots();
-            let (line, request) = push_screenshot_rows(
+            content = push_screenshot_rows(
                 &mut lines,
                 app,
                 &shots,
@@ -4119,12 +4141,10 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
                 pixels,
                 preview_rows,
             );
-            selected_line = line;
-            preview = request;
         }
         Some(crate::app::RunDetailTab::Api) => {
             let exchanges = app.detail_exchanges();
-            selected_line = push_exchange_rows(
+            content = push_exchange_rows(
                 &mut lines,
                 app,
                 &exchanges,
@@ -4135,13 +4155,12 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         }
         Some(crate::app::RunDetailTab::Logs) => {
             if let Some(detail) = detail.as_ref() {
-                selected_line =
-                    push_log_rows(&mut lines, &detail.logs, selection, content_area.width);
+                content = push_log_rows(&mut lines, &detail.logs, selection, content_area.width);
             }
         }
         Some(crate::app::RunDetailTab::Files) => {
             let files = app.detail_files();
-            selected_line = push_file_rows(&mut lines, app, &files, selection, content_area.width);
+            content = push_file_rows(&mut lines, app, &files, selection, content_area.width);
         }
         None => {
             push_empty_detail_rows(&mut lines, detail.as_ref(), status, content_area.width);
@@ -4151,7 +4170,7 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
     let max_offset = lines.len().saturating_sub(content_area.height as usize);
     let mut offset = app.explore_details_scroll.min(max_offset);
     if app.explore_details_reveal {
-        if let Some(line) = selected_line {
+        if let Some(line) = content.selected_line {
             if line < offset {
                 offset = line;
             } else if line >= offset + content_area.height as usize {
@@ -4161,6 +4180,12 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         app.explore_details_reveal = false;
     }
     app.explore_details_scroll = offset;
+    if !app.explore_edit_mode {
+        for (index, rect) in content.item_rects(content_area, offset) {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreDetailItem { index, rect });
+        }
+    }
     frame.render_widget(
         Paragraph::new(Text::from(truncate_lines(lines, content_area.width)))
             .scroll((offset.min(u16::MAX as usize) as u16, 0)),
@@ -4169,7 +4194,7 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
 
     // Pixels draw over the reserved blank cells after the text frame.
     if pixels
-        && let Some(preview) = preview
+        && let Some(preview) = content.preview.as_ref()
         && preview.line >= offset
         && preview.line < offset + content_area.height as usize
     {
@@ -4194,6 +4219,59 @@ struct DetailPreview {
     /// Content-relative line where the preview starts.
     line: usize,
     rows: u16,
+}
+
+/// Content-relative line span owned by one selectable Run Details row/block.
+#[derive(Debug, Clone, Copy)]
+struct DetailItemRange {
+    index: usize,
+    start: usize,
+    /// Exclusive end line.
+    end: usize,
+}
+
+/// Rendered Run Details content plus the geometry needed for mouse hits.
+#[derive(Default)]
+struct DetailContent {
+    selected_line: Option<usize>,
+    items: Vec<DetailItemRange>,
+    preview: Option<DetailPreview>,
+}
+
+impl DetailContent {
+    /// Clips item blocks to the visible viewport and returns screen rectangles.
+    fn item_rects(&self, area: Rect, offset: usize) -> Vec<(usize, Rect)> {
+        if area.height == 0 {
+            return Vec::new();
+        }
+        let top = offset;
+        let bottom = offset + area.height as usize;
+        self.items
+            .iter()
+            .filter_map(|item| {
+                let start = item.start.max(top);
+                let end = item.end.min(bottom);
+                (start < end).then(|| {
+                    (
+                        item.index,
+                        Rect::new(
+                            area.x,
+                            area.y + (start - top) as u16,
+                            area.width,
+                            (end - start) as u16,
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// One inner tab's text offset and clickable width inside the tab row.
+struct DetailTabHit {
+    tab: crate::app::RunDetailTab,
+    x: u16,
+    width: u16,
 }
 
 /// Scenario name, solid status chip, and tabular duration.
@@ -4254,13 +4332,17 @@ fn detail_step_line(
 }
 
 /// Inner family tabs, showing only families that have content.
+///
+/// Returns the rendered line and each tab's span so the caller can register
+/// click targets without duplicating the width arithmetic.
 fn detail_tabs_line(
     app: &App,
     tabs: &[crate::app::RunDetailTab],
     active: Option<crate::app::RunDetailTab>,
     width: u16,
-) -> Line<'static> {
+) -> (Line<'static>, Vec<DetailTabHit>) {
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut hits = Vec::new();
     let mut used = 0usize;
     for tab in tabs {
         let count = match tab {
@@ -4275,7 +4357,8 @@ fn detail_tabs_line(
         let count = format!("{count}");
         let label_width = UnicodeWidthStr::width(label.as_str());
         let count_width = UnicodeWidthStr::width(count.as_str());
-        if used + label_width + count_width + 2 > width as usize {
+        let tab_width = label_width + count_width + 1;
+        if used + tab_width + 1 > width as usize {
             break;
         }
         let selected = active == Some(*tab);
@@ -4287,12 +4370,17 @@ fn detail_tabs_line(
         } else {
             Style::default().fg(theme::MUTED)
         };
+        hits.push(DetailTabHit {
+            tab: *tab,
+            x: used as u16,
+            width: tab_width as u16,
+        });
         spans.push(Span::styled(label, style));
         spans.push(Span::styled(count, Style::default().fg(theme::MUTED)));
         spans.push(Span::raw(" "));
-        used += label_width + count_width + 1;
+        used += tab_width;
     }
-    Line::from(spans)
+    (Line::from(spans), hits)
 }
 
 /// Screenshot rows with an inline preview box reserved for the selected image.
@@ -4304,17 +4392,17 @@ fn push_screenshot_rows(
     width: u16,
     pixels: bool,
     preview_rows: u16,
-) -> (Option<usize>, Option<DetailPreview>) {
-    let mut selected_line = None;
-    let mut preview = None;
+) -> DetailContent {
+    let mut content = DetailContent::default();
     if shots.is_empty() {
         lines.push(Line::styled(
             "  No screenshots for this step",
             Style::default().fg(theme::MUTED),
         ));
-        return (None, None);
+        return content;
     }
     for (index, shot) in shots.iter().enumerate() {
+        let start = lines.len();
         let selected = index == selection;
         let path_label = shot.path.as_deref().map_or_else(
             || shot.reported.clone(),
@@ -4335,52 +4423,56 @@ fn push_screenshot_rows(
         );
         let line = select_detail_line(line, selected, width);
         if selected {
-            selected_line = Some(lines.len());
+            content.selected_line = Some(start);
         }
         lines.push(line);
         lines.push(pad_detail_line(
             Line::styled(format!(" {path_label}"), Style::default().fg(theme::MUTED)),
             width,
         ));
-        if !selected {
-            continue;
-        }
-        if pixels
-            && shot.size.is_some()
-            && let Some(path) = shot.path.clone()
-        {
-            let start = lines.len();
-            for _ in 0..preview_rows {
-                lines.push(pad_detail_line(Line::raw(""), width));
-            }
-            preview = Some(DetailPreview {
-                path,
-                line: start,
-                rows: preview_rows,
-            });
-        } else {
-            lines.push(pad_detail_line(
-                Line::styled(
-                    "  preview unavailable — terminal has no graphics protocol",
-                    Style::default().fg(theme::MUTED),
-                ),
-                width,
-            ));
-            for _ in 1..preview_rows {
-                lines.push(pad_detail_line(Line::raw(""), width));
-            }
-            if shot.path.is_none() {
+        if selected {
+            if pixels
+                && shot.size.is_some()
+                && let Some(path) = shot.path.clone()
+            {
+                let preview_start = lines.len();
+                for _ in 0..preview_rows {
+                    lines.push(pad_detail_line(Line::raw(""), width));
+                }
+                content.preview = Some(DetailPreview {
+                    path,
+                    line: preview_start,
+                    rows: preview_rows,
+                });
+            } else {
                 lines.push(pad_detail_line(
                     Line::styled(
-                        "  path is outside .teshi/logs/replay-screenshots",
-                        Style::default().fg(theme::WARNING),
+                        "  preview unavailable — terminal has no graphics protocol",
+                        Style::default().fg(theme::MUTED),
                     ),
                     width,
                 ));
+                for _ in 1..preview_rows {
+                    lines.push(pad_detail_line(Line::raw(""), width));
+                }
+                if shot.path.is_none() {
+                    lines.push(pad_detail_line(
+                        Line::styled(
+                            "  path is outside .teshi/logs/replay-screenshots",
+                            Style::default().fg(theme::WARNING),
+                        ),
+                        width,
+                    ));
+                }
             }
         }
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
     }
-    (selected_line, preview)
+    content
 }
 
 /// Recordings and unknown artifact kinds; never silently dropped.
@@ -4390,16 +4482,17 @@ fn push_file_rows(
     files: &[crate::app::DetailFile],
     selection: usize,
     width: u16,
-) -> Option<usize> {
-    let mut selected_line = None;
+) -> DetailContent {
+    let mut content = DetailContent::default();
     if files.is_empty() {
         lines.push(Line::styled(
             "  No recordings or attachments for this step",
             Style::default().fg(theme::MUTED),
         ));
-        return None;
+        return content;
     }
     for (index, file) in files.iter().enumerate() {
+        let start = lines.len();
         let selected = index == selection;
         let video = is_video_path(std::path::Path::new(&file.reported));
         let mut row = vec![Span::styled(
@@ -4430,7 +4523,7 @@ fn push_file_rows(
             width,
         );
         if selected {
-            selected_line = Some(lines.len());
+            content.selected_line = Some(start);
         }
         lines.push(line);
         let path_label = file.path.as_deref().map_or_else(
@@ -4450,8 +4543,13 @@ fn push_file_rows(
                 width,
             ));
         }
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
     }
-    selected_line
+    content
 }
 
 /// HTTP exchanges with folded headers and on-demand bodies.
@@ -4462,8 +4560,8 @@ fn push_exchange_rows(
     selection: usize,
     detail: Option<&CaseDetail>,
     width: u16,
-) -> Option<usize> {
-    let mut selected_line = None;
+) -> DetailContent {
+    let mut content = DetailContent::default();
     if let Some(detail) = detail
         && let Some(message) = detail.message.as_deref()
         && !message.trim().is_empty()
@@ -4490,9 +4588,10 @@ fn push_exchange_rows(
             "  No HTTP exchanges for this step",
             Style::default().fg(theme::MUTED),
         ));
-        return None;
+        return content;
     }
     for (index, exchange) in exchanges.iter().enumerate() {
+        let start = lines.len();
         let selected = index == selection;
         let status = exchange.status;
         let status_style = match status {
@@ -4517,7 +4616,7 @@ fn push_exchange_rows(
             width,
         );
         if selected {
-            selected_line = Some(lines.len());
+            content.selected_line = Some(start);
         }
         lines.push(line);
 
@@ -4620,8 +4719,13 @@ fn push_exchange_rows(
             Line::styled(" ─────", Style::default().fg(theme::BORDER)),
             width,
         ));
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
     }
-    selected_line
+    content
 }
 
 /// Runner logs are case-level; the selected row can be copied.
@@ -4630,16 +4734,17 @@ fn push_log_rows(
     logs: &[String],
     selection: usize,
     width: u16,
-) -> Option<usize> {
+) -> DetailContent {
+    let mut content = DetailContent::default();
     if logs.is_empty() {
         lines.push(Line::styled(
             "  No log lines for this case",
             Style::default().fg(theme::MUTED),
         ));
-        return None;
+        return content;
     }
-    let mut selected_line = None;
     for (index, log) in logs.iter().enumerate() {
+        let start = lines.len();
         let selected = index == selection;
         let line = select_detail_line(
             pad_detail_line(
@@ -4650,11 +4755,16 @@ fn push_log_rows(
             width,
         );
         if selected {
-            selected_line = Some(lines.len());
+            content.selected_line = Some(start);
         }
         lines.push(line);
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
     }
-    selected_line
+    content
 }
 
 fn push_empty_detail_rows(
@@ -8758,8 +8868,9 @@ mod truncate_tests {
         Line, Span, explore_panes, explore_run_summary_label, explore_scenarios_title,
         push_exchange_rows, render, truncate_line_to_cols,
     };
-    use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
+    use crate::app::{App, CaseDetail, ClickableRegion, ColumnFocus, RunStatus};
     use crate::keymap::Action;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
 
@@ -9205,6 +9316,271 @@ mod truncate_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn clickable_detail_app(root: &std::path::Path) -> App {
+        let mut app = detail_render_app(root);
+        let exchange = |id: &str, status: u16| {
+            teshi_core::HttpExchange::from_value(&serde_json::json!({
+                "type": "http_exchange",
+                "exchange_id": id,
+                "case_id": "f0:s1",
+                "step_id": "f0:s1:L4",
+                "template": "login.json.j2",
+                "method": "POST",
+                "url": "/api/login",
+                "request_headers": {"Accept": "application/json"},
+                "request_body": {"password": "***", "name": "Ada"},
+                "status": status,
+                "response_headers": {"content-type": "application/json"},
+                "response_body": {"session": "8f2c…a91"},
+                "duration_ms": 128,
+                "extract": {},
+                "asserts": [{"name": "status_ok", "passed": true}],
+                "redacted": true
+            }))
+            .expect("exchange")
+        };
+        let detail = CaseDetail {
+            case_id: "f0:s1".into(),
+            status: RunStatus::Passed,
+            duration_ms: Some(1240),
+            message: None,
+            stack: None,
+            attachments: vec![
+                crate::runner::RunAttachment {
+                    kind: "screenshot".into(),
+                    path: root
+                        .join(".teshi/logs/replay-screenshots/run/after-login.png")
+                        .display()
+                        .to_string(),
+                    step_id: Some("f0:s1:L4".into()),
+                },
+                crate::runner::RunAttachment {
+                    kind: "recording".into(),
+                    path: root
+                        .join(".teshi/logs/replay-screenshots/run/run.mp4")
+                        .display()
+                        .to_string(),
+                    step_id: None,
+                },
+            ],
+            logs: (0..3).map(|index| format!("log line {index}")).collect(),
+            exchanges: vec![exchange("e1", 200), exchange("e2", 201)],
+            steps: vec![crate::app::StepRunRecord {
+                step_id: "f0:s1:L4".into(),
+                text: "status is 200".into(),
+                status: Some("passed".into()),
+                message: None,
+            }],
+            inspector_plaintext: false,
+        };
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
+        app
+    }
+
+    fn detail_region_rect(
+        app: &App,
+        matches: impl Fn(&ClickableRegion) -> bool,
+    ) -> ratatui::layout::Rect {
+        app.clickable_regions
+            .iter()
+            .find_map(|region| {
+                if !matches(region) {
+                    return None;
+                }
+                match region {
+                    ClickableRegion::ExploreDetailPane { rect }
+                    | ClickableRegion::ExploreDetailTab { rect, .. }
+                    | ClickableRegion::ExploreDetailItem { rect, .. } => Some(*rect),
+                    _ => None,
+                }
+            })
+            .expect("requested Run Details region")
+    }
+
+    #[test]
+    fn run_details_tabs_rows_and_pane_are_clickable() {
+        let root = std::env::temp_dir().join("teshi-run-details-click");
+        let mut app = clickable_detail_app(&root);
+        app.explore_focus = ColumnFocus::Step;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        let api_tab = detail_region_rect(&app, |region| {
+            matches!(
+                region,
+                ClickableRegion::ExploreDetailTab {
+                    tab: crate::app::RunDetailTab::Api,
+                    ..
+                }
+            )
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            api_tab.x + 1,
+            api_tab.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click API tab");
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        assert_eq!(app.explore_details_tab, crate::app::RunDetailTab::Api);
+        assert!(app.explore_details_tab_pinned);
+        assert_eq!(app.explore_details_selection, 0);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render API");
+        let second_exchange = detail_region_rect(&app, |region| {
+            matches!(region, ClickableRegion::ExploreDetailItem { index: 1, .. })
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            second_exchange.x + 1,
+            second_exchange.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click second exchange");
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        assert_eq!(app.explore_details_selection, 1);
+
+        app.explore_focus = ColumnFocus::Step;
+        let pane = detail_region_rect(&app, |region| {
+            matches!(region, ClickableRegion::ExploreDetailPane { .. })
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x,
+            pane.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click pane chrome");
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        assert_eq!(
+            app.explore_details_selection, 1,
+            "clicking pane chrome keeps the selected row"
+        );
+    }
+
+    #[test]
+    fn run_details_wheel_scrolls_content_without_changing_steps() {
+        let root = std::env::temp_dir().join("teshi-run-details-wheel");
+        let mut app = clickable_detail_app(&root);
+        let mut detail = app.explore_case_details.remove(&(0, 0)).expect("detail");
+        detail.logs = (0..40).map(|index| format!("log line {index}")).collect();
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_details_tab = crate::app::RunDetailTab::Logs;
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let pane = detail_region_rect(&app, |region| {
+            matches!(region, ClickableRegion::ExploreDetailPane { .. })
+        });
+        let step = app.explore_selected_step;
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            pane.x + 2,
+            pane.y + 5,
+            KeyModifiers::NONE,
+        )
+        .expect("wheel down");
+        assert_eq!(app.explore_details_scroll, 3);
+        assert!(!app.explore_details_reveal);
+        assert_eq!(app.explore_selected_step, step);
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollUp,
+            pane.x + 2,
+            pane.y + 5,
+            KeyModifiers::NONE,
+        )
+        .expect("wheel up");
+        assert_eq!(app.explore_details_scroll, 0);
+    }
+
+    #[test]
+    fn run_details_mouse_targets_work_in_a_narrow_single_pane() {
+        let root = std::env::temp_dir().join("teshi-run-details-narrow");
+        let mut app = clickable_detail_app(&root);
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render narrow");
+
+        let api_tab = detail_region_rect(&app, |region| {
+            matches!(
+                region,
+                ClickableRegion::ExploreDetailTab {
+                    tab: crate::app::RunDetailTab::Api,
+                    ..
+                }
+            )
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            api_tab.x + 1,
+            api_tab.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click narrow API tab");
+        assert_eq!(app.explore_details_tab, crate::app::RunDetailTab::Api);
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+    }
+
+    #[test]
+    fn run_details_action_strip_click_expands_the_selected_exchange() {
+        let root = std::env::temp_dir().join("teshi-run-details-actions");
+        let mut app = clickable_detail_app(&root);
+        app.explore_details_tab = crate::app::RunDetailTab::Api;
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let button = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    action: Action::ExploreDetailToggle,
+                    rect,
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("Space expand button");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click Space expand");
+        assert!(app.explore_details_expanded.contains("e1"));
+    }
+
+    #[test]
+    fn run_details_edit_mode_registers_no_mouse_targets() {
+        let root = std::env::temp_dir().join("teshi-run-details-edit");
+        let mut app = clickable_detail_app(&root);
+        app.explore_edit_mode = true;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render edit mode");
+        assert!(!app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreDetailPane { .. }
+                | ClickableRegion::ExploreDetailTab { .. }
+                | ClickableRegion::ExploreDetailItem { .. }
+        )));
     }
 
     #[test]

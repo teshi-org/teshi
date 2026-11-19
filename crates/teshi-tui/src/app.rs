@@ -1938,6 +1938,20 @@ pub enum ClickableRegion {
         col_x: u16,
         col_right: u16,
     },
+    /// The Run Details panel; a click focuses the pane without changing rows.
+    ExploreDetailPane {
+        rect: ratatui::layout::Rect,
+    },
+    /// One inner content tab in Run Details.
+    ExploreDetailTab {
+        tab: RunDetailTab,
+        rect: ratatui::layout::Rect,
+    },
+    /// One selectable row/block in the active Run Details family.
+    ExploreDetailItem {
+        index: usize,
+        rect: ratatui::layout::Rect,
+    },
     /// A tag in the Features pane's filter strip (click toggles it).
     ExploreTag {
         index: usize,
@@ -14264,6 +14278,27 @@ impl App {
         }
         if self.active_tab == MainTab::Explore
             && !self.explore_edit_mode
+            && matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            && let Some(rect) = self
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ExploreDetailPane { rect } => Some(*rect),
+                    _ => None,
+                })
+            && rect.contains(pos)
+        {
+            if kind == MouseEventKind::ScrollUp {
+                self.explore_details_scroll = self.explore_details_scroll.saturating_sub(3);
+            } else {
+                self.explore_details_scroll = self.explore_details_scroll.saturating_add(3);
+            }
+            self.explore_details_reveal = false;
+            self.quit_pending_confirm = false;
+            return Ok(());
+        }
+        if self.active_tab == MainTab::Explore
+            && !self.explore_edit_mode
             && matches!(
                 kind,
                 MouseEventKind::ScrollUp
@@ -14741,7 +14776,10 @@ impl App {
                 | ClickableRegion::TestPointScenario { rect, .. }
                 | ClickableRegion::ExploreTag { rect, .. }
                 | ClickableRegion::ExploreTagClear { rect }
-                | ClickableRegion::ExploreTagScroll { rect, .. } => rect.contains(*pos),
+                | ClickableRegion::ExploreTagScroll { rect, .. }
+                | ClickableRegion::ExploreDetailPane { rect }
+                | ClickableRegion::ExploreDetailTab { rect, .. }
+                | ClickableRegion::ExploreDetailItem { rect, .. } => rect.contains(*pos),
                 ClickableRegion::ModelProfileRow { rect, .. }
                 | ClickableRegion::ModelFormField { rect, .. }
                 | ClickableRegion::AgentProfileRow { rect, .. }
@@ -14769,7 +14807,10 @@ impl App {
                 | ClickableRegion::TestPointScenario { .. }
                 | ClickableRegion::ExploreTag { .. }
                 | ClickableRegion::ExploreTagClear { .. }
-                | ClickableRegion::ExploreTagScroll { .. } => {}
+                | ClickableRegion::ExploreTagScroll { .. }
+                | ClickableRegion::ExploreDetailPane { .. }
+                | ClickableRegion::ExploreDetailTab { .. }
+                | ClickableRegion::ExploreDetailItem { .. } => {}
                 ClickableRegion::ModelProfileRow { .. }
                 | ClickableRegion::ModelFormField { .. }
                 | ClickableRegion::AgentProfileRow { .. }
@@ -15026,6 +15067,32 @@ impl App {
             ClickableRegion::ExploreStep { step_idx, .. } => {
                 self.explore_selected_step = *step_idx;
                 self.explore_focus = crate::app::ColumnFocus::Step;
+            }
+            ClickableRegion::ExploreDetailPane { .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                }
+            }
+            ClickableRegion::ExploreDetailTab { tab, .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                    let changed = self.explore_details_tab != *tab;
+                    self.explore_details_tab = *tab;
+                    self.explore_details_tab_pinned = true;
+                    if changed {
+                        self.explore_details_selection = 0;
+                        self.explore_details_scroll = 0;
+                        self.explore_details_reveal = true;
+                    }
+                }
+            }
+            ClickableRegion::ExploreDetailItem { index, .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                    self.explore_details_selection =
+                        (*index).min(self.detail_item_count().saturating_sub(1));
+                    self.explore_details_reveal = true;
+                }
             }
             ClickableRegion::ExploreTag { index, .. } => {
                 let tags = self.feature_tags.index.all_tags();

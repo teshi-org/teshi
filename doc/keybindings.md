@@ -119,6 +119,20 @@ artifact kinds keep their path and `Enter` hands them to the system opener.
 Evidence paths must resolve under `.teshi/logs/replay-screenshots/<run>/`;
 anything outside that root is shown but cannot be opened.
 
+### Mouse
+
+- Click a **Run Details** inner tab to switch family; the click also focuses the
+  pane and pins that tab for the selected step.
+- Click a screenshot, HTTP exchange, log line, recording, or unknown artifact
+  block to select it and focus Run Details. The selected block stays highlighted.
+- Click empty pane chrome to focus Run Details without changing the selected row.
+- The wheel scrolls Run Details content under the pointer without moving the
+  Steps selection or taking keyboard focus.
+- The pane action strip (`Enter fullscreen`, `Space expand`, `o open`,
+  `y copy path`, `p plaintext`) is clickable.
+- Clicking a Scenario or Step still updates Run Details immediately; Run Details
+  does not need keyboard focus for the content to follow.
+
 ### Feature editor: Normal
 
 | Key | Action |

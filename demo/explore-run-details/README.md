@@ -64,7 +64,10 @@ same structure when switching Features/runners.
 5. Press `Tab` until **Run Details** is focused (its border turns purple), or
    press `l` from Steps.
 6. Inside Run Details:
-   - `Tab` / `Shift+Tab` cycle the content families.
+   - Click an inner tab to switch family, or use `Tab` / `Shift+Tab`.
+   - Click a screenshot, HTTP exchange, log line, recording or unknown artifact
+     block to select it; the pane focuses itself.
+   - The mouse wheel scrolls the content under the pointer.
    - `j/k` select a row; `PageUp`/`PageDown` scroll expanded content.
    - `Space` expands the selected HTTP exchange body.
    - `Enter` opens a screenshot fullscreen, opens a recording, or expands HTTP.
