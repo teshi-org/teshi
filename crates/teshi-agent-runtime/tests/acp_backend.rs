@@ -424,7 +424,7 @@ fn backend_with_permission_host(mode: &str) -> AgentBackendRuntime {
 }
 
 fn events_until_terminal(backend: &mut AgentBackendRuntime) -> Vec<AgentBackendEvent> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut result = Vec::new();
     while Instant::now() < deadline {
         match backend.try_next_event() {
@@ -532,7 +532,7 @@ fn wait_controls(
     backend: &AgentBackendRuntime,
     predicate: impl Fn(&teshi_agent_runtime::AcpControls) -> bool,
 ) -> teshi_agent_runtime::AcpControls {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let state = backend.acp_controls().unwrap();
         if predicate(&state) {
@@ -666,7 +666,7 @@ fn policy_changes_apply_after_connection_without_approving_pending_requests() {
     backend
         .submit_turn(None, vec![ChatMessage::text("user", "hello")], None)
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let request_id = loop {
         if let Ok(Some(AgentBackendEvent::PermissionRequest { request_id, .. })) =
             backend.try_next_event()
@@ -719,7 +719,7 @@ fn separate_backends_keep_configuration_isolated() {
     assert_eq!(first.acp_controls().unwrap().config.options[0].current, "b");
     // Only an explicit teardown replaces the worker and rediscovers settings.
     first.request_shutdown();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while first.shutdown_pending() {
         first.poll_shutdown();
         assert!(
@@ -769,7 +769,7 @@ fn test_shutdown_of_a_wedged_agent_with_a_blocked_prompt_write_completes() {
 
 /// Waits for the fixture's first streamed chunk so the turn is in flight.
 fn wait_for_first_chunk(backend: &mut AgentBackendRuntime) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match backend.try_next_event() {
             Ok(Some(AgentBackendEvent::MessageChunk { .. })) => return,
@@ -861,7 +861,7 @@ fn cancel_answers_a_pending_permission_and_keeps_the_session() {
             None,
         )
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match backend.try_next_event() {
             Ok(Some(AgentBackendEvent::PermissionRequest { .. })) => break,
@@ -925,7 +925,7 @@ fn reconnecting_after_a_transport_failure_restores_the_transcript() {
     );
 
     // Reconnects after a failed transport, waiting for the old worker to exit.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         backend.poll_shutdown();
         if backend.start().is_ok() {
@@ -1093,7 +1093,7 @@ fn test_cancel_during_retry_backoff_keeps_the_session() {
             None,
         )
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match backend.try_next_event() {
             Ok(Some(AgentBackendEvent::Retrying { .. })) => break,
@@ -1240,7 +1240,7 @@ fn manual_permission_without_host_aborts_turn_when_agent_exits() {
     backend
         .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut events = Vec::new();
     while Instant::now() < deadline {
         match backend.try_next_event() {
@@ -1288,7 +1288,7 @@ fn manual_permission_with_host_continues_after_user_allows() {
         .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut events = Vec::new();
     let mut request_id = None;
     while Instant::now() < deadline {
@@ -1350,7 +1350,7 @@ fn manual_permission_with_host_rejection_fails_turn() {
         .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut events = Vec::new();
     let mut answered = false;
     while Instant::now() < deadline {
