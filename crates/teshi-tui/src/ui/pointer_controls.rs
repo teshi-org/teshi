@@ -4,11 +4,12 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{AiStatus, App, ChangeKind, ClickableRegion};
 use crate::keymap::Action;
 use crate::theme;
+use unicode_width::UnicodeWidthStr;
 
 /// Draw a scroll-following thread list and persistent New and Close controls.
 pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -191,17 +192,51 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         );
         return;
     }
-    let width = area.width.saturating_sub(4).min(100);
-    let height = area.height.saturating_sub(4).min(22);
-    let panel = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
+    let changes = app.has_agent_change_prompt();
+    // iCode's review card: content-driven width up to 100 columns (never below
+    // 60, so the decision row keeps every action) and a height that hugs the
+    // wrapped diff. One body row is reserved for the overflow hint only when
+    // some diff lines do not fit.
+    let spec = super::overlay::OverlaySpec::content(60, 100, 8, 22);
+    let (width, height) = if changes {
+        let change = &app.pending_agent_changes[0];
+        let diff = app
+            .pending_change_diffs
+            .first()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let diff_w = diff
+            .iter()
+            .map(|line| line.text.width() as u16 + 2)
+            .max()
+            .unwrap_or(0);
+        let title_w = crate::i18n::t("chat.pending.title").width() as u16;
+        let desired_w = (change.description.width() as u16).max(diff_w).max(title_w) + 2;
+        let width = spec.width.resolve(area.width, desired_w);
+        let body_cap = spec.height.resolve(area.height, u16::MAX).saturating_sub(3) as usize;
+        let rows = pending_body_rows(
+            change_description(change),
+            diff,
+            width.saturating_sub(2) as usize,
+            body_cap,
+        );
+        (width, spec.height.resolve(area.height, rows as u16 + 3))
+    } else {
+        let prompt = app.agent().pending_acp_permission.as_ref().unwrap();
+        let label_w = prompt
+            .options
+            .iter()
+            .map(|option| option.display_label().width() as u16 + 3)
+            .max()
+            .unwrap_or(0);
+        let title_w = crate::i18n::t("chat.permission.title").width() as u16;
+        let width = spec.width.resolve(area.width, label_w.max(title_w) + 2);
+        let rows = prompt.options.len() as u16 + 3;
+        (width, spec.height.resolve(area.height, rows))
+    };
+    let panel = super::overlay::centered(area, width, height);
     app.clickable_regions.clear();
     super::clear_to(frame, panel, theme::DIALOG_BG);
-    let changes = app.has_agent_change_prompt();
     let title = if changes {
         crate::i18n::t("chat.pending.title")
     } else {
@@ -218,30 +253,18 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
     );
     if changes {
         let change = &app.pending_agent_changes[0];
-        let mut lines = vec![Line::styled(
-            change.description.clone(),
-            Style::default()
-                .fg(theme::WARNING)
-                .add_modifier(Modifier::BOLD),
-        )];
-        if let Some(diff) = app.pending_change_diffs.first() {
-            for line in diff.iter().take(body.height.saturating_sub(1) as usize) {
-                let (prefix, color) = match line.kind {
-                    ChangeKind::Added => ("+", theme::SUCCESS),
-                    ChangeKind::Deleted => ("-", theme::ERROR),
-                    ChangeKind::Modified => ("~", theme::WARNING),
-                    ChangeKind::Unchanged => (" ", theme::MUTED),
-                };
-                lines.push(Line::styled(
-                    format!("{prefix} {}", line.text),
-                    Style::default().fg(color),
-                ));
-            }
-        }
-        frame.render_widget(
-            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-            body,
+        let diff = app
+            .pending_change_diffs
+            .first()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (lines, _hidden) = pending_body(
+            change_description(change),
+            diff,
+            body.width as usize,
+            body.height as usize,
         );
+        frame.render_widget(Paragraph::new(Text::from(lines)), body);
         let compact = inner.width < 70;
         super::render_action_bar(
             frame,
@@ -330,4 +353,113 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
             true,
         );
     }
+}
+
+/// The styled description row of the pending-change card.
+fn change_description(change: &crate::app::AgentPendingChange) -> Line<'static> {
+    Line::styled(
+        change.description.clone(),
+        Style::default()
+            .fg(theme::WARNING)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// One diff row, with the gutter prefix and colour the card has always used.
+fn change_diff_line(line: &teshi_core::diff::DiffLine) -> Line<'static> {
+    let (prefix, color) = match line.kind {
+        ChangeKind::Added => ("+", theme::SUCCESS),
+        ChangeKind::Deleted => ("-", theme::ERROR),
+        ChangeKind::Modified => ("~", theme::WARNING),
+        ChangeKind::Unchanged => (" ", theme::MUTED),
+    };
+    Line::styled(
+        format!("{prefix} {}", line.text),
+        Style::default().fg(color),
+    )
+}
+
+/// Body rows the pending-change card wants, bounded by `body_cap`.
+///
+/// Counts wrapped rows, not source lines, so a long step or table row reserves
+/// the rows it actually occupies. Adds one row when a hint is needed.
+fn pending_body_rows(
+    description: Line<'static>,
+    diff: &[teshi_core::diff::DiffLine],
+    width: usize,
+    body_cap: usize,
+) -> usize {
+    let description_rows = super::chat::wrap_line_to_width(description, width).len();
+    let (diff_rows, shown) = diff_fit(diff, width, body_cap.saturating_sub(description_rows));
+    description_rows + diff_rows + usize::from(shown < diff.len())
+}
+
+/// Wrapped rows and source lines that fit in `rows`.
+fn diff_fit(diff: &[teshi_core::diff::DiffLine], width: usize, rows: usize) -> (usize, usize) {
+    let mut used = 0usize;
+    let mut shown = 0usize;
+    for line in diff {
+        let wrapped = super::chat::wrap_line_to_width(change_diff_line(line), width);
+        if used + wrapped.len() > rows {
+            break;
+        }
+        used += wrapped.len();
+        shown += 1;
+    }
+    (used, shown)
+}
+
+/// Wrapped body rows, plus the number of diff lines the body cannot show.
+///
+/// Fills without a hint first; when the diff does not fit, the last row is
+/// reserved for the overflow hint and the diff is filled again to that budget.
+fn pending_body(
+    description: Line<'static>,
+    diff: &[teshi_core::diff::DiffLine],
+    width: usize,
+    rows: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let description_lines = super::chat::wrap_line_to_width(description, width);
+    let (lines, _used, shown) = fill_pending_body(description_lines.clone(), diff, width, rows);
+    if shown == diff.len() {
+        return (lines, 0);
+    }
+    let (mut lines, used, shown) =
+        fill_pending_body(description_lines, diff, width, rows.saturating_sub(1));
+    let hidden = diff.len() - shown;
+    if hidden > 0 && used < rows {
+        lines.push(Line::styled(
+            crate::i18n::fill(
+                crate::i18n::t("chat.change.more_lines"),
+                &[("n", &hidden.to_string())],
+            ),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    (lines, hidden)
+}
+
+/// Fills `rows` with the wrapped description and as many diff lines as fit.
+fn fill_pending_body(
+    mut description: Vec<Line<'static>>,
+    diff: &[teshi_core::diff::DiffLine],
+    width: usize,
+    rows: usize,
+) -> (Vec<Line<'static>>, usize, usize) {
+    if description.len() > rows {
+        description.truncate(rows);
+    }
+    let mut used = description.len();
+    let mut shown = 0usize;
+    let mut lines = description;
+    for line in diff {
+        let wrapped = super::chat::wrap_line_to_width(change_diff_line(line), width);
+        if used + wrapped.len() > rows {
+            break;
+        }
+        used += wrapped.len();
+        shown += 1;
+        lines.extend(wrapped);
+    }
+    (lines, used, shown)
 }

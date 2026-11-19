@@ -499,6 +499,7 @@ fn en(key: &str) -> Option<&'static str> {
         "chat.change.reject" => " Reject",
         "chat.change.diff" => " Diff",
         "chat.change.summary" => " Summary",
+        "chat.change.more_lines" => "… +{n} more lines",
         "chat.permission.allow" => " Allow [Enter]",
         "chat.permission.reject" => " Reject [Esc]",
         // ── Requirement overlays ────────────────────────────
@@ -1542,6 +1543,7 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "chat.change.reject" => " 驳回",
         "chat.change.diff" => " 差异",
         "chat.change.summary" => " 摘要",
+        "chat.change.more_lines" => "… 还有 {n} 行",
         "chat.permission.allow" => " 允许 [Enter]",
         "chat.permission.reject" => " 驳回 [Esc]",
         // ── Requirement overlays ────────────────────────────

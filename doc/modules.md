@@ -262,12 +262,15 @@ Built with **ratatui 0.29**. Uses `render_stateful_widget` for tree state.
 
 ### Overlays (rendered in priority order)
 
-- Agent change prompt (bottom bar)
-- External file change dialog (centered)
+- Agent change prompt (centered card, 60–100 × 8–22; Explore diff keeps the bottom action bar)
+- External file change dialog (centered, 64 columns, measured height)
 - Interrupt confirmation (centered, 56×8)
-- Auth panel (centered, 60×20)
+- Auth panel (centered, 60 columns × 8–20 rows)
 - Step keyword picker (positioned near current line)
-- Failure detail popup (75%×70%, centered)
+- Failure detail popup (75% wide ≤120, 70% tall ≤45, centered)
+
+Modal cards other than dialogs take their bounds from `ui/overlay.rs` (preferred
+size + viewport share + absolute cap); see the TUI style guide.
 
 ### Styles
 

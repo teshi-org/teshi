@@ -6,6 +6,7 @@
 //! targets: rendering returns the drawn rectangles so each caller registers
 //! its own clickable regions for them.
 
+use super::overlay;
 use crate::theme::{self, ButtonTone};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -68,7 +69,7 @@ impl Dialog<'_> {
         let body_rows = wrapped_rows(&self.body, content_w);
         let fixed = CHROME_ROWS + body_rows;
         let plan = ButtonPlan::new(&self.buttons, content_w, area.height.saturating_sub(fixed));
-        let panel = centered(area, width, fixed + plan.rows);
+        let panel = overlay::centered(area, width, fixed + plan.rows);
         let content = draw_chrome(frame, area, panel, self.title, self.warning, pad_x);
 
         let body_area = Rect::new(content.x, content.y, content.width, body_rows);
@@ -120,7 +121,7 @@ impl ListDialog<'_> {
             area.height.saturating_sub(fixed + wanted),
         );
         let visible = wanted.min(area.height.saturating_sub(fixed + plan.rows));
-        let panel = centered(area, width, fixed + visible + plan.rows);
+        let panel = overlay::centered(area, width, fixed + visible + plan.rows);
         let content = draw_chrome(frame, area, panel, self.title, false, pad_x);
 
         // Scroll just enough to keep the selection on the last visible row.
@@ -214,7 +215,7 @@ impl FormDialog<'_> {
         let notes_block = if notes_rows == 0 { 0 } else { notes_rows + 1 };
         let fixed = CHROME_ROWS + field_rows + notes_block;
         let plan = ButtonPlan::new(&self.buttons, content_w, area.height.saturating_sub(fixed));
-        let panel = centered(area, width, fixed + plan.rows);
+        let panel = overlay::centered(area, width, fixed + plan.rows);
         let content = draw_chrome(frame, area, panel, self.title, false, pad_x);
 
         for (row, field) in self.fields.iter().enumerate() {
@@ -346,7 +347,7 @@ fn dialog_width(title: &str, text_w: u16, buttons: &[DialogButton<'_>], area_w: 
     // Leave a visible backdrop margin, as iCode caps dialogs at 90%, unless
     // the content would then wrap: a narrow terminal spends the margin and
     // the extra padding on the content instead.
-    let ninety_percent = (u32::from(area_w) * 9 / 10) as u16;
+    let ninety_percent = overlay::share_cap(area_w, overlay::DEFAULT_SHARE);
     let roomy = needed <= ninety_percent;
     let cap = if roomy { ninety_percent } else { area_w };
     let width = tier.min(cap).max(8).min(area_w);
@@ -368,16 +369,6 @@ fn wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
     Paragraph::new(lines.to_vec())
         .wrap(Wrap { trim: false })
         .line_count(width) as u16
-}
-
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let height = height.min(area.height);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
 }
 
 /// Veils `area`, draws the card for `panel`, and returns its content area
@@ -482,7 +473,7 @@ fn draw_button(frame: &mut Frame<'_>, button: &DialogButton<'_>, rect: Rect) -> 
 
 /// Veils everything already drawn in `area` so the dialog is the only bright
 /// surface. Default backgrounds stay the terminal's own.
-fn dim_backdrop(frame: &mut Frame<'_>, area: Rect) {
+pub(super) fn dim_backdrop(frame: &mut Frame<'_>, area: Rect) {
     let buffer = frame.buffer_mut();
     let area = area.intersection(buffer.area);
     for y in area.top()..area.bottom() {
