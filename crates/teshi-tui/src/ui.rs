@@ -4364,8 +4364,11 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         overlay::FORM_SHARE
     };
+    // The list's five actions need the full 60-column card; spending the 10%
+    // backdrop margin below that clips the Close control. Form cards keep the
+    // same width so the list-to-form transition does not resize the card.
     let spec = overlay::OverlaySpec {
-        width: overlay::Axis::cells(60, 8, overlay::DEFAULT_SHARE),
+        width: overlay::Axis::cells(60, 60, 100),
         height: overlay::Axis::content(8, 22, height_share),
     };
     let panel_area = spec.rect(area, (0, content_rows));
