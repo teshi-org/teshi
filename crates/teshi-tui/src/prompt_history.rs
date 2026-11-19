@@ -52,10 +52,10 @@ impl PromptHistory {
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Ok(entry) = serde_json::from_str::<PromptEntry>(trimmed) {
-                    if !entry.text.is_empty() {
-                        history.entries.push(entry);
-                    }
+                if let Ok(entry) = serde_json::from_str::<PromptEntry>(trimmed)
+                    && !entry.text.is_empty()
+                {
+                    history.entries.push(entry);
                 }
             }
             if history.entries.len() > MAX_ENTRIES {

@@ -11638,9 +11638,7 @@ impl App {
             Action::AiCut => {
                 let selected = {
                     let input = self.active_composer_mut();
-                    input
-                        .selection()
-                        .and_then(|range| input.selected_text().map(|text| (range, text)))
+                    input.selection().zip(input.selected_text())
                 };
                 if let Some((range, text)) = selected
                     && self.try_copy_to_clipboard(&text)
