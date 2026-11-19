@@ -129,6 +129,22 @@ impl OverlaySpec {
         }
     }
 
+    /// Large viewer: percentage width and height with absolute caps, matching
+    /// iCode's `width: 92%; max-width: 120; height: 85%; max-height: 45`.
+    pub(crate) const fn viewer(
+        width_pct: u8,
+        min_w: u16,
+        max_w: u16,
+        height_pct: u8,
+        min_h: u16,
+        max_h: u16,
+    ) -> Self {
+        Self {
+            width: Axis::percent(width_pct, min_w, max_w, 100),
+            height: Axis::percent(height_pct, min_h, max_h, 100),
+        }
+    }
+
     /// Resolve to a centered rectangle.
     ///
     /// `content` is `(columns, rows)` measured without the card's border and
@@ -232,6 +248,23 @@ mod tests {
         let area = Rect::new(5, 2, 10, 6);
         assert_eq!(centered(area, 4, 2), Rect::new(8, 4, 4, 2));
         assert_eq!(centered(area, 20, 20), area, "never exceeds the area");
+    }
+
+    #[test]
+    fn viewer_keeps_the_percentage_and_the_absolute_caps() {
+        let spec = OverlaySpec::viewer(75, 20, 120, 70, 10, 45);
+        let sizes: Vec<(u16, u16)> = VIEWPORTS
+            .iter()
+            .map(|(width, height)| {
+                let placed = rect(spec, *width, *height, (0, 0));
+                (placed.width, placed.height)
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![(120, 42), (90, 25), (60, 16), (30, 14)],
+            "75%/70% of the viewport, capped at 120x45"
+        );
     }
 
     #[test]

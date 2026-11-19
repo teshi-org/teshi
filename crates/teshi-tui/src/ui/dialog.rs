@@ -473,7 +473,7 @@ fn draw_button(frame: &mut Frame<'_>, button: &DialogButton<'_>, rect: Rect) -> 
 
 /// Veils everything already drawn in `area` so the dialog is the only bright
 /// surface. Default backgrounds stay the terminal's own.
-fn dim_backdrop(frame: &mut Frame<'_>, area: Rect) {
+pub(super) fn dim_backdrop(frame: &mut Frame<'_>, area: Rect) {
     let buffer = frame.buffer_mut();
     let area = area.intersection(buffer.area);
     for y in area.top()..area.bottom() {

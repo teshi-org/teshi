@@ -33,6 +33,27 @@ mod pointer_controls;
 use dialog::{Dialog, DialogButton, FormDialog, FormField, ListDialog};
 use theme::ButtonTone;
 
+/// iCode-style size rules for the overlays migrated to [`overlay`].
+///
+/// Each axis keeps a preferred size, a viewport share and an absolute cap, so
+/// a 200-column terminal does not stretch a card that was designed for 120.
+const FAILURE_DETAIL_SPEC: overlay::OverlaySpec =
+    overlay::OverlaySpec::viewer(75, 20, 120, 70, 10, 45);
+const CHANGE_SUMMARY_SPEC: overlay::OverlaySpec =
+    overlay::OverlaySpec::viewer(65, 30, 110, 55, 10, 40);
+const SETTINGS_SPEC: overlay::OverlaySpec = overlay::OverlaySpec {
+    width: overlay::Axis::cells(80, 12, 92),
+    height: overlay::Axis::cells(22, 8, 85),
+};
+const AGENT_PROFILE_SPEC: overlay::OverlaySpec = overlay::OverlaySpec::viewer(
+    95,
+    AGENT_PROFILE_PANEL_MIN_WIDTH,
+    AGENT_PROFILE_PANEL_MAX_WIDTH,
+    85,
+    AGENT_PROFILE_PANEL_MIN_HEIGHT,
+    AGENT_PROFILE_PANEL_MAX_HEIGHT,
+);
+
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
 fn main_tabs(width: u16) -> [(MainTab, &'static str); 5] {
     let compact = width < 85;
@@ -2841,14 +2862,8 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     };
 
-    let popup_w = (area.width as f32 * 0.75) as u16;
-    let popup_h = (area.height as f32 * 0.70) as u16;
-    let popup_w = popup_w.max(20).min(area.width);
-    let popup_h = popup_h.max(10).min(area.height);
-    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
-
+    let popup = FAILURE_DETAIL_SPEC.rect(area, (0, 0));
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, popup);
     let block = theme::popup_block("Failure Details");
     let inner = block.inner(popup);
@@ -2944,14 +2959,8 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         return;
     }
 
-    let popup_w = (area.width as f32 * 0.65) as u16;
-    let popup_h = (area.height as f32 * 0.55) as u16;
-    let popup_w = popup_w.max(30).min(area.width);
-    let popup_h = popup_h.max(10).min(area.height);
-    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
-
+    let popup = CHANGE_SUMMARY_SPEC.rect(area, (0, 0));
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, popup);
     let block = theme::popup_block(crate::i18n::t("change_summary.title"));
     let [inner, footer] =
@@ -4315,6 +4324,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // height cap and leaves the backdrop margin on every screen.
     let content_rows = lines.len() as u16 + 3;
     let panel_area = overlay::OverlaySpec::form(60, 8, 20).rect(area, (0, content_rows));
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
     let block = theme::popup_block(crate::i18n::t("auth.title"));
@@ -4360,6 +4370,7 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     let panel_area = spec.rect(area, (0, content_rows));
 
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
     match app.model_panel_mode {
@@ -4612,7 +4623,7 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // 40 rows so a long history still shows the backdrop.
     let panel_area = overlay::OverlaySpec::prompt(88, 10, 40).rect(area, (0, desired_height));
 
-    // Dim background
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
     let title = if app.session_panel_legacy {
@@ -5121,14 +5132,11 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// under a `└─` glyph. The bottom border carries the save status and a
 /// semantic Close control.
 fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_w = area.width.saturating_sub(2).min(80);
-    let panel_h = area.height.saturating_sub(2).min(22);
-    if panel_w < 12 || panel_h < 5 {
+    let panel_area = SETTINGS_SPEC.rect(area, (0, 0));
+    if panel_area.width < 12 || panel_area.height < 5 {
         return;
     }
-    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
     let status = crate::i18n::t("settings.autosave");
@@ -5360,6 +5368,7 @@ const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
 
 fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel = agent_profile_panel_rect(area);
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel);
     let title = match app.agent_panel_mode {
         crate::app::AgentPanelMode::SelectBackend => {
@@ -5546,29 +5555,15 @@ const AGENT_PROFILE_PANEL_MAX_WIDTH: u16 = 100;
 const AGENT_PROFILE_PANEL_MIN_HEIGHT: u16 = 18;
 const AGENT_PROFILE_PANEL_MAX_HEIGHT: u16 = 50;
 
-/// Compute centered agent configuration modal bounds (chrys-like 95% x 85% with caps).
+/// Compute centered agent configuration modal bounds (iCode's 95% x 85% with caps).
 fn agent_profile_panel_rect(area: Rect) -> Rect {
-    let panel_w = ((area.width as u32 * 95) / 100).clamp(
-        AGENT_PROFILE_PANEL_MIN_WIDTH as u32,
-        AGENT_PROFILE_PANEL_MAX_WIDTH as u32,
-    ) as u16;
-    let panel_h = ((area.height as u32 * 85) / 100).clamp(
-        AGENT_PROFILE_PANEL_MIN_HEIGHT as u32,
-        AGENT_PROFILE_PANEL_MAX_HEIGHT as u32,
-    ) as u16;
-    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    Rect::new(
-        panel_x,
-        panel_y,
-        panel_w.min(area.width),
-        panel_h.min(area.height),
-    )
+    AGENT_PROFILE_SPEC.rect(area, (0, 0))
 }
 
 /// Render the agent profile configuration overlay (chrys-style layout).
 fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_area = agent_profile_panel_rect(area);
+    dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
     let block = theme::popup_block(crate::i18n::t("agent.config.title"));
@@ -7472,7 +7467,7 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
 }
 
 fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selection: usize) {
-    let width = area.width.min(100);
+    let width = overlay::Axis::cells(100, 20, overlay::DEFAULT_SHARE).resolve(area.width, 0);
     let inner_width = width.saturating_sub(2) as usize;
     if inner_width == 0 || area.height < 4 {
         return;
@@ -7524,12 +7519,7 @@ fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selec
         .min(selected_start)
         .min(rows.len().saturating_sub(list_height));
     let height = (list_height + reserved).min(area.height as usize) as u16;
-    let panel = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
+    let panel = overlay::centered(area, width, height);
     let mut lines = Vec::new();
     for (offset, (index, line)) in rows.iter().skip(start).take(list_height).enumerate() {
         lines.push(line.clone());
@@ -7565,7 +7555,11 @@ fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selec
 fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::project_context::SwitchOverlay;
     let overlay = app.project_switch.overlay.clone();
-    let (title, lines, width, height) = match overlay {
+    if matches!(overlay, SwitchOverlay::None) {
+        return;
+    }
+    dialog::dim_backdrop(frame, area);
+    let (title, lines, max_width) = match overlay {
         SwitchOverlay::None => return,
         SwitchOverlay::Picker { selection } => {
             render_project_picker(frame, app, area, selection);
@@ -7579,8 +7573,7 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
                 Line::raw(""),
                 theme::action_line(crate::i18n::t("project.open_path.hint")),
             ],
-            area.width.min(100),
-            6.min(area.height),
+            100,
         ),
         SwitchOverlay::Dirty { target } => {
             let mut rows = vec![
@@ -7600,12 +7593,7 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
             }
             rows.push(Line::raw(""));
             rows.push(theme::action_line(crate::i18n::t("project.dirty.hint")));
-            (
-                crate::i18n::t("project.dirty.title"),
-                rows,
-                area.width.min(86),
-                10.min(area.height),
-            )
+            (crate::i18n::t("project.dirty.title"), rows, 86)
         }
         SwitchOverlay::Busy { target } => (
             crate::i18n::t("project.busy.title"),
@@ -7618,16 +7606,24 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
                 Line::raw(crate::i18n::t("project.busy.hint")),
                 Line::raw(crate::i18n::t("project.busy.wait")),
             ],
-            area.width.min(86),
-            8.min(area.height),
+            86,
         ),
     };
-    let panel = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
+    // Keep a backdrop margin on narrow terminals and size the card from the
+    // wrapped lines instead of a fixed guess.
+    let width_axis = overlay::Axis::cells(max_width, 20, overlay::DEFAULT_SHARE);
+    let width = width_axis.resolve(area.width, 0);
+    let body_rows: u32 = lines
+        .iter()
+        .map(|line| {
+            chat::wrap_line_to_width(line.clone(), width.saturating_sub(2) as usize).len() as u32
+        })
+        .sum();
+    let spec = overlay::OverlaySpec {
+        width: width_axis,
+        height: overlay::Axis::content(4, 20, overlay::DEFAULT_SHARE),
+    };
+    let panel = spec.rect(area, (0, body_rows.min(20) as u16 + 2));
     frame.render_widget(Clear, panel);
     frame.render_widget(
         Paragraph::new(lines)
@@ -8530,6 +8526,35 @@ mod truncate_tests {
             })
             .count();
         assert_eq!(choices, 3, "every visible option is clickable");
+    }
+
+    #[test]
+    fn migrated_viewer_specs_stay_inside_every_viewport() {
+        for (width, height) in [(200u16, 60u16), (120, 36), (80, 24), (40, 20)] {
+            for spec in [
+                super::FAILURE_DETAIL_SPEC,
+                super::CHANGE_SUMMARY_SPEC,
+                super::SETTINGS_SPEC,
+                super::AGENT_PROFILE_SPEC,
+            ] {
+                let placed = spec.rect(ratatui::layout::Rect::new(0, 0, width, height), (0, 0));
+                assert!(
+                    placed.width <= width && placed.height <= height,
+                    "{spec:?} overflows {width}x{height}: {placed:?}"
+                );
+                assert!(placed.right() <= width && placed.bottom() <= height);
+            }
+        }
+
+        let area = ratatui::layout::Rect::new(0, 0, 200, 60);
+        let failure = super::FAILURE_DETAIL_SPEC.rect(area, (0, 0));
+        assert_eq!((failure.width, failure.height), (120, 42));
+        let summary = super::CHANGE_SUMMARY_SPEC.rect(area, (0, 0));
+        assert_eq!((summary.width, summary.height), (110, 33));
+        let settings = super::SETTINGS_SPEC.rect(area, (0, 0));
+        assert_eq!((settings.width, settings.height), (80, 22));
+        let agent = super::AGENT_PROFILE_SPEC.rect(area, (0, 0));
+        assert_eq!((agent.width, agent.height), (100, 50));
     }
 
     #[test]
