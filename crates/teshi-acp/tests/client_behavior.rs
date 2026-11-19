@@ -359,9 +359,23 @@ async fn list_and_load_use_v1_capabilities_and_wire_schema() {
                 .await
                 .unwrap();
         }
+        if let JsonRpcMessage::Request { id, method, params } =
+            read_next(&mut r).await.unwrap().unwrap()
+        {
+            assert_eq!(method, "session/load");
+            assert_eq!(params["sessionId"], "saved");
+            assert_eq!(params["cwd"], "/project");
+            assert_eq!(params["mcpServers"][0]["name"], "teshi-tools");
+            assert_eq!(params["mcpServers"][0]["command"], "teshi");
+            write_message(&mut sw, &response(id, json!({"sessionId":"saved"})))
+                .await
+                .unwrap();
+        }
     });
 
-    client.initialize().await.unwrap();
+    let init = client.initialize().await.unwrap();
+    assert!(init.supports_load_session());
+    assert!(!init.supports_resume_session());
     assert_eq!(
         client.list_sessions().await.unwrap(),
         json!({"sessions": []})
@@ -372,6 +386,87 @@ async fn list_and_load_use_v1_capabilities_and_wire_schema() {
         .unwrap();
     assert_eq!(loaded.id, "saved");
     assert_eq!(loaded.cwd, PathBuf::from("/project"));
+    let with_mcp = client
+        .load_session_with_mcp(
+            "saved",
+            PathBuf::from("/project"),
+            vec![teshi_acp::McpServer::Stdio(teshi_acp::McpServerStdio::new(
+                "teshi-tools",
+                "teshi",
+            ))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_mcp.id, "saved");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_session_requires_capability_and_forwards_mcp_servers() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (cr, cw) = tokio::io::split(client_io);
+    let (sr, mut sw) = tokio::io::split(server_io);
+    let (events_tx, _events_rx) = mpsc::channel(16);
+    let mut client = AcpClient::from_io(
+        cr,
+        cw,
+        test_config(),
+        events_tx,
+        PermissionPolicy::Auto,
+        None,
+    );
+
+    let server = tokio::spawn(async move {
+        let mut r = BufReader::new(sr);
+        if let JsonRpcMessage::Request { id, .. } = read_next(&mut r).await.unwrap().unwrap() {
+            write_message(
+                &mut sw,
+                &response(
+                    id,
+                    json!({
+                        "protocolVersion": 1,
+                        "agentCapabilities": {
+                            "sessionCapabilities": {"resume": {}}
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        if let JsonRpcMessage::Request { id, method, params } =
+            read_next(&mut r).await.unwrap().unwrap()
+        {
+            assert_eq!(method, "session/resume");
+            assert_eq!(params["sessionId"], "live");
+            assert_eq!(params["cwd"], "/project");
+            assert_eq!(params["mcpServers"][0]["name"], "teshi-tools");
+            write_message(&mut sw, &response(id, json!({"sessionId":"live"})))
+                .await
+                .unwrap();
+        }
+    });
+
+    let init = client.initialize().await.unwrap();
+    assert!(init.supports_resume_session());
+    assert!(!init.supports_load_session());
+    assert!(matches!(
+        client.load_session("live", PathBuf::from("/project")).await,
+        Err(teshi_acp::AcpError::CapabilityUnsupported("session/load"))
+    ));
+    let resumed = client
+        .resume_session_with_mcp(
+            "live",
+            PathBuf::from("/project"),
+            vec![teshi_acp::McpServer::Stdio(teshi_acp::McpServerStdio::new(
+                "teshi-tools",
+                "teshi",
+            ))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.id, "live");
+    assert_eq!(resumed.cwd, PathBuf::from("/project"));
     server.await.unwrap();
 }
 

@@ -621,11 +621,24 @@ impl AgentThread {
                 activity: None,
             });
         }
+        // Live ACP session identity must participate in the snapshot: a process
+        // can become ready without changing the transcript, and resume depends
+        // on the id surviving the next restart.
+        let acp_session_id = self
+            .backend
+            .acp_controls()
+            .and_then(|controls| controls.session_id)
+            .or_else(|| {
+                self.saved_session
+                    .as_ref()
+                    .and_then(|session| session.acp_session_id.clone())
+            });
         let snapshot = serde_json::to_string(&(
             &messages,
             &self.chat.queue,
             self.backend_kind(),
             &self.selected_acp_id,
+            &acp_session_id,
             &model,
             project,
             &self.member_dir,
@@ -656,6 +669,7 @@ impl AgentThread {
         }
         session.backend_kind = Some(self.backend_kind());
         session.acp_agent_id = self.selected_acp_id.clone();
+        session.acp_session_id = acp_session_id;
         session.member_dir = self.member_dir.clone();
         session.completed_answers = self.completed_answers.iter().copied().collect();
         session.generated_title = self.generated_title.clone();
@@ -3932,6 +3946,13 @@ impl App {
                     tools: self.agent_tools(agent_idx),
                 });
                 let thread = &self.agents[agent_idx];
+                // Resume the ACP agent's own session when this conversation was
+                // checkpointed with a remote id. Absent or unsupported agents
+                // fall back to session/new inside the worker.
+                config.restore_session_id = thread
+                    .saved_session
+                    .as_ref()
+                    .and_then(|session| session.acp_session_id.clone());
                 config.model_preference_path = thread.acp_preference_path("model-preferences")?;
                 config.option_preferences_path = thread.acp_preference_path("session-options")?;
                 let approval_path = thread.acp_preference_path("approval-preferences")?;
@@ -15407,6 +15428,11 @@ impl App {
         thread.replace_backend(kind);
         *thread.messages_mut() = messages;
         thread.selected_acp_id = selected_id;
+        // A different agent (or Native) cannot resume the previous ACP session.
+        if let Some(session) = thread.saved_session.as_mut() {
+            session.acp_session_id = None;
+            session.acp_agent_id = thread.selected_acp_id.clone();
+        }
         thread.backend_selected = true;
         thread.selection_warning = None;
         thread.acp_controls_ui = Default::default();
@@ -18798,7 +18824,11 @@ mod tests {
         assert_eq!(first.messages.last().unwrap().content, "unfinished");
         assert_eq!(first.completed_answers, vec![1]);
         assert_eq!(first.acp_agent_id.as_deref(), Some("example"));
+        assert!(first.acp_session_id.is_none());
         assert_eq!(first.project_root.as_deref(), Some(project.path()));
+        if let Some(session) = agent.saved_session.as_mut() {
+            session.acp_session_id = Some("acp-live".into());
+        }
         agent.partial_response_mut().push_str(" reply");
         agent
             .save_session_to(root.path(), project.path(), None)
@@ -18808,6 +18838,7 @@ mod tests {
         assert_eq!(second.created_at, first.created_at);
         assert_eq!(second.messages.len(), 2);
         assert_eq!(second.messages.last().unwrap().content, "unfinished reply");
+        assert_eq!(second.acp_session_id.as_deref(), Some("acp-live"));
         assert_eq!(
             agent.messages().len(),
             1,
@@ -19381,6 +19412,45 @@ mod tests {
             app.status.contains("could not be restored"),
             "{}",
             app.status
+        );
+    }
+
+    #[test]
+    fn restoring_history_keeps_acp_session_id_for_remote_resume() {
+        let (mut app, _project, _store) = slash_test_app();
+        let mut session = crate::session::Session::from_messages(
+            vec![AiChatMessage {
+                role: AiRole::User,
+                content: "hello".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            }],
+            None,
+        );
+        session.backend_kind = Some(teshi_agent::backend::AgentBackendKind::Acp);
+        session.acp_agent_id = Some("alpha".into());
+        session.acp_session_id = Some("saved-session".into());
+        session.project_root = Some(app.project.root_dir.clone());
+        stop_fixture_agents(&mut app);
+        assert!(app.restore_session(session, false));
+        assert_eq!(
+            app.agent()
+                .saved_session
+                .as_ref()
+                .and_then(|session| session.acp_session_id.as_deref()),
+            Some("saved-session")
+        );
+        app.select_backend(None);
+        assert!(
+            app.agent()
+                .saved_session
+                .as_ref()
+                .and_then(|session| session.acp_session_id.as_ref())
+                .is_none(),
+            "switching backend must drop the previous ACP session id"
         );
     }
 

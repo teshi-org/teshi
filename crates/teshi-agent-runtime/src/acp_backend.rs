@@ -50,6 +50,12 @@ pub struct AcpBackendConfig {
     pub inject_prompt_sections: bool,
     /// Automatic retries for turns that a transient network failure ended.
     pub turn_retry: TurnRetryPolicy,
+    /// ACP `sessionId` to restore on the next worker connect, when the agent
+    /// advertises `session/resume` or `session/load`.
+    ///
+    /// Absent for brand-new conversations. A failed restore falls back to
+    /// `session/new` and the existing transcript re-seed path.
+    pub restore_session_id: Option<String>,
 }
 
 impl AcpBackendConfig {
@@ -65,6 +71,7 @@ impl AcpBackendConfig {
             tool_bridge: None,
             inject_prompt_sections: true,
             turn_retry: TurnRetryPolicy::default(),
+            restore_session_id: None,
         }
     }
 }
@@ -118,6 +125,9 @@ pub struct AcpControls {
     /// Whether the agent advertised `promptCapabilities.image`; only
     /// meaningful once `ready` is set.
     pub image_prompts: bool,
+    /// True when this process restored an ACP session via `session/resume` or
+    /// `session/load`, so the first prompt must not re-seed local history.
+    pub remote_context_restored: bool,
 }
 
 /// Bridges an ACP agent's `session/request_permission` to a synchronous
@@ -523,9 +533,15 @@ impl AcpAgentBackend {
         {
             prompt.push_str(guidance);
         }
-        // A new ACP process has no remote history. Supply the saved transcript
-        // once, then let that process maintain its own conversation.
-        if !self.submitted_prompt && messages.len() > 1 {
+        // A fresh ACP process has no remote history unless session/resume or
+        // session/load already restored it. Only then fall back to re-seeding
+        // the saved transcript as a single prompt preamble.
+        let remote_restored = self
+            .controls
+            .lock()
+            .map(|state| state.remote_context_restored)
+            .unwrap_or(false);
+        if !self.submitted_prompt && !remote_restored && messages.len() > 1 {
             let history = messages[..messages.len() - 1]
                 .iter()
                 .map(|message| {
@@ -1000,6 +1016,76 @@ async fn restore_option_preferences(
     Ok(notices)
 }
 
+/// Open a fresh ACP session, or restore a saved one when the agent allows it.
+///
+/// Preference order matches the ACP client guidance for UIs that already own a
+/// local transcript: `session/resume` (no replay), then `session/load` (replay
+/// muted here), then `session/new`.
+///
+/// Returns `(session, remote_context_restored, optional_fallback_notice)`.
+async fn open_or_restore_session<W>(
+    client: &AcpClient<W>,
+    initialized: &teshi_acp::InitializeResult,
+    cwd: PathBuf,
+    servers: Vec<teshi_acp::McpServer>,
+    restore_session_id: Option<&str>,
+    updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+) -> Result<(teshi_acp::AcpSession, bool, Option<String>), teshi_acp::AcpError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut notice = None;
+    if let Some(id) = restore_session_id.filter(|id| !id.is_empty()) {
+        if initialized.supports_resume_session() {
+            match client
+                .resume_session_with_mcp(id, cwd.clone(), servers.clone())
+                .await
+            {
+                Ok(session) => return Ok((session, true, None)),
+                Err(error) => append_notice(
+                    &mut notice,
+                    format!("ACP session/resume failed ({error}); trying another restore path"),
+                ),
+            }
+        }
+        if initialized.supports_load_session() {
+            match client
+                .load_session_with_mcp(id, cwd.clone(), servers.clone())
+                .await
+            {
+                Ok(session) => {
+                    // session/load may replay history before answering. Teshi
+                    // already displays its own checkpoint, so drop those updates
+                    // instead of duplicating them into the UI transcript.
+                    drain_restore_replay(updates_rx).await;
+                    return Ok((session, true, notice));
+                }
+                Err(error) => append_notice(
+                    &mut notice,
+                    format!("ACP session/load failed ({error}); starting a fresh session"),
+                ),
+            }
+        } else if notice.is_none() {
+            append_notice(
+                &mut notice,
+                "ACP agent does not support session restore; starting a fresh session".into(),
+            );
+        }
+    }
+    let session = client.new_session_with_mcp(cwd, servers).await?;
+    Ok((session, false, notice))
+}
+
+/// Drop history-replay updates that arrived while `session/load` was in flight.
+async fn drain_restore_replay(updates_rx: &mut async_mpsc::Receiver<AcpEvent>) {
+    // The agent must finish replay before answering session/load, but the
+    // reader task may still be delivering the last few frames.
+    for _ in 0..3 {
+        while updates_rx.try_recv().is_ok() {}
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn run_worker(
     config: AcpBackendConfig,
     mut commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
@@ -1037,6 +1123,7 @@ async fn run_worker(
             return;
         }
     };
+    let restore_session_id = config.restore_session_id.clone();
     let result = async {
         let initialized = client
             .initialize()
@@ -1054,14 +1141,27 @@ async fn run_worker(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("ACP agent")
             .to_string();
-        let session = client
-            .new_session_with_mcp(cwd, servers)
-            .await
-            .map_err(|e| format!("ACP session creation failed: {e}"))?;
-        Ok::<_, String>((session, model, initialized.accepts_images()))
+        let (session, remote_context_restored, restore_notice) = open_or_restore_session(
+            &client,
+            &initialized,
+            cwd,
+            servers,
+            restore_session_id.as_deref(),
+            &mut updates_rx,
+        )
+        .await
+        .map_err(|e| format!("ACP session creation failed: {e}"))?;
+        Ok::<_, String>((
+            session,
+            model,
+            initialized.accepts_images(),
+            remote_context_restored,
+            restore_notice,
+        ))
     }
     .await;
-    let (mut session, model, image_prompts) = match result {
+    let (mut session, model, image_prompts, remote_context_restored, restore_notice) = match result
+    {
         Ok(value) => value,
         Err(error) => {
             if let Ok(mut state) = controls.lock() {
@@ -1147,9 +1247,13 @@ async fn run_worker(
     }
     if let Ok(mut state) = controls.lock() {
         state.config = session.config.clone();
+        if let Some(notice) = restore_notice {
+            append_notice(&mut preference_error, notice);
+        }
         state.error = preference_error;
         state.session_id = Some(session.id.clone());
         state.image_prompts = image_prompts;
+        state.remote_context_restored = remote_context_restored;
         state.ready = true;
         state.revision += 1;
     }
