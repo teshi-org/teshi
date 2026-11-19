@@ -6,7 +6,8 @@
 - A terminal with Unicode and true-color support
 - (Optional) Nightly toolchain + `wasm32-unknown-unknown` target + `wasm-bindgen` CLI, only for building `teshi-web`
 
-> The `.githooks/` in this repo are stale and not enabled by default. Rely on the commands below as the real quality gates.
+> Run `bash scripts/preflight.sh` (Windows: `pwsh scripts/preflight.ps1`) before pushing.
+> The `.githooks/` call the same script; enable them once with `git config core.hooksPath .githooks`.
 
 ## Branching and merge policy
 
@@ -14,8 +15,8 @@
 
 1. Branch from an up-to-date `main` as `dev/<github-handle>/<topic>`, for example `dev/lilinfangrelax/chat-dock`.
 2. Push the branch and open a pull request against `main`.
-3. CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) must pass. `main` is protected: direct pushes are rejected, and a pull request cannot merge while a required check is failing or the branch is behind `main`.
-4. Merge the pull request and delete the branch.
+3. CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) must pass. `main` is protected: required checks must succeed, and the organization-admin exception is the only bypass for a direct push.
+4. Queue the pull request (`Merge when ready`) instead of merging it directly. The merge queue runs CI on the exact merged tree; the post-merge `main` push reuses that green run for the identical tree instead of repeating it.
 
 Feature branches are short-lived, and `dev/` is only a branch-name prefix — there is no shared `dev` branch to sync with `main`.
 
@@ -161,6 +162,15 @@ cargo test --workspace --exclude teshi-web --locked -- --nocapture  # show test 
 cargo clippy --workspace --exclude teshi-web --locked --all-targets --all-features -- -D warnings  # lint
 cargo fmt --all --check                                           # check formatting
 ```
+
+### Preflight and hooks
+
+`scripts/preflight.sh` (POSIX) and `scripts/preflight.ps1` (Windows) run the same
+checks CI enforces: workspace and terminal-runner formatting, both clippy runs,
+and both test suites (`--no-tests` / `-NoTests` skips the tests). Enable the
+optional hooks once with `git config core.hooksPath .githooks`; `pre-commit`
+keeps the version and `dbg!` checks, and `pre-push` runs the preflight before
+the release-tag gate.
 
 ### Test layout
 

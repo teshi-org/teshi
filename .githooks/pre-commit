@@ -27,7 +27,7 @@ fi
 
 # ---- 2. cargo check --------------------------------------------------------
 echo ":: Compilation check (cargo check) ..."
-if ! cargo check 2>/dev/null; then
+if ! cargo check --workspace --exclude teshi-web --locked 2>/dev/null; then
     echo -e "${RED}   x  Compilation errors.${NC}"
     PASS=false
 else
@@ -36,7 +36,7 @@ fi
 
 # ---- 2b. cargo check --locked ---------------------------------------------
 echo ":: Lock file check (cargo check --locked) ..."
-if ! cargo check --locked 2>/dev/null; then
+if ! cargo check --workspace --exclude teshi-web --locked 2>/dev/null; then
     echo -e "${RED}   x  Cargo.lock is out of sync. Run 'cargo check' and stage Cargo.lock too.${NC}"
     PASS=false
 else
