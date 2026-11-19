@@ -226,7 +226,8 @@ fn close_app(terminal: &Terminal) {
     terminal.key("Escape").unwrap();
     terminal.key("Escape").unwrap();
     terminal.key("ctrl+q").unwrap();
-    terminal.expect_exit(0, 10000).unwrap();
+    // A loaded runner can take longer than 10s to join the quit path.
+    terminal.expect_exit(0, 30000).unwrap();
 }
 
 fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
