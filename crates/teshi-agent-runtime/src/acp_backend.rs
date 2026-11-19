@@ -1022,7 +1022,12 @@ async fn restore_option_preferences(
 /// local transcript: `session/resume` (no replay), then `session/load` (replay
 /// muted here), then `session/new`.
 ///
-/// Returns `(session, remote_context_restored, optional_fallback_notice)`.
+/// Restore is best-effort and never surfaces an error: falling back to
+/// `session/new` already keeps the conversation usable through transcript
+/// re-seeding, so a notice here would only replace the connected chip with an
+/// error state.
+///
+/// Returns `(session, remote_context_restored)`.
 async fn open_or_restore_session<W>(
     client: &AcpClient<W>,
     initialized: &teshi_acp::InitializeResult,
@@ -1030,50 +1035,32 @@ async fn open_or_restore_session<W>(
     servers: Vec<teshi_acp::McpServer>,
     restore_session_id: Option<&str>,
     updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
-) -> Result<(teshi_acp::AcpSession, bool, Option<String>), teshi_acp::AcpError>
+) -> Result<(teshi_acp::AcpSession, bool), teshi_acp::AcpError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let mut notice = None;
     if let Some(id) = restore_session_id.filter(|id| !id.is_empty()) {
-        if initialized.supports_resume_session() {
-            match client
+        if initialized.supports_resume_session()
+            && let Ok(session) = client
                 .resume_session_with_mcp(id, cwd.clone(), servers.clone())
                 .await
-            {
-                Ok(session) => return Ok((session, true, None)),
-                Err(error) => append_notice(
-                    &mut notice,
-                    format!("ACP session/resume failed ({error}); trying another restore path"),
-                ),
-            }
+        {
+            return Ok((session, true));
         }
-        if initialized.supports_load_session() {
-            match client
+        if initialized.supports_load_session()
+            && let Ok(session) = client
                 .load_session_with_mcp(id, cwd.clone(), servers.clone())
                 .await
-            {
-                Ok(session) => {
-                    // session/load may replay history before answering. Teshi
-                    // already displays its own checkpoint, so drop those updates
-                    // instead of duplicating them into the UI transcript.
-                    drain_restore_replay(updates_rx).await;
-                    return Ok((session, true, notice));
-                }
-                Err(error) => append_notice(
-                    &mut notice,
-                    format!("ACP session/load failed ({error}); starting a fresh session"),
-                ),
-            }
-        } else if notice.is_none() {
-            append_notice(
-                &mut notice,
-                "ACP agent does not support session restore; starting a fresh session".into(),
-            );
+        {
+            // session/load may replay history before answering. Teshi already
+            // displays its own checkpoint, so drop those updates instead of
+            // duplicating them into the UI transcript.
+            drain_restore_replay(updates_rx).await;
+            return Ok((session, true));
         }
     }
     let session = client.new_session_with_mcp(cwd, servers).await?;
-    Ok((session, false, notice))
+    Ok((session, false))
 }
 
 /// Drop history-replay updates that arrived while `session/load` was in flight.
@@ -1141,7 +1128,7 @@ async fn run_worker(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("ACP agent")
             .to_string();
-        let (session, remote_context_restored, restore_notice) = open_or_restore_session(
+        let (session, remote_context_restored) = open_or_restore_session(
             &client,
             &initialized,
             cwd,
@@ -1156,12 +1143,10 @@ async fn run_worker(
             model,
             initialized.accepts_images(),
             remote_context_restored,
-            restore_notice,
         ))
     }
     .await;
-    let (mut session, model, image_prompts, remote_context_restored, restore_notice) = match result
-    {
+    let (mut session, model, image_prompts, remote_context_restored) = match result {
         Ok(value) => value,
         Err(error) => {
             if let Ok(mut state) = controls.lock() {
@@ -1247,9 +1232,6 @@ async fn run_worker(
     }
     if let Ok(mut state) = controls.lock() {
         state.config = session.config.clone();
-        if let Some(notice) = restore_notice {
-            append_notice(&mut preference_error, notice);
-        }
         state.error = preference_error;
         state.session_id = Some(session.id.clone());
         state.image_prompts = image_prompts;

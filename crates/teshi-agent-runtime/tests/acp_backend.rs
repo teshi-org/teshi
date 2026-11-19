@@ -388,14 +388,9 @@ fn failed_session_load_falls_back_to_new_and_text_seed() {
     let controls = wait_controls(&backend, |s| s.ready);
     assert!(!controls.remote_context_restored);
     assert_eq!(controls.session_id.as_deref(), Some("fake-session"));
-    assert!(
-        controls
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("session/load failed")),
-        "{:?}",
-        controls.error
-    );
+    // A failed restore falls back to a fresh session that is still usable, so
+    // it must not put the connected chip into an error state.
+    assert_eq!(controls.error, None);
     backend.start().unwrap();
     backend.submit_turn(None, history_messages(), None).unwrap();
     let events = events_until_terminal(&mut backend);
