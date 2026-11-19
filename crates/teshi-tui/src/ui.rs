@@ -27,6 +27,7 @@ use teshi_core::highlight::{HighlightKind, highlight_line_spans};
 
 pub(crate) mod chat;
 mod dialog;
+mod overlay;
 mod pointer_controls;
 
 use dialog::{Dialog, DialogButton, FormDialog, FormField, ListDialog};
@@ -2892,12 +2893,16 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rec
         .external_change_prompt_path()
         .unwrap_or_else(|| "feature".to_string());
 
-    let popup_w = (area.width as f32 * 0.60) as u16;
-    let popup_h = area.height.clamp(3, 7);
-    let popup_w = popup_w.max(30).min(area.width);
-    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+    // iCode's notice card: a readable fixed width and a height measured from
+    // the wrapped message, capped at 90% of the screen.
+    let body = crate::i18n::t("external_change.body").replace("{file}", &file_name);
+    let spec = overlay::OverlaySpec::prompt(64, 5, 8);
+    let width = spec.width.resolve(area.width, 0);
+    let body_rows =
+        chat::wrap_line_to_width(Line::raw(body.clone()), width.saturating_sub(2) as usize).len();
+    // Message + blank separator + action row, inside two borders.
+    let rows = body_rows as u16 + 4;
+    let popup = overlay::centered(area, width, spec.height.resolve(area.height, rows));
 
     frame.render_widget(Clear, popup);
     let block = theme::popup_block(title);
@@ -2909,10 +2914,7 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rec
 
     let [content, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    let lines = vec![
-        Line::raw(crate::i18n::t("external_change.body").replace("{file}", &file_name)),
-        Line::raw(""),
-    ];
+    let lines = vec![Line::raw(body), Line::raw("")];
     frame.render_widget(Paragraph::new(Text::from(lines)), content);
     render_action_bar(
         frame,
@@ -4232,18 +4234,6 @@ fn status_label(status: RunStatus) -> &'static str {
 
 /// Renders the auth management overlay panel over the entire screen.
 fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_w = area.width.min(60);
-    let panel_h = area.height.min(20);
-    let panel_x = (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
-
-    frame.render_widget(Clear, panel_area);
-
-    let block = theme::popup_block(crate::i18n::t("auth.title"));
-    let inner = block.inner(panel_area);
-    frame.render_widget(block, panel_area);
-
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::raw(""));
 
@@ -4321,6 +4311,16 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
+    // The overview grows with the profile list; the card keeps iCode's 85%
+    // height cap and leaves the backdrop margin on every screen.
+    let content_rows = lines.len() as u16 + 3;
+    let panel_area = overlay::OverlaySpec::form(60, 8, 20).rect(area, (0, content_rows));
+    frame.render_widget(Clear, panel_area);
+
+    let block = theme::popup_block(crate::i18n::t("auth.title"));
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
     let [content, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     frame.render_widget(
@@ -4339,15 +4339,28 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 /// Renders the model profile management overlay panel.
 fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_w = area.width.min(60);
-    let panel_h = area.height.min(22);
-    let panel_x = (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+    use crate::app::ModelPanelMode;
+
+    // The list follows the profile count and the form its seven field rows,
+    // both inside iCode's 85% height cap on a 60-column card. Below 14 rows the
+    // share would clip the seventh field, so the card takes the full height.
+    let content_rows = match app.model_panel_mode {
+        ModelPanelMode::List if app.model_profiles.is_empty() => 8,
+        ModelPanelMode::List => app.model_profiles.len() as u16 + 4,
+        ModelPanelMode::Adding | ModelPanelMode::Editing => 11,
+    };
+    let height_share = if area.height < 14 {
+        100
+    } else {
+        overlay::FORM_SHARE
+    };
+    let spec = overlay::OverlaySpec {
+        width: overlay::Axis::cells(60, 8, overlay::DEFAULT_SHARE),
+        height: overlay::Axis::content(8, 22, height_share),
+    };
+    let panel_area = spec.rect(area, (0, content_rows));
 
     frame.render_widget(Clear, panel_area);
-
-    use crate::app::ModelPanelMode;
 
     match app.model_panel_mode {
         ModelPanelMode::List => render_model_list(frame, app, panel_area),
@@ -4591,15 +4604,13 @@ fn session_label(text: &str, width: u16) -> String {
 
 fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let session_count = app.session_list.len();
-    let panel_w = area.width.min(88);
     let desired_height = (session_count as u16)
         .saturating_mul(2)
         .saturating_add(4)
         .max(10);
-    let panel_h = area.height.min(desired_height);
-    let x = area.x + (area.width.saturating_sub(panel_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(x, y, panel_w, panel_h);
+    // Two rows per session plus the hint and action rows; the card stops at
+    // 40 rows so a long history still shows the backdrop.
+    let panel_area = overlay::OverlaySpec::prompt(88, 10, 40).rect(area, (0, desired_height));
 
     // Dim background
     frame.render_widget(Clear, panel_area);
@@ -4749,16 +4760,14 @@ fn render_history_search_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
     let selection = search.selection.min(matches.len().saturating_sub(1));
     let query = search.query.clone();
 
-    let popup_w = (area.width as f32 * 0.70) as u16;
-    let popup_h = (area.height as f32 * 0.55) as u16;
-    let popup_w = popup_w.max(36).min(area.width);
-    let popup_h = popup_h.max(10).min(area.height);
-    let popup = Rect::new(
-        area.x + (area.width.saturating_sub(popup_w)) / 2,
-        area.y + (area.height.saturating_sub(popup_h)) / 2,
-        popup_w,
-        popup_h,
-    );
+    // A command-palette shape: a share of the screen with an absolute cap, so
+    // the list stops widening on very large terminals. Percent axes ignore the
+    // measurement tuple.
+    const HISTORY_SEARCH: overlay::OverlaySpec = overlay::OverlaySpec {
+        width: overlay::Axis::percent(70, 36, 100, overlay::DEFAULT_SHARE),
+        height: overlay::Axis::percent(55, 10, 24, overlay::DEFAULT_SHARE),
+    };
+    let popup = HISTORY_SEARCH.rect(area, (0, 0));
     clear_to(frame, area, theme::OVERLAY_BG);
     let block = theme::popup_block(" Prompt history ");
     let [query_row, list, footer] = Layout::vertical([
@@ -4791,7 +4800,7 @@ fn render_history_search_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         for (index, text) in matches.iter().enumerate().skip(start).take(visible) {
             let preview: String = text
                 .chars()
-                .take(popup_w.saturating_sub(4) as usize)
+                .take(popup.width.saturating_sub(4) as usize)
                 .collect();
             let marker = if index == selection { "▸ " } else { "  " };
             let style = if index == selection {
@@ -7394,15 +7403,6 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
     if let Some(prompt) = &app.generation_scope_prompt
         && !app.authoring_ui.overlay_active()
     {
-        let panel_w = area.width.min(72);
-        let panel_h = 10.min(area.height);
-        let panel_area = Rect::new(
-            (area.width.saturating_sub(panel_w)) / 2,
-            (area.height.saturating_sub(panel_h)) / 2,
-            panel_w,
-            panel_h,
-        );
-        frame.render_widget(Clear, panel_area);
         let filter = match &prompt.iteration {
             teshi_core::authoring::RequirementIterationFilter::All => {
                 crate::i18n::t("req.iteration.all").to_string()
@@ -7438,6 +7438,10 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             )),
             Line::raw(""),
         ];
+        // The five info rows plus the action row inside the border.
+        let rows = lines.len() as u16 + 3;
+        let panel_area = overlay::OverlaySpec::prompt(72, 8, rows).rect(area, (0, rows));
+        frame.render_widget(Clear, panel_area);
         let block = theme::popup_block(crate::i18n::t("req.overlay.scope.title"));
         let [content, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
             .areas(block.inner(panel_area));
@@ -8211,6 +8215,321 @@ mod truncate_tests {
                 "{tab:?} paints the screen surface"
             );
         }
+    }
+
+    /// Bounds of the rounded card whose top border carries `title`.
+    fn card_bounds(buffer: &ratatui::buffer::Buffer, title: &str) -> Option<(u16, u16, u16, u16)> {
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            let Some(byte) = row.find(title) else {
+                continue;
+            };
+            let title_x = unicode_width::UnicodeWidthStr::width(&row[..byte]) as u16;
+            let left = (0..title_x)
+                .rev()
+                .find(|x| buffer[(*x, y)].symbol() == "╭")?;
+            let right = ((title_x + title.len() as u16)..buffer.area.width)
+                .find(|x| buffer[(*x, y)].symbol() == "╮")?;
+            let bottom =
+                ((y + 1)..buffer.area.height).find(|row| buffer[(left, *row)].symbol() == "╰")?;
+            return Some((left, y, right, bottom));
+        }
+        None
+    }
+
+    #[test]
+    fn history_search_caps_its_width_and_height_on_a_large_terminal() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.active_tab = crate::app::MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiHistorySearchOpen).unwrap();
+        assert!(app.history_search.is_some(), "history search opened");
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (left, top, right, bottom) =
+            card_bounds(buffer, " Prompt history ").expect("history search renders");
+        let width = right - left + 1;
+        let height = bottom - top + 1;
+        let right_margin = 200 - right - 1;
+        assert_eq!(width, 100, "70% width capped at 100 columns");
+        assert_eq!(height, 24, "55% height capped at 24 rows");
+        assert!(left >= 10 && right_margin >= 10, "10% backdrop margin");
+
+        let mut narrow = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        narrow.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = narrow.backend().buffer();
+        let (left, _top, right, _bottom) =
+            card_bounds(buffer, " Prompt history ").expect("history search renders narrow");
+        assert_eq!(
+            right - left + 1,
+            36,
+            "minimum width survives a narrow screen"
+        );
+    }
+
+    #[test]
+    fn auth_overview_hugs_its_lines_on_a_large_terminal() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.auth_panel_active = true;
+        app.status = "Auth: add provider".into();
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (left, top, right, bottom) =
+            card_bounds(buffer, " Auth Management ").expect("auth card renders");
+        let width = right - left + 1;
+        let height = bottom - top + 1;
+        assert_eq!(width, 60, "fixed 60-column form card");
+        assert_eq!(height, 8, "three lines plus chrome, floored at 8 rows");
+    }
+
+    #[test]
+    fn model_list_hugs_its_profiles_on_a_large_terminal() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.model_panel_active = true;
+        app.model_panel_mode = crate::app::ModelPanelMode::List;
+        app.model_profiles.clear();
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (left, top, right, bottom) =
+            card_bounds(buffer, " Model Profiles ").expect("model card renders");
+        let width = right - left + 1;
+        let height = bottom - top + 1;
+        assert_eq!(width, 60, "fixed 60-column form card");
+        assert_eq!(height, 8, "the empty state plus chrome");
+    }
+
+    fn diff_lines(count: usize, text: impl Fn(usize) -> String) -> Vec<teshi_core::diff::DiffLine> {
+        (0..count)
+            .map(|index| teshi_core::diff::DiffLine {
+                line_number_1based: index,
+                kind: teshi_core::diff::ChangeKind::Added,
+                text: text(index),
+                old_text: None,
+            })
+            .collect()
+    }
+
+    fn pending_change_app(description: &str, diff: Vec<teshi_core::diff::DiffLine>) -> App {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.active_tab = crate::app::MainTab::Ai;
+        app.status_message = None;
+        app.pending_agent_changes
+            .push(crate::app::AgentPendingChange {
+                description: description.into(),
+                file_path: "features/sample.feature".into(),
+                mutation: crate::app::AgentMutation::ReplaceLine {
+                    row_0based: 0,
+                    new_text: "Scenario: sample".into(),
+                },
+                scenario_name: "sample".into(),
+                test_point_ids: Vec::new(),
+                tool_call_id: "call-1".into(),
+                old_buffer_snapshot: String::new(),
+                agent_idx: 0,
+            });
+        app.pending_change_diffs.push(diff);
+        app
+    }
+
+    /// Screen text and card bounds for one pending-change render.
+    fn pending_change_frame(
+        app: &mut App,
+        width: u16,
+        height: u16,
+    ) -> (String, (u16, u16, u16, u16)) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let bounds =
+            card_bounds(buffer, " Pending Agent Change ").expect("pending change card renders");
+        let screen: String = (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        (screen, bounds)
+    }
+
+    #[test]
+    fn pending_change_prompt_caps_its_diff_and_reports_hidden_rows() {
+        let mut app = pending_change_app(
+            "Update the sample scenario",
+            diff_lines(40, |index| format!("step {index}")),
+        );
+        let (screen, (left, top, right, bottom)) = pending_change_frame(&mut app, 200, 60);
+        let width = right - left + 1;
+        let height = bottom - top + 1;
+        assert_eq!(width, 60, "content width with a floor for the decision row");
+        assert_eq!(height, 22, "40 diff rows stop at the 22-row cap");
+        assert_eq!(left, (200 - width) / 2, "centered with a backdrop margin");
+        assert!(
+            screen.contains("+23 more lines"),
+            "hidden diff lines are reported:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn pending_change_prompt_shows_a_diff_that_exactly_fits_without_a_hint() {
+        // The floor card has body 5: one description row + four diff rows.
+        let mut app = pending_change_app(
+            "Update the sample scenario",
+            diff_lines(4, |index| format!("step {index}")),
+        );
+        let (screen, (_, top, _, bottom)) = pending_change_frame(&mut app, 200, 60);
+        assert_eq!(bottom - top + 1, 8, "content fits the floor card");
+        assert!(
+            screen.contains("step 3"),
+            "every diff line is drawn:\n{screen}"
+        );
+        assert!(
+            !screen.contains("more lines"),
+            "a fitting diff needs no hint:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn pending_change_prompt_counts_wrapped_diff_rows() {
+        // 200-cell lines wrap to three rows each at the 100-column cap; the
+        // height budget must count those rows, not the eight source lines.
+        let mut app = pending_change_app(
+            "Update the sample scenario",
+            diff_lines(8, |index| format!("{index:02}{}", "x".repeat(198))),
+        );
+        let (screen, (_, top, _, bottom)) = pending_change_frame(&mut app, 200, 60);
+        assert_eq!(
+            bottom - top + 1,
+            22,
+            "wrapped rows fill the 22-row cap, not a 12-row guess"
+        );
+        assert!(screen.contains("xxx"), "diff content is visible:\n{screen}");
+        assert!(
+            screen.contains("more lines"),
+            "the hint stays inside the card:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn pending_change_prompt_without_a_diff_stays_compact() {
+        let mut app = pending_change_app("Update the sample scenario", Vec::new());
+        let (screen, (_, top, _, bottom)) = pending_change_frame(&mut app, 200, 60);
+        assert_eq!(bottom - top + 1, 8, "description plus chrome");
+        assert!(screen.contains("Update the sample scenario"));
+        assert!(!screen.contains("more lines"));
+    }
+
+    #[test]
+    fn model_form_uses_its_eleven_content_rows() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.model_panel_active = true;
+        app.model_panel_mode = crate::app::ModelPanelMode::Adding;
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (left, top, right, bottom) =
+            card_bounds(buffer, " Add Model Profile ").expect("model form renders");
+        let width = right - left + 1;
+        let height = bottom - top + 1;
+        assert_eq!(width, 60);
+        assert_eq!(height, 11, "blank row + seven fields + chrome");
+    }
+
+    #[test]
+    fn model_form_keeps_all_fields_on_a_short_terminal() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.model_panel_active = true;
+        app.model_panel_mode = crate::app::ModelPanelMode::Adding;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (_, top, _, bottom) =
+            card_bounds(buffer, " Add Model Profile ").expect("model form renders");
+        assert_eq!(
+            bottom - top + 1,
+            11,
+            "the full-content card, without clipping"
+        );
+        let screen: String = (0..12)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<String>>()
+            .join("\n");
+        assert!(
+            screen.contains("Temperature"),
+            "the last field stays visible:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn acp_permission_card_sizes_to_its_options() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.active_tab = crate::app::MainTab::Ai;
+        app.status_message = None;
+        app.agent_mut().pending_acp_permission = Some(crate::app::AcpPermissionPrompt {
+            request_id: 1,
+            options: vec![
+                teshi_agent::backend::PermissionChoice {
+                    id: "allow_once".into(),
+                    label: Some("Allow once".into()),
+                    kind: None,
+                },
+                teshi_agent::backend::PermissionChoice {
+                    id: "always".into(),
+                    label: Some("Always allow".into()),
+                    kind: None,
+                },
+                teshi_agent::backend::PermissionChoice {
+                    id: "reject".into(),
+                    label: Some("Reject".into()),
+                    kind: None,
+                },
+            ],
+            selected: 0,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (left, top, right, bottom) =
+            card_bounds(buffer, " ACP permission requested ").expect("ACP card renders");
+        assert_eq!(
+            right - left + 1,
+            60,
+            "option width with the 60-column floor"
+        );
+        assert_eq!(bottom - top + 1, 8, "three option rows plus chrome");
+        let choices = app
+            .clickable_regions
+            .iter()
+            .filter(|region| {
+                matches!(
+                    region,
+                    ClickableRegion::ActionButton {
+                        action: Action::AcpPermissionChoose(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(choices, 3, "every visible option is clickable");
     }
 
     #[test]
