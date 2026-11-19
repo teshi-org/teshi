@@ -66,8 +66,12 @@ adapters write artifacts directly into that run instead of creating duplicates.
 The TUI adapter also supports standalone execution with its own managed run.
 
 External visual adapters must emit per-step capture outcomes correlated to the
-planned case/step identity. Missing capture integration leaves acceptance
-incomplete. Explicit `@cli`, `@logic`, `@unit`, or API-only cases (or
+planned case/step identity. `artifact` and `http_exchange` events may carry a
+`step_id`; without one, Run Details treats the evidence as case-level and shows
+it on every step. Artifact paths must resolve inside the run directory under
+`.teshi/logs/replay-screenshots/<run>/`; the UI shows them relative to the
+project root and refuses to open anything outside that root. Missing capture
+integration leaves acceptance incomplete. Explicit `@cli`, `@logic`, `@unit`, or API-only cases (or
 `meta.runner_mode=cli`) are nonvisual; arbitrary UI backends cannot opt out merely
 because capture is unsupported. Chrome capture still requires an explicit
 target and screenshot capability; the common layer does not select an unrelated

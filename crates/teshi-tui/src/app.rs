@@ -825,6 +825,8 @@ pub enum ColumnFocus {
     Feature,
     Scenario,
     Step,
+    /// The Run Details pane beside Steps.
+    Details,
 }
 
 impl ColumnFocus {
@@ -833,6 +835,35 @@ impl ColumnFocus {
             Self::Feature => 0,
             Self::Scenario => 1,
             Self::Step => 2,
+            // Details has no list viewport of its own; it shares the fixed
+            // layout path but never indexes the column arrays.
+            Self::Details => 3,
+        }
+    }
+}
+
+/// Content families shown as inner tabs in Run Details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunDetailTab {
+    /// Step screenshots, with an inline preview when the terminal draws pixels.
+    #[default]
+    Screenshots,
+    /// HTTP exchanges and their folded bodies.
+    Api,
+    /// Runner log lines, always case-level.
+    Logs,
+    /// Recordings and unknown artifact kinds.
+    Files,
+}
+
+impl RunDetailTab {
+    /// Tab label without its count.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Screenshots => "Screenshots",
+            Self::Api => "API",
+            Self::Logs => "Logs",
+            Self::Files => "Files",
         }
     }
 }
@@ -885,6 +916,128 @@ pub struct StepRunRecord {
     pub status: Option<String>,
     /// Failure message from the step.
     pub message: Option<String>,
+}
+
+/// One screenshot shown in Run Details, from an artifact or a replay capture.
+#[derive(Debug, Clone)]
+pub(crate) struct DetailScreenshot {
+    /// File name shown in the row.
+    pub file: String,
+    /// Resolved, trusted path; `None` when the runner reported a path outside
+    /// the replay evidence root.
+    pub path: Option<PathBuf>,
+    /// Path as reported, shown even when it cannot be opened.
+    pub reported: String,
+    /// On-disk size in bytes.
+    pub size: Option<u64>,
+    /// Replay capture metadata, when the row came from the capture index.
+    pub capture: Option<crate::image_view::ScreenshotRef>,
+}
+
+/// One recording or unknown artifact shown in Run Details.
+#[derive(Debug, Clone)]
+pub(crate) struct DetailFile {
+    /// Runner-reported kind.
+    pub kind: String,
+    /// File name shown in the row.
+    pub file: String,
+    /// Resolved, trusted path.
+    pub path: Option<PathBuf>,
+    /// Path as reported.
+    pub reported: String,
+    /// On-disk size in bytes.
+    pub size: Option<u64>,
+}
+
+/// Normalizes a Gherkin step body for protocol text matching.
+fn normalize_step_text(text: &str) -> String {
+    text.trim()
+        .strip_prefix("[API]")
+        .unwrap_or(text.trim())
+        .trim()
+        .to_string()
+}
+
+/// Whether an artifact is a screenshot/image family member.
+fn is_image_artifact(kind: &str, path: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    kind.contains("screen")
+        || kind.contains("image")
+        || kind.contains("png")
+        || is_image_path(Path::new(path))
+}
+
+/// Whether the path has an image extension the viewer understands.
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+            )
+        })
+}
+
+/// File name of a reported path, tolerating `/` and `\` separators.
+fn file_name(reported: &str) -> String {
+    reported
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(reported)
+        .to_string()
+}
+
+/// Size of an existing artifact, used for the right-aligned metadata column.
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+}
+
+/// Whether a replay capture belongs to the selected step.
+fn capture_matches_selection(
+    capture: &crate::image_view::ScreenshotRef,
+    step_text: Option<&str>,
+    step_line: Option<usize>,
+) -> bool {
+    if let (Some(line), Some(captured_line)) = (step_line, capture.step_line)
+        && line as u64 == captured_line
+    {
+        return true;
+    }
+    let Some(step_text) = step_text else {
+        return false;
+    };
+    !capture.step_text.trim().is_empty()
+        && normalize_step_text(&capture.step_text) == normalize_step_text(step_text)
+}
+
+/// Whether a URL can be opened by the host browser.
+fn is_web_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Source line encoded in runner step ids such as `f0:s1:L13`.
+fn step_id_line(step_id: &str) -> Option<usize> {
+    step_id.rsplit_once(":L")?.1.parse().ok()
+}
+
+/// Drops Windows' verbatim `\\?\` prefix for ordinary drive paths.
+///
+/// The evidence writer canonicalizes its run directory, so runner-reported
+/// artifact paths can be verbatim while the project root is not. UNC verbatim
+/// paths stay unchanged because stripping their prefix changes their meaning.
+fn simplify_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\")
+        && !rest.starts_with("UNC\\")
+    {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 /// First capture recorded for `step_text`, matched on the recorded text.
@@ -1357,8 +1510,28 @@ pub struct App {
     pub explore_case_map: HashMap<String, (usize, usize)>,
     pub explore_case_status: HashMap<(usize, usize), RunStatus>,
     pub explore_case_details: HashMap<(usize, usize), CaseDetail>,
-    pub explore_detail_open: bool,
-    pub explore_detail_case: Option<(usize, usize)>,
+    /// Selected inner tab of the Run Details pane.
+    pub explore_details_tab: RunDetailTab,
+    /// True once the user explicitly chose an inner tab for this step.
+    ///
+    /// A failed step otherwise defaults to the API summary even when a
+    /// screenshot exists.
+    pub explore_details_tab_pinned: bool,
+    /// Selected item inside the active Run Details tab.
+    pub explore_details_selection: usize,
+    /// First visible content line of the Run Details pane.
+    pub explore_details_scroll: usize,
+    /// Whether the next frame must reveal `explore_details_selection`.
+    ///
+    /// PageUp/PageDown scroll without moving the selection, so they clear this
+    /// instead of letting the renderer snap back to the selected row.
+    pub explore_details_reveal: bool,
+    /// Exchange ids whose folded HTTP bodies are rendered.
+    pub explore_details_expanded: HashSet<String>,
+    /// Scenario captures backing the current Run Details selection.
+    pub explore_detail_shots: Vec<crate::image_view::ScreenshotRef>,
+    /// `(feature, scenario)` the cached captures belong to.
+    pub explore_detail_shots_key: Option<(usize, usize)>,
     pub explore_run_summary: Option<RunSummary>,
     // ── MindMap AI panel state ────────────────────────────────────────
     pub mindmap_focus: MindMapFocus,
@@ -1765,6 +1938,20 @@ pub enum ClickableRegion {
         col_x: u16,
         col_right: u16,
     },
+    /// The Run Details panel; a click focuses the pane without changing rows.
+    ExploreDetailPane {
+        rect: ratatui::layout::Rect,
+    },
+    /// One inner content tab in Run Details.
+    ExploreDetailTab {
+        tab: RunDetailTab,
+        rect: ratatui::layout::Rect,
+    },
+    /// One selectable row/block in the active Run Details family.
+    ExploreDetailItem {
+        index: usize,
+        rect: ratatui::layout::Rect,
+    },
     /// A tag in the Features pane's filter strip (click toggles it).
     ExploreTag {
         index: usize,
@@ -2083,8 +2270,7 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
         self.explore_run_summary = None;
         self.explore_state = None;
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
@@ -2822,8 +3008,14 @@ impl App {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
-            explore_detail_open: false,
-            explore_detail_case: None,
+            explore_details_tab: RunDetailTab::Screenshots,
+            explore_details_tab_pinned: false,
+            explore_details_selection: 0,
+            explore_details_scroll: 0,
+            explore_details_reveal: false,
+            explore_details_expanded: HashSet::new(),
+            explore_detail_shots: Vec::new(),
+            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -3066,8 +3258,14 @@ impl App {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
-            explore_detail_open: false,
-            explore_detail_case: None,
+            explore_details_tab: RunDetailTab::Screenshots,
+            explore_details_tab_pinned: false,
+            explore_details_selection: 0,
+            explore_details_scroll: 0,
+            explore_details_reveal: false,
+            explore_details_expanded: HashSet::new(),
+            explore_detail_shots: Vec::new(),
+            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -3278,8 +3476,14 @@ impl App {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
-            explore_detail_open: false,
-            explore_detail_case: None,
+            explore_details_tab: RunDetailTab::Screenshots,
+            explore_details_tab_pinned: false,
+            explore_details_selection: 0,
+            explore_details_scroll: 0,
+            explore_details_reveal: false,
+            explore_details_expanded: HashSet::new(),
+            explore_detail_shots: Vec::new(),
+            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -6580,8 +6784,7 @@ impl App {
         self.explore_case_status.clear();
         self.explore_case_details.clear();
         self.explore_run_summary = None;
-        self.explore_detail_case = None;
-        self.explore_detail_open = false;
+        self.explore_detail_shots_key = None;
         self.external_change_prompt = None;
         self.explore_selected_feature = 0;
         self.explore_selected_deleted_feature = None;
@@ -6848,8 +7051,7 @@ impl App {
             .filter(|((i, _), _)| *i != idx)
             .map(|((i, s), value)| ((if i > idx { i - 1 } else { i }, s), value))
             .collect();
-        self.explore_detail_case = None;
-        self.explore_detail_open = false;
+        self.explore_detail_shots_key = None;
         self.external_change_prompt = None;
         self.bump_git_status_revision();
         self.rebuild_project_views(None);
@@ -8062,30 +8264,22 @@ impl App {
             }
             RunEvent::Artifact {
                 case_id,
+                step_id,
                 kind,
                 path,
             } => {
                 if let Some(case_id) = case_id
                     && let Some(key) = self.explore_case_map.get(&case_id).copied()
                 {
-                    let detail =
-                        self.explore_case_details
-                            .entry(key)
-                            .or_insert_with(|| CaseDetail {
-                                case_id: case_id.clone(),
-                                status: RunStatus::Running,
-                                duration_ms: None,
-                                message: None,
-                                stack: None,
-                                attachments: Vec::new(),
-                                logs: Vec::new(),
-                                exchanges: Vec::new(),
-                                steps: Vec::new(),
-                                inspector_plaintext: false,
-                            });
-                    detail
-                        .attachments
-                        .push(runner::RunAttachment { kind, path });
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
+                    detail.attachments.push(runner::RunAttachment {
+                        kind,
+                        path,
+                        step_id,
+                    });
                 }
             }
             RunEvent::EndRun {
@@ -8209,8 +8403,7 @@ impl App {
         self.explore_case_status.clear();
         self.explore_case_details.clear();
         self.explore_run_summary = None;
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
     }
 
     fn start_explore_run(&mut self) {
@@ -8286,7 +8479,7 @@ impl App {
                     ));
                 }
             }
-            ColumnFocus::Scenario | ColumnFocus::Step => {
+            ColumnFocus::Scenario | ColumnFocus::Step | ColumnFocus::Details => {
                 if let Some(scenario) = feature.scenario_at(self.explore_selected_scenario) {
                     cases.push(build_case(
                         self.explore_selected_feature,
@@ -8300,40 +8493,546 @@ impl App {
         cases
     }
 
-    fn toggle_failure_detail(&mut self) {
-        if self.explore_detail_open {
-            self.explore_detail_open = false;
-            self.explore_detail_case = None;
+    /// Moves keyboard focus to the Run Details pane.
+    pub(crate) fn focus_run_details(&mut self) {
+        if self.active_tab != MainTab::Explore || self.explore_edit_mode {
             return;
         }
-        let key = (
+        self.explore_focus = ColumnFocus::Details;
+        self.explore_details_selection = 0;
+        self.explore_details_scroll = 0;
+        self.explore_details_reveal = true;
+        self.explore_details_tab_pinned = false;
+        self.normalize_detail_tab();
+    }
+
+    fn current_detail_key(&self) -> (usize, usize) {
+        (
             self.explore_selected_feature,
             self.explore_selected_scenario,
-        );
-        if let Some(detail) = self.explore_case_details.get(&key)
-            && (detail.status == RunStatus::Failed
-                || !detail.exchanges.is_empty()
-                || detail
-                    .steps
-                    .iter()
-                    .any(|s| s.status.as_deref() == Some("failed")))
+        )
+    }
+
+    pub(crate) fn current_detail(&self) -> Option<&CaseDetail> {
+        self.explore_case_details.get(&self.current_detail_key())
+    }
+
+    /// Correlated runner label shown at the right of the detail step line.
+    pub(crate) fn detail_runner_label(&self) -> Option<String> {
+        let detail = self.current_detail()?;
+        let mut label = detail.case_id.clone();
+        if let Some(step) = self.current_run_step(detail) {
+            label.push_str(" · ");
+            label.push_str(&step.step_id);
+        }
+        Some(label)
+    }
+
+    /// Run record of the Gherkin step currently selected in Steps.
+    ///
+    /// Runner step ids usually embed the source line (`f0:s1:L13`), which is
+    /// the primary key; text matching is the fallback for runners that use
+    /// opaque ids.
+    fn current_run_step<'a>(&self, detail: &'a CaseDetail) -> Option<&'a StepRunRecord> {
+        let line = self.explore_selected_step_line();
+        if let Some(line) = line
+            && let Some(step) = detail
+                .steps
+                .iter()
+                .find(|step| step_id_line(&step.step_id) == Some(line))
         {
-            self.explore_detail_open = true;
-            self.explore_detail_case = Some(key);
-        } else {
-            self.status = crate::i18n::t("status.no_run_details_for_selection").to_string();
+            return Some(step);
+        }
+        let text = self.explore_selected_step_text()?;
+        let wanted = normalize_step_text(&text);
+        detail
+            .steps
+            .iter()
+            .find(|step| normalize_step_text(&step.text) == wanted)
+    }
+
+    /// Evidence with no `step_id` belongs to the case and stays visible on
+    /// every step; evidence with one is shown only for its own step.
+    fn step_evidence_visible(step_id: Option<&str>, current: Option<&str>) -> bool {
+        match (step_id, current) {
+            (None, _) => true,
+            (Some(_), None) => true,
+            (Some(id), Some(current)) => id == current,
         }
     }
 
-    fn toggle_inspector_plaintext(&mut self) {
-        let Some(key) = self.explore_detail_case else {
-            self.status = crate::i18n::t(
-                "status.open_run_details_first_enter_then_press_p_to_expand_secrets",
-            )
-            .into();
+    /// Exchange rows for the selected step, case-level rows included.
+    pub(crate) fn detail_exchanges(&self) -> Vec<teshi_core::HttpExchange> {
+        let Some(detail) = self.current_detail() else {
+            return Vec::new();
+        };
+        let current = self
+            .current_run_step(detail)
+            .map(|step| step.step_id.as_str());
+        detail
+            .exchanges
+            .iter()
+            .filter(|exchange| Self::step_evidence_visible(exchange.step_id.as_deref(), current))
+            .cloned()
+            .collect()
+    }
+
+    /// Image artifacts and replay captures for the selected step.
+    pub(crate) fn detail_screenshots(&self) -> Vec<DetailScreenshot> {
+        let detail = self.current_detail();
+        let current = detail
+            .and_then(|detail| self.current_run_step(detail))
+            .map(|step| step.step_id.as_str());
+        let step_text = self.explore_selected_step_text();
+        let step_line = self.explore_selected_step_line();
+        let mut shots = Vec::new();
+        let mut seen = HashSet::new();
+
+        if let Some(detail) = detail {
+            for attachment in &detail.attachments {
+                if !is_image_artifact(&attachment.kind, &attachment.path)
+                    || !Self::step_evidence_visible(attachment.step_id.as_deref(), current)
+                {
+                    continue;
+                }
+                let path = self.artifact_path(&attachment.path);
+                let key = path.as_ref().map_or_else(
+                    || attachment.path.clone(),
+                    |path| path.display().to_string(),
+                );
+                if !seen.insert(key) {
+                    continue;
+                }
+                shots.push(DetailScreenshot {
+                    file: file_name(&attachment.path),
+                    size: path.as_deref().and_then(file_size),
+                    path,
+                    reported: attachment.path.clone(),
+                    capture: None,
+                });
+            }
+        }
+
+        for capture in &self.explore_detail_shots {
+            if !capture_matches_selection(capture, step_text.as_deref(), step_line) {
+                continue;
+            }
+            let path = crate::image_view::capture_path(&self.project.root_dir, capture);
+            let trusted = self.artifact_path(&path.display().to_string());
+            let key = path.display().to_string();
+            if !seen.insert(key) {
+                continue;
+            }
+            shots.push(DetailScreenshot {
+                file: capture.file.clone(),
+                size: trusted.as_deref().and_then(file_size),
+                path: trusted,
+                reported: path.display().to_string(),
+                capture: Some(capture.clone()),
+            });
+        }
+        shots
+    }
+
+    /// Recordings and unknown artifacts for the selected step.
+    pub(crate) fn detail_files(&self) -> Vec<DetailFile> {
+        let Some(detail) = self.current_detail() else {
+            return Vec::new();
+        };
+        let current = self
+            .current_run_step(detail)
+            .map(|step| step.step_id.as_str());
+        let mut seen = HashSet::new();
+        detail
+            .attachments
+            .iter()
+            .filter(|attachment| {
+                !is_image_artifact(&attachment.kind, &attachment.path)
+                    && Self::step_evidence_visible(attachment.step_id.as_deref(), current)
+                    && seen.insert(attachment.path.clone())
+            })
+            .map(|attachment| {
+                let path = self.artifact_path(&attachment.path);
+                DetailFile {
+                    kind: attachment.kind.clone(),
+                    file: file_name(&attachment.path),
+                    size: path.as_deref().and_then(file_size),
+                    path,
+                    reported: attachment.path.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Content families that have something to show for this step.
+    pub(crate) fn detail_tabs(&self) -> Vec<RunDetailTab> {
+        let mut tabs = Vec::new();
+        if !self.detail_screenshots().is_empty() {
+            tabs.push(RunDetailTab::Screenshots);
+        }
+        if !self.detail_exchanges().is_empty() {
+            tabs.push(RunDetailTab::Api);
+        }
+        if self
+            .current_detail()
+            .is_some_and(|detail| !detail.logs.is_empty())
+        {
+            tabs.push(RunDetailTab::Logs);
+        }
+        if !self.detail_files().is_empty() {
+            tabs.push(RunDetailTab::Files);
+        }
+        tabs
+    }
+
+    /// The stored inner tab when it still has content, otherwise the first.
+    ///
+    /// A failed step defaults to the API summary unless the user explicitly
+    /// pinned another tab for this step.
+    pub(crate) fn active_detail_tab(&self) -> Option<RunDetailTab> {
+        let tabs = self.detail_tabs();
+        if tabs.is_empty() {
+            None
+        } else if !self.explore_details_tab_pinned
+            && self.selected_step_failed()
+            && tabs.contains(&RunDetailTab::Api)
+        {
+            Some(RunDetailTab::Api)
+        } else if tabs.contains(&self.explore_details_tab) {
+            Some(self.explore_details_tab)
+        } else {
+            tabs.first().copied()
+        }
+    }
+
+    fn selected_step_failed(&self) -> bool {
+        let Some(detail) = self.current_detail() else {
+            return false;
+        };
+        detail.status == RunStatus::Failed
+            || self
+                .current_run_step(detail)
+                .is_some_and(|step| step.status.as_deref() == Some("failed"))
+    }
+
+    fn normalize_detail_tab(&mut self) {
+        if let Some(tab) = self.active_detail_tab() {
+            self.explore_details_tab = tab;
+        }
+    }
+
+    /// Number of selectable rows in the active inner tab.
+    pub(crate) fn detail_item_count(&self) -> usize {
+        match self.active_detail_tab() {
+            Some(RunDetailTab::Screenshots) => self.detail_screenshots().len(),
+            Some(RunDetailTab::Api) => self.detail_exchanges().len(),
+            Some(RunDetailTab::Logs) => self.current_detail().map_or(0, |detail| detail.logs.len()),
+            Some(RunDetailTab::Files) => self.detail_files().len(),
+            None => 0,
+        }
+    }
+
+    fn explore_detail_tab_step(&mut self, next: bool) {
+        let tabs = self.detail_tabs();
+        if tabs.len() < 2 {
+            return;
+        }
+        let current = self
+            .active_detail_tab()
+            .and_then(|tab| tabs.iter().position(|candidate| *candidate == tab))
+            .unwrap_or(0);
+        let target = if next {
+            (current + 1) % tabs.len()
+        } else {
+            (current + tabs.len() - 1) % tabs.len()
+        };
+        self.explore_details_tab = tabs[target];
+        self.explore_details_tab_pinned = true;
+        self.explore_details_selection = 0;
+        self.explore_details_scroll = 0;
+        self.explore_details_reveal = true;
+    }
+
+    fn explore_detail_move(&mut self, delta: isize) {
+        self.normalize_detail_tab();
+        let len = self.detail_item_count();
+        if len == 0 {
+            self.explore_details_selection = 0;
+            self.explore_details_scroll = 0;
+            return;
+        }
+        let next =
+            (self.explore_details_selection as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.explore_details_selection = next;
+        self.explore_details_reveal = true;
+    }
+
+    fn explore_detail_home(&mut self) {
+        self.explore_details_selection = 0;
+        self.explore_details_scroll = 0;
+        self.explore_details_reveal = true;
+    }
+
+    fn explore_detail_end(&mut self) {
+        self.explore_details_selection = self.detail_item_count().saturating_sub(1);
+        self.explore_details_reveal = true;
+    }
+
+    pub(crate) fn explore_detail_toggle(&mut self) {
+        self.normalize_detail_tab();
+        let selection = self.explore_details_selection;
+        match self.active_detail_tab() {
+            Some(RunDetailTab::Api) => {
+                let Some(exchange) = self.detail_exchanges().get(selection).cloned() else {
+                    return;
+                };
+                let id = exchange.exchange_id;
+                if !self.explore_details_expanded.remove(&id) {
+                    self.explore_details_expanded.insert(id);
+                }
+            }
+            Some(RunDetailTab::Screenshots | RunDetailTab::Files) => {
+                self.status = "This artifact has no folded detail".into();
+            }
+            Some(RunDetailTab::Logs) => {
+                self.status = "Run logs are already expanded".into();
+            }
+            None => {
+                self.status = "No run details for this step".into();
+            }
+        }
+    }
+
+    fn explore_detail_primary(&mut self) {
+        self.ensure_detail_shots();
+        self.normalize_detail_tab();
+        let selection = self.explore_details_selection;
+        match self.active_detail_tab() {
+            Some(RunDetailTab::Screenshots) => {
+                let Some(shot) = self.detail_screenshots().get(selection).cloned() else {
+                    return;
+                };
+                if let Some(capture) = shot.capture {
+                    // Open the whole scenario so the viewer's j/k keeps working;
+                    // the selected step picks the starting capture.
+                    let refs = self.explore_detail_shots.clone();
+                    let step_text = self.explore_selected_step_text();
+                    self.show_screenshot_panel(
+                        crate::image_view::ScreenshotOrigin::Explore,
+                        refs,
+                        step_text.as_deref(),
+                    );
+                    if !capture.file.is_empty()
+                        && let Some(index) = self
+                            .screenshot
+                            .refs
+                            .iter()
+                            .position(|candidate| candidate.file == capture.file)
+                        && index != self.screenshot.index
+                    {
+                        self.screenshot.index = index;
+                        self.load_selected_screenshot();
+                    }
+                } else if let Some(path) = shot.path {
+                    self.open_detail_image(path);
+                } else {
+                    self.status = format!("Cannot open {}", shot.reported);
+                }
+            }
+            Some(RunDetailTab::Api) => self.explore_detail_toggle(),
+            Some(RunDetailTab::Files) => {
+                let Some(file) = self.detail_files().get(selection).cloned() else {
+                    return;
+                };
+                match file.path {
+                    Some(path) => self.open_detail_file(&path),
+                    None => self.status = format!("Cannot open {}", file.reported),
+                }
+            }
+            Some(RunDetailTab::Logs) => self.explore_detail_copy_path(),
+            None => {
+                self.status = "No run details for this step".into();
+            }
+        }
+    }
+
+    fn explore_detail_open_external(&mut self) {
+        self.ensure_detail_shots();
+        self.normalize_detail_tab();
+        let selection = self.explore_details_selection;
+        match self.active_detail_tab() {
+            Some(RunDetailTab::Screenshots) => {
+                if let Some(shot) = self.detail_screenshots().get(selection).cloned() {
+                    match shot.path {
+                        Some(path) => self.open_detail_file(&path),
+                        None => self.status = format!("Cannot open {}", shot.reported),
+                    }
+                }
+            }
+            Some(RunDetailTab::Files) => {
+                if let Some(file) = self.detail_files().get(selection).cloned() {
+                    match file.path {
+                        Some(path) => self.open_detail_file(&path),
+                        None => self.status = format!("Cannot open {}", file.reported),
+                    }
+                }
+            }
+            Some(RunDetailTab::Api) => {
+                if let Some(exchange) = self.detail_exchanges().get(selection)
+                    && is_web_url(&exchange.url)
+                {
+                    self.open_detail_file(Path::new(&exchange.url));
+                }
+            }
+            Some(RunDetailTab::Logs) | None => {
+                self.status = "Nothing to open here".into();
+            }
+        }
+    }
+
+    fn explore_detail_copy_path(&mut self) {
+        self.ensure_detail_shots();
+        self.normalize_detail_tab();
+        let selection = self.explore_details_selection;
+        let Some(target) = (match self.active_detail_tab() {
+            Some(RunDetailTab::Screenshots) => {
+                self.detail_screenshots()
+                    .get(selection)
+                    .map(|shot| match &shot.path {
+                        Some(path) => self.project_display_path(path),
+                        None => shot.reported.clone(),
+                    })
+            }
+            Some(RunDetailTab::Files) => self.detail_files().get(selection).map(|file| match &file
+                .path
+            {
+                Some(path) => self.project_display_path(path),
+                None => file.reported.clone(),
+            }),
+            Some(RunDetailTab::Api) => self
+                .detail_exchanges()
+                .get(selection)
+                .map(|exchange| exchange.url.clone()),
+            Some(RunDetailTab::Logs) => self
+                .current_detail()
+                .and_then(|detail| detail.logs.get(selection).cloned()),
+            None => None,
+        }) else {
+            self.status = "Nothing to copy here".into();
             return;
         };
+        if self.try_copy_to_clipboard(&target) {
+            self.status = format!("Copied {target}");
+            self.set_status_message(self.status.clone());
+        }
+    }
+
+    fn open_detail_image(&mut self, path: PathBuf) {
+        // Mirror the opener's containment check before the viewer reads pixels.
+        let root = self.project.root_dir.join(".teshi/logs/replay-screenshots");
+        if let Ok(root) = root.canonicalize()
+            && !path
+                .canonicalize()
+                .is_ok_and(|resolved| resolved.starts_with(&root))
+        {
+            self.status = format!("Refusing to open {}", self.project_display_path(&path));
+            self.set_status_message(self.status.clone());
+            return;
+        }
+        self.open_image_viewer(path);
+    }
+
+    fn open_detail_file(&mut self, path: &Path) {
+        // A symlink under the evidence root could point elsewhere; verify the
+        // resolved file stays inside it before handing it to the OS opener.
+        let text = path.to_string_lossy();
+        if !is_web_url(&text) {
+            let root = self.project.root_dir.join(".teshi/logs/replay-screenshots");
+            if let Ok(root) = root.canonicalize() {
+                let inside = path
+                    .canonicalize()
+                    .is_ok_and(|resolved| resolved.starts_with(&root));
+                if !inside {
+                    self.status = format!("Refusing to open {}", self.project_display_path(path));
+                    self.set_status_message(self.status.clone());
+                    return;
+                }
+            }
+        }
+        match crate::image_view::open_path_externally(path) {
+            Ok(()) => {
+                self.status = format!("Opened {}", path.display());
+                self.set_status_message(self.status.clone());
+            }
+            Err(error) => {
+                self.status = format!("Cannot open {}: {error:#}", path.display());
+                self.set_status_message(self.status.clone());
+            }
+        }
+    }
+
+    /// Resolves a runner-reported artifact path under the replay evidence root.
+    ///
+    /// Absolute and relative reports are accepted only when they stay inside
+    /// `.teshi/logs/replay-screenshots`; anything else is displayed but never
+    /// opened.
+    fn artifact_path(&self, reported: &str) -> Option<PathBuf> {
+        let reported = reported.trim();
+        if reported.is_empty() {
+            return None;
+        }
+        let root = simplify_path(&self.project.root_dir.join(".teshi/logs/replay-screenshots"));
+        let candidate = simplify_path(&if Path::new(reported).is_absolute() {
+            PathBuf::from(reported)
+        } else {
+            self.project.root_dir.join(reported)
+        });
+        let relative = candidate.strip_prefix(&root).ok()?;
+        if relative.as_os_str().is_empty()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    /// Display path relative to the project root, using `/` separators.
+    pub(crate) fn project_display_path(&self, path: &Path) -> String {
+        let root = simplify_path(&self.project.root_dir);
+        simplify_path(path)
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// Caches scenario captures for the details pane.
+    pub(crate) fn ensure_detail_shots(&mut self) {
+        let key = self.current_detail_key();
+        if self.explore_detail_shots_key == Some(key) {
+            return;
+        }
+        self.explore_detail_shots_key = Some(key);
+        self.explore_detail_shots = if self.explore_selected_deleted_feature.is_none()
+            && self.project.features.get(key.0).is_some()
+        {
+            self.collect_explore_screenshots()
+        } else {
+            Vec::new()
+        };
+    }
+
+    fn toggle_inspector_plaintext(&mut self) {
+        let key = self.current_detail_key();
         let Some(detail) = self.explore_case_details.get_mut(&key) else {
+            self.status = "No run details for this step".into();
             return;
         };
         if detail.inspector_plaintext {
@@ -8429,8 +9128,8 @@ impl App {
         self.explore_selected_deleted_feature = None;
         self.explore_selected_feature = idx;
         self.restore_explore_memory();
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
+        self.reset_detail_selection();
     }
 
     fn explore_set_deleted_feature(&mut self, idx: usize) {
@@ -8442,8 +9141,8 @@ impl App {
         self.explore_selected_deleted_feature = Some(idx);
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
+        self.reset_detail_selection();
     }
 
     fn explore_set_scenario(&mut self, idx: usize) {
@@ -8458,8 +9157,8 @@ impl App {
             self.explore_selected_step = 0;
         }
         self.normalize_explore_selection();
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
+        self.reset_detail_selection();
     }
 
     fn explore_move_selection(&mut self, delta: isize) {
@@ -8503,12 +9202,14 @@ impl App {
             ColumnFocus::Step => {
                 let steps = self.explore_selected_step_count();
                 let next = clamp_idx(self.explore_selected_step as isize + delta, steps);
-                self.explore_selected_step = next;
-                self.persist_explore_memory();
+                if next != self.explore_selected_step {
+                    self.explore_selected_step = next;
+                    self.persist_explore_memory();
+                    self.reset_detail_selection();
+                }
             }
+            ColumnFocus::Details => self.explore_detail_move(delta),
         }
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
     }
 
     fn explore_move_home(&mut self) {
@@ -8526,10 +9227,10 @@ impl App {
             ColumnFocus::Step => {
                 self.explore_selected_step = 0;
                 self.persist_explore_memory();
+                self.reset_detail_selection();
             }
+            ColumnFocus::Details => self.explore_detail_home(),
         }
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
     }
 
     fn explore_move_end(&mut self) {
@@ -8548,31 +9249,50 @@ impl App {
                 if let Some(last) = self.explore_selected_step_count().checked_sub(1) {
                     self.explore_selected_step = last;
                     self.persist_explore_memory();
+                    self.reset_detail_selection();
                 }
             }
+            ColumnFocus::Details => self.explore_detail_end(),
         }
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
     }
 
     fn explore_focus_next(&mut self) {
+        if self.explore_focus == ColumnFocus::Details {
+            // Focus stays in the pane; Tab now walks its inner families.
+            self.explore_detail_tab_step(true);
+            return;
+        }
         self.explore_focus = match self.explore_focus {
             ColumnFocus::Feature => ColumnFocus::Scenario,
             ColumnFocus::Scenario => ColumnFocus::Step,
-            ColumnFocus::Step => ColumnFocus::Step,
+            ColumnFocus::Step => ColumnFocus::Details,
+            ColumnFocus::Details => ColumnFocus::Details,
         };
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        if self.explore_focus == ColumnFocus::Details {
+            self.explore_details_selection = 0;
+            self.explore_details_scroll = 0;
+            self.normalize_detail_tab();
+        }
     }
 
     fn explore_focus_prev(&mut self) {
+        if self.explore_focus == ColumnFocus::Details {
+            self.explore_detail_tab_step(false);
+            return;
+        }
         self.explore_focus = match self.explore_focus {
             ColumnFocus::Feature => ColumnFocus::Feature,
             ColumnFocus::Scenario => ColumnFocus::Feature,
             ColumnFocus::Step => ColumnFocus::Scenario,
+            ColumnFocus::Details => ColumnFocus::Step,
         };
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+    }
+
+    fn reset_detail_selection(&mut self) {
+        self.explore_details_selection = 0;
+        self.explore_details_scroll = 0;
+        self.explore_details_tab_pinned = false;
+        self.explore_details_reveal = true;
     }
 
     fn explore_selected_step_line(&self) -> Option<usize> {
@@ -8643,8 +9363,7 @@ impl App {
         self.clear_step_input_state();
         self.clear_step_keyword_picker();
         self.explore_edit_mode = true;
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
         self.status = crate::i18n::t("status.explore_edit_mode").to_string();
     }
 
@@ -8857,58 +9576,19 @@ impl App {
         self.screenshot.support_detail = detection.detail;
     }
 
-    /// Opens the viewer for whatever the active tab has selected.
-    ///
-    /// Returns false when the tab has no capture entry point, so `i` keeps its
-    /// normal binding in that pane.
-    fn open_screenshot_for_current_tab(&mut self) -> bool {
-        match self.active_tab {
-            MainTab::MindMap => {
-                if self.mindmap_focus != MindMapFocus::Main || self.scenario_dropdown_open {
-                    return false;
-                }
-                self.refresh_capture_index();
-                self.open_screenshot_panel();
-                true
-            }
-            MainTab::Explore
-                if !self.explore_edit_mode
-                    && (self.explore_detail_open
-                        || (self.explore_focus == ColumnFocus::Step
-                            && self.catalog_selection_ready()
-                            && self.explore_selected_deleted_feature.is_none()
-                            && self.explore_changed_steps().is_empty())) =>
-            {
-                // Failure Details is the primary entry: it points at the step
-                // that actually broke, which is what a capture is for.
-                let step = if self.explore_detail_open {
-                    self.failed_step_text()
-                } else {
-                    self.explore_selected_step_text()
-                };
-                self.refresh_capture_index();
-                self.open_explore_screenshot(step.as_deref());
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Handles keys owned by the screenshot panel.
     ///
     /// Returns true when the key was consumed and must not also run its normal
-    /// binding.
+    /// binding. `i` no longer opens the viewer; Run Details owns that entry.
     pub fn handle_screenshot_key(&mut self, key: KeyEvent) -> bool {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return false;
         }
         if !self.screenshot.visible {
-            return key.code == KeyCode::Char('i')
-                && key.modifiers == KeyModifiers::NONE
-                && self.open_screenshot_for_current_tab();
+            return false;
         }
         match key.code {
-            KeyCode::Char('i') | KeyCode::Esc => self.close_screenshot_panel(),
+            KeyCode::Esc => self.close_screenshot_panel(),
             KeyCode::Char('j') => self.step_screenshot(1),
             KeyCode::Char('k') => self.step_screenshot(-1),
             KeyCode::Char('+') | KeyCode::Char('=') => self
@@ -8972,6 +9652,8 @@ impl App {
             .map(|(key, entry)| (*key, entry.count))
             .collect();
         self.mindmap_index.set_captured_scenarios(counts);
+        // A new run can change the captures backing Run Details.
+        self.explore_detail_shots_key = None;
     }
 
     /// Maps the newest captures onto `(feature index, scenario index)`.
@@ -9006,21 +9688,6 @@ impl App {
                 .or_insert_with(|| entry.clone());
         }
         captured
-    }
-
-    fn open_screenshot_panel(&mut self) {
-        let refs = self.collect_scenario_screenshots();
-        self.show_screenshot_panel(crate::image_view::ScreenshotOrigin::MindMap, refs, None);
-    }
-
-    /// Opens the viewer for the Explore selection, starting at `step_text`.
-    fn open_explore_screenshot(&mut self, step_text: Option<&str>) {
-        let refs = self.collect_explore_screenshots();
-        self.show_screenshot_panel(
-            crate::image_view::ScreenshotOrigin::Explore,
-            refs,
-            step_text,
-        );
     }
 
     fn show_screenshot_panel(
@@ -9177,33 +9844,6 @@ impl App {
         }
     }
 
-    /// Captures recorded for the selected scenario, in step order.
-    ///
-    /// Only the newest run that recorded captures for this Feature is used, so
-    /// two runs of the same Feature never mix in one panel.
-    fn collect_scenario_screenshots(&mut self) -> Vec<crate::image_view::ScreenshotRef> {
-        let Some(loc) = self.selected_node_location() else {
-            return Vec::new();
-        };
-        let Some(feature) = self.project.features.get(loc.feature_idx) else {
-            return Vec::new();
-        };
-        let feature_rel =
-            crate::image_view::relative_feature_path(&self.project.root_dir, &feature.file_path);
-        let scenario = match loc.context {
-            mindmap::LocationContext::Scenario(index) => {
-                feature.scenario_at(index).map(|item| item.name.clone())
-            }
-            mindmap::LocationContext::Background => None,
-        };
-
-        crate::image_view::screenshots_for(
-            &self.project.root_dir,
-            &feature_rel,
-            scenario.as_deref(),
-        )
-    }
-
     /// Captures recorded for the scenario selected in Explore, in step order.
     fn collect_explore_screenshots(&mut self) -> Vec<crate::image_view::ScreenshotRef> {
         let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
@@ -9239,25 +9879,13 @@ impl App {
     }
 
     /// Text of the step selected in the Explore Steps pane.
-    fn explore_selected_step_text(&self) -> Option<String> {
+    pub(crate) fn explore_selected_step_text(&self) -> Option<String> {
         let feature = self.project.features.get(self.explore_selected_feature)?;
         let step = feature
             .scenario_at(self.explore_selected_scenario)?
             .steps
             .get(self.explore_selected_step)?;
         Some(step.text.clone())
-    }
-
-    /// Text of the step that failed in the open Failure Details popup.
-    fn failed_step_text(&self) -> Option<String> {
-        let detail = self.explore_case_details.get(&self.explore_detail_case?)?;
-        detail
-            .steps
-            .iter()
-            .rev()
-            .find(|step| step.status.as_deref() == Some("failed"))
-            .or_else(|| detail.steps.last())
-            .map(|step| step.text.clone())
     }
 
     /// Step index in the selected scenario for the capture the viewer shows.
@@ -10072,7 +10700,19 @@ impl App {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // h/l move through the visual column order; `e`/EnterEdit
                     // opens the editor from the Steps column.
-                    self.explore_focus_next();
+                    if self.explore_focus != ColumnFocus::Details {
+                        self.explore_focus_next();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreLeft => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    if self.explore_focus == ColumnFocus::Details {
+                        self.explore_focus = ColumnFocus::Step;
+                    } else {
+                        self.explore_focus_prev();
+                    }
                     self.quit_pending_confirm = false;
                 }
             }
@@ -10548,9 +11188,53 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
-            Action::ToggleFailureDetail => {
+            Action::FocusRunDetails => {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
-                    self.toggle_failure_detail();
+                    self.focus_run_details();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreDetailEnter => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_detail_primary();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreDetailToggle => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_detail_toggle();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreDetailScrollUp => {
+                if self.active_tab == MainTab::Explore
+                    && !self.explore_edit_mode
+                    && self.explore_focus == ColumnFocus::Details
+                {
+                    self.explore_details_scroll = self.explore_details_scroll.saturating_sub(10);
+                    self.explore_details_reveal = false;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreDetailScrollDown => {
+                if self.active_tab == MainTab::Explore
+                    && !self.explore_edit_mode
+                    && self.explore_focus == ColumnFocus::Details
+                {
+                    self.explore_details_scroll = self.explore_details_scroll.saturating_add(10);
+                    self.explore_details_reveal = false;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreOpenExternal => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_detail_open_external();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreCopyPath => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_detail_copy_path();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -11368,10 +12052,13 @@ impl App {
                 self.set_status_message(message);
             }
             Action::ExplorePan(delta) => {
-                let index = self.explore_focus.index();
-                self.explore_horizontal_scroll[index] = self.explore_horizontal_scroll[index]
-                    .saturating_add_signed(delta)
-                    .min(self.explore_viewports[index].max_horizontal);
+                // Run Details has no horizontal viewport of its own.
+                if self.explore_focus != ColumnFocus::Details {
+                    let index = self.explore_focus.index();
+                    self.explore_horizontal_scroll[index] = self.explore_horizontal_scroll[index]
+                        .saturating_add_signed(delta)
+                        .min(self.explore_viewports[index].max_horizontal);
+                }
             }
             Action::Quit => self.quit(),
             Action::RequestQuit => self.request_quit_confirmation(),
@@ -12130,11 +12817,14 @@ impl App {
                         self.clear_step_input_state();
                         self.clear_step_keyword_picker();
                         self.status = crate::i18n::t("status.input_state_cleared").to_string();
-                    } else if self.explore_detail_open {
-                        self.explore_detail_open = false;
-                        self.explore_detail_case = None;
                     } else if self.active_tab == MainTab::Explore && self.explore_edit_mode {
                         self.explore_exit_edit();
+                    } else if self.active_tab == MainTab::Explore
+                        && self.explore_focus == ColumnFocus::Details
+                    {
+                        // Leave the fourth pane; narrow terminals then paint
+                        // Scenarios again, and wide ones keep the same target.
+                        self.explore_focus = ColumnFocus::Scenario;
                     } else if self.view_stage != ViewStage::TreeOnly {
                         self.stage_back();
                     }
@@ -12484,8 +13174,7 @@ impl App {
         self.pending_char = None;
         if self.active_tab == MainTab::Explore {
             self.explore_edit_mode = false;
-            self.explore_detail_open = false;
-            self.explore_detail_case = None;
+            self.explore_details_scroll = 0;
         }
         self.quit_pending_confirm = false;
         self.active_tab = tab;
@@ -13608,7 +14297,27 @@ impl App {
         }
         if self.active_tab == MainTab::Explore
             && !self.explore_edit_mode
-            && !self.explore_detail_open
+            && matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            && let Some(rect) = self
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ExploreDetailPane { rect } => Some(*rect),
+                    _ => None,
+                })
+            && rect.contains(pos)
+        {
+            if kind == MouseEventKind::ScrollUp {
+                self.explore_details_scroll = self.explore_details_scroll.saturating_sub(3);
+            } else {
+                self.explore_details_scroll = self.explore_details_scroll.saturating_add(3);
+            }
+            self.explore_details_reveal = false;
+            self.quit_pending_confirm = false;
+            return Ok(());
+        }
+        if self.active_tab == MainTab::Explore
+            && !self.explore_edit_mode
             && matches!(
                 kind,
                 MouseEventKind::ScrollUp
@@ -14086,7 +14795,10 @@ impl App {
                 | ClickableRegion::TestPointScenario { rect, .. }
                 | ClickableRegion::ExploreTag { rect, .. }
                 | ClickableRegion::ExploreTagClear { rect }
-                | ClickableRegion::ExploreTagScroll { rect, .. } => rect.contains(*pos),
+                | ClickableRegion::ExploreTagScroll { rect, .. }
+                | ClickableRegion::ExploreDetailPane { rect }
+                | ClickableRegion::ExploreDetailTab { rect, .. }
+                | ClickableRegion::ExploreDetailItem { rect, .. } => rect.contains(*pos),
                 ClickableRegion::ModelProfileRow { rect, .. }
                 | ClickableRegion::ModelFormField { rect, .. }
                 | ClickableRegion::AgentProfileRow { rect, .. }
@@ -14114,7 +14826,10 @@ impl App {
                 | ClickableRegion::TestPointScenario { .. }
                 | ClickableRegion::ExploreTag { .. }
                 | ClickableRegion::ExploreTagClear { .. }
-                | ClickableRegion::ExploreTagScroll { .. } => {}
+                | ClickableRegion::ExploreTagScroll { .. }
+                | ClickableRegion::ExploreDetailPane { .. }
+                | ClickableRegion::ExploreDetailTab { .. }
+                | ClickableRegion::ExploreDetailItem { .. } => {}
                 ClickableRegion::ModelProfileRow { .. }
                 | ClickableRegion::ModelFormField { .. }
                 | ClickableRegion::AgentProfileRow { .. }
@@ -14371,6 +15086,32 @@ impl App {
             ClickableRegion::ExploreStep { step_idx, .. } => {
                 self.explore_selected_step = *step_idx;
                 self.explore_focus = crate::app::ColumnFocus::Step;
+            }
+            ClickableRegion::ExploreDetailPane { .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                }
+            }
+            ClickableRegion::ExploreDetailTab { tab, .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                    let changed = self.explore_details_tab != *tab;
+                    self.explore_details_tab = *tab;
+                    self.explore_details_tab_pinned = true;
+                    if changed {
+                        self.explore_details_selection = 0;
+                        self.explore_details_scroll = 0;
+                        self.explore_details_reveal = true;
+                    }
+                }
+            }
+            ClickableRegion::ExploreDetailItem { index, .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                    self.explore_details_selection =
+                        (*index).min(self.detail_item_count().saturating_sub(1));
+                    self.explore_details_reveal = true;
+                }
             }
             ClickableRegion::ExploreTag { index, .. } => {
                 let tags = self.feature_tags.index.all_tags();
@@ -15210,8 +15951,7 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
-        self.explore_detail_open = false;
-        self.explore_detail_case = None;
+        self.explore_detail_shots_key = None;
         self.explore_run_summary = None;
         self.explore_diff_lines = None;
         self.pending_change_summary.clear();
@@ -16213,7 +16953,7 @@ mod tests {
     use super::{
         AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
         ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
-        MindMapFocus, ModelPanelMode, RunStatus, ViewStage, attach_prompt_images,
+        MindMapFocus, ModelPanelMode, RunDetailTab, RunStatus, ViewStage, attach_prompt_images,
         completed_assistant_responses, current_step_keyword_index, interrupted_acp_message,
         replace_step_keyword_line,
     };
@@ -23701,8 +24441,8 @@ mod tests {
         app.ai_input_focused = true;
         app.scenario_dropdown_open = false;
         app.explore_edit_mode = true;
-        app.explore_detail_open = true;
-        app.explore_detail_case = Some((0, 0));
+        app.explore_focus = ColumnFocus::Details;
+        app.explore_details_scroll = 3;
         app.pending_char = Some('g');
         app.quit_pending_confirm = false;
         render_test_app(&mut app, 100);
@@ -23721,8 +24461,7 @@ mod tests {
         assert!(!app.ai_input_focused);
         assert!(!app.scenario_dropdown_open);
         assert!(!app.explore_edit_mode);
-        assert!(!app.explore_detail_open);
-        assert!(app.explore_detail_case.is_none());
+        assert_eq!(app.explore_details_scroll, 0);
         assert!(app.pending_char.is_none());
         assert!(!app.quit_pending_confirm);
         assert_eq!(app.status, "Switched to MindMap tab");
@@ -23863,18 +24602,37 @@ mod tests {
 
         app.explore_focus = ColumnFocus::Step;
         app.explore_focus_next();
-        assert_eq!(app.explore_focus, ColumnFocus::Step);
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
 
-        // Visual order is Features → Scenarios → Steps.
+        // In Details, Tab walks inner families and stays in the pane.
+        app.explore_focus_next();
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        app.explore_focus_prev();
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+
+        // Visual order is Features → Scenarios → Steps → Run Details.
         app.explore_focus = ColumnFocus::Feature;
         app.explore_focus_next();
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
         app.explore_focus_next();
         assert_eq!(app.explore_focus, ColumnFocus::Step);
+        app.explore_focus_next();
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        app.handle_action(Action::ExploreLeft).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
         app.explore_focus_prev();
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
         app.explore_focus_prev();
         assert_eq!(app.explore_focus, ColumnFocus::Feature);
+    }
+
+    #[test]
+    fn escape_from_run_details_returns_to_scenarios() {
+        let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::Explore;
+        app.explore_focus = ColumnFocus::Details;
+        app.handle_action(Action::ClearInputState).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
     }
 
     #[test]
@@ -23888,8 +24646,12 @@ mod tests {
         app.handle_action(Action::ExploreRight).unwrap();
         assert_eq!(app.explore_focus, ColumnFocus::Step);
         app.handle_action(Action::ExploreRight).unwrap();
-        assert_eq!(app.explore_focus, ColumnFocus::Step);
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        app.handle_action(Action::ExploreRight).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
 
+        app.handle_action(Action::ExploreLeft).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
         app.handle_action(Action::FocusPrevColumn).unwrap();
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
         app.handle_action(Action::FocusPrevColumn).unwrap();
@@ -24319,8 +25081,14 @@ mod tests {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
-            explore_detail_open: false,
-            explore_detail_case: None,
+            explore_details_tab: RunDetailTab::Screenshots,
+            explore_details_tab_pinned: false,
+            explore_details_selection: 0,
+            explore_details_scroll: 0,
+            explore_details_reveal: false,
+            explore_details_expanded: HashSet::new(),
+            explore_detail_shots: Vec::new(),
+            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -24542,8 +25310,14 @@ Feature: B
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
-            explore_detail_open: false,
-            explore_detail_case: None,
+            explore_details_tab: RunDetailTab::Screenshots,
+            explore_details_tab_pinned: false,
+            explore_details_selection: 0,
+            explore_details_scroll: 0,
+            explore_details_reveal: false,
+            explore_details_expanded: HashSet::new(),
+            explore_detail_shots: Vec::new(),
+            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -25087,21 +25861,19 @@ Feature: B
     }
 
     #[test]
-    fn screenshot_panel_opens_and_closes_on_mindmap_i() {
+    fn screenshot_panel_opens_from_explicit_actions_not_i() {
         let mut app = editor_test_app();
-        app.mindmap_focus = MindMapFocus::Main;
 
-        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(
+            !app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+            "i must no longer open the viewer"
+        );
+        assert!(!app.screenshot.visible);
+
+        app.open_image_viewer(PathBuf::from("frame.png"));
         assert!(app.screenshot.visible);
         assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!app.screenshot.visible);
-
-        // The binding stays inert outside the MindMap tab and off the tree.
-        app.active_tab = MainTab::Ai;
-        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-        app.active_tab = MainTab::MindMap;
-        app.mindmap_focus = MindMapFocus::AiPanel;
-        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
     }
 
     #[test]
@@ -25234,12 +26006,198 @@ Feature: B
     }
 
     #[test]
-    fn explore_steps_open_the_viewer_at_the_selected_step() {
-        let (mut app, _project, _store) = explore_capture_test_app();
-        app.explore_focus = ColumnFocus::Step;
+    fn run_details_show_case_level_evidence_on_every_step() {
+        let content = "Feature: Login\n  Scenario: Detail\n    Given one\n    Then two\n";
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            content,
+            PathBuf::from("login.feature"),
+        )];
+        let mut detail = super::empty_running_detail("f0:s1".into());
+        detail.steps = vec![
+            super::StepRunRecord {
+                step_id: "f0:s1:L3".into(),
+                text: "one".into(),
+                status: Some("passed".into()),
+                message: None,
+            },
+            super::StepRunRecord {
+                step_id: "f0:s1:L4".into(),
+                text: "two".into(),
+                status: Some("passed".into()),
+                message: None,
+            },
+        ];
+        detail.exchanges = vec![
+            teshi_core::HttpExchange::from_value(&serde_json::json!({
+                "type": "http_exchange",
+                "exchange_id": "step-one",
+                "case_id": "f0:s1",
+                "step_id": "f0:s1:L3",
+                "method": "GET",
+                "url": "https://example.test/one",
+                "status": 200
+            }))
+            .expect("step exchange"),
+            teshi_core::HttpExchange::from_value(&serde_json::json!({
+                "type": "http_exchange",
+                "exchange_id": "case-wide",
+                "case_id": "f0:s1",
+                "method": "GET",
+                "url": "https://example.test/wide",
+                "status": 200
+            }))
+            .expect("case exchange"),
+        ];
+        app.explore_case_details.insert((0, 0), detail);
+
+        app.explore_selected_step = 0;
+        let first: Vec<_> = app
+            .detail_exchanges()
+            .into_iter()
+            .map(|exchange| exchange.exchange_id)
+            .collect();
+        assert_eq!(first, vec!["step-one", "case-wide"]);
+
+        app.explore_selected_step = 1;
+        let second: Vec<_> = app
+            .detail_exchanges()
+            .into_iter()
+            .map(|exchange| exchange.exchange_id)
+            .collect();
+        assert_eq!(
+            second,
+            vec!["case-wide"],
+            "case-level evidence stays visible on every step"
+        );
+    }
+
+    #[test]
+    fn run_detail_artifact_paths_must_stay_inside_evidence_root() {
+        let mut app = App::from_args().expect("app init");
+        let root = tempdir().unwrap();
+        app.project.root_dir = root.path().to_path_buf();
+        let inside = root
+            .path()
+            .join(".teshi/logs/replay-screenshots/run/after.png");
+        assert_eq!(
+            app.artifact_path(&inside.display().to_string()),
+            Some(inside.clone())
+        );
+        assert!(
+            app.artifact_path(".teshi/logs/replay-screenshots/../secret.txt")
+                .is_none()
+        );
+        assert!(
+            app.artifact_path(root.path().join("outside.png").to_str().unwrap())
+                .is_none()
+        );
+        #[cfg(windows)]
+        {
+            let verbatim = format!(r"\\?\{}", inside.display());
+            assert_eq!(
+                app.artifact_path(&verbatim),
+                Some(inside),
+                "the evidence writer's verbatim prefix is normalized"
+            );
+        }
+    }
+
+    #[test]
+    fn run_detail_tabs_cycle_only_content_families() {
+        let content = "Feature: Login\n  Scenario: Detail\n    Given one\n";
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            content,
+            PathBuf::from("login.feature"),
+        )];
+        let mut detail = super::empty_running_detail("f0:s1".into());
+        detail.logs = vec!["log line".into()];
+        detail.exchanges = vec![
+            teshi_core::HttpExchange::from_value(&serde_json::json!({
+                "type": "http_exchange",
+                "exchange_id": "e1",
+                "method": "GET",
+                "url": "https://example.test/",
+                "status": 200
+            }))
+            .expect("exchange"),
+        ];
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_focus = ColumnFocus::Details;
+
+        assert_eq!(app.active_detail_tab(), Some(RunDetailTab::Api));
+        app.explore_focus_next();
+        assert_eq!(app.active_detail_tab(), Some(RunDetailTab::Logs));
+        app.explore_focus_next();
+        assert_eq!(app.active_detail_tab(), Some(RunDetailTab::Api));
+        app.explore_focus_prev();
+        assert_eq!(app.active_detail_tab(), Some(RunDetailTab::Logs));
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+    }
+
+    #[test]
+    fn failed_step_prefers_api_until_the_user_pins_a_tab() {
+        let content = "Feature: Login\n  Scenario: Detail\n    Given one\n    Then two\n";
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            content,
+            PathBuf::from("login.feature"),
+        )];
+        let mut detail = super::empty_running_detail("f0:s1".into());
+        detail.status = RunStatus::Failed;
+        detail.steps = vec![super::StepRunRecord {
+            step_id: "f0:s1:L4".into(),
+            text: "two".into(),
+            status: Some("failed".into()),
+            message: Some("boom".into()),
+        }];
+        detail.attachments = vec![crate::runner::RunAttachment {
+            kind: "screenshot".into(),
+            path: ".teshi/logs/replay-screenshots/run/a.png".into(),
+            step_id: Some("f0:s1:L4".into()),
+        }];
+        detail.exchanges = vec![
+            teshi_core::HttpExchange::from_value(&serde_json::json!({
+                "type": "http_exchange",
+                "exchange_id": "e1",
+                "method": "GET",
+                "url": "https://example.test/",
+                "status": 500
+            }))
+            .expect("exchange"),
+        ];
+        app.explore_case_details.insert((0, 0), detail);
         app.explore_selected_step = 1;
 
-        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert_eq!(
+            app.detail_tabs(),
+            vec![RunDetailTab::Screenshots, RunDetailTab::Api]
+        );
+        assert_eq!(
+            app.active_detail_tab(),
+            Some(RunDetailTab::Api),
+            "a failed step lands on the API summary"
+        );
+
+        app.explore_details_tab = RunDetailTab::Screenshots;
+        app.explore_details_tab_pinned = true;
+        assert_eq!(
+            app.active_detail_tab(),
+            Some(RunDetailTab::Screenshots),
+            "an explicit tab choice wins"
+        );
+    }
+
+    #[test]
+    fn explore_details_enter_opens_the_selected_step_capture() {
+        let (mut app, _project, _store) = explore_capture_test_app();
+        app.explore_focus = ColumnFocus::Details;
+        app.explore_selected_step = 1;
+        app.ensure_detail_shots();
+        app.explore_details_tab = RunDetailTab::Screenshots;
+
+        app.explore_detail_primary();
         assert!(app.screenshot.visible);
         assert_eq!(
             app.screenshot.origin,
@@ -25247,6 +26205,7 @@ Feature: B
         );
         assert_eq!(app.screenshot.refs.len(), 2);
         assert_eq!(app.screenshot.index, 1);
+        assert_eq!(app.screenshot.refs[1].step_text, "broken step");
 
         // Closing hands the last viewed capture back to the Steps pane.
         app.screenshot.index = 0;
@@ -25256,21 +26215,30 @@ Feature: B
     }
 
     #[test]
-    fn explore_i_stays_inert_off_the_steps_pane() {
+    fn explore_i_is_inert_in_every_pane() {
         let (mut app, _project, _store) = explore_capture_test_app();
-        app.explore_focus = ColumnFocus::Scenario;
+        for focus in [
+            ColumnFocus::Feature,
+            ColumnFocus::Scenario,
+            ColumnFocus::Step,
+            ColumnFocus::Details,
+        ] {
+            app.explore_focus = focus;
+            assert!(
+                !app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+                "i stayed live in {focus:?}"
+            );
+            assert!(!app.screenshot.visible);
+        }
 
-        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-        assert!(!app.screenshot.visible);
-
-        app.explore_edit_mode = true;
-        app.explore_focus = ColumnFocus::Step;
+        app.active_tab = MainTab::MindMap;
+        app.mindmap_focus = MindMapFocus::Main;
         assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
         assert!(!app.screenshot.visible);
     }
 
     #[test]
-    fn failure_details_open_the_capture_of_the_failed_step() {
+    fn failed_case_details_stay_in_the_run_details_pane() {
         let (mut app, _project, _store) = explore_capture_test_app();
         let mut detail = super::empty_running_detail("case-1".to_string());
         detail.status = RunStatus::Failed;
@@ -25289,15 +26257,12 @@ Feature: B
             },
         ];
         app.explore_case_details.insert((0, 0), detail);
-        app.explore_detail_open = true;
-        app.explore_detail_case = Some((0, 0));
-        // The popup owns `i` from any Explore pane.
-        app.explore_focus = ColumnFocus::Scenario;
+        app.explore_focus = ColumnFocus::Details;
 
-        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-        assert!(app.screenshot.visible);
-        assert_eq!(app.screenshot.index, 1);
-        assert_eq!(app.screenshot.refs[1].step_text, "broken step");
+        // There is no popup state left to open, and the retired key does nothing.
+        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible);
+        assert!(!app.explore_details_expanded.contains("e1"));
     }
 
     #[test]

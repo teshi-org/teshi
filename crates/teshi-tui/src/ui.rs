@@ -37,8 +37,6 @@ use theme::ButtonTone;
 ///
 /// Each axis keeps a preferred size, a viewport share and an absolute cap, so
 /// a 200-column terminal does not stretch a card that was designed for 120.
-const FAILURE_DETAIL_SPEC: overlay::OverlaySpec =
-    overlay::OverlaySpec::viewer(75, 20, 120, 70, 10, 45);
 const CHANGE_SUMMARY_SPEC: overlay::OverlaySpec =
     overlay::OverlaySpec::viewer(65, 30, 110, 55, 10, 40);
 const SETTINGS_SPEC: overlay::OverlaySpec = overlay::OverlaySpec {
@@ -764,7 +762,9 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
             | ClickableRegion::QuitConfirmNo { rect }
             | ClickableRegion::AiInterruptConfirm { rect }
             | ClickableRegion::AiInterruptContinue { rect }
-            | ClickableRegion::ExploreHorizontalScrollbar { rect, .. } => *rect,
+            | ClickableRegion::ExploreHorizontalScrollbar { rect, .. }
+            | ClickableRegion::ExploreDetailTab { rect, .. }
+            | ClickableRegion::ExploreDetailItem { rect, .. } => *rect,
             ClickableRegion::ExploreFeature {
                 row_y,
                 col_x,
@@ -1107,12 +1107,12 @@ fn compact_panes(area: Rect, focus: usize) -> [Rect; 3] {
 }
 
 /// Explore keeps the Feature column on the shared left-pane band, gives the
-/// Scenario list only the rows it needs (capped at 40%), and hands the rest
-/// to Steps. Tiny terminals still show only the focused pane.
-fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 3] {
+/// Scenario list only the rows it needs (capped at 40%), and splits the rest
+/// into Steps and Run Details. Tiny terminals still show only the focused pane.
+fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 4] {
     if area.width < 70 || area.height < 12 {
-        let mut panes = [Rect::default(); 3];
-        panes[focus.min(2)] = area;
+        let mut panes = [Rect::default(); 4];
+        panes[focus.min(3)] = area;
         return panes;
     }
     let [left, right] = Layout::horizontal([
@@ -1127,9 +1127,15 @@ fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 3] {
         .saturating_add(3)
         .clamp(4, max_scenario);
     let scenario_height = desired.min(right.height.saturating_sub(3).max(3));
-    let [scenario, steps] =
+    let [scenario, bottom] =
         Layout::vertical([Constraint::Length(scenario_height), Constraint::Min(3)]).areas(right);
-    [left, scenario, steps]
+    let min_details = 24.min(bottom.width / 2);
+    let steps_width = 38
+        .min(bottom.width.saturating_sub(min_details))
+        .max(bottom.width / 4);
+    let [steps, details] =
+        Layout::horizontal([Constraint::Length(steps_width), Constraint::Min(10)]).areas(bottom);
+    [left, scenario, steps, details]
 }
 
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1139,15 +1145,22 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
             .split(area);
         render_editor_panel(frame, app, cols[0], false);
-        render_reserved_panel(frame, app, cols[1]);
+        render_run_details(frame, app, cols[1], false);
         return;
     }
     let scenario_rows = explore_scenario_count(app);
     let cols = explore_panes(area, app.explore_focus.index(), scenario_rows);
+    app.ensure_detail_shots();
 
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
     render_explore_steps(frame, app, cols[2]);
+    render_run_details(
+        frame,
+        app,
+        cols[3],
+        app.explore_focus == ColumnFocus::Details,
+    );
     // Scenario/step bindings still use logical rows. Feature bindings are
     // emitted directly for the viewport and already have screen coordinates.
     let views = app.explore_viewports;
@@ -1165,7 +1178,6 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         *row = view.rect.y + (logical_row - view.offset) as u16;
         true
     });
-    render_failure_detail(frame, app, area);
 }
 
 fn explore_select_style(focused: bool) -> Style {
@@ -1289,6 +1301,8 @@ fn render_explore_viewport<'a>(
         ColumnFocus::Feature => app.explore_selected_feature_row().unwrap_or(0),
         ColumnFocus::Scenario => app.explore_selected_scenario,
         ColumnFocus::Step => app.explore_selected_step,
+        // Run Details has no list viewport; it never reaches this renderer.
+        ColumnFocus::Details => 0,
     });
     let view = &mut app.explore_viewports[column.index()];
     let owner = match column {
@@ -1303,6 +1317,7 @@ fn render_explore_viewport<'a>(
             app.explore_selected_deleted_feature,
             Some(app.explore_selected_scenario),
         ),
+        ColumnFocus::Details => (0, None, None),
     };
     if view.last_owner != Some(owner) {
         view.offset = 0;
@@ -1817,10 +1832,7 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let explore_actions = [
         (crate::i18n::t("explore.run"), Action::RunScenario),
-        (
-            crate::i18n::t("explore.detail"),
-            Action::ToggleFailureDetail,
-        ),
+        (crate::i18n::t("explore.detail"), Action::FocusRunDetails),
         (crate::i18n::t("explore.edit"), Action::EnterEdit),
     ];
     if !app.catalog_selection_ready() {
@@ -2840,58 +2852,6 @@ fn render_examples_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<
         out.push(format_row(row));
     }
     out
-}
-
-fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if !app.explore_detail_open {
-        return;
-    }
-    let Some((fi, si)) = app.explore_detail_case else {
-        return;
-    };
-    let Some(detail) = app.explore_case_details.get(&(fi, si)) else {
-        return;
-    };
-    if detail.status != RunStatus::Failed {
-        return;
-    }
-    let Some(feature) = app.project.features.get(fi) else {
-        return;
-    };
-    let Some(scenario) = feature.scenario_at(si) else {
-        return;
-    };
-
-    let popup = FAILURE_DETAIL_SPEC.rect(area, (0, 0));
-    dialog::dim_backdrop(frame, area);
-    frame.render_widget(Clear, popup);
-    let block = theme::popup_block("Failure Details");
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    // The hint is an addition; a popup too short for both must keep every
-    // detail line, and the run's message is the last thing to lose.
-    let out_lines = truncate_lines(build_case_detail_lines(&scenario.name, detail), inner.width);
-    let hint_fits = out_lines.len() < inner.height as usize;
-    let body = if hint_fits {
-        let [body, footer] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                " i failed step screenshot · Enter/Esc close",
-                Style::default().fg(theme::MUTED),
-            )),
-            footer,
-        );
-        body
-    } else {
-        inner
-    };
-    frame.render_widget(Paragraph::new(Text::from(out_lines)), body);
 }
 
 fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -4093,133 +4053,972 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &mut App, editor_area:
     );
 }
 
-/// Renders the reserved panel placeholder (stage 3, right side).
-fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = theme::panel_block("Run Details", false);
+/// Renders the Run Details pane beside Steps.
+///
+/// The header always keeps two rows (scenario/status/duration and step/runner)
+/// plus the inner tab row, so switching families or stepping never moves the
+/// content origin. Content scrolls independently of the Steps selection.
+fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    app.ensure_detail_shots();
+    let block = theme::panel_block("Run Details", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let detail_key = (app.explore_selected_feature, app.explore_selected_scenario);
-    let detail_content = if let Some(detail) = app.explore_case_details.get(&detail_key) {
-        let scenario_name = app
-            .project
-            .features
-            .get(app.explore_selected_feature)
-            .and_then(|f| f.scenario_at(app.explore_selected_scenario))
-            .map(|s| s.name.as_str())
-            .unwrap_or("-");
-        truncate_lines(build_case_detail_lines(scenario_name, detail), inner.width)
-    } else {
-        truncate_lines(no_run_detail_lines(), inner.width)
+    let (body_area, action_area) = split_pane_action_row(inner);
+    if body_area.height == 0 {
+        return;
+    }
+    if !app.explore_edit_mode && area.width > 0 && area.height > 0 {
+        // Broad target registered first; tabs and items layered above it win
+        // the reverse-order hit test.
+        app.clickable_regions
+            .push(ClickableRegion::ExploreDetailPane { rect: area });
+    }
+
+    let scenario = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .and_then(|feature| feature.scenario_at(app.explore_selected_scenario));
+    let scenario_name = scenario.map_or("-", |scenario| scenario.name.as_str());
+    let detail = app.current_detail().cloned();
+    let status = detail
+        .as_ref()
+        .map_or(RunStatus::Idle, |detail| detail.status);
+    let duration = detail.as_ref().and_then(|detail| detail.duration_ms);
+    let step_text = app.explore_selected_step_text().unwrap_or_default();
+    let runner = app.detail_runner_label();
+    let tabs = app.detail_tabs();
+    let active_tab = app.active_detail_tab();
+    let item_count = app.detail_item_count();
+    if app.explore_details_selection >= item_count {
+        app.explore_details_selection = item_count.saturating_sub(1);
+    }
+    let selection = app.explore_details_selection;
+
+    // Three fixed rows: scenario/status/duration, step/runner, inner tabs.
+    let header_height = 3.min(body_area.height);
+    let header_area = Rect {
+        height: header_height,
+        ..body_area
     };
-    let planned_style = Style::default().fg(theme::MUTED);
-    let mut content = vec![
-        Line::styled(
-            "Planned features:",
-            planned_style.add_modifier(Modifier::BOLD),
+    let content_area = Rect {
+        x: body_area.x,
+        y: body_area.y + header_height,
+        width: body_area.width,
+        height: body_area.height - header_height,
+    };
+    let (tabs_line, tab_hits) = detail_tabs_line(app, &tabs, active_tab, header_area.width);
+    let header = vec![
+        detail_scenario_line(scenario_name, status, duration, header_area.width),
+        detail_step_line(
+            app.explore_selected_step + 1,
+            &step_text,
+            runner.as_deref(),
+            header_area.width,
         ),
-        Line::styled("Step implementation code", planned_style),
-        Line::styled("BDD runner", planned_style),
-        Line::styled("Test results", planned_style),
-        Line::raw(""),
+        tabs_line,
     ];
-    content.extend(detail_content);
-    let content = truncate_lines(content, inner.width);
-    frame.render_widget(Paragraph::new(Text::from(content)), inner);
-}
-
-fn build_case_detail_lines(scenario_name: &str, detail: &CaseDetail) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::styled(
-        format!("Scenario: {scenario_name}"),
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(format!(
-        "Status: {}",
-        status_label(detail.status)
-    )));
-    lines.push(Line::raw(format!("Case: {}", detail.case_id)));
-    let duration = detail
-        .duration_ms
-        .map(|ms| format!("{ms} ms"))
-        .unwrap_or_else(|| "-".to_string());
-    lines.push(Line::raw(format!("Duration: {duration}")));
-
-    if let Some(message) = &detail.message {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Message:"));
-        lines.push(Line::raw(message.clone()));
-    }
-
-    if let Some(stack) = &detail.stack {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Stack:"));
-        for line in stack.lines() {
-            lines.push(Line::raw(line.to_string()));
+    frame.render_widget(
+        Paragraph::new(Text::from(truncate_lines(header, header_area.width))),
+        header_area,
+    );
+    if !app.explore_edit_mode && header_height == 3 {
+        for hit in tab_hits {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreDetailTab {
+                    tab: hit.tab,
+                    rect: Rect::new(
+                        header_area.x + hit.x,
+                        header_area.y + 2,
+                        hit.width.min(header_area.width.saturating_sub(hit.x)),
+                        1,
+                    ),
+                });
         }
     }
 
-    if !detail.attachments.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Attachments:"));
-        for att in &detail.attachments {
-            lines.push(Line::raw(format!("- {}: {}", att.kind, att.path)));
+    let pixels = app.inline_images.has_pixels();
+    let preview_rows = (content_area.height / 2).clamp(4, 10);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut content = DetailContent::default();
+    match active_tab {
+        Some(crate::app::RunDetailTab::Screenshots) => {
+            let shots = app.detail_screenshots();
+            content = push_screenshot_rows(
+                &mut lines,
+                app,
+                &shots,
+                selection,
+                content_area.width,
+                pixels,
+                preview_rows,
+            );
         }
-    }
-
-    if !detail.logs.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Logs:"));
-        for line in detail.logs.iter().take(20) {
-            lines.push(Line::raw(line.clone()));
+        Some(crate::app::RunDetailTab::Api) => {
+            let exchanges = app.detail_exchanges();
+            content = push_exchange_rows(
+                &mut lines,
+                app,
+                &exchanges,
+                selection,
+                detail.as_ref(),
+                content_area.width,
+            );
         }
-    }
-
-    if !detail.steps.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Steps:"));
-        for step in &detail.steps {
-            let status = step.status.as_deref().unwrap_or("running");
-            lines.push(Line::raw(format!("- [{status}] {}", step.text)));
-            if let Some(message) = &step.message {
-                lines.push(Line::raw(format!("    {message}")));
+        Some(crate::app::RunDetailTab::Logs) => {
+            if let Some(detail) = detail.as_ref() {
+                content = push_log_rows(&mut lines, &detail.logs, selection, content_area.width);
             }
         }
-    }
-
-    if !detail.exchanges.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(if detail.inspector_plaintext {
-            "HTTP exchanges (plaintext — p to hide):"
-        } else {
-            "HTTP exchanges (redacted — p to expand):"
-        }));
-        for exchange in &detail.exchanges {
-            for line in teshi_core::format_exchange_lines(exchange, true) {
-                lines.push(Line::raw(line));
-            }
-            lines.push(Line::raw(""));
+        Some(crate::app::RunDetailTab::Files) => {
+            let files = app.detail_files();
+            content = push_file_rows(&mut lines, app, &files, selection, content_area.width);
+        }
+        None => {
+            push_empty_detail_rows(&mut lines, detail.as_ref(), status, content_area.width);
         }
     }
 
-    lines
+    let max_offset = lines.len().saturating_sub(content_area.height as usize);
+    let mut offset = app.explore_details_scroll.min(max_offset);
+    if app.explore_details_reveal {
+        if let Some(line) = content.selected_line {
+            if line < offset {
+                offset = line;
+            } else if line >= offset + content_area.height as usize {
+                offset = line + 1 - content_area.height as usize;
+            }
+        }
+        app.explore_details_reveal = false;
+    }
+    app.explore_details_scroll = offset;
+    if !app.explore_edit_mode {
+        for (index, rect) in content.item_rects(content_area, offset) {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreDetailItem { index, rect });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(truncate_lines(lines, content_area.width)))
+            .scroll((offset.min(u16::MAX as usize) as u16, 0)),
+        content_area,
+    );
+
+    // Pixels draw over the reserved blank cells after the text frame.
+    if pixels
+        && let Some(preview) = content.preview.as_ref()
+        && preview.line >= offset
+        && preview.line < offset + content_area.height as usize
+    {
+        let top = content_area.y + (preview.line - offset) as u16;
+        let rows = preview.rows.min(content_area.bottom().saturating_sub(top));
+        if rows > 0 && content_area.width > 2 {
+            let area = Rect::new(content_area.x + 1, top, content_area.width - 2, rows);
+            let _ =
+                app.inline_images
+                    .place(frame, &preview.path, (area.width, area.height), area, 0);
+        }
+    }
+
+    if let Some(action_area) = action_area {
+        render_detail_actions(frame, app, action_area, active_tab);
+    }
 }
 
-fn no_run_detail_lines() -> Vec<Line<'static>> {
-    vec![
-        Line::raw(""),
-        Line::styled(
-            "  No run details yet",
-            Style::default()
-                .fg(theme::MUTED)
-                .add_modifier(Modifier::BOLD),
+/// Reserved pixel area for one selected screenshot.
+struct DetailPreview {
+    path: std::path::PathBuf,
+    /// Content-relative line where the preview starts.
+    line: usize,
+    rows: u16,
+}
+
+/// Content-relative line span owned by one selectable Run Details row/block.
+#[derive(Debug, Clone, Copy)]
+struct DetailItemRange {
+    index: usize,
+    start: usize,
+    /// Exclusive end line.
+    end: usize,
+}
+
+/// Rendered Run Details content plus the geometry needed for mouse hits.
+#[derive(Default)]
+struct DetailContent {
+    selected_line: Option<usize>,
+    items: Vec<DetailItemRange>,
+    preview: Option<DetailPreview>,
+}
+
+impl DetailContent {
+    /// Clips item blocks to the visible viewport and returns screen rectangles.
+    fn item_rects(&self, area: Rect, offset: usize) -> Vec<(usize, Rect)> {
+        if area.height == 0 {
+            return Vec::new();
+        }
+        let top = offset;
+        let bottom = offset + area.height as usize;
+        self.items
+            .iter()
+            .filter_map(|item| {
+                let start = item.start.max(top);
+                let end = item.end.min(bottom);
+                (start < end).then(|| {
+                    (
+                        item.index,
+                        Rect::new(
+                            area.x,
+                            area.y + (start - top) as u16,
+                            area.width,
+                            (end - start) as u16,
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// One inner tab's text offset and clickable width inside the tab row.
+struct DetailTabHit {
+    tab: crate::app::RunDetailTab,
+    x: u16,
+    width: u16,
+}
+
+/// Scenario name, solid status chip, and tabular duration.
+fn detail_scenario_line(
+    scenario_name: &str,
+    status: RunStatus,
+    duration: Option<u64>,
+    width: u16,
+) -> Line<'static> {
+    let (label, background) = match status {
+        RunStatus::Passed => ("PASSED", theme::SUCCESS),
+        RunStatus::Failed => ("FAILED", theme::ERROR),
+        RunStatus::Blocked => ("BLOCKED", theme::WARNING),
+        RunStatus::Running => ("RUNNING", theme::WARNING),
+        RunStatus::Skipped => ("SKIPPED", theme::MUTED),
+        RunStatus::Idle => ("IDLE", theme::MUTED),
+    };
+    let spans = vec![
+        Span::styled(
+            truncate_ellipsis(scenario_name, width.saturating_sub(18) as usize),
+            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ),
-        Line::raw(""),
-        Line::raw("  Run [r] to execute scenarios."),
-    ]
+        Span::raw(" "),
+        theme::chip(format!(" {label} "), background),
+    ];
+    detail_line_with_right(
+        spans,
+        Span::styled(format_elapsed(duration), Style::default().fg(theme::MUTED)),
+        width,
+    )
+}
+
+/// Selected step index/text and its runner correlation id.
+fn detail_step_line(
+    step_index: usize,
+    step_text: &str,
+    runner: Option<&str>,
+    width: u16,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(format!("#{step_index} "), Style::default().fg(theme::MUTED)),
+        Span::styled(
+            truncate_ellipsis(step_text, width.saturating_sub(18) as usize),
+            Style::default().fg(theme::FG),
+        ),
+    ];
+    if let Some(runner) = runner {
+        spans.push(Span::raw(" "));
+        // Runner labels are long (`f0:s1:L13`); keep them visible when space allows.
+        if UnicodeWidthStr::width(runner) + 12 < width as usize {
+            spans.push(Span::styled(
+                runner.to_string(),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+    }
+    detail_line_with_right(spans, Span::raw(""), width)
+}
+
+/// Inner family tabs, showing only families that have content.
+///
+/// Returns the rendered line and each tab's span so the caller can register
+/// click targets without duplicating the width arithmetic.
+fn detail_tabs_line(
+    app: &App,
+    tabs: &[crate::app::RunDetailTab],
+    active: Option<crate::app::RunDetailTab>,
+    width: u16,
+) -> (Line<'static>, Vec<DetailTabHit>) {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut hits = Vec::new();
+    let mut used = 0usize;
+    for tab in tabs {
+        let count = match tab {
+            crate::app::RunDetailTab::Screenshots => app.detail_screenshots().len(),
+            crate::app::RunDetailTab::Api => app.detail_exchanges().len(),
+            crate::app::RunDetailTab::Logs => {
+                app.current_detail().map_or(0, |detail| detail.logs.len())
+            }
+            crate::app::RunDetailTab::Files => app.detail_files().len(),
+        };
+        let label = format!(" {} ", tab.label());
+        let count = format!("{count}");
+        let label_width = UnicodeWidthStr::width(label.as_str());
+        let count_width = UnicodeWidthStr::width(count.as_str());
+        let tab_width = label_width + count_width + 1;
+        if used + tab_width + 1 > width as usize {
+            break;
+        }
+        let selected = active == Some(*tab);
+        let style = if selected {
+            Style::default()
+                .fg(theme::FG)
+                .bg(theme::TAB_ACTIVE_BG)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(theme::MUTED)
+        };
+        hits.push(DetailTabHit {
+            tab: *tab,
+            x: used as u16,
+            width: tab_width as u16,
+        });
+        spans.push(Span::styled(label, style));
+        spans.push(Span::styled(count, Style::default().fg(theme::MUTED)));
+        spans.push(Span::raw(" "));
+        used += tab_width;
+    }
+    (Line::from(spans), hits)
+}
+
+/// Screenshot rows with an inline preview box reserved for the selected image.
+fn push_screenshot_rows(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    shots: &[crate::app::DetailScreenshot],
+    selection: usize,
+    width: u16,
+    pixels: bool,
+    preview_rows: u16,
+) -> DetailContent {
+    let mut content = DetailContent::default();
+    if shots.is_empty() {
+        lines.push(Line::styled(
+            "  No screenshots for this step",
+            Style::default().fg(theme::MUTED),
+        ));
+        return content;
+    }
+    for (index, shot) in shots.iter().enumerate() {
+        let start = lines.len();
+        let selected = index == selection;
+        let path_label = shot.path.as_deref().map_or_else(
+            || shot.reported.clone(),
+            |path| app.project_display_path(path),
+        );
+        let mut row = vec![
+            Span::styled("▣ ", Style::default().fg(theme::PRIMARY)),
+            Span::styled(shot.file.clone(), Style::default().fg(theme::FG)),
+        ];
+        let size = shot.size.map_or_else(String::new, human_bytes);
+        if !size.is_empty() {
+            row.push(Span::raw(" "));
+        }
+        let line = detail_line_with_right(
+            row,
+            Span::styled(size, Style::default().fg(theme::MUTED)),
+            width,
+        );
+        let line = select_detail_line(line, selected, width);
+        if selected {
+            content.selected_line = Some(start);
+        }
+        lines.push(line);
+        lines.push(pad_detail_line(
+            Line::styled(format!(" {path_label}"), Style::default().fg(theme::MUTED)),
+            width,
+        ));
+        if selected {
+            if pixels
+                && shot.size.is_some()
+                && let Some(path) = shot.path.clone()
+            {
+                let preview_start = lines.len();
+                for _ in 0..preview_rows {
+                    lines.push(pad_detail_line(Line::raw(""), width));
+                }
+                content.preview = Some(DetailPreview {
+                    path,
+                    line: preview_start,
+                    rows: preview_rows,
+                });
+            } else {
+                lines.push(pad_detail_line(
+                    Line::styled(
+                        "  preview unavailable — terminal has no graphics protocol",
+                        Style::default().fg(theme::MUTED),
+                    ),
+                    width,
+                ));
+                for _ in 1..preview_rows {
+                    lines.push(pad_detail_line(Line::raw(""), width));
+                }
+                if shot.path.is_none() {
+                    lines.push(pad_detail_line(
+                        Line::styled(
+                            "  path is outside .teshi/logs/replay-screenshots",
+                            Style::default().fg(theme::WARNING),
+                        ),
+                        width,
+                    ));
+                }
+            }
+        }
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
+    }
+    content
+}
+
+/// Recordings and unknown artifact kinds; never silently dropped.
+fn push_file_rows(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    files: &[crate::app::DetailFile],
+    selection: usize,
+    width: u16,
+) -> DetailContent {
+    let mut content = DetailContent::default();
+    if files.is_empty() {
+        lines.push(Line::styled(
+            "  No recordings or attachments for this step",
+            Style::default().fg(theme::MUTED),
+        ));
+        return content;
+    }
+    for (index, file) in files.iter().enumerate() {
+        let start = lines.len();
+        let selected = index == selection;
+        let video = is_video_path(std::path::Path::new(&file.reported));
+        let mut row = vec![Span::styled(
+            if video { "▶ " } else { "◦ " },
+            Style::default().fg(if video { theme::PRIMARY } else { theme::MUTED }),
+        )];
+        row.push(Span::styled(
+            file.file.clone(),
+            Style::default().fg(theme::FG),
+        ));
+        if !file.kind.is_empty() {
+            row.push(Span::styled(
+                format!(" · {}", file.kind),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+        let size = file.size.map_or_else(String::new, human_bytes);
+        if !size.is_empty() {
+            row.push(Span::raw(" "));
+        }
+        let line = select_detail_line(
+            detail_line_with_right(
+                row,
+                Span::styled(size, Style::default().fg(theme::MUTED)),
+                width,
+            ),
+            selected,
+            width,
+        );
+        if selected {
+            content.selected_line = Some(start);
+        }
+        lines.push(line);
+        let path_label = file.path.as_deref().map_or_else(
+            || file.reported.clone(),
+            |path| app.project_display_path(path),
+        );
+        lines.push(pad_detail_line(
+            Line::styled(format!(" {path_label}"), Style::default().fg(theme::MUTED)),
+            width,
+        ));
+        if selected && video {
+            lines.push(pad_detail_line(
+                Line::styled(
+                    "  Enter opens the system player",
+                    Style::default().fg(theme::MUTED),
+                ),
+                width,
+            ));
+        }
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
+    }
+    content
+}
+
+/// HTTP exchanges with folded headers and on-demand bodies.
+fn push_exchange_rows(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    exchanges: &[teshi_core::HttpExchange],
+    selection: usize,
+    detail: Option<&CaseDetail>,
+    width: u16,
+) -> DetailContent {
+    let mut content = DetailContent::default();
+    if let Some(detail) = detail
+        && let Some(message) = detail.message.as_deref()
+        && !message.trim().is_empty()
+    {
+        let color = if detail.status == RunStatus::Blocked {
+            theme::WARNING
+        } else {
+            theme::ERROR
+        };
+        lines.push(pad_detail_line(
+            Line::styled(
+                format!(
+                    " assertion failed  {}",
+                    message.lines().next().unwrap_or("")
+                ),
+                Style::default().fg(color),
+            ),
+            width,
+        ));
+        lines.push(pad_detail_line(Line::raw(""), width));
+    }
+    if exchanges.is_empty() {
+        lines.push(Line::styled(
+            "  No HTTP exchanges for this step",
+            Style::default().fg(theme::MUTED),
+        ));
+        return content;
+    }
+    for (index, exchange) in exchanges.iter().enumerate() {
+        let start = lines.len();
+        let selected = index == selection;
+        let status = exchange.status;
+        let status_style = match status {
+            Some(code) if code >= 400 => Style::default().fg(theme::ERROR),
+            Some(_) => Style::default().fg(theme::SUCCESS),
+            None => Style::default().fg(theme::MUTED),
+        };
+        let mut row = vec![
+            Span::styled(
+                format!("{} ", exchange.method),
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(exchange.url.clone(), Style::default().fg(theme::FG)),
+        ];
+        let status = status.map_or_else(|| "-".to_string(), |code| code.to_string());
+        row.push(Span::raw(" "));
+        let line = select_detail_line(
+            detail_line_with_right(row, Span::styled(status, status_style), width),
+            selected,
+            width,
+        );
+        if selected {
+            content.selected_line = Some(start);
+        }
+        lines.push(line);
+
+        let mut meta = Vec::new();
+        if let Some(duration) = exchange.duration_ms {
+            meta.push(format!("{duration} ms"));
+        }
+        let request_bytes = json_bytes(&exchange.request_body);
+        let response_bytes = json_bytes(&exchange.response_body);
+        meta.push(format!(
+            "req {} · res {}",
+            human_bytes(request_bytes as u64),
+            human_bytes(response_bytes as u64)
+        ));
+        if let Some(content_type) = content_type(exchange) {
+            meta.push(content_type);
+        }
+        lines.push(pad_detail_line(
+            Line::styled(
+                format!(" {}", meta.join(" · ")),
+                Style::default().fg(theme::MUTED),
+            ),
+            width,
+        ));
+
+        for assertion in exchange
+            .asserts
+            .iter()
+            .filter(|assertion| !assertion.passed)
+        {
+            lines.push(pad_detail_line(
+                Line::styled(
+                    format!(" ✗ {}", assertion.name),
+                    Style::default().fg(theme::ERROR),
+                ),
+                width,
+            ));
+        }
+
+        let expanded = app.explore_details_expanded.contains(&exchange.exchange_id);
+        push_fold_row(
+            lines,
+            expanded,
+            "Request headers",
+            &format!("{}", json_count(&exchange.request_headers)),
+            width,
+        );
+        push_fold_row(
+            lines,
+            expanded,
+            "Request body",
+            &format!("{} · not loaded", human_bytes(request_bytes as u64)),
+            width,
+        );
+        if expanded {
+            push_json_lines(lines, &exchange.request_body, width);
+        }
+        push_fold_row(
+            lines,
+            expanded,
+            "Response headers",
+            &format!("{}", json_count(&exchange.response_headers)),
+            width,
+        );
+        push_fold_row(
+            lines,
+            expanded,
+            "Response body",
+            &format!("{} · not loaded", human_bytes(response_bytes as u64)),
+            width,
+        );
+        if expanded {
+            push_json_lines(lines, &exchange.response_body, width);
+            if !exchange.extract.is_null()
+                && exchange
+                    .extract
+                    .as_object()
+                    .is_some_and(|map| !map.is_empty())
+            {
+                lines.push(pad_detail_line(
+                    Line::styled(
+                        " extract",
+                        Style::default()
+                            .fg(theme::MUTED)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    width,
+                ));
+                push_json_lines(lines, &exchange.extract, width);
+            }
+        }
+        lines.push(pad_detail_line(
+            Line::styled(
+                "  Space expands · body renders only on demand",
+                Style::default().fg(theme::MUTED),
+            ),
+            width,
+        ));
+        lines.push(pad_detail_line(
+            Line::styled(" ─────", Style::default().fg(theme::BORDER)),
+            width,
+        ));
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
+    }
+    content
+}
+
+/// Runner logs are case-level; the selected row can be copied.
+fn push_log_rows(
+    lines: &mut Vec<Line<'static>>,
+    logs: &[String],
+    selection: usize,
+    width: u16,
+) -> DetailContent {
+    let mut content = DetailContent::default();
+    if logs.is_empty() {
+        lines.push(Line::styled(
+            "  No log lines for this case",
+            Style::default().fg(theme::MUTED),
+        ));
+        return content;
+    }
+    for (index, log) in logs.iter().enumerate() {
+        let start = lines.len();
+        let selected = index == selection;
+        let line = select_detail_line(
+            pad_detail_line(
+                Line::styled(format!(" {log}"), Style::default().fg(theme::FG)),
+                width,
+            ),
+            selected,
+            width,
+        );
+        if selected {
+            content.selected_line = Some(start);
+        }
+        lines.push(line);
+        content.items.push(DetailItemRange {
+            index,
+            start,
+            end: lines.len(),
+        });
+    }
+    content
+}
+
+fn push_empty_detail_rows(
+    lines: &mut Vec<Line<'static>>,
+    detail: Option<&CaseDetail>,
+    status: RunStatus,
+    width: u16,
+) {
+    lines.push(pad_detail_line(Line::raw(""), width));
+    if let Some(detail) = detail {
+        lines.push(pad_detail_line(
+            Line::styled(
+                "  No evidence recorded for this step",
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            width,
+        ));
+        if let Some(message) = detail.message.as_deref()
+            && !message.trim().is_empty()
+        {
+            let color = if status == RunStatus::Blocked {
+                theme::WARNING
+            } else {
+                theme::ERROR
+            };
+            for line in message.lines().take(3) {
+                lines.push(pad_detail_line(
+                    Line::styled(format!("  {line}"), Style::default().fg(color)),
+                    width,
+                ));
+            }
+        }
+    } else {
+        lines.push(pad_detail_line(
+            Line::styled(
+                "  No run details yet",
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            width,
+        ));
+        lines.push(pad_detail_line(Line::raw(""), width));
+        lines.push(pad_detail_line(
+            Line::styled(
+                "  Run [r] to execute scenarios.",
+                Style::default().fg(theme::MUTED),
+            ),
+            width,
+        ));
+    }
+}
+
+fn render_detail_actions(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    active: Option<crate::app::RunDetailTab>,
+) {
+    let controls: Vec<(&str, Action)> = match active {
+        Some(crate::app::RunDetailTab::Screenshots) => vec![
+            ("Enter fullscreen", Action::ExploreDetailEnter),
+            ("o open", Action::ExploreOpenExternal),
+            ("y copy path", Action::ExploreCopyPath),
+        ],
+        Some(crate::app::RunDetailTab::Api) => vec![
+            ("Space expand", Action::ExploreDetailToggle),
+            ("p plaintext", Action::ToggleInspectorPlaintext),
+            ("y copy URL", Action::ExploreCopyPath),
+        ],
+        Some(crate::app::RunDetailTab::Logs) => {
+            vec![("y copy line", Action::ExploreCopyPath)]
+        }
+        Some(crate::app::RunDetailTab::Files) => vec![
+            ("Enter open", Action::ExploreDetailEnter),
+            ("y copy path", Action::ExploreCopyPath),
+        ],
+        None => Vec::new(),
+    };
+    render_action_bar(
+        frame,
+        &mut app.clickable_regions,
+        area,
+        "",
+        &controls,
+        false,
+    );
+}
+
+/// Join left and right spans on one row, right-aligning `right`.
+fn detail_line_with_right(
+    mut left: Vec<Span<'static>>,
+    right: Span<'static>,
+    width: u16,
+) -> Line<'static> {
+    let left_width: usize = left
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum();
+    let right_width = UnicodeWidthStr::width(right.content.as_ref());
+    let width = width as usize;
+    if left_width + right_width < width {
+        left.push(Span::raw(" ".repeat(width - left_width - right_width)));
+    } else {
+        left.push(Span::raw(" "));
+    }
+    left.push(right);
+    Line::from(left)
+}
+
+/// Apply the selection fill to a whole row and its trailing cells.
+fn select_detail_line(mut line: Line<'static>, selected: bool, width: u16) -> Line<'static> {
+    if selected {
+        let style = theme::selected_row(true);
+        line.style = style;
+        for span in &mut line.spans {
+            span.style = span.style.patch(style);
+        }
+        pad_detail_line(line, width)
+    } else {
+        pad_detail_line(line, width)
+    }
+}
+
+fn pad_detail_line(line: Line<'static>, width: u16) -> Line<'static> {
+    let style = line.style;
+    pad_line_to_width(line, width, style)
+}
+
+fn push_fold_row(
+    lines: &mut Vec<Line<'static>>,
+    expanded: bool,
+    label: &str,
+    right: &str,
+    width: u16,
+) {
+    let caret = if expanded { "▾ " } else { "▸ " };
+    let spans = vec![
+        Span::styled(caret, Style::default().fg(theme::MUTED)),
+        Span::styled(label.to_string(), Style::default().fg(theme::FG)),
+    ];
+    lines.push(pad_detail_line(
+        detail_line_with_right(
+            spans,
+            Span::styled(right.to_string(), Style::default().fg(theme::MUTED)),
+            width,
+        ),
+        width,
+    ));
+}
+
+fn push_json_lines(lines: &mut Vec<Line<'static>>, value: &serde_json::Value, width: u16) {
+    let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    for line in text.lines().take(12) {
+        lines.push(pad_detail_line(
+            Line::styled(format!("   {line}"), Style::default().fg(theme::MUTED)),
+            width,
+        ));
+    }
+    if text.lines().count() > 12 {
+        lines.push(pad_detail_line(
+            Line::styled("   …", Style::default().fg(theme::MUTED)),
+            width,
+        ));
+    }
+}
+
+fn truncate_ellipsis(text: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for character in text.chars() {
+        if UnicodeWidthStr::width(out.as_str()) + UnicodeWidthChar::width(character).unwrap_or(0)
+            >= max
+        {
+            break;
+        }
+        out.push(character);
+    }
+    out.push('…');
+    out
+}
+
+fn format_elapsed(duration: Option<u64>) -> String {
+    match duration {
+        Some(ms) if ms >= 1000 => format!("{:.2}s", ms as f64 / 1000.0),
+        Some(ms) => format!("{ms} ms"),
+        None => "—".to_string(),
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes / KB)
+    } else {
+        format!("{bytes:.0} B")
+    }
+}
+
+fn json_bytes(value: &serde_json::Value) -> usize {
+    serde_json::to_string(value).map_or(0, |text| text.len())
+}
+
+fn json_count(value: &serde_json::Value) -> usize {
+    value.as_object().map_or(0, |map| map.len())
+}
+
+/// Content type from either header block, lower-cased for the metadata row.
+fn content_type(exchange: &teshi_core::HttpExchange) -> Option<String> {
+    [&exchange.response_headers, &exchange.request_headers]
+        .into_iter()
+        .find_map(|headers| {
+            headers.as_object().and_then(|headers| {
+                headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-type")
+                        .then(|| value.as_str().unwrap_or_default().to_string())
+                })
+            })
+        })
+}
+
+/// Whether the artifact path is a recording the system player should own.
+fn is_video_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "webm" | "mov" | "mkv" | "avi"
+            )
+        })
 }
 
 fn truncate_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
@@ -4228,17 +5027,6 @@ fn truncate_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
         out_lines.push(truncate_line_to_cols(line, width));
     }
     out_lines
-}
-
-fn status_label(status: RunStatus) -> &'static str {
-    match status {
-        RunStatus::Idle => "Idle",
-        RunStatus::Running => "Running",
-        RunStatus::Passed => "Passed",
-        RunStatus::Failed => "Failed",
-        RunStatus::Skipped => "Skipped",
-        RunStatus::Blocked => "Blocked",
-    }
 }
 
 /// Renders the auth management overlay panel over the entire screen.
@@ -8084,37 +8872,44 @@ mod truncate_tests {
     use std::path::PathBuf;
 
     use super::{
-        Line, Span, build_case_detail_lines, explore_panes, explore_run_summary_label,
-        explore_scenarios_title, render, truncate_line_to_cols,
+        Line, Span, explore_panes, explore_run_summary_label, explore_scenarios_title,
+        push_exchange_rows, render, truncate_line_to_cols,
     };
-    use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
+    use crate::app::{App, CaseDetail, ClickableRegion, ColumnFocus, RunStatus};
     use crate::keymap::Action;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
 
     #[test]
-    fn explore_scenarios_take_only_their_rows_while_steps_get_the_rest() {
+    fn explore_scenarios_take_only_their_rows_while_steps_and_details_share_the_rest() {
         let area = ratatui::layout::Rect::new(0, 0, 120, 30);
 
-        let [_, scenario, steps] = explore_panes(area, 0, 1);
+        let [_, scenario, steps, details] = explore_panes(area, 0, 1);
         assert_eq!(
             scenario.height, 4,
             "one scenario plus borders and the action strip"
         );
         assert_eq!(steps.height, 26);
+        assert_eq!(details.height, 26);
+        assert_eq!(steps.width, 38, "Steps keeps its documented 38-column band");
+        assert_eq!(details.x, steps.right());
+        assert_eq!(details.right(), area.right());
         assert_eq!(scenario.y, area.y, "Scenarios sit above the Steps list");
         assert_eq!(steps.bottom(), area.bottom());
 
-        let [_, scenario, steps] = explore_panes(area, 0, 0);
+        let [_, scenario, steps, details] = explore_panes(area, 0, 0);
         assert_eq!(
             scenario.height, 4,
             "an empty list still has borders and the action strip"
         );
         assert_eq!(steps.height, 26);
+        assert_eq!(details.height, 26);
 
-        let [_, scenario, steps] = explore_panes(area, 0, 30);
+        let [_, scenario, steps, details] = explore_panes(area, 0, 30);
         assert_eq!(scenario.height, 12, "the scenario pane caps at 40%");
         assert_eq!(steps.height, 18);
+        assert_eq!(details.height, 18);
     }
 
     #[test]
@@ -8124,6 +8919,11 @@ mod truncate_tests {
         assert_eq!(panes[0], ratatui::layout::Rect::default());
         assert_eq!(panes[1], ratatui::layout::Rect::default());
         assert_eq!(panes[2], area);
+        assert_eq!(panes[3], ratatui::layout::Rect::default());
+
+        let panes = explore_panes(area, 3, 5);
+        assert_eq!(panes[3], area, "Details joins the focus rotation");
+        assert_eq!(panes[0], ratatui::layout::Rect::default());
     }
 
     #[test]
@@ -8535,7 +9335,6 @@ mod truncate_tests {
     fn migrated_viewer_specs_stay_inside_every_viewport() {
         for (width, height) in [(200u16, 60u16), (120, 36), (80, 24), (40, 20)] {
             for spec in [
-                super::FAILURE_DETAIL_SPEC,
                 super::CHANGE_SUMMARY_SPEC,
                 super::SETTINGS_SPEC,
                 super::AGENT_PROFILE_SPEC,
@@ -8550,8 +9349,6 @@ mod truncate_tests {
         }
 
         let area = ratatui::layout::Rect::new(0, 0, 200, 60);
-        let failure = super::FAILURE_DETAIL_SPEC.rect(area, (0, 0));
-        assert_eq!((failure.width, failure.height), (120, 42));
         let summary = super::CHANGE_SUMMARY_SPEC.rect(area, (0, 0));
         assert_eq!((summary.width, summary.height), (110, 33));
         let settings = super::SETTINGS_SPEC.rect(area, (0, 0));
@@ -8696,7 +9493,7 @@ mod truncate_tests {
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         for action in [
             Action::RunScenario,
-            Action::ToggleFailureDetail,
+            Action::FocusRunDetails,
             Action::EnterEdit,
         ] {
             assert!(
@@ -8842,8 +9639,433 @@ mod truncate_tests {
         assert_eq!(explore_scenarios_title(&app), "Scenarios (0)");
     }
 
+    fn detail_render_app(root: &std::path::Path) -> App {
+        let content = "Feature: Login\n  Scenario: Successful login\n    Given the API is running\n    Then status is 200\n";
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.project.root_dir = root.to_path_buf();
+        app.project.features = vec![gherkin::parse_feature(content, root.join("login.feature"))];
+        app.active_tab = crate::app::MainTab::Explore;
+        app.explore_selected_feature = 0;
+        app.explore_selected_scenario = 0;
+        app.explore_selected_step = 1;
+        app
+    }
+
+    fn draw_detail_screen(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, app))
+            .expect("render details");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    fn clickable_detail_app(root: &std::path::Path) -> App {
+        let mut app = detail_render_app(root);
+        let exchange = |id: &str, status: u16| {
+            teshi_core::HttpExchange::from_value(&serde_json::json!({
+                "type": "http_exchange",
+                "exchange_id": id,
+                "case_id": "f0:s1",
+                "step_id": "f0:s1:L4",
+                "template": "login.json.j2",
+                "method": "POST",
+                "url": "/api/login",
+                "request_headers": {"Accept": "application/json"},
+                "request_body": {"password": "***", "name": "Ada"},
+                "status": status,
+                "response_headers": {"content-type": "application/json"},
+                "response_body": {"session": "8f2c…a91"},
+                "duration_ms": 128,
+                "extract": {},
+                "asserts": [{"name": "status_ok", "passed": true}],
+                "redacted": true
+            }))
+            .expect("exchange")
+        };
+        let detail = CaseDetail {
+            case_id: "f0:s1".into(),
+            status: RunStatus::Passed,
+            duration_ms: Some(1240),
+            message: None,
+            stack: None,
+            attachments: vec![
+                crate::runner::RunAttachment {
+                    kind: "screenshot".into(),
+                    path: root
+                        .join(".teshi/logs/replay-screenshots/run/after-login.png")
+                        .display()
+                        .to_string(),
+                    step_id: Some("f0:s1:L4".into()),
+                },
+                crate::runner::RunAttachment {
+                    kind: "recording".into(),
+                    path: root
+                        .join(".teshi/logs/replay-screenshots/run/run.mp4")
+                        .display()
+                        .to_string(),
+                    step_id: None,
+                },
+            ],
+            logs: (0..3).map(|index| format!("log line {index}")).collect(),
+            exchanges: vec![exchange("e1", 200), exchange("e2", 201)],
+            steps: vec![crate::app::StepRunRecord {
+                step_id: "f0:s1:L4".into(),
+                text: "status is 200".into(),
+                status: Some("passed".into()),
+                message: None,
+            }],
+            inspector_plaintext: false,
+        };
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
+        app
+    }
+
+    fn detail_region_rect(
+        app: &App,
+        matches: impl Fn(&ClickableRegion) -> bool,
+    ) -> ratatui::layout::Rect {
+        app.clickable_regions
+            .iter()
+            .find_map(|region| {
+                if !matches(region) {
+                    return None;
+                }
+                match region {
+                    ClickableRegion::ExploreDetailPane { rect }
+                    | ClickableRegion::ExploreDetailTab { rect, .. }
+                    | ClickableRegion::ExploreDetailItem { rect, .. } => Some(*rect),
+                    _ => None,
+                }
+            })
+            .expect("requested Run Details region")
+    }
+
     #[test]
-    fn case_detail_lines_keep_redacted_http_values() {
+    fn run_details_tabs_rows_and_pane_are_clickable() {
+        let root = std::env::temp_dir().join("teshi-run-details-click");
+        let mut app = clickable_detail_app(&root);
+        app.explore_focus = ColumnFocus::Step;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        let api_tab = detail_region_rect(&app, |region| {
+            matches!(
+                region,
+                ClickableRegion::ExploreDetailTab {
+                    tab: crate::app::RunDetailTab::Api,
+                    ..
+                }
+            )
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            api_tab.x + 1,
+            api_tab.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click API tab");
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        assert_eq!(app.explore_details_tab, crate::app::RunDetailTab::Api);
+        assert!(app.explore_details_tab_pinned);
+        assert_eq!(app.explore_details_selection, 0);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render API");
+        let second_exchange = detail_region_rect(&app, |region| {
+            matches!(region, ClickableRegion::ExploreDetailItem { index: 1, .. })
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            second_exchange.x + 1,
+            second_exchange.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click second exchange");
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        assert_eq!(app.explore_details_selection, 1);
+
+        app.explore_focus = ColumnFocus::Step;
+        let pane = detail_region_rect(&app, |region| {
+            matches!(region, ClickableRegion::ExploreDetailPane { .. })
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x,
+            pane.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click pane chrome");
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+        assert_eq!(
+            app.explore_details_selection, 1,
+            "clicking pane chrome keeps the selected row"
+        );
+    }
+
+    #[test]
+    fn run_details_wheel_scrolls_content_without_changing_steps() {
+        let root = std::env::temp_dir().join("teshi-run-details-wheel");
+        let mut app = clickable_detail_app(&root);
+        let mut detail = app.explore_case_details.remove(&(0, 0)).expect("detail");
+        detail.logs = (0..40).map(|index| format!("log line {index}")).collect();
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_details_tab = crate::app::RunDetailTab::Logs;
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let pane = detail_region_rect(&app, |region| {
+            matches!(region, ClickableRegion::ExploreDetailPane { .. })
+        });
+        let step = app.explore_selected_step;
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            pane.x + 2,
+            pane.y + 5,
+            KeyModifiers::NONE,
+        )
+        .expect("wheel down");
+        assert_eq!(app.explore_details_scroll, 3);
+        assert!(!app.explore_details_reveal);
+        assert_eq!(app.explore_selected_step, step);
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollUp,
+            pane.x + 2,
+            pane.y + 5,
+            KeyModifiers::NONE,
+        )
+        .expect("wheel up");
+        assert_eq!(app.explore_details_scroll, 0);
+    }
+
+    #[test]
+    fn run_details_mouse_targets_work_in_a_narrow_single_pane() {
+        let root = std::env::temp_dir().join("teshi-run-details-narrow");
+        let mut app = clickable_detail_app(&root);
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render narrow");
+
+        let api_tab = detail_region_rect(&app, |region| {
+            matches!(
+                region,
+                ClickableRegion::ExploreDetailTab {
+                    tab: crate::app::RunDetailTab::Api,
+                    ..
+                }
+            )
+        });
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            api_tab.x + 1,
+            api_tab.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click narrow API tab");
+        assert_eq!(app.explore_details_tab, crate::app::RunDetailTab::Api);
+        assert_eq!(app.explore_focus, ColumnFocus::Details);
+    }
+
+    #[test]
+    fn run_details_action_strip_click_expands_the_selected_exchange() {
+        let root = std::env::temp_dir().join("teshi-run-details-actions");
+        let mut app = clickable_detail_app(&root);
+        app.explore_details_tab = crate::app::RunDetailTab::Api;
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let button = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    action: Action::ExploreDetailToggle,
+                    rect,
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("Space expand button");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click Space expand");
+        assert!(app.explore_details_expanded.contains("e1"));
+    }
+
+    #[test]
+    fn run_details_edit_mode_registers_no_mouse_targets() {
+        let root = std::env::temp_dir().join("teshi-run-details-edit");
+        let mut app = clickable_detail_app(&root);
+        app.explore_edit_mode = true;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render edit mode");
+        assert!(!app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreDetailPane { .. }
+                | ClickableRegion::ExploreDetailTab { .. }
+                | ClickableRegion::ExploreDetailItem { .. }
+        )));
+    }
+
+    #[test]
+    fn run_details_render_header_screenshot_and_no_protocol_fallback() {
+        let root = std::env::temp_dir().join("teshi-run-details-ui");
+        let mut app = detail_render_app(&root);
+        let detail = CaseDetail {
+            case_id: "f0:s1".into(),
+            status: RunStatus::Passed,
+            duration_ms: Some(1240),
+            message: None,
+            stack: None,
+            attachments: vec![crate::runner::RunAttachment {
+                kind: "screenshot".into(),
+                path: root
+                    .join(".teshi/logs/replay-screenshots/run/after-login.png")
+                    .display()
+                    .to_string(),
+                step_id: Some("f0:s1".into()),
+            }],
+            logs: Vec::new(),
+            exchanges: Vec::new(),
+            steps: vec![crate::app::StepRunRecord {
+                step_id: "f0:s1".into(),
+                text: "status is 200".into(),
+                status: Some("passed".into()),
+                message: None,
+            }],
+            inspector_plaintext: false,
+        };
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
+
+        let screen = draw_detail_screen(&mut app, 160, 32);
+        for expected in [
+            "Run Details",
+            "Successful login",
+            "PASSED",
+            "1.24s",
+            "#2",
+            "status is 200",
+            "Screenshots",
+            "after-login.png",
+            "preview unavailable",
+            ".teshi/logs/replay-screenshots/run/after-login.png",
+        ] {
+            assert!(screen.contains(expected), "missing {expected:?}: {screen}");
+        }
+        assert!(!screen.contains("Failure Details"), "{screen}");
+    }
+
+    #[test]
+    fn run_details_failed_http_rows_are_red_and_expand_on_space() {
+        let root = std::env::temp_dir().join("teshi-run-details-api");
+        let mut app = detail_render_app(&root);
+        let exchange = teshi_core::HttpExchange::from_value(&serde_json::json!({
+            "type": "http_exchange",
+            "exchange_id": "e1",
+            "case_id": "f0:s1",
+            "step_id": "f0:s1:L4",
+            "template": "login.json.j2",
+            "method": "POST",
+            "url": "/api/login",
+            "request_headers": {"Accept": "application/json"},
+            "request_body": {"password": "***", "name": "Ada"},
+            "status": 401,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": {"error": "bad credentials"},
+            "duration_ms": 128,
+            "extract": {},
+            "asserts": [{"name": "status_ok", "passed": false}],
+            "redacted": true
+        }))
+        .expect("exchange");
+        let detail = CaseDetail {
+            case_id: "f0:s1".into(),
+            status: RunStatus::Failed,
+            duration_ms: Some(410),
+            message: Some("expected 200, got 401".into()),
+            stack: None,
+            attachments: Vec::new(),
+            logs: Vec::new(),
+            exchanges: vec![exchange],
+            steps: vec![crate::app::StepRunRecord {
+                step_id: "f0:s1:L4".into(),
+                text: "status is 200".into(),
+                status: Some("failed".into()),
+                message: Some("expected 200, got 401".into()),
+            }],
+            inspector_plaintext: false,
+        };
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        for expected in ["FAILED", "API", "401", "assertion failed", "not loaded"] {
+            assert!(screen.contains(expected), "missing {expected:?}: {screen}");
+        }
+        assert!(
+            !screen.contains("Ada"),
+            "HTTP body stayed lazy before Space: {screen}"
+        );
+        let (x, y) = cell_at_text(&terminal, "assertion failed").expect("assertion row");
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].fg,
+            crate::theme::ERROR,
+            "the assertion row is red"
+        );
+
+        app.explore_details_selection = 0;
+        app.explore_detail_toggle();
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render expanded");
+        let expanded: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(expanded.contains("Ada"), "{expanded}");
+        assert!(expanded.contains("***"), "{expanded}");
+    }
+
+    #[test]
+    fn run_detail_http_rows_keep_redacted_values_and_lazy_bodies() {
         let exchange = teshi_core::HttpExchange::from_value(&serde_json::json!({
             "type": "http_exchange",
             "exchange_id": "e1",
@@ -8869,18 +10091,46 @@ mod truncate_tests {
             stack: None,
             attachments: Vec::new(),
             logs: Vec::new(),
-            exchanges: vec![exchange],
+            exchanges: vec![exchange.clone()],
             steps: Vec::new(),
             inspector_plaintext: false,
         };
-        let text = build_case_detail_lines("Create user", &detail)
+        let mut app = App::from_args().expect("app init");
+        let mut lines = Vec::new();
+        push_exchange_rows(
+            &mut lines,
+            &app,
+            std::slice::from_ref(&exchange),
+            0,
+            Some(&detail),
+            80,
+        );
+        let collapsed = lines
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("***"));
-        assert!(!text.to_lowercase().contains("bearer"));
-        assert!(text.contains("redacted"));
+        assert!(collapsed.contains("not loaded"), "{collapsed}");
+        assert!(!collapsed.contains("Ada"), "body stayed lazy: {collapsed}");
+
+        app.explore_details_expanded.insert("e1".into());
+        let mut expanded = Vec::new();
+        push_exchange_rows(
+            &mut expanded,
+            &app,
+            std::slice::from_ref(&exchange),
+            0,
+            Some(&detail),
+            80,
+        );
+        let expanded = expanded
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("***"));
+        assert!(!expanded.to_lowercase().contains("bearer"));
+        assert!(expanded.contains("Ada"), "{expanded}");
     }
 
     #[test]
@@ -9905,8 +11155,9 @@ Feature: Rule only
 
     #[test]
     fn explore_steps_render_deleted_and_added_git_lines() {
-        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is closed\n";
-        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is not running\n";
+        let old =
+            "Feature: Backup\n  Scenario: Restore\n    Given a backup\n    And app is closed\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup\n    And app runs\n";
         let mut app = App::from_args().expect("app init");
         let path = PathBuf::from("backup.feature");
         app.project.features = vec![gherkin::parse_feature(new, path.clone())];
@@ -9932,8 +11183,8 @@ Feature: Rule only
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("-     And the application is closed"));
-        assert!(screen.contains("+     And the application is not running"));
+        assert!(screen.contains("-     And app is closed"));
+        assert!(screen.contains("+     And app runs"));
     }
 
     /// Coordinates of the first cell whose row contains `needle` (ASCII only).
@@ -9953,8 +11204,9 @@ Feature: Rule only
 
     #[test]
     fn changed_steps_keep_gherkin_colors() {
-        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is closed\n";
-        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is not running\n    And the cache is warm\n";
+        let old =
+            "Feature: Backup\n  Scenario: Restore\n    Given a backup\n    And app is closed\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup\n    And app runs\n    And cache is warm\n";
         let mut app = App::from_args().expect("app init");
         let path = PathBuf::from("backup.feature");
         app.project.features = vec![gherkin::parse_feature(new, path.clone())];
@@ -9982,14 +11234,13 @@ Feature: Rule only
 
         // The added Step keeps a Gherkin keyword colour and inherits `Given`,
         // exactly like the browse view.
-        let (x, y) =
-            cell_at_text(&terminal, "And the application is not running").expect("added row");
+        let (x, y) = cell_at_text(&terminal, "And app runs").expect("added row");
         let cell = &terminal.backend().buffer()[(x, y)];
         assert_eq!(cell.fg, crate::theme::PRIMARY);
 
         // Removed Steps have no AST counterpart, so they fall back to the plain
         // continuation colour.
-        let (x, y) = cell_at_text(&terminal, "And the application is closed").expect("removed row");
+        let (x, y) = cell_at_text(&terminal, "And app is closed").expect("removed row");
         let cell = &terminal.backend().buffer()[(x, y)];
         assert_eq!(cell.fg, crate::theme::TAB_INACTIVE);
     }
@@ -10418,7 +11669,7 @@ mod left_pane_width_tests {
     #[test]
     fn test_explore_left_column_matches_shared_band() {
         let area = ratatui::layout::Rect::new(0, 0, 140, 30);
-        let [left, _, _] = explore_panes(area, 0, 1);
+        let [left, _, _, _] = explore_panes(area, 0, 1);
         assert_eq!(left.width, left_pane_width(area.width));
         assert_eq!(
             left.width,

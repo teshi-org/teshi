@@ -269,10 +269,25 @@ pub enum Action {
     /// Move to the nearest visible pane above the current pane.
     FocusPaneUp,
     ExploreRight,
+    /// Move focus one visual column left; from Run Details this returns to Steps.
+    ExploreLeft,
     RunScenario,
     AiSuggest,
     EnterEdit,
-    ToggleFailureDetail,
+    /// Focus the Run Details pane without running anything.
+    FocusRunDetails,
+    /// Perform the primary action of the selected Run Details item.
+    ExploreDetailEnter,
+    /// Expand or collapse the selected Run Details item.
+    ExploreDetailToggle,
+    /// Scroll Run Details content up without changing the selected step.
+    ExploreDetailScrollUp,
+    /// Scroll Run Details content down without changing the selected step.
+    ExploreDetailScrollDown,
+    /// Open the selected Run Details artifact or URL outside Teshi.
+    ExploreOpenExternal,
+    /// Copy the selected Run Details path or URL.
+    ExploreCopyPath,
     /// Expand or hide redacted HTTP fields in Explore run details.
     ToggleInspectorPlaintext,
     // Step keyword picker overlay
@@ -1737,19 +1752,24 @@ impl Action {
             return match (event.code, event.modifiers) {
                 (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
                 (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
-                (KeyCode::Left, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Left, _) => Some(Self::ExploreLeft),
                 (KeyCode::Right, _) => Some(Self::ExploreRight),
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::MoveUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
                 }
-                (KeyCode::Char('h'), KeyModifiers::NONE) => Some(Self::FocusPrevColumn),
+                (KeyCode::Char('h'), KeyModifiers::NONE) => Some(Self::ExploreLeft),
                 (KeyCode::Char('l'), KeyModifiers::NONE) => Some(Self::ExploreRight),
                 (KeyCode::Home, _) => Some(Self::MoveHome),
                 (KeyCode::End, _) => Some(Self::MoveEnd),
-                (KeyCode::Enter, _) => Some(Self::ToggleFailureDetail),
+                (KeyCode::PageUp, _) => Some(Self::ExploreDetailScrollUp),
+                (KeyCode::PageDown, _) => Some(Self::ExploreDetailScrollDown),
+                (KeyCode::Enter, _) => Some(Self::ExploreDetailEnter),
+                (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ExploreDetailToggle),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RunScenario),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ToggleInspectorPlaintext),
+                (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ExploreOpenExternal),
+                (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Self::ExploreCopyPath),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AiSuggest),
                 (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::EnterEdit),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
@@ -3090,11 +3110,11 @@ mod tests {
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
-            Some(Action::FocusPrevColumn)
+            Some(Action::ExploreLeft)
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
-            Some(Action::ToggleFailureDetail)
+            Some(Action::ExploreDetailEnter)
         );
         assert_eq!(
             Action::from_key_event(

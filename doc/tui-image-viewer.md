@@ -1,12 +1,10 @@
 # TUI screenshot viewing
 
 Captures are reached from where a scenario is run and reviewed. In Explore the
-Scenarios and Steps panes end rows with `●N`, and `i` opens the capture of the
-selected step. The Failure Details popup opens the failing step's capture with
-`i` from any Explore pane, and closing the viewer moves the Steps selection to
-the capture that was last shown. `i` on a MindMap node opens the same viewer for
-browsing evidence by requirement structure. The viewer uses the newest replay
-run with captures for that scenario.
+Scenarios and Steps panes end rows with `●N`, and Run Details opens the capture
+of the selected step with `Enter`. Closing the viewer moves the Steps selection
+to the capture that was last shown. The viewer uses the newest replay run with
+captures for that scenario. The retired `i` binding no longer opens anything.
 
 Clicking an image opens the same viewer for that file: a sent image or its
 `▣` label in the AI chat transcript, an `[Image #N]` placeholder or `@path`
@@ -42,7 +40,7 @@ open, because `o` hands the file to the operating system's default opener.
 | Up / Down in fit view | Previous / next captured step |
 | `o` | Open the original in the operating system's viewer |
 | `w`, `Web [w]` | Open the shown capture in the hosted Web UI's Run page. Starts the project daemon when none is listening; later presses reuse it |
-| `i` / Esc, `Close [Esc]` | Close immediately, including during loading |
+| Esc, `Close [Esc]` | Close immediately, including during loading; `i` no longer closes or opens the viewer |
 
 100 percent is measured in the terminal graphics protocol's virtual pixels;
 the terminal may scale those pixels for its font and display DPI. Use the

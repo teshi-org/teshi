@@ -167,13 +167,27 @@ reported the same way.
 {"type":"start_case","case_id":"f0:s1","name":"Successful login"}
 {"type":"start_step","case_id":"f0:s1","step_id":"f0:s1:L13","text":"I log in"}
 {"type":"end_step","case_id":"f0:s1","step_id":"f0:s1:L13","status":"passed"}
+{"type":"artifact","case_id":"f0:s1","step_id":"f0:s1:L13","kind":"screenshot","path":"/abs/.teshi/logs/replay-screenshots/<run>/after-login.png"}
+{"type":"http_exchange","exchange_id":"e1","case_id":"f0:s1","step_id":"f0:s1:L14","template":"login.json.j2","method":"POST","url":"https://example.test/login","status":200}
 {"type":"case_passed","case_id":"f0:s1","duration_ms":1234}
-{"type":"case_failed","case_id":"f0:s2","duration_ms":567,"error":{"message":"Assertion failed","stack":"...","attachments":[{"kind":"screenshot","path":"/abs/a.png"}]}}
+{"type":"case_failed","case_id":"f0:s2","duration_ms":567,"error":{"message":"Assertion failed","stack":"...","attachments":[{"kind":"screenshot","path":"/abs/a.png","step_id":"f0:s2:L9"}]}}
 {"type":"case_skipped","case_id":"f0:s3","reason":"Not implemented"}
 {"type":"case_blocked","case_id":"f0:s4","reason":"browser session unavailable","category":"target_unavailable"}
 {"type":"log","case_id":"f0:s1","message":"..."}
 {"type":"end_run","passed":1,"failed":1,"skipped":1,"blocked":1}
 ```
+
+### Evidence correlation
+
+`artifact` and `http_exchange` accept an optional `step_id`. When it is absent,
+the evidence belongs to the case: Explore Run Details shows it on every step of
+that case. When it is present, the row is shown only on the matching step.
+`case_failed.error.attachments[]` accepts the same optional `step_id`.
+
+Artifact paths may be absolute or relative to the project root, but the UI
+opens them only when they resolve under
+`.teshi/logs/replay-screenshots/<run>/`. Run Details displays them relative to
+the project root.
 
 ### Blocked
 

@@ -338,7 +338,7 @@ pub enum ScreenshotOrigin {
     /// Opened from a MindMap node.
     #[default]
     MindMap,
-    /// Opened from the Explore Steps pane or the Failure Details popup.
+    /// Opened from the Explore Steps pane or the Run Details pane.
     Explore,
     /// A standalone image clicked in the chat, the composer, or a requirement.
     Image,
@@ -962,7 +962,7 @@ pub fn open_externally(project: &Path, shot: &ScreenshotRef) -> Result<()> {
 }
 
 /// Hand a file to the operating system's default opener.
-fn open_path_externally(path: &Path) -> Result<()> {
+pub(crate) fn open_path_externally(path: &Path) -> Result<()> {
     let mut command = if cfg!(windows) {
         let mut command = Command::new("cmd");
         // `start` treats a quoted argument as a window title, so pass an empty one.
