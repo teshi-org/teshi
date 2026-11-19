@@ -14,7 +14,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
 9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Vertical scrollbars are a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Horizontal scrollbars use a `▄` half-block foreground on one row with the same track/thumb colours, keeping the bar visually thin while preserving the full-row pointer target. Never draw a bar with `─`, `━`, `│`, or `┃`.
-10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips. Confirmation dialogs (`Dialog`) and option pickers (`ListDialog`) instead use `ui/dialog.rs`, modeled on iCode's `ConfirmDialog`: a veiled backdrop, a DIALOG_BG card with a BORDER outline (WARNING for destructive decisions), two-cell horizontal padding, width tiers of 43/64/80/100 columns capped at 90% of the screen, and a centered row of solid buttons. Confirmations center their message; pickers list full-width selectable rows that scroll with the selection, with muted notes below; forms (`FormDialog`) align labeled one-row input bars, scroll long text to keep the caret visible, and put live feedback and help below. Buttons rest at their muted fill and use the full semantic color when Enter or the arrow selection activates them; Primary confirms, Warning cancels, Danger destroys, and Neutral edits without closing. Up to three buttons are tall half-block pills; more share one compact row.
+10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips. Confirmation dialogs (`Dialog`) and option pickers (`ListDialog`) instead use `ui/dialog.rs`, modeled on iCode's `ConfirmDialog`: a veiled backdrop, a DIALOG_BG card with a BORDER outline (WARNING for destructive decisions), two-cell horizontal padding, width tiers of 43/64/80/100 columns capped at 90% of the screen, and a centered row of solid buttons. Confirmations center their message; pickers list full-width selectable rows that scroll with the selection, with muted notes below; forms (`FormDialog`) align labeled one-row input bars, scroll long text to keep the caret visible, and put live feedback and help below. Buttons rest at their muted fill and use the full semantic color when Enter or the arrow selection activates them; Primary confirms, Warning cancels, Danger destroys, and Neutral edits without closing. Up to three buttons are tall half-block pills; more share one compact row. Cards that are not dialogs resolve their bounds through `ui/overlay.rs` (see [Overlay sizing](#overlay-sizing)).
 
 Paint the whole screen with SCREEN_BG/FG before drawing, the way iCode paints
 `MainScreen { background: $background }`: the terminal profile's own colours must
@@ -73,6 +73,7 @@ dividers, and click regions.
 | `input_style(focused)` | Dialog input bar: BLOCK_BG at rest, CHAT_CHIP_BG while it receives typing |
 | `backdrop_color(color, foreground)` | Veil a covered cell; default backgrounds stay on the screen surface |
 | `clear_to(frame, area, bg)` | Clear a region and repaint it with bg; use it wherever `Clear` alone would expose the terminal background |
+| `overlay::OverlaySpec` | One card rule: preferred size, viewport share and absolute cap per axis; resolve with `rect(area, content)` |
 | `popup_rows(lines, width)` | Extend active/inactive selected options across metadata and trailing cells |
 | `action_line(text)` | Preserve action text while rendering bracketed keys as chips |
 | `selected_row(focused)` | Full-row fill style; apply to row widget |
@@ -94,6 +95,34 @@ their source keyword's Gherkin palette (including continuation inheritance).
 For merged nodes, background wins; otherwise use the first source location.
 Explicit highlight rules and relationship categories override these base roles.
 Keep existing node text, shape, IDs, navigation, and grouping unchanged.
+
+## Overlay sizing
+
+Every modal card takes its bounds from `ui/overlay.rs`, which encodes iCode's
+two constraints per axis: a preferred size, a viewport share it never exceeds
+(default 90%), and an absolute cap so a very large terminal does not stretch a
+card that was designed for 120 columns. Heights follow the content where the
+card has a natural size; a body that can overflow keeps one row for a
+`… +N more lines` hint, and lists scroll with their selection. Cards dim the
+frame under them (`dialog::dim_backdrop`) before clearing their own rectangle.
+Dialogs keep their own 43/64/80/100 tier ladder.
+
+| Constructor | Shape | Used by |
+|---|---|---|
+| `OverlaySpec::prompt(width, min_h, max_h)` | fixed width, content height, 90% caps | external-change notice, generation scope, session browser |
+| `OverlaySpec::form(width, min_h, max_h)` | fixed width, content height, 85% height cap | auth and model cards |
+| `OverlaySpec::content(min_w, max_w, min_h, max_h)` | content width and height | pending-change / ACP permission card |
+| `OverlaySpec::viewer(w%, min_w, max_w, h%, min_h, max_h)` | percentage axes with absolute caps | failure detail, change summary, agent configuration |
+| `Axis::cells / percent / content` | one axis for one-off cards | settings, project dialogs, prompt history |
+
+Current cards: failure detail 75%/≤120 × 70%/≤45; change summary 65%/≤110 ×
+55%/≤40; settings 80×22 within 92%/85%; agent configuration 95%/≤100 ×
+85%/≤50; auth 60×(8–20); model 60×(8–22); session 88×(10–40); prompt history
+70%/≤100 × 55%/≤24; pending change 60–100 × 8–22.
+
+Not migrated on purpose: the full-screen screenshot viewer and draft editor,
+and anchored popups (scenario dropdown, ACP settings picker, slash suggestions)
+stay next to their anchor instead of centering.
 
 ## Glyph vocabulary
 

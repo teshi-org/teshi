@@ -319,11 +319,14 @@ fn new_requirement_creation_dirty_guard_supports_cancel_and_discard() {
         .unwrap();
     terminal.key("D").unwrap();
     terminal.expect_text("# Document 2", true, 10000).unwrap();
-    let screen = terminal.screen().unwrap();
-    assert!(
-        tree_contains_title(&screen, "Document 2"),
-        "discarding the dirty document did not select the new document in the tree:\n{screen}"
-    );
+    // The editor paints the restored document before the tree row that selects
+    // it. Poll the tree instead of sampling one frame: the single sample raced
+    // the next repaint and failed as "did not select the new document".
+    terminal
+        .expect_screen("Document 2 selected in the tree", 5000, |screen| {
+            tree_contains_title(screen, "Document 2")
+        })
+        .unwrap();
 
     terminal.key("Ctrl+s").unwrap();
     terminal

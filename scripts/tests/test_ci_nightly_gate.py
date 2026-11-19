@@ -16,14 +16,22 @@ SHA = "c" * 40
 TREE = "e" * 40
 PR_HEAD = "a" * 40
 RUNS = f"repos/{REPO}/actions/workflows/ci.yml/runs"
-PUSH_RUNS = f"{RUNS}?branch=main&head_sha={SHA}&per_page=100"
+PUSH_RUNS = f"{RUNS}?head_sha={SHA}&per_page=100"
 PULLS = f"repos/{REPO}/commits/{SHA}/pulls"
 PR_RUNS = f"{RUNS}?event=pull_request&head_sha={PR_HEAD}&per_page=100"
 ARTIFACTS = f"repos/{REPO}/actions/runs/7/artifacts?name=tested-tree-{TREE}"
+MERGE_GROUP_ARTIFACTS = f"repos/{REPO}/actions/runs/9/artifacts?name=tested-tree-{TREE}"
 
 
-def run(head_sha=SHA, status="completed", conclusion="success", repo=REPO, run_id=7):
-    return {"id": run_id, "head_sha": head_sha, "status": status, "conclusion": conclusion, "head_repository": {"full_name": repo}}
+def run(head_sha=SHA, status="completed", conclusion="success", repo=REPO, run_id=7, event=None):
+    return {
+        "id": run_id,
+        "head_sha": head_sha,
+        "status": status,
+        "conclusion": conclusion,
+        "head_repository": {"full_name": repo},
+        "event": event,
+    }
 
 
 def pull(base="main", merged=True, repo=REPO):
@@ -84,6 +92,39 @@ class NightlyCiGateTest(unittest.TestCase):
                 "failed push run is rescued by an identical PR tree",
                 pr_responses(push_runs=[run(conclusion="failure", run_id=8)]),
                 "success:pull-request #36 run 7",
+            ),
+        ]
+        for label, responses, expected in cases:
+            with self.subTest(label):
+                fetch, _ = fake_fetch(responses)
+                self.assertEqual(gate.decide(fetch, REPO, SHA, TREE), expected, label)
+
+    def test_merge_queue_and_fork_cases(self):
+        cases = [
+            (
+                "merge queue verified the merged tree",
+                {
+                    PUSH_RUNS: {"workflow_runs": [run(run_id=9, event="merge_group")]},
+                    MERGE_GROUP_ARTIFACTS: {"artifacts": [{"name": f"tested-tree-{TREE}"}]},
+                },
+                "success:merge-group run 9",
+            ),
+            (
+                "merge queue run without the tree marker",
+                {
+                    PUSH_RUNS: {"workflow_runs": [run(run_id=9, event="merge_group")]},
+                    MERGE_GROUP_ARTIFACTS: {"artifacts": []},
+                    PULLS: [],
+                },
+                "missing",
+            ),
+            (
+                "merge queue run from a fork repository",
+                {
+                    PUSH_RUNS: {"workflow_runs": [run(run_id=9, event="merge_group", repo="someone/teshi")]},
+                    PULLS: [],
+                },
+                "missing",
             ),
         ]
         for label, responses, expected in cases:

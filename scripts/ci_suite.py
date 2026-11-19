@@ -213,10 +213,22 @@ def configure_environment(inventory, artifacts):
         os.environ[f"TESHI_{key}_ARTIFACTS"] = str(artifacts / directory)
 
 
+def pin_acceptance_locale(shard):
+    """Pin the spawned app's UI language for terminal acceptance shards.
+
+    Hosted runners resolve to en-US, but a developer host may not. Only the
+    terminal shards spawn the TUI; backend unit tests pin their own locale and
+    a process-wide override would take precedence over it.
+    """
+    if shard in ("terminal-a", "terminal-b"):
+        os.environ["TESHI_LOCALE"] = "en"
+
+
 def execute(inventory, shard, artifacts):
     assert_identity(inventory)
     artifacts = Path(artifacts).resolve()
     configure_environment(inventory, artifacts)
+    pin_acceptance_locale(shard)
     execution = dict(schema_version=1, **identity(), shard=shard, targets=[], status="failed",
                      inventory_sha256=inventory_digest(inventory), deferred=deferred_tests(inventory, shard), errors=[])
     write(artifacts / "execution.json", execution)

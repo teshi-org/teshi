@@ -16,32 +16,9 @@ if echo "$RUSTUP_CHECK" | grep -q "Update available"; then
 fi
 echo -e "${GREEN}   - OK${NC}"
 
-# ---- 1. cargo clippy -------------------------------------------------------
-echo ":: Lint gate (cargo clippy --all-targets --all-features -D warnings) ..."
-if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
-    echo -e "${RED}   x  Clippy warnings found (treated as errors).${NC}"
-    PASS=false
-else
-    echo -e "${GREEN}   - OK${NC}"
-fi
-
-# ---- 2. cargo test ---------------------------------------------------------
-echo ":: Test gate (cargo test --all) ..."
-if ! cargo test --all 2>/dev/null; then
-    echo -e "${RED}   x  Tests failed.${NC}"
-    PASS=false
-else
-    echo -e "${GREEN}   - OK${NC}"
-fi
-
-# ---- 3. cargo doc ----------------------------------------------------------
-echo ":: Doc gate (RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --document-private-items) ..."
-if ! RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --document-private-items 2>/dev/null; then
-    echo -e "${RED}   x  Doc build failed.${NC}"
-    PASS=false
-else
-    echo -e "${GREEN}   - OK${NC}"
-fi
+# ---- 1. Repository gates ----------------------------------------------------
+# Same commands as CI; teshi-web is wasm32-only and stays out of native runs.
+bash scripts/preflight.sh || PASS=false
 
 # ---- 4. Release tag gate: verify local MSI exists before tag push -----------
 while read local_ref local_sha remote_ref remote_sha; do

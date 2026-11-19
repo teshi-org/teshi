@@ -691,10 +691,20 @@ fn linked_point_pointer_selection_matches_keyboard_after_resize() {
         "Linked point 2"
     ));
     terminal.resize(55, 16).unwrap();
-    terminal.expect_text("Linked point 2", false, 1500).unwrap();
-    fixture.capture(&terminal, "linked-hidden-narrow");
+    // The narrow layout drops the wide detail pane, keeps the focused pane
+    // full-width, and shortens the tab labels. Wait for that layout instead of
+    // sampling before the repaint: the old "row disappears" check only passed
+    // on the pre-repaint wide frame clipped at 55 columns.
+    terminal
+        .expect_stable_text("MindMap", false, 5000, 200)
+        .unwrap();
+    fixture.capture(&terminal, "linked-narrow-layout");
+    terminal.expect_text("Linked point 2", true, 5000).unwrap();
     terminal.resize(150, 30).unwrap();
-    terminal.expect_text("Linked point 2", true, 1500).unwrap();
+    terminal
+        .expect_stable_text("MindMap", true, 5000, 200)
+        .unwrap();
+    terminal.expect_text("Linked point 2", true, 5000).unwrap();
     fixture.click(&terminal, "Linked point 2", "linked-after-resize");
     fixture.capture(&terminal, "linked-restored-selection");
     assert!(selected_linked(

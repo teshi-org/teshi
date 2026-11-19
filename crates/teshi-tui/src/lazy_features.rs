@@ -184,6 +184,20 @@ impl LazyFeatures {
         self.retries = 0;
     }
 
+    /// Drops the pending selection after its source file disappeared.
+    ///
+    /// A later catalog poll installs the first surviving path. Keeping a
+    /// deleted path selected would leave the content pane empty while the tree
+    /// still lists the remaining Features.
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.selected = None;
+        self.content_rx = None;
+        self.requested = None;
+        self.error = None;
+        self.retries = 0;
+    }
+
     fn start_content(&mut self) {
         if self.content_rx.is_some() {
             return;
