@@ -717,8 +717,13 @@ fn registry_picker(narrow: bool) {
     let terminal = fixture.launch();
     command(&terminal, "/acp");
     terminal
-        .expect_text("Installed ACP Agents", true, 1500)
+        .expect_text("Installed ACP Agents", true, 5000)
         .unwrap();
+    // The seeded list loads asynchronously. Wait for its rows before resolving
+    // the footer control: a list that finishes loading moves "Registry [i]"
+    // after the click coordinate was chosen, so the press lands outside the
+    // panel and dismisses it instead of opening the registry.
+    terminal.expect_text("ACP Alpha", true, 5000).unwrap();
     fixture.click(
         &terminal,
         &["Registry [i]"],
