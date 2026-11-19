@@ -39,71 +39,108 @@ pub enum CursorMotion {
     End,
 }
 
-/// Single-line text input with a cursor counted in Unicode scalar values.
+/// Single-line text input backed by the shared [`crate::composer::Composer`]
+/// edit model (selection, undo, word ops). Newlines are rejected so callers
+/// keep a one-line contract.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LineInput {
-    text: String,
-    cursor: usize,
+    composer: crate::composer::Composer,
 }
 
 impl LineInput {
     /// Creates an input holding `text` with the cursor at the end.
     pub fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
-        let cursor = text.chars().count();
-        Self { text, cursor }
+        let mut composer = crate::composer::Composer::default();
+        // Single-line fields collapse newlines so a pasted draft cannot break
+        // form or search chrome.
+        composer.set_text(text.into().replace(['\n', '\r'], " "));
+        Self { composer }
     }
 
     /// Current text.
     pub fn text(&self) -> &str {
-        &self.text
+        self.composer.text()
     }
 
     /// Text before and after the cursor, used to draw the caret.
     pub fn split_at_cursor(&self) -> (&str, &str) {
-        self.text.split_at(self.byte_offset(self.cursor))
+        let offset = self.byte_offset(self.composer.cursor());
+        self.composer.text().split_at(offset)
+    }
+
+    /// Selected character range, when the caret differs from the anchor.
+    pub fn selection(&self) -> Option<std::ops::Range<usize>> {
+        self.composer.selection()
+    }
+
+    /// Selects the whole line.
+    pub fn select_all(&mut self) {
+        self.composer.select_all();
+    }
+
+    /// Undoes the last edit.
+    pub fn undo(&mut self) -> bool {
+        self.composer.undo()
+    }
+
+    /// Redoes the last undone edit.
+    pub fn redo(&mut self) -> bool {
+        self.composer.redo()
+    }
+
+    /// Deletes the previous ASCII word (CJK is one unit).
+    pub fn delete_word_back(&mut self) {
+        self.composer.delete_word_back();
+    }
+
+    /// Moves by word.
+    pub fn move_word(&mut self, forward: bool, select: bool) {
+        if forward {
+            self.composer.move_word_right(select);
+        } else {
+            self.composer.move_word_left(select);
+        }
+    }
+
+    /// Extends or moves the caret with arrow keys.
+    pub fn move_cursor_select(&mut self, motion: CursorMotion, select: bool) {
+        match motion {
+            CursorMotion::Left => self.composer.move_left(select),
+            CursorMotion::Right => self.composer.move_right(select),
+            CursorMotion::Home => self.composer.move_home(select),
+            CursorMotion::End => self.composer.move_end(select),
+        }
     }
 
     fn byte_offset(&self, chars: usize) -> usize {
-        self.text
+        self.composer
+            .text()
             .char_indices()
             .nth(chars)
-            .map_or(self.text.len(), |(index, _)| index)
+            .map_or(self.composer.text().len(), |(index, _)| index)
     }
 
-    /// Inserts `ch` at the cursor.
+    /// Inserts `ch` at the cursor. Newlines are ignored.
     pub fn insert(&mut self, ch: char) {
-        let offset = self.byte_offset(self.cursor);
-        self.text.insert(offset, ch);
-        self.cursor += 1;
+        if ch == '\n' || ch == '\r' {
+            return;
+        }
+        self.composer.insert_char(ch);
     }
 
     /// Removes the character before the cursor.
     pub fn backspace(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            let offset = self.byte_offset(self.cursor);
-            self.text.remove(offset);
-        }
+        self.composer.backspace();
     }
 
     /// Removes the character under the cursor.
     pub fn delete(&mut self) {
-        if self.cursor < self.text.chars().count() {
-            let offset = self.byte_offset(self.cursor);
-            self.text.remove(offset);
-        }
+        self.composer.delete();
     }
 
     /// Moves the cursor without editing.
     pub fn move_cursor(&mut self, motion: CursorMotion) {
-        let len = self.text.chars().count();
-        self.cursor = match motion {
-            CursorMotion::Left => self.cursor.saturating_sub(1),
-            CursorMotion::Right => (self.cursor + 1).min(len),
-            CursorMotion::Home => 0,
-            CursorMotion::End => len,
-        };
+        self.move_cursor_select(motion, false);
     }
 }
 
@@ -1093,5 +1130,20 @@ mod tests {
         input.delete();
         input.backspace();
         assert_eq!(input.text(), "a");
+    }
+
+    #[test]
+    fn line_input_select_all_undo_and_word_delete_use_composer() {
+        let mut input = LineInput::new("hello world");
+        input.select_all();
+        input.insert('x');
+        assert_eq!(input.text(), "x");
+        assert!(input.undo());
+        assert_eq!(input.text(), "hello world");
+        input.move_cursor(CursorMotion::End);
+        input.delete_word_back();
+        assert_eq!(input.text(), "hello ");
+        input.insert('\n');
+        assert_eq!(input.text(), "hello ", "newlines stay rejected");
     }
 }

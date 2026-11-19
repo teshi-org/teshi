@@ -2535,30 +2535,19 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
     let agent = app.agent();
     let (rows, cursor) = input_rows(&agent.input, agent.input.cursor(), text_width);
     let scroll = cursor.0.saturating_sub(inner.height - 1);
-    let display = if agent.input.is_empty() {
-        let placeholder = if active {
-            if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
-                "Type a follow-up · Enter queues it"
-            } else {
-                "Type your message..."
-            }
-        } else {
-            ""
-        };
-        Text::from(Line::styled(placeholder, muted()))
-    } else {
-        Text::from(
-            rows.into_iter()
-                .skip(usize::from(scroll))
-                .collect::<Vec<_>>(),
-        )
-    };
+    // Keep an empty composer blank: no placeholder copy or trigger chips.
+    // Focus is still visible via the PRIMARY border and the block caret.
+    let display = Text::from(
+        rows.into_iter()
+            .skip(usize::from(scroll))
+            .collect::<Vec<_>>(),
+    );
     frame.render_widget(Paragraph::new(display), text_area);
-    if text_width > 0
-        && let Some(selection) = agent.input.selection()
-    {
+    if text_width > 0 {
         let layout = crate::composer::layout(agent.input.text(), text_width);
-        paint_composer_selection(frame, text_area, &layout, selection, scroll);
+        if let Some(selection) = agent.input.selection() {
+            paint_composer_selection(frame, text_area, &layout, selection, scroll);
+        }
     }
     // Registered after the composer region so a click on a placeholder opens
     // the image instead of only focusing the input.
@@ -2616,7 +2605,18 @@ fn paint_composer_selection(
     let style = Style::default()
         .fg(theme::FG)
         .bg(theme::EDITOR_SELECTION_BG);
-    for &(row, column, cells) in layout.cells.get(selection).unwrap_or_default() {
+    paint_composer_range(frame, area, layout, selection, scroll, style);
+}
+
+fn paint_composer_range(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    layout: &crate::composer::Layout,
+    range: std::ops::Range<usize>,
+    scroll: u16,
+    style: Style,
+) {
+    for &(row, column, cells) in layout.cells.get(range).unwrap_or_default() {
         if cells == 0 || row < scroll {
             continue;
         }

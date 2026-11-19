@@ -537,7 +537,11 @@ impl Composer {
 
     fn normalize_trigger(&self, ch: char) -> char {
         match ch {
-            '／' if self.cursor == 0 && self.selection().is_none() => '/',
+            '／' | '＃' | '！' if self.cursor == 0 && self.selection().is_none() => match ch {
+                '／' => '/',
+                '＃' => '#',
+                _ => '!',
+            },
             '＠' if self.mention_boundary() => '@',
             _ => ch,
         }
@@ -843,6 +847,14 @@ mod tests {
         let mut input = composer("");
         input.insert_char('／');
         assert_eq!(input.text(), "/");
+
+        let mut input = composer("");
+        input.insert_char('＃');
+        assert_eq!(input.text(), "#");
+
+        let mut input = composer("");
+        input.insert_char('！');
+        assert_eq!(input.text(), "!");
 
         let mut input = composer("hello");
         input.move_end(false);

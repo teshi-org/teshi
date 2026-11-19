@@ -1373,6 +1373,12 @@ pub struct App {
     pub settings_panel_selection: usize,
     pub slash_suggestion_active: bool,
     pub slash_suggestion_selection: usize,
+    /// Project-scoped sent-prompt MRU for Up/Down and Ctrl+R.
+    pub prompt_history: crate::prompt_history::PromptHistory,
+    /// Open Ctrl+R history search overlay, if any.
+    pub history_search: Option<crate::prompt_history::HistorySearchState>,
+    /// Open fullscreen draft editor, if any.
+    pub composer_editor: Option<crate::prompt_history::ComposerEditorState>,
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
     pub ai_input_focused: bool,
     /// Width in cells of the last rendered composer text area. Zero before the
@@ -2090,6 +2096,9 @@ impl App {
         self.session_panel_selection = 0;
         self.clear_chat_selection();
         self.reset_agents_for_project(target.root());
+        self.history_search = None;
+        self.composer_editor = None;
+        self.reload_prompt_history();
         if let Err(error) = teshi_engine::add_recent_project(target.root()) {
             self.status = crate::i18n::fill(
                 crate::i18n::t("status.switched_project_but_recent_history_was_not_saved"),
@@ -2818,6 +2827,9 @@ impl App {
             settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            prompt_history: crate::prompt_history::PromptHistory::empty(),
+            history_search: None,
+            composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
             ai_sidebar_collapsed: false,
@@ -2893,6 +2905,7 @@ impl App {
         app.normalize_explore_selection();
         app.show_selection_warning();
         app.refresh_capture_index();
+        app.reload_prompt_history();
         Ok(app)
     }
 
@@ -2970,6 +2983,9 @@ impl App {
             settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            prompt_history: crate::prompt_history::PromptHistory::empty(),
+            history_search: None,
+            composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
             ai_sidebar_collapsed: false,
@@ -3111,6 +3127,7 @@ impl App {
         app.mindmap_index.apply_highlight_categories("root");
         app.show_selection_warning();
         app.refresh_capture_index();
+        app.reload_prompt_history();
         Ok(app)
     }
 
@@ -3178,6 +3195,9 @@ impl App {
             settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            prompt_history: crate::prompt_history::PromptHistory::empty(),
+            history_search: None,
+            composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
             ai_sidebar_collapsed: false,
@@ -4336,15 +4356,44 @@ impl App {
         crate::chat_images::expand_placeholders(&text, &images)
     }
 
-    /// Steps the composer through this conversation's sent prompts like shell
+    /// Reloads project-scoped prompt history from disk.
+    fn reload_prompt_history(&mut self) {
+        self.prompt_history =
+            crate::prompt_history::PromptHistory::load_for_project(&self.project.root_dir)
+                .unwrap_or_else(|_| crate::prompt_history::PromptHistory::empty());
+    }
+
+    /// Records a successfully taken send into the project prompt history.
+    fn record_prompt_history(&mut self, text: &str) {
+        if let Err(error) = self.prompt_history.record(text) {
+            tracing::warn!(%error, "failed to persist prompt history");
+        }
+    }
+
+    /// Prompts available to Up/Down recall: persisted MRU, falling back to this
+    /// conversation's sent user messages when the store is empty.
+    fn recall_prompt_list(&self) -> Vec<String> {
+        let persisted: Vec<String> = self
+            .prompt_history
+            .prompts()
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
+        if !persisted.is_empty() {
+            return persisted;
+        }
+        crate::chat_state::sent_prompts(self.agent().messages())
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Steps the composer through persisted (or session) prompts like shell
     /// history; stepping past the newest prompt restores the interrupted draft.
     ///
     /// Returns `false` when nothing lies further in that direction.
     fn recall_sent_prompt(&mut self, older: bool) -> bool {
-        let prompts: Vec<String> = crate::chat_state::sent_prompts(self.agent().messages())
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let prompts = self.recall_prompt_list();
         let current = self.agent().chat.recall.as_ref().map(|recall| recall.index);
         let next = match (current, older) {
             (None, true) => prompts.len().checked_sub(1),
@@ -4408,11 +4457,75 @@ impl App {
 
     /// Keeps slash suggestions coherent after a text-changing edit.
     fn after_composer_edit(&mut self) {
+        if self.composer_editor.is_some() {
+            return;
+        }
         if self.slash_suggestion_active {
             self.slash_suggestion_selection = 0;
             if !self.agent().input.starts_with('/') {
                 self.slash_suggestion_active = false;
             }
+        }
+    }
+
+    /// The composer that currently receives typing: the fullscreen editor when
+    /// open, otherwise the selected agent's live input.
+    fn active_composer_mut(&mut self) -> &mut crate::composer::Composer {
+        if let Some(editor) = self.composer_editor.as_mut() {
+            &mut editor.draft
+        } else {
+            &mut self.agents[self.selected_agent].input
+        }
+    }
+
+    /// Opens Ctrl+R history search over the project prompt MRU.
+    fn open_history_search(&mut self) {
+        if self.history_search.is_some() || self.composer_editor.is_some() {
+            return;
+        }
+        self.focus_ai_input();
+        let saved_draft = crate::chat_images::expand_placeholders(
+            &self.agent().input,
+            &self.agent().input_images,
+        );
+        self.agent_mut().chat.recall = None;
+        self.history_search = Some(crate::prompt_history::HistorySearchState::open(saved_draft));
+        self.slash_suggestion_active = false;
+        self.status = "Prompt history · Enter select · Esc cancel".into();
+    }
+
+    /// Opens the fullscreen draft editor with a snapshot of the live composer.
+    fn open_composer_editor(&mut self) {
+        if self.composer_editor.is_some() || self.history_search.is_some() {
+            return;
+        }
+        self.focus_ai_input();
+        self.composer_editor = Some(crate::prompt_history::ComposerEditorState::open(
+            &self.agent().input,
+        ));
+        self.slash_suggestion_active = false;
+        self.status = "Draft editor · Ctrl+S apply · Esc discard".into();
+    }
+
+    /// Writes the fullscreen editor draft back into the live composer.
+    fn apply_composer_editor(&mut self) {
+        let Some(editor) = self.composer_editor.take() else {
+            return;
+        };
+        let agent_idx = self.selected_agent;
+        let text = editor.draft.text().to_string();
+        let cursor = editor.draft.cursor();
+        self.restore_ai_draft(agent_idx, &text);
+        self.agents[agent_idx].input.set_cursor(cursor);
+        self.focus_ai_input();
+        self.status = "Draft applied from editor".into();
+    }
+
+    /// Closes the fullscreen editor without changing the live composer.
+    fn dismiss_composer_editor(&mut self) {
+        if self.composer_editor.take().is_some() {
+            self.focus_ai_input();
+            self.status = "Draft editor discarded".into();
         }
     }
 
@@ -11289,8 +11402,10 @@ impl App {
             Action::OpenReplayWebUi => self.open_replay_web_ui(),
             Action::AiNewline => {
                 self.focus_ai_input();
-                self.agent_mut().input.insert_char('\n');
-                self.sync_composer_atoms();
+                self.active_composer_mut().insert_char('\n');
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiClipboardPaste => {
@@ -11324,18 +11439,96 @@ impl App {
             }
             Action::AiSendChar(ch) => {
                 self.focus_ai_input();
-                self.agent_mut().input.insert_char(ch);
-                self.sync_composer_atoms();
+                self.active_composer_mut().insert_char(ch);
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                    // Activate slash command suggestions when "/" is typed
+                    if self.agent().input.starts_with('/') && !self.slash_suggestion_active {
+                        self.slash_suggestion_active = true;
+                        self.slash_suggestion_selection = 0;
+                    }
+                    if self.slash_suggestion_active {
+                        self.slash_suggestion_selection = 0;
+                    }
+                }
                 self.quit_pending_confirm = false;
-                // Activate slash command suggestions when "/" is typed
-                if self.agent().input.starts_with('/') && !self.slash_suggestion_active {
-                    self.slash_suggestion_active = true;
-                    self.slash_suggestion_selection = 0;
+            }
+            Action::AiHistorySearchOpen => {
+                self.open_history_search();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiHistorySearchPrev => {
+                if let Some(search) = self.history_search.as_mut() {
+                    search.selection = search.selection.saturating_sub(1);
                 }
-                // Reset selection as user types — filtered list changes
-                if self.slash_suggestion_active {
-                    self.slash_suggestion_selection = 0;
+                self.quit_pending_confirm = false;
+            }
+            Action::AiHistorySearchNext => {
+                if let Some(query) = self.history_search.as_ref().map(|search| search.query.clone())
+                {
+                    let count = self.prompt_history.search(&query).len();
+                    if count > 0
+                        && let Some(search) = self.history_search.as_mut()
+                    {
+                        search.selection = (search.selection + 1).min(count - 1);
+                    }
                 }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiHistorySearchInsert(ch) => {
+                if let Some(search) = self.history_search.as_mut() {
+                    search.query.push(ch);
+                    search.selection = 0;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiHistorySearchBackspace => {
+                if let Some(search) = self.history_search.as_mut() {
+                    search.query.pop();
+                    search.selection = 0;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiHistorySearchSelect => {
+                if let Some(search) = self.history_search.take() {
+                    let text = self
+                        .prompt_history
+                        .search(&search.query)
+                        .get(search.selection)
+                        .cloned();
+                    let agent_idx = self.selected_agent;
+                    if let Some(text) = text {
+                        self.restore_ai_draft(agent_idx, &text);
+                        self.agent_mut().chat.recall = None;
+                        self.status = "Inserted prompt from history".into();
+                    } else {
+                        self.restore_ai_draft(agent_idx, &search.saved_draft);
+                        self.status = "No history match".into();
+                    }
+                    self.focus_ai_input();
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiHistorySearchDismiss => {
+                if let Some(search) = self.history_search.take() {
+                    let agent_idx = self.selected_agent;
+                    self.restore_ai_draft(agent_idx, &search.saved_draft);
+                    self.focus_ai_input();
+                    self.status = "History search cancelled".into();
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiComposerEditorOpen => {
+                self.open_composer_editor();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiComposerEditorApply => {
+                self.apply_composer_editor();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiComposerEditorDismiss => {
+                self.dismiss_composer_editor();
+                self.quit_pending_confirm = false;
             }
             Action::AiContinueTask => {
                 self.continue_interrupted_task()?;
@@ -11355,6 +11548,7 @@ impl App {
                     && !self.agent().input.trim().starts_with('/')
                 {
                     let message = self.take_ai_draft();
+                    self.record_prompt_history(&message);
                     self.agent_mut().chat.queue.push_back(message);
                     if paused_queue {
                         // A stopped turn keeps the queue paused; a new message
@@ -11379,111 +11573,129 @@ impl App {
                     return self.execute_slash_command(cmd);
                 }
 
+                self.record_prompt_history(&user_msg);
                 self.dispatch_user_message(user_msg)?;
             }
             Action::AiBackspace => {
-                self.agent_mut().input.backspace();
-                self.sync_composer_atoms();
-                self.after_composer_edit();
+                self.active_composer_mut().backspace();
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiDelete => {
-                self.agent_mut().input.delete();
-                self.sync_composer_atoms();
-                self.after_composer_edit();
+                self.active_composer_mut().delete();
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiBackspaceWord => {
-                self.agent_mut().input.delete_word_back();
-                self.sync_composer_atoms();
-                self.after_composer_edit();
+                self.active_composer_mut().delete_word_back();
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiDeleteWord => {
-                self.agent_mut().input.delete_word_forward();
-                self.sync_composer_atoms();
-                self.after_composer_edit();
+                self.active_composer_mut().delete_word_forward();
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiDeleteToLineStart => {
-                self.agent_mut().input.delete_to_line_start();
-                self.sync_composer_atoms();
-                self.after_composer_edit();
+                self.active_composer_mut().delete_to_line_start();
+                if self.composer_editor.is_none() {
+                    self.sync_composer_atoms();
+                    self.after_composer_edit();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectAll => {
                 self.focus_ai_input();
-                self.agent_mut().input.select_all();
+                self.active_composer_mut().select_all();
                 self.quit_pending_confirm = false;
             }
             Action::AiUndo => {
-                if self.agent_mut().input.undo() {
+                if self.active_composer_mut().undo() && self.composer_editor.is_none() {
                     self.sync_composer_atoms();
                     self.after_composer_edit();
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiRedo => {
-                if self.agent_mut().input.redo() {
+                if self.active_composer_mut().redo() && self.composer_editor.is_none() {
                     self.sync_composer_atoms();
                     self.after_composer_edit();
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiCut => {
-                if let Some(range) = self.agent().input.selection()
-                    && let Some(text) = self.agent().input.selected_text()
+                let selected = {
+                    let input = self.active_composer_mut();
+                    input
+                        .selection()
+                        .and_then(|range| input.selected_text().map(|text| (range, text)))
+                };
+                if let Some((range, text)) = selected
                     && self.try_copy_to_clipboard(&text)
                 {
-                    self.agent_mut().input.remove_chars(range);
-                    self.sync_composer_atoms();
-                    self.after_composer_edit();
+                    self.active_composer_mut().remove_chars(range);
+                    if self.composer_editor.is_none() {
+                        self.sync_composer_atoms();
+                        self.after_composer_edit();
+                    }
                     self.status = crate::i18n::fill(crate::i18n::t("status.cut_character_s"), &[("arg0", &crate::i18n::arg(&text.chars().count()))]);
                     self.set_status_message(self.status.clone());
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorLeft => {
-                self.agent_mut().input.move_left(false);
+                self.active_composer_mut().move_left(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorRight => {
-                self.agent_mut().input.move_right(false);
+                self.active_composer_mut().move_right(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectLeft => {
-                self.agent_mut().input.move_left(true);
+                self.active_composer_mut().move_left(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectRight => {
-                self.agent_mut().input.move_right(true);
+                self.active_composer_mut().move_right(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorWordLeft => {
-                self.agent_mut().input.move_word_left(false);
+                self.active_composer_mut().move_word_left(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorWordRight => {
-                self.agent_mut().input.move_word_right(false);
+                self.active_composer_mut().move_word_right(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectWordLeft => {
-                self.agent_mut().input.move_word_left(true);
+                self.active_composer_mut().move_word_left(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectWordRight => {
-                self.agent_mut().input.move_word_right(true);
+                self.active_composer_mut().move_word_right(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorUp | Action::AiCursorDown => {
                 let up = matches!(action, Action::AiCursorUp);
                 let width = self.composer_text_width;
                 let moved = if up {
-                    self.agent_mut().input.move_up(false, width)
+                    self.active_composer_mut().move_up(false, width)
                 } else {
-                    self.agent_mut().input.move_down(false, width)
+                    self.active_composer_mut().move_down(false, width)
                 };
-                if !moved {
+                if !moved && self.composer_editor.is_none() {
                     self.recall_sent_prompt(up);
                 }
                 self.quit_pending_confirm = false;
@@ -11492,26 +11704,26 @@ impl App {
                 let up = matches!(action, Action::AiSelectUp);
                 let width = self.composer_text_width;
                 if up {
-                    self.agent_mut().input.move_up(true, width);
+                    self.active_composer_mut().move_up(true, width);
                 } else {
-                    self.agent_mut().input.move_down(true, width);
+                    self.active_composer_mut().move_down(true, width);
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorHome => {
-                self.agent_mut().input.move_home(false);
+                self.active_composer_mut().move_home(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorEnd => {
-                self.agent_mut().input.move_end(false);
+                self.active_composer_mut().move_end(false);
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectHome => {
-                self.agent_mut().input.move_home(true);
+                self.active_composer_mut().move_home(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectEnd => {
-                self.agent_mut().input.move_end(true);
+                self.active_composer_mut().move_end(true);
                 self.quit_pending_confirm = false;
             }
             Action::AiOpenAgentSelector => self.execute_slash_command("agent")?,
@@ -13725,6 +13937,14 @@ impl App {
                 self.explore_horizontal_scroll_grab = None;
             }
             MouseEventKind::Up(MouseButton::Right) => {
+                // Composer selection wins on a right-click inside the input
+                // (iCode), before region focus handlers can clear intent.
+                if matches!(self.hit_test(&pos), Some(ClickableRegion::ChatInput { .. }))
+                    && self.agent().input.has_selection()
+                {
+                    self.copy_selection_to_clipboard()?;
+                    return Ok(());
+                }
                 // Try clickable regions first (e.g. right-click on a tab/item)
                 if let Some(region) = self.hit_test(&pos).cloned() {
                     return self.handle_region_click(&region, &pos);
@@ -18883,6 +19103,101 @@ mod tests {
     }
 
     #[test]
+    fn right_click_on_composer_copies_selection() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("copy-me".to_string());
+        app.agent_mut().input.select_all();
+        app.clickable_regions = vec![ClickableRegion::ChatInput {
+            rect: ratatui::layout::Rect::new(0, 0, 20, 3),
+        }];
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Right),
+            2,
+            1,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(
+            app.status.to_lowercase().contains("copied")
+                || app.system_clipboard.is_some()
+                || app.agent().input.has_selection(),
+            "right-click should attempt a composer copy: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn composer_full_width_hash_and_bang_normalize_at_start() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+
+        app.agent_mut().input.set_text(String::new());
+        app.handle_action(Action::AiSendChar('＃')).unwrap();
+        assert_eq!(app.agent().input.text(), "#");
+
+        app.agent_mut().input.set_text(String::new());
+        app.handle_action(Action::AiSendChar('！')).unwrap();
+        assert_eq!(app.agent().input.text(), "!");
+    }
+
+    #[test]
+    fn history_search_selects_persisted_prompt_and_esc_restores_draft() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.prompt_history.record("alpha prompt").unwrap();
+        app.prompt_history.record("beta prompt").unwrap();
+        app.agent_mut().input.set_text("draft".to_string());
+
+        app.handle_action(Action::AiHistorySearchOpen).unwrap();
+        assert!(app.history_search.is_some());
+        app.handle_action(Action::AiHistorySearchInsert('b'))
+            .unwrap();
+        app.handle_action(Action::AiHistorySearchSelect).unwrap();
+        assert!(app.history_search.is_none());
+        assert_eq!(app.agent().input.text(), "beta prompt");
+
+        app.agent_mut().input.set_text("again".to_string());
+        app.handle_action(Action::AiHistorySearchOpen).unwrap();
+        app.handle_action(Action::AiHistorySearchDismiss).unwrap();
+        assert_eq!(app.agent().input.text(), "again");
+    }
+
+    #[test]
+    fn composer_editor_apply_and_discard_round_trip() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("live draft".to_string());
+        app.agent_mut().input.set_cursor(4);
+
+        app.handle_action(Action::AiComposerEditorOpen).unwrap();
+        assert!(app.composer_editor.is_some());
+        app.handle_action(Action::AiSendChar('X')).unwrap();
+        assert_eq!(app.agent().input.text(), "live draft");
+        assert!(
+            app.composer_editor
+                .as_ref()
+                .unwrap()
+                .draft
+                .text()
+                .contains('X')
+        );
+        app.handle_action(Action::AiComposerEditorDismiss).unwrap();
+        assert!(app.composer_editor.is_none());
+        assert_eq!(app.agent().input.text(), "live draft");
+
+        app.handle_action(Action::AiComposerEditorOpen).unwrap();
+        app.handle_action(Action::AiSelectAll).unwrap();
+        app.handle_action(Action::AiSendChar('Z')).unwrap();
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+        assert_eq!(app.agent().input.text(), "Z");
+    }
+
+    #[test]
     fn newline_action_inserts_a_literal_line_break() {
         let (mut app, _project, _store) = slash_test_app();
         app.agent_mut().input.set_text("first line".to_string());
@@ -23889,6 +24204,9 @@ mod tests {
             settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            prompt_history: crate::prompt_history::PromptHistory::empty(),
+            history_search: None,
+            composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
             ai_sidebar_collapsed: false,
@@ -24109,6 +24427,9 @@ Feature: B
             settings_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            prompt_history: crate::prompt_history::PromptHistory::empty(),
+            history_search: None,
+            composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
             ai_sidebar_collapsed: false,

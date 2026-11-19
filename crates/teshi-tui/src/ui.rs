@@ -462,6 +462,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.auth_panel_active
         || app.model_panel_active
         || app.session_panel_active
+        || app.history_search.is_some()
+        || app.composer_editor.is_some()
         || app.quit_pending_confirm
         || app.ai_interrupt_confirm
         || app.approval_panel_active
@@ -503,6 +505,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.session_panel_active {
         render_session_panel(frame, app, frame.area());
+    }
+
+    if app.history_search.is_some() {
+        render_history_search_panel(frame, app, frame.area());
+    }
+
+    if app.composer_editor.is_some() {
+        render_composer_editor_panel(frame, app, frame.area());
     }
 
     if app.quit_pending_confirm {
@@ -1161,14 +1171,31 @@ fn search_query_spans(query: &crate::authoring_tab::LineInput, active: bool) -> 
     let (before, after) = query.split_at_cursor();
     let mut spans = vec![Span::raw("/".to_string())];
     if active {
-        spans.push(Span::raw(before.to_string()));
-        let mut rest = after.chars();
-        let under = rest.next().map_or_else(|| " ".to_string(), String::from);
-        spans.push(Span::styled(
-            under,
-            Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
-        ));
-        spans.push(Span::raw(rest.as_str().to_string()));
+        if let Some(selection) = query.selection() {
+            let text = query.text();
+            let start = selection.start.min(text.chars().count());
+            let end = selection.end.min(text.chars().count()).max(start);
+            let before_sel: String = text.chars().take(start).collect();
+            let selected: String = text.chars().skip(start).take(end - start).collect();
+            let after_sel: String = text.chars().skip(end).collect();
+            spans.push(Span::raw(before_sel));
+            spans.push(Span::styled(
+                selected,
+                Style::default()
+                    .fg(theme::FG)
+                    .bg(theme::EDITOR_SELECTION_BG),
+            ));
+            spans.push(Span::raw(after_sel));
+        } else {
+            spans.push(Span::raw(before.to_string()));
+            let mut rest = after.chars();
+            let under = rest.next().map_or_else(|| " ".to_string(), String::from);
+            spans.push(Span::styled(
+                under,
+                Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
+            ));
+            spans.push(Span::raw(rest.as_str().to_string()));
+        }
     } else {
         spans.push(Span::raw(format!("{before}{after}")));
     }
@@ -4711,6 +4738,200 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ],
         true,
     );
+}
+
+/// Ctrl+R prompt-history search overlay.
+fn render_history_search_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let Some(search) = app.history_search.as_ref() else {
+        return;
+    };
+    let matches = app.prompt_history.search(&search.query);
+    let selection = search.selection.min(matches.len().saturating_sub(1));
+    let query = search.query.clone();
+
+    let popup_w = (area.width as f32 * 0.70) as u16;
+    let popup_h = (area.height as f32 * 0.55) as u16;
+    let popup_w = popup_w.max(36).min(area.width);
+    let popup_h = popup_h.max(10).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(popup_w)) / 2,
+        area.y + (area.height.saturating_sub(popup_h)) / 2,
+        popup_w,
+        popup_h,
+    );
+    clear_to(frame, area, theme::OVERLAY_BG);
+    let block = theme::popup_block(" Prompt history ");
+    let [query_row, list, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(block.inner(popup));
+    frame.render_widget(block, popup);
+
+    let caret = if query.is_empty() { " " } else { "" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Filter: ", theme::muted()),
+            Span::styled(query.clone(), theme::input_style(true)),
+            Span::styled(
+                caret,
+                Style::default().bg(theme::CURSOR_BG).fg(theme::CURSOR_FG),
+            ),
+        ])),
+        query_row,
+    );
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if matches.is_empty() {
+        lines.push(Line::styled("No matches", theme::muted()));
+    } else {
+        let visible = list.height as usize;
+        let start = selection.saturating_sub(visible.saturating_sub(1));
+        for (index, text) in matches.iter().enumerate().skip(start).take(visible) {
+            let preview: String = text
+                .chars()
+                .take(popup_w.saturating_sub(4) as usize)
+                .collect();
+            let marker = if index == selection { "▸ " } else { "  " };
+            let style = if index == selection {
+                theme::selected_row(true)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::styled(format!("{marker}{preview}"), style));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, list.width))),
+        list,
+    );
+    frame.render_widget(
+        Paragraph::new(theme::footer_line([
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" select  ", theme::muted()),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" cancel", theme::muted()),
+        ])),
+        footer,
+    );
+}
+
+/// Fullscreen draft editor opened with Ctrl+O.
+fn render_composer_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let Some(editor) = app.composer_editor.as_ref() else {
+        return;
+    };
+    let popup_w = area.width.saturating_sub(4).max(40).min(area.width);
+    let popup_h = area.height.saturating_sub(4).max(12).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(popup_w)) / 2,
+        area.y + (area.height.saturating_sub(popup_h)) / 2,
+        popup_w,
+        popup_h,
+    );
+    clear_to(frame, area, theme::OVERLAY_BG);
+    let block = theme::popup_block(" Draft editor ");
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
+    frame.render_widget(block, popup);
+
+    let width = body.width.max(1);
+    let layout = crate::composer::layout(editor.draft.text(), width);
+    let cursor = layout.position_of(editor.draft.cursor());
+    let scroll = cursor.0.saturating_sub(body.height.saturating_sub(1));
+    let rows: Vec<Line<'static>> = layout
+        .rows
+        .iter()
+        .skip(usize::from(scroll))
+        .take(body.height as usize)
+        .map(|row| Line::raw(row.clone()))
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(rows)), body);
+    if let Some(selection) = editor.draft.selection() {
+        paint_overlay_composer_selection(frame, body, &layout, selection, scroll);
+    }
+    let under = editor.draft.chars().nth(editor.draft.cursor());
+    let position = (body.x + cursor.1, body.y + cursor.0 - scroll);
+    if body.contains(position.into()) {
+        paint_overlay_block_cursor(frame, body, position, under);
+        frame.set_cursor_position(position);
+    }
+    frame.render_widget(
+        Paragraph::new(theme::footer_line([
+            Span::styled(
+                "Ctrl+S",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" apply  ", theme::muted()),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" discard", theme::muted()),
+        ])),
+        footer,
+    );
+}
+
+fn paint_overlay_composer_selection(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    layout: &crate::composer::Layout,
+    selection: std::ops::Range<usize>,
+    scroll: u16,
+) {
+    let style = Style::default()
+        .fg(theme::FG)
+        .bg(theme::EDITOR_SELECTION_BG);
+    for &(row, column, cells) in layout.cells.get(selection).unwrap_or_default() {
+        if cells == 0 || row < scroll {
+            continue;
+        }
+        let y = area.y + row - scroll;
+        if y >= area.bottom() {
+            continue;
+        }
+        let start = area.x + column;
+        let end = (start + cells).min(area.right());
+        for x in start..end {
+            frame.buffer_mut()[(x, y)].set_style(style);
+        }
+    }
+}
+
+fn paint_overlay_block_cursor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    (x, y): (u16, u16),
+    under: Option<char>,
+) {
+    let cells = under
+        .filter(|ch| !ch.is_control())
+        .and_then(UnicodeWidthChar::width)
+        .unwrap_or(1)
+        .max(1) as u16;
+    let style = Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG);
+    let buffer = frame.buffer_mut();
+    for column in x..x.saturating_add(cells).min(area.right()) {
+        if area.contains((column, y).into()) {
+            buffer[(column, y)].set_style(style);
+        }
+    }
 }
 
 /// Render the quit confirmation popup panel.

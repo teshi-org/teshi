@@ -223,32 +223,28 @@ impl Fixture {
                 row + 1
             ))
             .unwrap();
-        // An empty composer paints its focus placeholder; a draft keeps its text
-        // and only the border changes, so settle before typing either way.
-        if screen.contains("Type your message...") {
-            terminal
-                .expect_text("Type your message...", true, 2000)
-                .unwrap();
-        } else {
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        // Empty composers stay blank; drafts already show their text. A short
+        // beat lets the PRIMARY border and caret settle before typing.
+        let _ = screen;
+        std::thread::sleep(Duration::from_millis(200));
         self.capture(terminal, &format!("{name}-after"));
     }
 
     /// Blurs the composer with `Esc`, the documented keyboard equivalent.
     ///
     /// An unfocused AI composer sends `Esc` to the quit confirmation, so only
-    /// press it when the focus placeholder shows that the input owns keys.
+    /// press it when a typing probe shows that the input owns keys.
     fn blur_composer(&self, terminal: &Terminal, name: &str) {
         self.capture(terminal, &format!("{name}-before"));
-        if !terminal.screen().unwrap().contains("Type your message...") {
-            self.capture(terminal, &format!("{name}-after"));
-            return;
+        const PROBE: &str = "§";
+        terminal.write(PROBE).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        if terminal.screen().unwrap().contains(PROBE) {
+            terminal.key("Backspace").unwrap();
+            terminal.expect_text(PROBE, false, 2000).unwrap();
+            terminal.key("Escape").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
         }
-        terminal.key("Escape").unwrap();
-        terminal
-            .expect_text("Type your message...", false, 2000)
-            .unwrap();
         self.capture(terminal, &format!("{name}-after"));
     }
 

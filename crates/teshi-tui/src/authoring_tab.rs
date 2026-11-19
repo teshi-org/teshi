@@ -2932,7 +2932,46 @@ impl App {
             // Control chords are commands, not query text. Leave input mode
             // before handing them to the keymap, so a following chord key
             // (Ctrl+W then `l`) or a focus change (Ctrl+N) never sees a stale
-            // search state that would swallow the next plain key.
+            // Editing chords stay inside the search field (shared Composer).
+            // Other Ctrl/Alt chords leave search so global bindings can run.
+            if event.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(
+                    event.code,
+                    KeyCode::Char('a' | 'z' | 'y' | 'A' | 'Z' | 'Y')
+                        | KeyCode::Backspace
+                        | KeyCode::Left
+                        | KeyCode::Right
+                )
+            {
+                let query = &mut self.authoring_ui.search_query;
+                match event.code {
+                    KeyCode::Char('a' | 'A') => query.select_all(),
+                    KeyCode::Char('z' | 'Z') if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                        let _ = query.redo();
+                    }
+                    KeyCode::Char('z' | 'Z') => {
+                        let _ = query.undo();
+                    }
+                    KeyCode::Char('y' | 'Y') => {
+                        let _ = query.redo();
+                    }
+                    KeyCode::Backspace => query.delete_word_back(),
+                    KeyCode::Left => {
+                        query.move_word(false, event.modifiers.contains(KeyModifiers::SHIFT))
+                    }
+                    KeyCode::Right => {
+                        query.move_word(true, event.modifiers.contains(KeyModifiers::SHIFT))
+                    }
+                    _ => {}
+                }
+                if matches!(
+                    event.code,
+                    KeyCode::Char('a' | 'z' | 'y' | 'A' | 'Z' | 'Y') | KeyCode::Backspace
+                ) {
+                    self.authoring_ui.schedule_requirement_search();
+                }
+                return true;
+            }
             if event
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -2949,22 +2988,22 @@ impl App {
                 KeyCode::Enter => self.authoring_ui.search_active = false,
                 KeyCode::Backspace => self.authoring_ui.search_query.backspace(),
                 KeyCode::Delete => self.authoring_ui.search_query.delete(),
-                KeyCode::Left => self
-                    .authoring_ui
-                    .search_query
-                    .move_cursor(CursorMotion::Left),
-                KeyCode::Right => self
-                    .authoring_ui
-                    .search_query
-                    .move_cursor(CursorMotion::Right),
-                KeyCode::Home => self
-                    .authoring_ui
-                    .search_query
-                    .move_cursor(CursorMotion::Home),
-                KeyCode::End => self
-                    .authoring_ui
-                    .search_query
-                    .move_cursor(CursorMotion::End),
+                KeyCode::Left => self.authoring_ui.search_query.move_cursor_select(
+                    CursorMotion::Left,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                ),
+                KeyCode::Right => self.authoring_ui.search_query.move_cursor_select(
+                    CursorMotion::Right,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                ),
+                KeyCode::Home => self.authoring_ui.search_query.move_cursor_select(
+                    CursorMotion::Home,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                ),
+                KeyCode::End => self.authoring_ui.search_query.move_cursor_select(
+                    CursorMotion::End,
+                    event.modifiers.contains(KeyModifiers::SHIFT),
+                ),
                 KeyCode::Char(ch) => self.authoring_ui.search_query.insert(ch),
                 KeyCode::Up | KeyCode::Down => return false,
                 _ => return true,

@@ -93,10 +93,8 @@ fn explicit_acp_selection_survives_new_and_restart() {
     };
     send(&terminal, "original conversation");
     terminal.key("Escape").unwrap();
-    // Blurring the empty composer removes its focus placeholder.
-    terminal
-        .expect_text("Type your message...", false, 5000)
-        .unwrap();
+    // Empty composers stay blank; `a` in Normal mode opens a new agent.
+    std::thread::sleep(std::time::Duration::from_millis(100));
     terminal.key("a").unwrap();
     terminal
         .expect_text("WRAPPED_REPLY_01", false, 5000)

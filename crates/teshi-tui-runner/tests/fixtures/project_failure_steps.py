@@ -423,8 +423,8 @@ class World(TerminalWorld):
             self.op("key", "Escape")
             return
         if text == "the operator requests project B":
-            if "Type your message..." in self.screen():
-                self.op("click", "Type your message...")
+            if "›" in self.screen():
+                self.op("click", "›")
             else:
                 self.op("key", "Escape")
                 self.op("key", "3")

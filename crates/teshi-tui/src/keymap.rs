@@ -31,6 +31,10 @@ pub struct KeyContext {
     pub model_panel_adding: bool,
     /// Whether the session browser panel is currently open.
     pub session_panel_active: bool,
+    /// Whether Ctrl+R prompt-history search owns input.
+    pub history_search_active: bool,
+    /// Whether the fullscreen composer draft editor is open.
+    pub composer_editor_active: bool,
     /// Whether the Change Summary overlay is visible.
     pub change_summary_visible: bool,
     /// Whether the AI agent is currently waiting for an LLM response.
@@ -328,6 +332,26 @@ pub enum Action {
     AiDeleteWord,
     /// Delete from the composer caret to the line start (Ctrl+U).
     AiDeleteToLineStart,
+    /// Open Ctrl+R prompt-history search over persisted drafts.
+    AiHistorySearchOpen,
+    /// Move the history-search highlight up.
+    AiHistorySearchPrev,
+    /// Move the history-search highlight down.
+    AiHistorySearchNext,
+    /// Apply the highlighted history entry to the composer.
+    AiHistorySearchSelect,
+    /// Close history search and restore the interrupted draft.
+    AiHistorySearchDismiss,
+    /// Insert a character into the history-search query.
+    AiHistorySearchInsert(char),
+    /// Delete the last character of the history-search query.
+    AiHistorySearchBackspace,
+    /// Open the fullscreen draft editor (Ctrl+O).
+    AiComposerEditorOpen,
+    /// Apply the fullscreen editor draft back to the composer.
+    AiComposerEditorApply,
+    /// Discard the fullscreen editor and keep the live composer unchanged.
+    AiComposerEditorDismiss,
     AiSendMessage,
     /// Continue an interrupted ACP task in the current session.
     AiContinueTask,
@@ -621,6 +645,80 @@ impl Action {
                         && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
                 {
                     Some(Self::OverlayInsert(ch))
+                }
+                _ => None,
+            };
+        }
+        if context.history_search_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::AiHistorySearchDismiss),
+                (KeyCode::Enter, _) => Some(Self::AiHistorySearchSelect),
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    Some(Self::AiHistorySearchPrev)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                    Some(Self::AiHistorySearchNext)
+                }
+                (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::AiHistorySearchNext),
+                (KeyCode::Backspace, _) => Some(Self::AiHistorySearchBackspace),
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiHistorySearchInsert(ch))
+                }
+                _ => None,
+            };
+        }
+        if context.composer_editor_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::AiComposerEditorDismiss),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL)
+                | (KeyCode::Enter, KeyModifiers::CONTROL) => Some(Self::AiComposerEditorApply),
+                (KeyCode::Enter, KeyModifiers::SHIFT)
+                | (KeyCode::Char('j'), KeyModifiers::CONTROL)
+                | (KeyCode::Enter, _) => Some(Self::AiNewline),
+                (KeyCode::Char('a'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{1}'), _) => {
+                    Some(Self::AiSelectAll)
+                }
+                (KeyCode::Char('z'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{1a}'), _) => {
+                    Some(Self::AiUndo)
+                }
+                (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(Self::AiRedo),
+                (KeyCode::Char('z' | 'Z'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiRedo)
+                }
+                (KeyCode::Char('x'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{18}'), _) => {
+                    Some(Self::AiCut)
+                }
+                (KeyCode::Backspace, _) => Some(Self::AiBackspace),
+                (KeyCode::Delete, _) => Some(Self::AiDelete),
+                (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectLeft)
+                }
+                (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectRight)
+                }
+                (KeyCode::Up, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectUp)
+                }
+                (KeyCode::Down, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                    Some(Self::AiSelectDown)
+                }
+                (KeyCode::Left, _) => Some(Self::AiCursorLeft),
+                (KeyCode::Right, _) => Some(Self::AiCursorRight),
+                (KeyCode::Up, _) => Some(Self::AiCursorUp),
+                (KeyCode::Down, _) => Some(Self::AiCursorDown),
+                (KeyCode::Home, _) => Some(Self::AiCursorHome),
+                (KeyCode::End, _) => Some(Self::AiCursorEnd),
+                (KeyCode::Char('o'), KeyModifiers::CONTROL) => Some(Self::AiComposerEditorDismiss),
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiSendChar(ch))
                 }
                 _ => None,
             };
@@ -1808,6 +1906,8 @@ impl Action {
                 {
                     Some(Self::AiToggleSidebar)
                 }
+                (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::AiHistorySearchOpen),
+                (KeyCode::Char('o'), KeyModifiers::CONTROL) => Some(Self::AiComposerEditorOpen),
                 (KeyCode::Char(ch), modifiers)
                     if !ch.is_control()
                         && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
@@ -1976,6 +2076,8 @@ fn modal_context(context: KeyContext) -> bool {
         || context.generation_scope_prompt_active
         || context.step_keyword_picker_active
         || context.project_switch_active
+        || context.history_search_active
+        || context.composer_editor_active
 }
 
 fn pane_navigation_allowed(context: KeyContext) -> bool {
@@ -2322,6 +2424,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -2639,6 +2743,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -2688,6 +2794,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -2737,6 +2845,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: true,
             scenario_dropdown_open: false,
@@ -2825,6 +2935,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -2884,6 +2996,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -2943,6 +3057,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -3010,6 +3126,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -3059,6 +3177,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -3108,6 +3228,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -3181,6 +3303,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -3249,6 +3373,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,
@@ -3538,6 +3664,8 @@ mod tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,

@@ -76,13 +76,13 @@ class HistoryRestorationTests(unittest.TestCase):
                 if self.phase == "queued":
                     if self.polls < 3:
                         # A completion row can match the command before input does.
-                        return "/agent Select session Agent\n│Type your message..."
+                        return "/agent Select session Agent\n›"
                     self.accepted = True
                     return "│" + self.typed
                 if self.polls < 2:
                     return "│" + self.typed
                 self.consumed = True
-                return "Select Agent for this session\n│Type your message..."
+                return "Select Agent for this session\n›"
 
         world = QueuedInputWorld()
         with patch.object(bindings.time, "sleep"):
