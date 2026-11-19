@@ -177,20 +177,15 @@ impl Fixture {
             .unwrap();
     }
 
-    /// Clicks a pane action chip or the global footer command by label.
-    ///
-    /// Commands now render on the focused pane's action strip, and Save stays on
-    /// the global footer; both draw the bare label, so the last matching row is
-    /// the control rather than a tree row ("Saved queries") or the tab bar.
-    /// Panes that a narrow terminal does not draw are revealed through `anchor`
-    /// first.
-    fn click_editor_action(&self, terminal: &Terminal, anchor: &str, label: &str, stage: &str) {
+    /// Saves the focused requirement document with the Normal-mode `Ctrl+s`
+    /// binding. Saving is keyboard-only since the footer action strip was
+    /// pared back to Settings/Exit; `anchor` reveals the editor pane first on
+    /// narrow terminals where only the focused pane is drawn.
+    fn save_editor(&self, terminal: &Terminal, anchor: &str, stage: &str) {
+        self.capture(terminal, &format!("{stage}-before"));
         self.reveal(terminal, anchor);
-        if self.config.cols >= 60 && !terminal.screen().unwrap().contains(label) {
-            terminal.click_text(anchor, 1500).unwrap();
-            terminal.expect_text(label, true, 1500).unwrap();
-        }
-        self.click_control(terminal, label, stage);
+        terminal.key("Ctrl+s").unwrap();
+        self.capture(terminal, &format!("{stage}-after"));
     }
 
     /// Clicks `label` on the lowest screen row that carries it.
@@ -339,7 +334,7 @@ fn new_document(narrow: bool) {
     let terminal = fixture.launch();
     fixture.click_new(&terminal);
     terminal.expect_text("# Document 1", true, 1500).unwrap();
-    fixture.click_editor_action(&terminal, "# Document 1", " Save", "save-new");
+    fixture.save_editor(&terminal, "# Document 1", "save-new");
     wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     let body = documents::document_path(&fixture.store, "doc-1").expect("doc-1 is indexed");
     assert_eq!(fs::read_to_string(body).unwrap(), "# Document 1\n\n");
@@ -544,7 +539,7 @@ fn dirty_modal(narrow: bool, save: bool) {
             ALPHA
         }
     );
-    fixture.click_editor_action(&terminal, "# Document 1", " Save", "save-new-after-dirty");
+    fixture.save_editor(&terminal, "# Document 1", "save-new-after-dirty");
     wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     fixture.capture(&terminal, "dirty-resolution-persisted");
     fixture.finish(terminal);
@@ -594,12 +589,7 @@ fn priority_roundtrip(narrow: bool) {
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
         ALPHA
     );
-    fixture.click_editor_action(
-        &terminal,
-        "draft alpha first",
-        " Save",
-        "priority-save-body",
-    );
+    fixture.save_editor(&terminal, "draft alpha first", "priority-save-body");
     wait_until(|| {
         fs::read_to_string(fixture.store.join("alpha.md"))
             .unwrap()

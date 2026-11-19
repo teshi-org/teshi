@@ -748,9 +748,9 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
     // Opening the loaded store hands focus to the tree, so let the document
     // render before moving to the editor or the chord lands too early.
     terminal.expect_text("body 01", true, 10000).unwrap();
-    // Footer controls follow the focused pane; the tree opens first. The editor
-    // strip only paints once the document pane owns focus, so wait for its
-    // Edit action before sampling the baseline frame.
+    // Pane action chips follow the focused pane; the tree opens first. The
+    // editor strip only paints once the document pane owns focus, so wait for
+    // its Edit action before sampling the baseline frame.
     prefix(&terminal, "Right");
     terminal.expect_text(" Edit", true, 10000).unwrap();
     // Let the focus border and strip settle before the baseline screenshot.
@@ -760,7 +760,7 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
         .lines()
         .enumerate()
         .find_map(|(row, line)| {
-            line.find(" Save")
+            line.find(" Edit")
                 .map(|byte| (row + 1, line[..byte].chars().count() + 1))
         })
         .unwrap();
