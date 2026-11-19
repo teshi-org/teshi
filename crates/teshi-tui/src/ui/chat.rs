@@ -3959,9 +3959,10 @@ mod tests {
         let (mut app, _project, _store) = activity_test_app();
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
-        // Cases: (draft, caret, expected glyphs under the block).
+        // Cases: (draft, caret, expected glyphs under the block). Empty
+        // composers stay blank, so the caret paints over a space cell.
         let cases: [(&str, usize, &[&str]); 4] = [
-            ("", 0, &["T"]),
+            ("", 0, &[" "]),
             ("ab", 1, &["b"]),
             ("ab", 2, &[" "]),
             ("a中", 1, &["中", " "]),
