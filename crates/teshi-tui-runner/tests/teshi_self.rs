@@ -639,7 +639,7 @@ fn verify(source: &str, command: &str) {
             vec![text("Sample scenario")],
             vec![key("r")],
             vec![key("e"), text(" Edit")],
-            vec![text("Status: Passed"), text("[passed] a sample step")],
+            vec![text("PASSED"), text("Screenshots")],
             vec![
                 key("Enter"),
                 key("End"),
