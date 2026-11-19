@@ -124,6 +124,12 @@ impl RunRequest {
 pub struct RunAttachment {
     pub kind: String,
     pub path: String,
+    /// Gherkin step correlation id when the runner attributed the artifact.
+    ///
+    /// Missing means case-level evidence, which Run Details shows for every
+    /// step of that case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +177,7 @@ pub enum RunEvent {
     },
     Artifact {
         case_id: Option<String>,
+        step_id: Option<String>,
         kind: String,
         path: String,
     },
@@ -250,9 +257,13 @@ impl RunEvent {
             }
             Self::Artifact {
                 case_id,
+                step_id,
                 kind,
                 path,
-            } => json!({"type": "artifact", "case_id": case_id, "kind": kind, "path": path}),
+            } => json!({
+                "type": "artifact", "case_id": case_id, "step_id": step_id,
+                "kind": kind, "path": path,
+            }),
             Self::EndRun {
                 passed,
                 failed,
@@ -1048,6 +1059,10 @@ pub(crate) fn parse_event_line(line: &str) -> Option<RunEvent> {
                 .get("case_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            step_id: value
+                .get("step_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             kind: value
                 .get("kind")
                 .and_then(|v| v.as_str())
@@ -1126,7 +1141,15 @@ fn parse_error(value: Option<&serde_json::Value>) -> RunError {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            attachments.push(RunAttachment { kind, path });
+            let step_id = item
+                .get("step_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            attachments.push(RunAttachment {
+                kind,
+                path,
+                step_id,
+            });
         }
     }
     RunError {
@@ -1341,6 +1364,7 @@ impl RunReportCollector {
             }
             RunEvent::Artifact {
                 case_id: Some(case_id),
+                step_id,
                 kind,
                 path,
             } => {
@@ -1348,6 +1372,7 @@ impl RunReportCollector {
                     case.attachments.push(RunAttachment {
                         kind: kind.clone(),
                         path: path.clone(),
+                        step_id: step_id.clone(),
                     });
                 }
             }
@@ -2139,6 +2164,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_line_reads_artifact_step_correlation() {
+        let line = r#"{"type":"artifact","case_id":"c1","step_id":"c1:L9","kind":"screenshot","path":"/abs/a.png"}"#;
+        let event = parse_event_line(line).expect("parse artifact");
+        let RunEvent::Artifact {
+            case_id,
+            step_id,
+            kind,
+            path,
+        } = event
+        else {
+            panic!("expected artifact");
+        };
+        assert_eq!(case_id.as_deref(), Some("c1"));
+        assert_eq!(step_id.as_deref(), Some("c1:L9"));
+        assert_eq!(kind, "screenshot");
+        assert_eq!(path, "/abs/a.png");
+
+        let event = parse_event_line(
+            r#"{"type":"artifact","case_id":"c1","kind":"video","path":"/abs/run.mp4"}"#,
+        )
+        .expect("parse case-level artifact");
+        assert!(matches!(event, RunEvent::Artifact { step_id: None, .. }));
+    }
+
+    #[test]
     fn parse_event_line_keeps_unknown_types_for_forwarding() {
         let event = parse_event_line(r#"{"type":"end_example","case_id":"c","example_line":7}"#)
             .expect("unknown protocol events are kept");
@@ -2287,6 +2337,7 @@ mod tests {
         });
         collector.observe(&RunEvent::Artifact {
             case_id: Some("f0:s0".into()),
+            step_id: None,
             kind: "text".into(),
             path: "screen.txt".into(),
         });

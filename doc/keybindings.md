@@ -78,25 +78,46 @@ work while the prompt is open, and a left click closes it.
 | `/` | Search Feature names, titles, and relative paths in the Features column; the title shows `/query` with a block caret (Left/Right/Home/End move it, Delete removes forward); Enter keeps the filter, Esc clears it |
 | Enter | Toggle the selected Feature directory |
 | `j/k`, Down/Up | Select next/previous row |
-| `h/Left` | In the Features column: collapse an open directory, otherwise select the parent directory. Elsewhere: move focus to the previous visible column in the order Scenarios → Features or Steps → Scenarios |
-| `l/Right` | In the Features column: expand a closed directory, step into the first child of an open one, or open a Feature's scenarios. Elsewhere: move focus to the next visible column (Scenarios, then Steps); use `e` to edit |
-| Shift+Tab | Previous column |
-| Tab | Next column |
-| Home/End, `gg/G` | First/last row |
-| PageUp/PageDown, Ctrl+B/Ctrl+F | Navigate approximately ten rows |
-| Enter | Expand/collapse failure details |
-| `i` | Open the replay screenshot viewer for the selected step, or for the failed step while Failure Details is open |
+| `h/Left` | In the Features column: collapse an open directory, otherwise select the parent directory. In Run Details: return to Steps. Elsewhere: move focus to the previous visible column |
+| `l/Right` | In the Features column: expand a closed directory, step into the first child of an open one, or open a Feature's scenarios. Elsewhere: move focus to the next visible column (Scenarios, Steps, then Run Details); at Run Details the stop is final. Use `e` to edit |
+| Shift+Tab | Previous column; in Run Details, previous inner tab |
+| Tab | Next column; in Run Details, next inner tab |
+| Home/End, `gg/G` | First/last row (or first/last Run Details item) |
+| PageUp/PageDown, Ctrl+B/Ctrl+F | Navigate approximately ten rows; in Run Details, scroll the content without moving the selected step |
+| Enter | Run Details primary action: fullscreen a screenshot, open a recording or unknown artifact, or expand the selected HTTP exchange |
+| Space | Expand/collapse the selected Run Details item; HTTP bodies stay unloaded until this key |
+| `o` | Open the selected Run Details artifact or HTTP URL in the system opener |
+| `y` | Copy the selected Run Details path or HTTP URL |
+| `i` | Retired; it no longer opens a screenshot viewer |
 | `r` | Run the selected scenario |
 | `p` | Toggle plaintext for redacted HTTP inspector fields |
 | `a` | Request an AI suggestion |
 | `e` | Open the selected file editor |
 | Esc | Clear the current interaction state |
 
-Features occupy the left column. In the right column, Scenarios sit above
-Steps; Tab/Shift+Tab and the pane chords follow that visual order. The
-Scenarios title carries the last run's tally on its right edge (for example
+Features occupy the left column. In the right column, Scenarios sit above the
+bottom row, which splits into **Steps** (38 columns) and **Run Details**.
+Tab/Shift+Tab and the pane chords follow that visual order. The Scenarios title
+carries the last run's tally on its right edge (for example
 `1/2 passed, 1 failed`), and its bottom row holds **Run**, **Detail**, and
 **Edit**.
+
+### Run Details
+
+The pane header always shows the scenario, a solid status chip, the duration,
+the selected step, and its runner correlation id. Inner tabs appear only for
+content families that exist: **Screenshots**, **API**, **Logs**, and **Files**.
+`j/k` selects a row inside the active family; changing the Steps selection
+updates the pane immediately without moving focus.
+
+HTTP bodies are collapsed by default: the folded rows report header counts and
+body sizes. `Space` renders the redacted request/response bodies; `p` still
+expands plaintext through the running API sidecar. Screenshots draw inline when
+the terminal has a graphics protocol and otherwise keep the same rows with
+`preview unavailable` plus the project-relative path. Recordings and unknown
+artifact kinds keep their path and `Enter` hands them to the system opener.
+Evidence paths must resolve under `.teshi/logs/replay-screenshots/<run>/`;
+anything outside that root is shown but cannot be opened.
 
 ### Feature editor: Normal
 
@@ -150,23 +171,21 @@ Ctrl+7, Ctrl+underscore, and Ctrl+Shift+minus.
 | `p` | Show/hide the AI panel |
 | Enter | Focus the visible AI panel |
 | `o` | Open the scenario-location dropdown |
-| `i` | Toggle the replay screenshot viewer |
 
 The viewer also opens from Explore, which is the main entry point: the
-Scenarios and Steps panes mark captures with `●N`, `i` on the Steps pane opens
-the capture of the selected step, and `i` in Failure Details opens the failing
-step. In Explore the viewer covers the Scenarios and Steps panes, leaving the
-Features column as context; narrow terminals fall back to the whole tab.
-Closing the viewer moves the Steps selection to the capture that was last
-shown. The MindMap entry stays available for browsing evidence by requirement
-structure.
+Scenarios and Steps panes mark captures with `●N`, and Run Details `Enter`
+opens the capture of the selected step. In Explore the viewer covers the
+Scenarios and Steps panes, leaving the Features column as context; narrow
+terminals fall back to the whole tab. Closing the viewer moves the Steps
+selection to the capture that was last shown. `i` is retired everywhere and no
+longer opens the viewer.
 
 The viewer shows the captures recorded for the selected scenario by
 the newest replay run that has them. `j/k` switch between steps. `+`/`=` and
 `-` zoom, `1` selects 100 percent, and `0`/`f` resets to fit. In a zoomed view,
 arrow keys pan through original pixels; `h/l` also pan horizontally. In fit
 view, Up/Down retain step navigation. `o` opens the original in the system
-viewer, and `i` or Esc closes it, including while an image is loading.
+viewer, and Esc closes it, including while an image is loading.
 Loading and encoding run in the background; the title distinguishes loading
 from incremental pixel output. See [screenshot viewing](tui-image-viewer.md)
 for limits and validation.
