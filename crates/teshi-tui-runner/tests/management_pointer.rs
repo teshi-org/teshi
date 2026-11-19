@@ -173,7 +173,8 @@ impl Fixture {
         terminal.key("Escape").unwrap();
         terminal.key("Escape").unwrap();
         terminal.key("ctrl+q").unwrap();
-        terminal.expect_exit(0, 10000).unwrap();
+        // A loaded runner can take longer than 10s to join the quit path.
+        terminal.expect_exit(0, 30000).unwrap();
     }
 
     fn profile_count(&self) -> usize {

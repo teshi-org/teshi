@@ -47,11 +47,17 @@ sharded measurements rather than these initial weights.
 3. The existing `Terminal interface tests (<platform>)` checks are final gates.
    They run even when dependencies fail, and require successful preparation and
    every shard, exact inventories, complete replay evidence and actual files.
+   The workflow also runs on `merge_group`: the merge queue builds the exact
+   merged tree and that green run becomes the evidence for the post-merge push.
 4. Nightly continues consuming the success of the entire CI workflow for the
-   exact source: the push run for the `main` commit, or the merged pull
-   request's run when its `tested-tree-<tree>` marker matches that commit's Git
-   tree. Skipped, cancelled, missing and failed prerequisites cannot unlock the
-   platform gate.
+   exact source: the push run for the `main` commit, the merge-queue run of that
+   commit, or the merged pull request's run when its `tested-tree-<tree>` marker
+   matches that commit's Git tree. Skipped, cancelled, missing and failed
+   prerequisites cannot unlock the platform gate.
+5. A push to `main` first asks `nightly_ci_gate.py` whether a green run already
+   verified the identical Git tree. When a merge-queue or merged-PR run did, the
+   heavy jobs are skipped and the run records that evidence in its summary; a
+   direct push or a tree without green evidence still runs the full workflow.
 
 Ownership checks require every integration-test module to occur exactly once.
 Compiled inventories additionally cover platform conditionals, unit-test targets,
@@ -146,6 +152,10 @@ CI self-test launches enforce explicit application, session and ACP-store
 overrides. Fixtures own these stores independently of Windows known-folder
 lookups; overriding APPDATA/LOCALAPPDATA alone does not isolate every store.
 Project-switch fixtures select their intended native backend explicitly.
+Shard executions pin `TESHI_LOCALE=en` for the shards that spawn the TUI;
+hosted runners resolve to en-US, and assertions on English labels must not
+depend on the runner image's locale. Backend unit tests keep their own pinned
+locale because the environment override would take precedence over it.
 
 Evidence helpers do not establish application readiness. Keep waits at the
 operation's semantic boundary; this is not a general idle/layout barrier.

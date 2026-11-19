@@ -94,7 +94,7 @@ Then: `./target/debug/teshi web --project <dir> --host 127.0.0.1 --port 20253 --
 Without `dist`, the daemon errors with "GPUI WASM dist not found". The daemon auto-resolves
 `apps/teshi-web/dist` when run from the repo root, so `--dist` is optional there.
 
-### Git hooks
+### Git hooks / preflight
 
-The repo's `.githooks/` are not enabled by default here and are stale. Rely on the commands above
-as the real quality gates rather than `.githooks/pre-commit`.
+`scripts/preflight.sh` (or `pwsh scripts/preflight.ps1`) runs the CI quality gates locally. The
+`.githooks/` delegate to it; enable them once with `git config core.hooksPath .githooks`.

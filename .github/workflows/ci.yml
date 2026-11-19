@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # A merge queue builds the exact merged tree and runs this workflow there.
+  merge_group:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -12,10 +14,56 @@ concurrency:
 
 permissions:
   contents: read
+  # The push gate reads run artifacts and merged pull requests.
+  actions: read
+  pull-requests: read
 
 jobs:
+  # A merge normally produces a new commit with the tree a green pull-request
+  # run already verified. Re-running the full workflow there only repeats the
+  # verification; a direct push has no such evidence and still runs everything.
+  reuse:
+    name: Reuse verified tree
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      reused: ${{ steps.gate.outputs.reused }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ask whether this tree already passed CI
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          # A failed lookup must fall back to full CI, not block the push run.
+          state=$(python scripts/nightly_ci_gate.py --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" --tree "$tree") || state="lookup-failed"
+          echo "CI evidence for ${tree}: ${state}"
+          echo "state=${state}" >> "$GITHUB_OUTPUT"
+          case "$state" in
+            success:pull-request*|success:merge-group*)
+              echo "reused=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "reused=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+      - name: Explain the decision
+        run: |
+          if [ "${{ steps.gate.outputs.reused }}" = "true" ]; then
+            echo "### Reused a green run for the identical source tree" >> "$GITHUB_STEP_SUMMARY"
+            echo "Evidence: ${{ steps.gate.outputs.state }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Heavy jobs are skipped; the tree was already verified." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Running full CI" >> "$GITHUB_STEP_SUMMARY"
+            echo "No green run exists for this exact tree (${{ steps.gate.outputs.state }})." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   quality:
     name: Quality gates
+    needs: reuse
+    if: always() && needs.reuse.outputs.reused != 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -111,6 +159,8 @@ jobs:
 
   tui-build:
     name: Prepare terminal tests (${{ matrix.os }})
+    needs: reuse
+    if: always() && needs.reuse.outputs.reused != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     env:
@@ -165,7 +215,8 @@ jobs:
 
   tui-shards:
     name: Terminal ${{ matrix.shard }} (${{ matrix.os }})
-    needs: tui-build
+    needs: [reuse, tui-build]
+    if: always() && needs.reuse.outputs.reused != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -210,8 +261,8 @@ jobs:
   tui-tests:
     # Keep the existing required check name stable across the sharding change.
     name: Terminal interface tests (${{ matrix.os }})
-    if: always()
-    needs: [tui-build, tui-shards]
+    if: always() && needs.reuse.outputs.reused != 'true'
+    needs: [reuse, tui-build, tui-shards]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     strategy:
@@ -257,6 +308,8 @@ jobs:
 
   desktop:
     name: teshi-desktop build (GPUI)
+    needs: reuse
+    if: always() && needs.reuse.outputs.reused != 'true'
     runs-on: windows-latest
 
     steps:
