@@ -12806,6 +12806,12 @@ impl App {
                         self.status = crate::i18n::t("status.input_state_cleared").to_string();
                     } else if self.active_tab == MainTab::Explore && self.explore_edit_mode {
                         self.explore_exit_edit();
+                    } else if self.active_tab == MainTab::Explore
+                        && self.explore_focus == ColumnFocus::Details
+                    {
+                        // Leave the fourth pane; narrow terminals then paint
+                        // Scenarios again, and wide ones keep the same target.
+                        self.explore_focus = ColumnFocus::Scenario;
                     } else if self.view_stage != ViewStage::TreeOnly {
                         self.stage_back();
                     }
@@ -24552,6 +24558,15 @@ mod tests {
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
         app.explore_focus_prev();
         assert_eq!(app.explore_focus, ColumnFocus::Feature);
+    }
+
+    #[test]
+    fn escape_from_run_details_returns_to_scenarios() {
+        let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::Explore;
+        app.explore_focus = ColumnFocus::Details;
+        app.handle_action(Action::ClearInputState).unwrap();
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
     }
 
     #[test]
