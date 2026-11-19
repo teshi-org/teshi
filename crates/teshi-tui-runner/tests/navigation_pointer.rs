@@ -464,6 +464,11 @@ fn ai_input_pointer_click_takes_text_focus() {
     let terminal = fixture.launch();
     terminal.key("3").unwrap();
     terminal.expect_text("AI Chat", true, 5000).unwrap();
+    // The sidebar label paints before the composer border; wait for the border
+    // instead of sampling one frame and failing when it has not drawn yet.
+    terminal
+        .expect_text("╭────────────────", true, 5000)
+        .unwrap();
     let (col, row) = locate(&terminal, "╭────────────────");
     terminal
         .write(&format!(

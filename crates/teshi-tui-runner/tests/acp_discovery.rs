@@ -1,5 +1,9 @@
 //! Real PTY coverage for passive chat and explicitly requested ACP startup.
-use std::{fs, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 use teshi_tui_runner::{Launch, Terminal};
 
 #[test]
@@ -98,8 +102,8 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         fs::write(output.join("loading-second.txt"), &second).unwrap();
         assert_ne!(first, second, "loading feedback must animate");
         terminal.expect_text(settings, true, 10000).unwrap();
-        assert_eq!(count_method(&trace, "spawn"), 1);
-        assert_eq!(count_method(&trace, "session/new"), 1);
+        wait_for_method(&trace, "spawn", 1, 5000);
+        wait_for_method(&trace, "session/new", 1, 5000);
         assert_eq!(
             count_method(&trace, "session/prompt"),
             0,
@@ -112,7 +116,7 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
             terminal.key("1").unwrap();
             terminal.key("3").unwrap();
         }
-        assert_eq!(count_method(&trace, "spawn"), 1);
+        wait_for_method(&trace, "spawn", 1, 1000);
         assert_eq!(count_method(&trace, "session/prompt"), 0);
         terminal.write("first explicit prompt").unwrap();
         terminal.key("Enter").unwrap();
@@ -127,9 +131,9 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         terminal.key("Escape").unwrap();
         terminal.key("1").unwrap();
         terminal.key("3").unwrap();
-        assert_eq!(count_method(&trace, "spawn"), 1);
-        assert_eq!(count_method(&trace, "session/new"), 1);
-        assert_eq!(count_method(&trace, "session/prompt"), 1);
+        wait_for_method(&trace, "spawn", 1, 1000);
+        wait_for_method(&trace, "session/new", 1, 1000);
+        wait_for_method(&trace, "session/prompt", 1, 5000);
         terminal.key("Enter").unwrap();
         terminal.write("/new").unwrap();
         terminal.key("Tab").unwrap();
@@ -140,17 +144,15 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         terminal.expect_text("LAZY_REPLY_1", true, 10000).unwrap();
         terminal.expect_text("Not connected", true, 5000).unwrap();
         std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(
-            count_method(&trace, "spawn"),
-            2,
-            "history restore is passive"
-        );
+        // History restore stays passive; the spawn may land just after the
+        // restored transcript and "Not connected" chip are painted.
+        wait_for_method(&trace, "spawn", 2, 5000);
         fs::write(output.join("restored.txt"), terminal.screen().unwrap()).unwrap();
         terminal.key("Enter").unwrap();
         terminal.expect_text(settings, true, 10000).unwrap();
-        assert_eq!(count_method(&trace, "spawn"), 3);
-        assert_eq!(count_method(&trace, "session/new"), 3);
-        assert_eq!(count_method(&trace, "session/prompt"), 1);
+        wait_for_method(&trace, "spawn", 3, 5000);
+        wait_for_method(&trace, "session/new", 3, 5000);
+        wait_for_method(&trace, "session/prompt", 1, 1000);
         fs::copy(&trace, output.join("acp-trace.jsonl")).unwrap();
         terminal.close().unwrap();
     }
@@ -162,6 +164,28 @@ fn count_method(path: &std::path::Path, method: &str) -> usize {
         .lines()
         .filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["method"] == method)
         .count()
+}
+
+/// Waits until the fixture trace records exactly `expected` calls of `method`.
+///
+/// The chip that proves the agent connected can paint before the agent's trace
+/// write lands, and at 40 columns that chip is an ellipsis which also appears
+/// while loading. Polling the trace keeps the assertion bound to the contract
+/// instead of to the frame that happened to be sampled.
+fn wait_for_method(path: &Path, method: &str, expected: usize, timeout_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let count = count_method(path, method);
+        if count == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {timeout_ms}ms waiting for {method} count {expected} (last {count}) in {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
@@ -255,18 +279,18 @@ fn failed_explicit_selection_does_not_retry_while_browsing_and_can_be_reselected
         terminal.key("Escape").unwrap();
     }
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(count_method(&trace, "spawn"), 1);
+    wait_for_method(&trace, "spawn", 1, 1000);
     assert_eq!(count_method(&trace, "session/prompt"), 0);
     configure("ok");
     select();
     terminal.expect_text("Settings", true, 10000).unwrap();
-    assert_eq!(count_method(&trace, "spawn"), 2);
+    wait_for_method(&trace, "spawn", 2, 5000);
     assert_eq!(count_method(&trace, "session/prompt"), 0);
     terminal.write("after explicit retry").unwrap();
     terminal.key("Enter").unwrap();
     terminal.expect_text("LAZY_REPLY_1", true, 10000).unwrap();
-    assert_eq!(count_method(&trace, "spawn"), 2);
-    assert_eq!(count_method(&trace, "session/prompt"), 1);
+    wait_for_method(&trace, "spawn", 2, 1000);
+    wait_for_method(&trace, "session/prompt", 1, 5000);
     fs::copy(&trace, output.join("acp-trace.jsonl")).unwrap();
     terminal.close().unwrap();
 }

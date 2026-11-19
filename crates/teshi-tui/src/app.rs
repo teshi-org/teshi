@@ -6799,6 +6799,11 @@ impl App {
     }
 
     fn remove_external_feature(&mut self, idx: usize) {
+        let removed_path = self
+            .project
+            .features
+            .get(idx)
+            .map(|feature| feature.file_path.clone());
         self.project.features.remove(idx);
         self.buffers.remove(idx);
         self.buffer_dirty.remove(idx);
@@ -6817,6 +6822,14 @@ impl App {
         self.explore_selected_feature = self
             .explore_selected_feature
             .saturating_sub(usize::from(self.explore_selected_feature > idx));
+        // Lazy mode installs only the selected Feature. When that file is gone,
+        // drop the stale selection so the next catalog poll installs a surviving
+        // path; otherwise the pane stays empty while the tree lists the rest.
+        if let (Some(state), Some(path)) = (self.lazy_features.as_mut(), removed_path.as_ref())
+            && state.selected.as_deref() == Some(path.as_path())
+        {
+            state.clear_selection();
+        }
         self.explore_feature_scenario_memory.clear();
         self.explore_scenario_step_memory.clear();
         self.explore_case_map.retain(|_, (i, _)| *i != idx);
@@ -21941,6 +21954,59 @@ mod tests {
         assert_eq!(app.project.features[0].name, "Second");
         assert_eq!(app.build_explore_cases().len(), 1);
         assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn external_deletion_of_the_loaded_feature_clears_the_lazy_selection() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        for name in ["keep", "remove"] {
+            fs::write(
+                root.path().join(format!("{name}.feature")),
+                format!("Feature: {name}\n  Scenario: Example\n    Given a fixture\n"),
+            )
+            .unwrap();
+        }
+        let mut app = App::from_project_directory(
+            root.path(),
+            crate::config::load_config().unwrap(),
+            true,
+            false,
+            store.path().into(),
+        )
+        .unwrap();
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        await_catalog(&mut app, 2);
+        await_launch_selection(&mut app);
+        let installed = app.project.features[0].file_path.clone();
+        let surviving = app
+            .lazy_features
+            .as_ref()
+            .unwrap()
+            .paths
+            .iter()
+            .find(|path| **path != installed)
+            .cloned()
+            .unwrap();
+        fs::remove_file(&installed).unwrap();
+        // The production 1s throttle must not hide the deletion from this test.
+        app.last_external_check = Instant::now() - Duration::from_secs(2);
+        app.poll_external_feature_changes();
+        assert!(app.project.features.is_empty());
+        assert!(app.lazy_features.as_ref().unwrap().selected.is_none());
+
+        // The next poll installs a surviving catalog path; keeping the deleted
+        // selection would leave the pane empty while the tree lists the rest.
+        app.lazy_features
+            .as_mut()
+            .unwrap()
+            .paths
+            .retain(|path| path.exists());
+        app.poll_lazy_features();
+        assert_eq!(
+            app.lazy_features.as_ref().unwrap().selected.as_deref(),
+            Some(surviving.as_path())
+        );
     }
 
     #[test]
