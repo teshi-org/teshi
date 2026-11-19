@@ -65,7 +65,6 @@ class World:
         self.op("key", "3")
         self.expect("Welcome to AI Chat!")
         self.op("key", "Enter")
-        self.expect("Type your message...")
         self.input = True
         self.discover()
 
@@ -92,14 +91,14 @@ class World:
         raise AssertionError("connection deadline exceeded")
 
     def focus(self):
-        # Focus lives on the composer; Enter still focuses when unfocused.
+        # Empty composers stay blank. Click the prompt glyph (or a retained
+        # draft) so focus does not depend on placeholder copy.
         screen = self.op("screen")
-        if "Type your message..." not in screen and any(
-            label in screen for label in ("Send", "[NORMAL]", "›")
-        ):
-            self.op("key", "Enter")
-        screen = self.op("screen")
-        target = self.rejected_message if self.rejected_message and self.rejected_message in screen else "Type your message..."
+        target = (
+            self.rejected_message
+            if self.rejected_message and self.rejected_message in screen
+            else "›"
+        )
         self.op("click", target)
         self.input = True
 

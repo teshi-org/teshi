@@ -3184,6 +3184,8 @@ mod pipeline_gate_tests {
             model_panel_active: false,
             model_panel_adding: false,
             session_panel_active: false,
+            history_search_active: false,
+            composer_editor_active: false,
             change_summary_visible: false,
             ai_status_waiting: false,
             scenario_dropdown_open: false,

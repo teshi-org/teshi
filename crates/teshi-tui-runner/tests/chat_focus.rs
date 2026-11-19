@@ -108,24 +108,36 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
     capture(&terminal, "blurred");
     for _ in 0..2 {
         terminal.key("Enter").unwrap();
-        // The composer placeholder only paints while the input owns focus; the
-        // Send button paints in both states, so it cannot gate the repaint.
-        terminal
-            .expect_text("Type your message...", true, 5000)
-            .unwrap();
-        assert_eq!(input_title(&terminal), before);
+        // Empty composers stay blank; focus still changes border/caret styling.
         let focused_svg = root.path().join("focused.svg");
-        terminal.screenshot(&focused_svg).unwrap();
-        assert_ne!(
-            fs::read(&before_svg).unwrap(),
-            fs::read(&focused_svg).unwrap(),
-            "focus did not change rendered styling"
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            terminal.screenshot(&focused_svg).unwrap();
+            if fs::read(&before_svg).unwrap() != fs::read(&focused_svg).unwrap() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "focus did not change rendered styling"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(input_title(&terminal), before);
         capture(&terminal, "focused");
         terminal.key("Escape").unwrap();
-        terminal
-            .expect_text("Type your message...", false, 5000)
-            .unwrap();
+        let blur_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let current = root.path().join("blur-current.svg");
+            terminal.screenshot(&current).unwrap();
+            if fs::read(&before_svg).unwrap() == fs::read(&current).unwrap() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < blur_deadline,
+                "blur did not restore the idle composer styling"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(input_title(&terminal), before);
     }
 }

@@ -263,6 +263,9 @@ Clicking a conversation focuses the sidebar too.
 | Ctrl+Home/End | History top/bottom |
 | Ctrl+Shift+C | Copy chat selection |
 | Esc | Return to Normal |
+| Ctrl+R | Search persisted prompt history for this project; Enter inserts, Esc restores the draft |
+| Ctrl+O | Open a fullscreen draft editor; Ctrl+S / Ctrl+Enter apply, Esc discards |
+| Right-click | Copy the composer selection when the pointer is over the input |
 
 In the AI tab, Esc from Input returns to Normal; Esc there withdraws the newest
 queued follow-up back into the composer, or opens an "Interrupt the current
@@ -277,8 +280,12 @@ dismiss, or quit confirmation). Ctrl+K stays chat-history scrolling;
 delete-to-line-end is intentionally not bound.
 Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
-Full-width `／` and `＠` become `/` and `@` at command and mention boundaries;
-`＃` and `！` stay literal.
+Full-width `／` `＃` `！` become `/` `#` `!` at the start of an empty draft;
+`＠` becomes `@` at mention boundaries. An empty composer stays blank; focus is
+shown by the border and block caret only (no placeholder copy or trigger chips).
+Sent prompts are stored per project under the app data directory and drive both
+Up/Down recall and Ctrl+R search. Requirements search and other single-line
+fields reuse the same Composer edit model for select-all, undo, and word delete.
 
 A pasted screenshot or a pasted or dropped image file appears in the input as
 an `[Image #N]` placeholder; typing `@path` to a PNG, JPEG, GIF, WebP, or BMP

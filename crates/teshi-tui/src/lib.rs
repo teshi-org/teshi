@@ -31,6 +31,7 @@ pub mod markdown;
 mod mindmap;
 mod profiles;
 mod project_context;
+mod prompt_history;
 mod runner;
 
 pub use runner::{RUN_BLOCKED_EXIT_CODE, RunBlocked};
@@ -531,6 +532,8 @@ pub fn run() -> Result<()> {
                             model_panel_adding: app.model_panel_mode == app::ModelPanelMode::Adding
                                 || app.model_panel_mode == app::ModelPanelMode::Editing,
                             session_panel_active: app.session_panel_active,
+                            history_search_active: app.history_search.is_some(),
+                            composer_editor_active: app.composer_editor.is_some(),
                             change_summary_visible: app.change_summary_visible,
                             ai_status_waiting: app.agent().status == crate::app::AiStatus::Waiting,
                             scenario_dropdown_open: app.scenario_dropdown_open,

@@ -225,7 +225,6 @@ class World:
         self.op("key", "3")
         self.expect("Welcome to AI Chat!")
         self.op("key", "Enter")
-        self.expect("Type your message...")
         self.input_focused = True
         self.chat_open = True
         if self.backend == "ACP":
@@ -444,16 +443,15 @@ class World:
         self.absent("│" + typed, timeout=30)
 
     def focus_input(self):
-        # The footer advertises Send even while the input is unfocused. Click
-        # the actual empty input instead of inferring focus from that label.
-        # Focus lives on the composer; Enter still focuses when unfocused.
+        # Empty composers stay blank. Click the prompt glyph (or a retained
+        # draft) so focus does not depend on placeholder copy.
         screen = self.screen()
-        if "Type your message..." not in screen and any(
-            label in screen for label in ("Send", "[NORMAL]", "›")
-        ):
-            self.op("key", "Enter")
-            self.expect("Type your message...")
-        self.op("click", "Type your message...")
+        target = (
+            self.rejected_message
+            if getattr(self, "rejected_message", None) and self.rejected_message in screen
+            else "›"
+        )
+        self.op("click", target)
         self.input_focused = True
 
     def resume(self):
@@ -573,9 +571,9 @@ class World:
                 if getattr(self, "last_streamed_reply", None):
                     self.expect(self.last_streamed_reply)
                 # Escape first blurs a focused input, then cancels the turn.
-                if "Type your message..." in self.screen():
+                if self.input_focused:
                     self.op("key", "Escape")
-                    self.absent("Type your message...")
+                    self.input_focused = False
                 self.op("key", "Escape")
                 self.expect("│ ○ ")
             else:
@@ -776,10 +774,10 @@ class World:
             if self.process is None:
                 self.open_chat()
             if "create a new agent" in text:
-                self.op("key", "Escape")
-                self.absent("Type your message...")
+                if self.input_focused:
+                    self.op("key", "Escape")
+                    self.input_focused = False
                 self.op("key", "a")
-                self.expect("Type your message...")
                 self.input_focused = True
             else:
                 self.command(quoted[0] if quoted else "/new")
@@ -811,10 +809,12 @@ class World:
             return
         if text.startswith("switch to the original agent") or text.startswith("I switch to the original agent") or text.startswith("restore the saved conversation") or text.startswith("I restore the saved conversation"):
             if "switch to the original agent" in text:
-                self.op("key", "Escape")
+                if self.input_focused:
+                    self.op("key", "Escape")
+                    self.input_focused = False
                 self.op("key", "k")
                 self.op("key", "Enter")
-                self.expect("Type your message...")
+                self.input_focused = True
             else:
                 self.resume()
             self.backend = "Fake Alpha"

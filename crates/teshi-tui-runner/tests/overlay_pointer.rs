@@ -144,10 +144,12 @@ fn capture(terminal: &Terminal, stage: &str) {
 /// new agent).
 fn focus_composer(terminal: &Terminal) {
     terminal.key("Enter").unwrap();
-    // The placeholder only paints while the composer owns focus.
-    terminal
-        .expect_text("Type your message...", true, WAIT_MS)
-        .unwrap();
+    // Empty composers stay blank; a transient probe proves Input mode.
+    const PROBE: &str = "§";
+    terminal.write(PROBE).unwrap();
+    terminal.expect_text(PROBE, true, WAIT_MS).unwrap();
+    terminal.key("Backspace").unwrap();
+    terminal.expect_text(PROBE, false, WAIT_MS).unwrap();
 }
 
 fn command(terminal: &Terminal, input: &str) {
