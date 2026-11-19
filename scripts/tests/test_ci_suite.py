@@ -17,6 +17,16 @@ import ci_suite as suite
 
 
 class PartitionTests(unittest.TestCase):
+    def test_only_terminal_shards_pin_the_acceptance_locale(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TESHI_LOCALE", None)
+            suite.pin_acceptance_locale("backend")
+            self.assertNotIn("TESHI_LOCALE", os.environ, "backend unit tests keep their own locale")
+            suite.pin_acceptance_locale("directory")
+            self.assertNotIn("TESHI_LOCALE", os.environ)
+            suite.pin_acceptance_locale("terminal-b")
+            self.assertEqual(os.environ["TESHI_LOCALE"], "en")
+
     def test_failed_binary_does_not_hide_results_from_independent_later_binaries(self):
         identity = dict(source_sha="local", platform=sys.platform, partition_sha256="partition")
         targets = [dict(id=f"test:{name}", owner="terminal-b", executable=f"{name}.exe",

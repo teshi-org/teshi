@@ -5,6 +5,8 @@ A green CI push run for the exact main commit qualifies. So does a green
 pull_request run of the merged pull request when its checkout had the same Git
 tree: merging creates a new main commit, but the tested files are identical,
 so waiting for a second CI run on main would only repeat the verification.
+A merge queue verifies the merged tree directly; its run qualifies for the
+same reason (`success:merge-group`).
 
 Prints ``success:<evidence>``, ``not-green:<states>`` or ``missing`` and exits
 0. Any API or parsing failure exits 1 so the workflow can fail closed.
@@ -39,15 +41,21 @@ def same_repo(owner: dict | None, repo: str) -> bool:
 def decide(fetch: Fetch, repo: str, sha: str, tree: str) -> str:
     """Return the CI verdict for main commit ``sha`` whose Git tree is ``tree``."""
     ci_runs = f"repos/{repo}/actions/workflows/ci.yml/runs"
+    # A merge-queue run carries the merged commit but belongs to the queue
+    # branch, so query by SHA and verify the repository below.
     exact = [
         run
-        for run in fetch(f"{ci_runs}?branch=main&head_sha={sha}&per_page=100")["workflow_runs"]
-        if run.get("head_sha") == sha
+        for run in fetch(f"{ci_runs}?head_sha={sha}&per_page=100")["workflow_runs"]
+        if run.get("head_sha") == sha and same_repo(run.get("head_repository"), repo)
     ]
-    if any(is_green(run) for run in exact):
+    marker = tree_artifact_name(tree)
+    for run in exact:
+        # The marker proves the queue checked out the tree the merged commit has.
+        if is_green(run) and run.get("event") == "merge_group" and has_marker(fetch, repo, run, marker):
+            return f"success:merge-group run {run['id']}"
+    if any(is_green(run) and run.get("event") != "merge_group" for run in exact):
         return "success:push"
 
-    marker = tree_artifact_name(tree)
     for pull in fetch(f"repos/{repo}/commits/{sha}/pulls"):
         # Fork pull_request runs execute the fork's own workflow file, so their
         # markers prove nothing about what this repository's CI verified.
@@ -59,13 +67,19 @@ def decide(fetch: Fetch, repo: str, sha: str, tree: str) -> str:
                 continue
             # The marker binds the run to its tested merge checkout; a PR run
             # against an older main has a different tree and cannot qualify.
-            artifacts = fetch(f"repos/{repo}/actions/runs/{run['id']}/artifacts?name={marker}")["artifacts"]
-            if any(artifact.get("name") == marker for artifact in artifacts):
+            if has_marker(fetch, repo, run, marker):
                 return f"success:pull-request #{pull['number']} run {run['id']}"
 
-    if exact:
-        return "not-green:" + ",".join(sorted({f"{run.get('status')}/{run.get('conclusion')}" for run in exact}))
+    states = sorted({f"{run.get('status')}/{run.get('conclusion')}" for run in exact if not is_green(run)})
+    if states:
+        return "not-green:" + ",".join(states)
     return "missing"
+
+
+def has_marker(fetch: Fetch, repo: str, run: dict, marker: str) -> bool:
+    """Whether ``run`` uploaded the tested-tree marker for ``marker``."""
+    artifacts = fetch(f"repos/{repo}/actions/runs/{run['id']}/artifacts?name={marker}")["artifacts"]
+    return any(artifact.get("name") == marker for artifact in artifacts)
 
 
 def gh_api(path: str) -> Any:
