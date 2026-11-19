@@ -23,7 +23,8 @@ binding; with a selection it still copies. Requirements calls its Normal mode
 | `Ctrl+B/Ctrl+F` or PageUp/PageDown | Page up/down in Normal mode and choice lists |
 | `s` / `Ctrl+S` | Save the active editable buffer in Normal mode |
 | `m` | Open model settings in Normal mode |
-| `Ctrl+Q` or `:q` | Exit; the **Exit** control at the bottom-right of every tab is the clickable equivalent. `:q` is the host-safe route when a parent terminal also binds `Ctrl+Q`. `q` never exits. `Ctrl+C` copies an active selection; with nothing selected it matches `Esc` (cancel, close, or blur) so tablets without a reliable Escape key can still dismiss overlays and leave insert modes. Immediate exit remains `Ctrl+Q` / `:q` only |
+| `F10` or `Ctrl+Shift+P` or `/preferences` | Open Teshi app Settings; the footer **Settings [F10]** control is the clickable equivalent |
+| `Ctrl+Q` or `:q` | Exit; the footer **Exit [Ctrl+Q]** control is the clickable equivalent. `:q` is the host-safe route when a parent terminal also binds `Ctrl+Q`. `q` never exits. `Ctrl+C` copies an active selection; with nothing selected it matches `Esc` (cancel, close, or blur) so tablets without a reliable Escape key can still dismiss overlays and leave insert modes. Immediate exit remains `Ctrl+Q` / `:q` only |
 
 Pane chords do not steal text input or Requirements visual selections. Existing
 Tab/Shift+Tab and non-text column-navigation keys remain available. In
@@ -37,14 +38,13 @@ pointer; Shift+wheel scrolls horizontally where supported.
 
 ### Global footer
 
-Every tab shares one application action bar: **Sessions**, **Agents**,
-**Models**, **Save**, and **Settings**. The labels are clickable action names
-only — keyboard chords and slash commands stay in this document, not in the
-strip. **Exit** stays pinned at the bottom-right (`Ctrl+Q` / `:q`). Tab-specific
-workflow controls live in pane action strips (Explore Scenarios bottom row;
-Requirements / Test Points tree bottom rows; AI title-bar **Chats** chip) rather
-than the footer left side. On narrow terminals the global strip may hide; Save
-and Models are not pushed back into the left footer.
+Every tab shares one application action bar with **Settings [F10]** only.
+**Exit [Ctrl+Q]** stays pinned at the bottom-right (`:q` remains the host-safe
+route). Sessions, Agents, Models, and Save stay reachable through their existing
+slash commands, Normal-mode keys, and pane strips rather than the footer.
+Tab-specific workflow controls live in pane action strips (Explore Scenarios
+bottom row; Requirements / Test Points tree bottom rows; AI title-bar **Chats**
+chip). On narrow terminals the Settings control may hide.
 
 ### Command line
 
@@ -478,13 +478,14 @@ cancels/closes. Text forms preserve printable `j/k`.
 Ctrl+comma or `/settings` opens ACP settings. Other active modals keep ownership
 of their input. Terminals that cannot encode Ctrl+comma can use `/settings`.
 Agent mode settings and Teshi approval modes remain separate controls.
-Ctrl+Shift+P or `/preferences` opens Teshi app settings. The first row controls
-whether AI chats receive Teshi's extra prompt context (project context, authoring
-pipeline, generation status, exploration, and ACP tool guidance); it is on by
-default. The second row cycles the UI language (System → English → 简体中文).
-Both are persisted in the user settings file and save as you change them. A UI
-language change also retargets `features/<locale>/` in the open session unless
-the project was opened with `-R` or Feature buffers are dirty.
+F10, Ctrl+Shift+P, or `/preferences` opens Teshi app settings (F10 matches
+icode's Settings binding). The first row controls whether AI chats receive
+Teshi's extra prompt context (project context, authoring pipeline, generation
+status, exploration, and ACP tool guidance); it is on by default. The second
+row cycles the UI language (System → English → 简体中文). Both are persisted in
+the user settings file and save as you change them. A UI language change also
+retargets `features/<locale>/` in the open session unless the project was opened
+with `-R` or Feature buffers are dirty.
 
 ## AI slash commands
 

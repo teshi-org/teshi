@@ -580,7 +580,8 @@ fn testpoint_review_filter_batch_and_save_buttons_persist_their_targets() {
     terminal
         .expect_text("Intent & review [NORMAL]", true, 2000)
         .unwrap();
-    click_action(&terminal, "Save");
+    // Saving is keyboard-only (s / Ctrl+s); the footer Save control was removed.
+    terminal.key("s").unwrap();
     fixture.wait(&terminal, "save", || {
         fixture.point(40)["objective"] == "OBJECTIVE_40Z"
     });
@@ -598,10 +599,10 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     let terminal = fixture.launch();
     terminal.resize(55, 16).unwrap();
     fixture.capture(&terminal, "narrow");
-    // Approve/Reject/Filter live on the tree pane strip; Batch/Continue stay on
-    // the keyboard. Save remains on the global footer strip when width allows.
+    // Approve/Reject/Filter live on the tree pane strip; Batch/Continue and
+    // Save stay on the keyboard (the footer strip keeps Settings/Exit only).
     let screen = terminal.screen().unwrap();
-    for control in ["Approve", "Reject", "Filter", "Save"] {
+    for control in ["Approve", "Reject", "Filter"] {
         assert!(
             screen.contains(control),
             "narrow layout missing {control}:\n{screen}"
@@ -642,7 +643,7 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     terminal.write("Z").unwrap();
     terminal.key("Escape").unwrap();
     terminal.expect_text("[NORMAL]", true, 2000).unwrap();
-    click_action(&terminal, "Save");
+    terminal.key("s").unwrap();
     fixture.wait(&terminal, "narrow-save-resets-reviewed-intent", || {
         fixture.point(0)["objective"] == "OBJECTIVE_00Z"
             && fixture.point(0)["review_state"] == "proposed"

@@ -164,7 +164,7 @@ fn new_requirement_creation_keeps_tree_and_editor_in_sync() {
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
-fn requirements_footer_save_and_keyboard_both_persist_documents() {
+fn requirements_keyboard_save_persists_documents() {
     let binary = fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap()).unwrap();
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
@@ -176,22 +176,8 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
     terminal.key("4").unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("# Document 1", true, 10000).unwrap();
-    // Address the footer row directly: the tree's "Saved queries" row contains
-    // the same " Save" prefix, so a text lookup would click the tree instead.
-    terminal.expect_text(" Save", true, 10000).unwrap();
-    let screen = terminal.screen().unwrap();
-    let (row, footer) = screen.lines().enumerate().last().unwrap();
-    let byte = footer.find(" Save").expect("footer Save control");
-    let col = footer[..byte].chars().count();
-    terminal
-        .write(&format!(
-            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
-            col + 1,
-            row + 1,
-            col + 1,
-            row + 1
-        ))
-        .unwrap();
+    // Saving is keyboard-only (s / Ctrl+s); the footer Save control was removed.
+    terminal.key("Ctrl+s").unwrap();
     let wait_count = |count: usize| {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -231,7 +217,7 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
         fs::read_to_string(store.join(doc["path"].as_str().unwrap())).unwrap(),
         "# Document 2\n\n"
     );
-    if let Some(path) = artifact_path("footer-save-index.json") {
+    if let Some(path) = artifact_path("keyboard-save-index.json") {
         fs::write(path, serde_json::to_vec_pretty(&second).unwrap()).unwrap();
     }
     terminal.key("ctrl+q").unwrap();

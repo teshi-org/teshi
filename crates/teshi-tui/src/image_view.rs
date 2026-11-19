@@ -1009,7 +1009,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, rendered: &mut Rendered) {
     );
     match rendered.prepared.encoded.as_ref() {
         Encoded::Pixels(_) => {
-            frame.render_widget(ratatui::widgets::Clear, area);
+            crate::ui::clear_to(frame, area, crate::theme::OVERLAY_BG);
             rendered.pending_area = Some(placement);
         }
         Encoded::Cells(protocol) => {

@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{AiStatus, App, ChangeKind, ClickableRegion};
 use crate::keymap::Action;
@@ -129,8 +129,8 @@ pub(super) fn render_slash_suggestions(
 /// Keep every review decision visible and isolate its pointer ownership.
 /// Draw the AI footer using the same rectangles for text and pointer actions.
 ///
-/// Labels are action names only. When the global app strip is visible, Model is
-/// omitted here to avoid duplicating that destination.
+/// Labels are action names only. Model stays available from the AI status row
+/// and `/models`; the global footer keeps Settings only.
 pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.has_agent_change_prompt() && !app.has_acp_permission_prompt() {
         return;
@@ -200,7 +200,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         height,
     );
     app.clickable_regions.clear();
-    frame.render_widget(Clear, panel);
+    super::clear_to(frame, panel, theme::DIALOG_BG);
     let changes = app.has_agent_change_prompt();
     let title = if changes {
         crate::i18n::t("chat.pending.title")

@@ -12049,6 +12049,25 @@ impl App {
         self.quit_panel_selection = 0;
     }
 
+    /// Asks this process to exit because an installation update is waiting.
+    ///
+    /// Routes through the ordinary quit ladder so unsaved work and a running
+    /// turn still ask first; an already-open confirmation keeps its answer.
+    /// Returns true when the app is about to exit.
+    pub fn request_update_exit(&mut self) -> bool {
+        self.status = crate::i18n::t("status.update_exit_requested").to_string();
+        self.set_status_message(self.status.clone());
+        if self.quit_pending_confirm {
+            return false;
+        }
+        if matches!(self.agent().status, AiStatus::Waiting) {
+            self.request_quit_confirmation();
+            return false;
+        }
+        self.quit();
+        self.should_quit
+    }
+
     fn quit(&mut self) {
         self.ai_interrupt_confirm = false;
         if self
@@ -14982,10 +15001,13 @@ impl App {
             return false;
         }
         if !self.settings_panel_active {
-            // Ctrl+Shift+P; bare Ctrl+P stays the Requirements priority edit.
-            // Some terminals drop the SHIFT bit but keep the uppercase char, so
-            // accept that form without widening to lowercase Ctrl+P.
+            // F10 matches icode's Settings footer binding. Ctrl+Shift+P remains
+            // as the chord for hosts that remap function keys; bare Ctrl+P stays
+            // the Requirements priority edit. Some terminals drop the SHIFT bit
+            // but keep the uppercase char, so accept that form without widening
+            // to lowercase Ctrl+P.
             let chord = match key.code {
+                KeyCode::F(10) => key.modifiers.is_empty(),
                 KeyCode::Char('P') => key.modifiers.contains(KeyModifiers::CONTROL),
                 KeyCode::Char('p') => key
                     .modifiers
@@ -16138,13 +16160,16 @@ mod tests {
     }
 
     #[test]
-    fn global_footer_actions_open_sessions_and_settings() {
+    fn global_footer_actions_open_settings() {
         let (mut app, _project, _store) = slash_test_app();
-        app.handle_action(Action::SessionPanelOpen).unwrap();
-        assert!(app.session_panel_active);
-
-        app.session_panel_active = false;
         app.handle_action(Action::SettingsPanelOpen).unwrap();
+        assert!(app.settings_panel_active);
+    }
+
+    #[test]
+    fn f10_opens_app_settings_like_icode() {
+        let (mut app, _project, _store) = slash_test_app();
+        assert!(app.handle_settings_panel_key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE)));
         assert!(app.settings_panel_active);
     }
 
@@ -16658,6 +16683,27 @@ mod tests {
             app.poll_llm_events();
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn update_exit_request_routes_through_the_quit_ladder() {
+        let (mut app, _project, _store) = slash_test_app();
+        assert!(app.request_update_exit());
+        assert!(app.should_quit);
+
+        let (mut app, _project, _store) = slash_test_app();
+        app.dirty = true;
+        assert!(!app.request_update_exit());
+        assert!(app.quit_pending_confirm, "unsaved work asks first");
+        assert!(!app.should_quit);
+
+        let (mut app, _project, _store) = slash_test_app();
+        app.quit_pending_confirm = true;
+        assert!(!app.request_update_exit());
+        assert!(
+            !app.should_quit,
+            "an open confirmation keeps its own answer"
+        );
     }
 
     #[test]

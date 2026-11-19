@@ -63,7 +63,13 @@ pub fn record(
             error: error.clone(),
             payload: candidate.cloned(),
             cached_payload: cached,
-            next_attempt: if cached {
+            next_attempt: if stage == "process_exit" {
+                if cached {
+                    "Cached payload retained. Close the listed Teshi processes and run `teshi update --retry-install`, or allow a verified force close with `teshi update --retry-install --force-close`.".into()
+                } else {
+                    "Close the listed Teshi processes and run `teshi update`; `teshi update --force-close` permits a verified force close after the graceful timeout.".into()
+                }
+            } else if cached {
                 "Cached payload retained. --retry-install works offline after revalidation; teshi update also reuses valid cache.".into()
             } else if stage == "download" {
                 "Partial bytes retained when safe. teshi update resumes with Range, or restarts if unsupported; --retry-install requires a complete verified payload.".into()

@@ -333,6 +333,14 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    // Paint the screen surface first, the way iCode's `MainScreen` paints
+    // `$background`: the palette then reads the same in any terminal profile.
+    // Component fills draw on top; a region cleared later repaints it with
+    // `clear_to` because `Clear` alone resets cells to the terminal's defaults.
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::FG).bg(theme::SCREEN_BG)),
+        frame.area(),
+    );
     // Validate the raw editor buffer on every redraw.  The parser-backed
     // project remains permissive; these diagnostics are only an editor aid
     // and never prevent Browse/Insert rendering or input handling.
@@ -383,9 +391,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         footer_row,
     );
     // Quit stays pinned to the bottom-right of every tab so it is always
-    // discoverable and clickable. The label is an action name only — keyboard
-    // chords live in the docs, not in the footer strip. Tab footers render
-    // into the remaining width and cannot cover the control.
+    // discoverable and clickable. The label advertises Ctrl+Q (matching the
+    // host-safe `:q` docs) so the chord is visible without leaving the strip.
+    // Tab footers render into the remaining width and cannot cover the control.
     let exit_label = format!(" {} ", crate::i18n::t("footer.exit"));
     let exit_label_width = exit_label.width() as u16;
     let full_footer = footer_row;
@@ -407,10 +415,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
-    // Tab workflows live in pane strips, so the footer left side stays empty.
+    // Tab workflows live in pane strips; the global strip is Settings only.
     // Give the global strip the full remaining width when it fits; narrow
     // terminals drop it rather than back-filling contextual controls.
-    const APP_ACTIONS_WIDTH: u16 = 40;
+    const APP_ACTIONS_WIDTH: u16 = 20;
     let app_footer = (footer.width >= APP_ACTIONS_WIDTH).then_some(footer);
 
     if app.command_line.is_some() {
@@ -544,17 +552,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_pointer_feedback(frame, app);
 }
 
-/// Draw the compact global action strip (Sessions / Agents / Models / Save / Settings).
+/// Draw the compact global action strip (Settings only).
 ///
-/// The strip owns the footer row (aside from Exit). Labels are action names only.
+/// The strip owns the footer row (aside from Exit). Settings advertises its
+/// F10 chord — the same binding icode surfaces in its Textual footer.
 fn render_app_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let actions = [
-        (crate::i18n::t("footer.sessions"), Action::SessionPanelOpen),
-        (crate::i18n::t("footer.agents"), Action::AgentPanelOpen),
-        (crate::i18n::t("footer.models"), Action::ModelPanelOpen),
-        (crate::i18n::t("footer.save"), Action::Save),
-        (crate::i18n::t("footer.settings"), Action::SettingsPanelOpen),
-    ];
+    let actions = [(crate::i18n::t("footer.settings"), Action::SettingsPanelOpen)];
     render_action_bar(frame, &mut app.clickable_regions, area, "", &actions, false);
 }
 
@@ -664,6 +667,24 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
             paint_hover(frame, Rect::new(area.x, y, area.width, 1));
         }
     }
+}
+
+/// Clears `area` before new content and repaints it with `bg`.
+///
+/// `Clear` resets every cell to the terminal's own defaults, which would cut a
+/// transparent hole through the screen surface. Any cleared region that does not
+/// immediately draw its own fill must be cleared through here instead.
+pub(crate) fn clear_to(frame: &mut Frame<'_>, area: Rect, bg: Color) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::FG).bg(bg)),
+        area,
+    );
+}
+
+/// [`clear_to`] on the screen surface.
+pub(crate) fn clear_to_surface(frame: &mut Frame<'_>, area: Rect) {
+    clear_to(frame, area, theme::SCREEN_BG);
 }
 
 /// Tints a hovered target. Fills are lifted by `theme::hover_fill`, so an
@@ -3083,7 +3104,7 @@ fn render_mindmap_scenario_preview(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    frame.render_widget(Clear, inner);
+    clear_to_surface(frame, inner);
 
     // Paint full-width spaces first to avoid stale pixels from previous frames
     let buf = frame.buffer_mut();
@@ -3233,7 +3254,7 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.screenshot.visible || area.is_empty() {
         return;
     }
-    frame.render_widget(Clear, area);
+    clear_to_surface(frame, area);
     let popup = image_viewer_rect(area);
     let standalone = app.screenshot.origin == crate::image_view::ScreenshotOrigin::Image;
     let noun = if standalone { "image" } else { "capture" };
@@ -3608,7 +3629,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     let editor_block = theme::panel_block(title, !preview);
     let editor_inner = editor_block.inner(area);
     frame.render_widget(editor_block, area);
-    frame.render_widget(Clear, editor_inner);
+    clear_to_surface(frame, editor_inner);
 
     // Keep a small, non-blocking diagnostics pane inside the editor.  The
     // source area retains at least two rows in normal terminal sizes, while
@@ -6170,7 +6191,7 @@ fn render_requirements_editor(
         editor_actions.push((crate::i18n::t("req.point"), Action::ReqNewTestPoint));
     }
     editor_actions.push((crate::i18n::t("req.new"), Action::ReqNewDocument));
-    frame.render_widget(Clear, content_inner);
+    clear_to_surface(frame, content_inner);
 
     if missing {
         frame.render_widget(
@@ -7919,9 +7940,62 @@ mod truncate_tests {
     }
 
     #[test]
+    fn screen_surface_covers_every_tab() {
+        // iCode paints `MainScreen` with the theme background; teshi does the
+        // same so no cell keeps the terminal profile's own colors. A cleared
+        // region that forgets `clear_to` shows up here as a `Reset` cell.
+        for tab in [
+            crate::app::MainTab::Explore,
+            crate::app::MainTab::MindMap,
+            crate::app::MainTab::Ai,
+            crate::app::MainTab::Requirements,
+            crate::app::MainTab::TestPoints,
+        ] {
+            let mut app = App::from_args().expect("app init");
+            app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+            app.active_tab = tab;
+            app.status_message = None;
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let width = buffer.area.width as usize;
+            // A default background is the terminal's own; no leading cell may
+            // keep it, or the terminal profile would show through the surface.
+            let terminal_owned: ratatui::style::Color = Default::default();
+            // Ratatui resets the hidden continuation cell of a wide glyph, so
+            // only a leading cell can expose the terminal background.
+            let transparent: Vec<(u16, u16)> = buffer
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| cell.bg == terminal_owned)
+                .filter(|(index, _)| {
+                    *index % width == 0
+                        || unicode_width::UnicodeWidthStr::width(buffer.content[index - 1].symbol())
+                            < 2
+                })
+                .map(|(index, _)| ((index % width) as u16, (index / width) as u16))
+                .collect();
+            assert!(
+                transparent.is_empty(),
+                "{tab:?} leaves {} cells on the terminal background: {:?}",
+                transparent.len(),
+                &transparent[..transparent.len().min(12)]
+            );
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .any(|cell| cell.bg == crate::theme::SCREEN_BG),
+                "{tab:?} paints the screen surface"
+            );
+        }
+    }
+
+    #[test]
     fn global_footer_lists_semantic_actions_on_every_tab() {
-        // Contextual workflows live in pane strips; the footer left side stays
-        // empty on every tab when the global strip fits.
+        // Contextual workflows live in pane strips; the global footer keeps
+        // Settings (with its F10 chord) and Exit (with Ctrl+Q) only.
         for tab in [
             crate::app::MainTab::Explore,
             crate::app::MainTab::MindMap,
@@ -7942,38 +8016,47 @@ mod truncate_tests {
                 .map(|x| buffer[(x, 23)].symbol())
                 .collect::<String>();
             assert!(
-                !text.contains("Navigate") && !text.contains('['),
-                "footer left stays free of key tips on {tab:?}: {text}"
+                !text.contains("Navigate")
+                    && !text.contains("Sessions")
+                    && !text.contains("Agents")
+                    && !text.contains("Models")
+                    && !text.contains("Save"),
+                "footer left keeps Settings only on {tab:?}: {text}"
             );
             assert!(
-                text.contains("Sessions"),
-                "the global strip stays on {tab:?}: {text}"
+                text.contains("Settings [F10]"),
+                "the Settings control stays on {tab:?}: {text}"
             );
-            for label in ["Agents", "Models", "Save", "Settings"] {
-                assert!(text.contains(label), "{tab:?}: {text}");
-            }
-            for (label, action) in [
-                ("Sessions", Action::SessionPanelOpen),
-                ("Agents", Action::AgentPanelOpen),
-                ("Models", Action::ModelPanelOpen),
-                ("Save", Action::Save),
-                ("Settings", Action::SettingsPanelOpen),
-            ] {
-                let byte = text.rfind(label).unwrap();
-                let offset = unicode_width::UnicodeWidthStr::width(&text[..byte]) as u16;
-                assert_eq!(
-                    buffer[(offset, 23)].fg,
-                    crate::theme::PRIMARY,
-                    "{tab:?} {label} keeps semantic emphasis: {text}"
-                );
-                assert!(
-                    app.clickable_regions.iter().any(|region| matches!(
-                        region,
-                        ClickableRegion::ActionButton { action: found, .. } if found == &action
-                    )),
-                    "{label} is clickable"
-                );
-            }
+            assert!(
+                text.contains("Exit [Ctrl+Q]"),
+                "Exit advertises Ctrl+Q on {tab:?}: {text}"
+            );
+            // footer_line paints bracketed chords in PRIMARY; the action name
+            // stays FOOTER_DESC so the key tip is the discoverable accent.
+            let byte = text.find("[F10]").unwrap();
+            let offset = unicode_width::UnicodeWidthStr::width(&text[..byte]) as u16;
+            assert_eq!(
+                buffer[(offset, 23)].fg,
+                crate::theme::PRIMARY,
+                "{tab:?} Settings advertises F10: {text}"
+            );
+            let exit_byte = text.find("[Ctrl+Q]").unwrap();
+            let exit_offset = unicode_width::UnicodeWidthStr::width(&text[..exit_byte]) as u16;
+            assert_eq!(
+                buffer[(exit_offset, 23)].fg,
+                crate::theme::PRIMARY,
+                "{tab:?} Exit advertises Ctrl+Q: {text}"
+            );
+            assert!(
+                app.clickable_regions.iter().any(|region| matches!(
+                    region,
+                    ClickableRegion::ActionButton {
+                        action: Action::SettingsPanelOpen,
+                        ..
+                    }
+                )),
+                "Settings is clickable"
+            );
             let exit = app
                 .clickable_regions
                 .iter()
@@ -8028,7 +8111,10 @@ mod truncate_tests {
                 .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
                 .collect::<String>();
             assert!(label.contains('退'), "tab {index}: {label}");
-            assert!(!label.contains("^q"), "tab {index}: {label}");
+            assert!(
+                label.contains("Ctrl+Q"),
+                "tab {index} advertises the quit chord: {label}"
+            );
         }
     }
 
@@ -8161,8 +8247,7 @@ mod truncate_tests {
             .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
             .collect::<String>();
         assert!(row.starts_with(":wq"), "{row}");
-        assert!(row.contains("Exit"), "{row}");
-        assert!(!row.contains("^q"), "{row}");
+        assert!(row.contains("Exit [Ctrl+Q]"), "{row}");
         assert!(
             !app.clickable_regions.iter().any(|region| matches!(
                 region,

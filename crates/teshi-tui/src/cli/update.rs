@@ -1,8 +1,68 @@
 //! Thin terminal adapter for the native update core.
 
-use std::sync::atomic::AtomicBool;
+use std::{
+    io::{self, BufRead, IsTerminal, Write},
+    path::Path,
+    sync::atomic::AtomicBool,
+};
 use teshi_core::version::{ReleaseChannel, build_identity};
 use teshi_update::manager;
+
+/// Only an explicit `y`/`yes` consents to closing running processes.
+fn parse_close_answer(line: &str) -> bool {
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Refuses before downloading when this installation still has running
+/// processes unless the caller already allowed a force close or consents here.
+///
+/// Returns whether a verified force close is permitted for this attempt.
+fn preflight_running_processes(
+    executable: &Path,
+    force_close: bool,
+    json: bool,
+) -> teshi_update::Result<bool> {
+    let identity = build_identity();
+    let installation = teshi_update::install::Installation::detect(executable, &identity)?;
+    // Unmarked, portable and MSI installs fail for a different reason; they must
+    // not be held up by a process prompt that cannot lead to an install.
+    if !installation.can_install() {
+        return Ok(force_close);
+    }
+    let processes = teshi_update::processes::installation_processes_for(executable, &identity)?;
+    if processes.is_empty() {
+        return Ok(force_close);
+    }
+    let interactive = !json && io::stdin().is_terminal() && io::stderr().is_terminal();
+    let consent = if interactive && !force_close {
+        eprintln!(
+            "Teshi processes from this installation are still running:\n{}",
+            teshi_update::processes::describe_processes(&processes)
+        );
+        eprint!("Close them and continue? Unsaved work may be lost. [y/N] ");
+        let _ = io::stderr().flush();
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line)?;
+        Some(parse_close_answer(&line))
+    } else {
+        None
+    };
+    match teshi_update::processes::plan_close(processes.len(), force_close, consent) {
+        teshi_update::processes::ClosePlan::Proceed => Ok(force_close),
+        teshi_update::processes::ClosePlan::ForceClose => {
+            if !force_close {
+                eprintln!(
+                    "Closing running Teshi processes; unsaved work may be lost if they do not exit gracefully."
+                );
+            }
+            Ok(true)
+        }
+        teshi_update::processes::ClosePlan::Stop => Err(teshi_update::UpdateError::new(
+            teshi_update::ErrorCode::Busy,
+            teshi_update::processes::busy_message(&processes, force_close),
+        )),
+    }
+}
 
 /// Runs the update CLI, reserving exit 3 for an accepted helper handoff.
 pub fn handle_update(
@@ -27,18 +87,25 @@ pub fn handle_update(
             let executable = std::env::current_exe()?;
             let key = installation.root.as_deref().unwrap_or(&executable);
             let failure = teshi_update::diagnostics::last_failure(key);
-            let running = if let (Some(root), Some(bundle)) =
-                (installation.root.as_deref(), installation.bundle.as_ref())
-            {
-                teshi_update::processes::installation_processes(root, bundle)?
-            } else {
-                teshi_update::processes::processes_for_images(std::slice::from_ref(&executable))?
-            };
+            let running = teshi_update::processes::installation_processes_for(
+                &executable,
+                &build_identity(),
+            )?;
+            let next_step = (!running.is_empty()).then_some(
+                "Close the listed processes and retry, or allow a verified force close with `teshi update --force-close` (cached payload: `teshi update --retry-install --force-close`).",
+            );
             return Ok((
-                serde_json::json!({"status":"local_status", "installation":installation, "previous_transaction":previous, "last_failure":failure, "running_processes":running}),
+                serde_json::json!({"status":"local_status", "installation":installation, "previous_transaction":previous, "last_failure":failure, "running_processes":running, "next_step":next_step}),
                 0,
             ));
         }
+        // Refuse before checking GitHub or downloading when this installation is
+        // still in use; the prompt (TTY only) may grant a verified force close.
+        let force_close = if check_only {
+            force_close
+        } else {
+            preflight_running_processes(&std::env::current_exe()?, force_close, json)?
+        };
         let channel = channel.map(|value| {
             if value == "nightly" {
                 ReleaseChannel::Nightly
@@ -142,6 +209,9 @@ pub fn handle_update(
                             payload["asset"]["sha256"].as_str().unwrap_or_default()
                         );
                     }
+                    if let Some(cached) = failure.get("cached_payload").and_then(|v| v.as_bool()) {
+                        println!("Cached payload: {cached}");
+                    }
                     println!("{}", failure["next_attempt"].as_str().unwrap_or_default());
                 }
                 if let Some(processes) = value
@@ -155,6 +225,9 @@ pub fn handle_update(
                             process["executable"].as_str().unwrap_or_default()
                         );
                     }
+                }
+                if let Some(next) = value.get("next_step").and_then(|value| value.as_str()) {
+                    println!("Next: {next}");
                 }
                 if code == 3 {
                     println!(
@@ -174,6 +247,21 @@ pub fn handle_update(
                 eprintln!("Update failed: {error}");
             }
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_close_answer;
+
+    #[test]
+    fn only_an_explicit_yes_consents_to_closing_processes() {
+        for answer in ["y", "Y", "yes", " YES \n"] {
+            assert!(parse_close_answer(answer), "{answer:?}");
+        }
+        for answer in ["", "\n", "n", "no", "maybe"] {
+            assert!(!parse_close_answer(answer), "{answer:?}");
         }
     }
 }

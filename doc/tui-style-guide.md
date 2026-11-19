@@ -10,15 +10,20 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 3. Rounded borders; `▌` for user messages and for the finished answer (green), `│` guides for chat activity and unfinished replies. Keep header/status/footer rows one line high.
 4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Chat conversation rows use the quieter CHAT_CHIP_BG/FG fill. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
-6. Footer action labels use PRIMARY bold on a full-width FOOTER_BG strip; status text uses FOOTER_DESC. Do not paint keyboard chords into the footer. Pane action strips (bottom row inside a panel) reuse the same PRIMARY bold labels on FOOTER_BG for the reserved row only.
+6. Footer action labels use PRIMARY bold on a full-width FOOTER_BG strip; status text uses FOOTER_DESC. The global footer advertises chords only on **Settings [F10]** and **Exit [Ctrl+Q]**; other pane action strips keep action names without chords. Pane action strips (bottom row inside a panel) reuse the same PRIMARY bold labels on FOOTER_BG for the reserved row only.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
 9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Vertical scrollbars are a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Horizontal scrollbars use a `▄` half-block foreground on one row with the same track/thumb colours, keeping the bar visually thin while preserving the full-row pointer target. Never draw a bar with `─`, `━`, `│`, or `┃`.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips. Confirmation dialogs (`Dialog`) and option pickers (`ListDialog`) instead use `ui/dialog.rs`, modeled on iCode's `ConfirmDialog`: a veiled backdrop, a DIALOG_BG card with a BORDER outline (WARNING for destructive decisions), two-cell horizontal padding, width tiers of 43/64/80/100 columns capped at 90% of the screen, and a centered row of solid buttons. Confirmations center their message; pickers list full-width selectable rows that scroll with the selection, with muted notes below; forms (`FormDialog`) align labeled one-row input bars, scroll long text to keep the caret visible, and put live feedback and help below. Buttons rest at their muted fill and use the full semantic color when Enter or the arrow selection activates them; Primary confirms, Warning cancels, Danger destroys, and Neutral edits without closing. Up to three buttons are tall half-block pills; more share one compact row.
 
-Never paint the terminal background globally. Fill only selections, chips, active
-tabs, footers, code/quote blocks, user chat messages, current lines, and overlays.
-Preserve visible text, key bindings, tab padding, dividers, and click regions.
+Paint the whole screen with SCREEN_BG/FG before drawing, the way iCode paints
+`MainScreen { background: $background }`: the terminal profile's own colours must
+not show through. Fill selections, chips, active tabs, footers, code/quote
+blocks, user chat messages, current lines, and overlays on top of that surface.
+`Clear` resets cells to the terminal defaults, so a cleared region must use
+`ui::clear_to` (OVERLAY_BG inside overlays, DIALOG_BG for dialog cards) unless it
+immediately draws its own fill. Preserve visible text, key bindings, tab padding,
+dividers, and click regions.
 
 ## Token table
 
@@ -34,6 +39,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | FG | #EEEEEE | Default foreground |
 | MUTED | #949494 | Hints, metadata, pending |
 | BORDER | #5F5F5F | Unfocused borders, skipped |
+| SCREEN_BG | #1C1C1C | Solid screen surface behind every component |
 | BLOCK_BG | #303030 | Code and quote surfaces |
 | CHAT_USER_BG | #2B242E | User chat message surface |
 | CHAT_CHIP_BG | #332C41 | Chat controls and selected conversation |
@@ -65,7 +71,8 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | `button_fill(tone, focused)` | Primary/Warning/Danger/Neutral button fill: muted at rest, full color when focused |
 | `button_style(tone, focused)` | Button label style: CHIP_FG bold on semantic fills, FG bold on the Neutral gray |
 | `input_style(focused)` | Dialog input bar: BLOCK_BG at rest, CHAT_CHIP_BG while it receives typing |
-| `backdrop_color(color, foreground)` | Veil a covered cell; default backgrounds stay the terminal's |
+| `backdrop_color(color, foreground)` | Veil a covered cell; default backgrounds stay on the screen surface |
+| `clear_to(frame, area, bg)` | Clear a region and repaint it with bg; use it wherever `Clear` alone would expose the terminal background |
 | `popup_rows(lines, width)` | Extend active/inactive selected options across metadata and trailing cells |
 | `action_line(text)` | Preserve action text while rendering bracketed keys as chips |
 | `selected_row(focused)` | Full-row fill style; apply to row widget |
@@ -131,7 +138,7 @@ acceptance separately; text tests alone do not prove visual acceptance.
 ## Reviewed tab samples
 
 These compact text samples show the preserved structure of real PTY captures.
-The terminal owns the background; footer strips span the full width. Active
+The screen surface owns the background; footer strips span the full width. Active
 tab underlines follow registered click regions, including clipped tab widths.
 When a local version label would overlap the active underline, keep the complete
 registered underline and clip the version's right-aligned viewport to the space
@@ -172,20 +179,19 @@ AI [3]
 │ New [a] Close[x]│││› Continue the review…              Send ↵ ││
 │                 ││╰──────────────────────────────────────────╯│
 ╰─────────────────╯╰────────────────────────────────────────────╯
-                                      Sessions Agents Models Save Settings Exit
+                                      Settings [F10]              Exit [Ctrl+Q]
 ```
 
 `:` from any Normal/Browse mode replaces the active tab's footer bar with the
 command-line prompt until Enter runs it or Esc closes it. The prompt keeps the
-**Exit** control on the right and needs no control chord, so `:q` stays usable
-where a host terminal also binds `Ctrl+Q`. The prompt itself is not advertised
-in the footer beyond the `:` you type. Footer labels are action names only —
-keyboard chords do not appear in the strip.
+**Exit [Ctrl+Q]** control on the right and needs no control chord, so `:q` stays
+usable where a host terminal also binds `Ctrl+Q`. The prompt itself is not
+advertised in the footer beyond the `:` you type.
 
 ```text
 Command line prompt
 ━━━━━━━━━━━━━━━━━━━
-:wq▏                                                            Exit
+:wq▏                                                     Exit [Ctrl+Q]
 ```
 
 ```text
@@ -195,7 +201,7 @@ Requirements [4]
 │Shared visual language ││# Shared visual language││                  │
 │ Filter  New  Actions  ││ Edit  Point  New       ││                  │
 ╰───────────────────────╯╰───────────────────────╯╰──────────────────╯
-                                      Sessions Agents Models Save Settings Exit
+                                      Settings [F10]              Exit [Ctrl+Q]
 ```
 
 ```text
@@ -205,7 +211,7 @@ Test Points [5]
 │Visual style       ││Focus is visible          ││                    │
 │ Approve Reject Filter││Verify panel focus     ││                    │
 ╰───────────────────╯╰─────────────────────────╯╰────────────────────╯
-                                      Sessions Agents Models Save Settings Exit
+                                      Settings [F10]              Exit [Ctrl+Q]
 ```
 
 ```text
