@@ -1,0 +1,11 @@
+# Demo project for the Explore Run Details pane.
+#
+# The runner emits protocol v1 events and writes synthetic evidence into the
+# run directory supplied by Teshi. It does not touch the network or the app.
+[[runners]]
+name = "run-details-demo"
+cmd = "python"
+args = ["runner/demo_runner.py"]
+cwd = "."
+[runners.match]
+paths = ["**"]
