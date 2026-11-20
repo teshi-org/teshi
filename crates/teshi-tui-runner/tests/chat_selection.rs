@@ -1010,13 +1010,15 @@ fn chat_selection_copies_unicode_across_messages_and_completed_tool_title() {
         .unwrap();
     // Selecting across the wide-glyph row above this message can repaint the
     // following row with a one-cell shift, so resolve the target before the
-    // drag rather than re-reading text that may no longer be intact.
+    // drag instead of re-reading shifted text, and aim at the middle of the
+    // word so a one-cell mispaint still lands inside the selection.
     let (end_col, end_row) = locate_text(&terminal, "UNICODE_END");
     drag_between_text(&terminal, "UNICODE_START", "UNICODE_END", true);
     case.save(&terminal, "reverse-cross-message-selection");
+    let target = end_col + 4;
     terminal
         .write(&format!(
-            "\x1b[<2;{end_col};{end_row}M\x1b[<2;{end_col};{end_row}m"
+            "\x1b[<2;{target};{end_row}M\x1b[<2;{target};{end_row}m"
         ))
         .unwrap();
     assert_clipboard(
