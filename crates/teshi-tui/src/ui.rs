@@ -2715,7 +2715,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
                     StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
                 };
-                let (kw_span, _) =
+                let (kw_span, keyword_pad) =
                     step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
                 let body_span =
                     Span::styled(format!(" {}", step.text), Style::default().fg(theme::MUTED));
@@ -2723,6 +2723,18 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 line = pad_line_to_width(line, inner.width, Style::default());
                 lines.push(line);
                 line_idx += 1;
+                if let Some(rows) = step.data_table.as_deref() {
+                    let style = Style::default().fg(theme::MUTED);
+                    line_idx += push_step_table_rows(
+                        &mut lines,
+                        &mut app.clickable_regions,
+                        rows,
+                        step_table_indent(keyword_pad, &step.keyword),
+                        inner,
+                        None,
+                        style,
+                    );
+                }
             }
             lines.push(Line::raw(""));
             line_idx += 1;
@@ -2755,7 +2767,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
                 StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
             };
-            let (kw_span, _) =
+            let (kw_span, keyword_pad) =
                 step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
             let body_span = if i == app.explore_selected_step {
                 Span::styled(format!(" {}", step.text), highlight_style)
@@ -2782,6 +2794,17 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 col_x: inner.x,
                 col_right: inner.right(),
             });
+            if let Some(rows) = step.data_table.as_deref() {
+                line_idx += push_step_table_rows(
+                    &mut lines,
+                    &mut app.clickable_regions,
+                    rows,
+                    step_table_indent(keyword_pad, &step.keyword),
+                    inner,
+                    Some(i),
+                    trail,
+                );
+            }
         }
 
         if let Some(scenario) = scenario
@@ -2804,7 +2827,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ));
                 line_idx += 1;
-                for row in render_examples_table_lines(&table.headers, &table.rows) {
+                for row in render_gherkin_table_lines(&table.headers, &table.rows) {
                     lines.push(Line::raw(format!("   {row}")));
                     line_idx += 1;
                 }
@@ -2816,7 +2839,56 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
 }
 
-fn render_examples_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
+/// Indent that lines a step's data table up with the step body.
+///
+/// The keyword gutter pads short keywords, so the body starts past the padded
+/// keyword plus the separating space. Table rows use the same column to read as
+/// part of their step instead of floating under the gutter.
+fn step_table_indent(keyword_pad: usize, keyword: &str) -> usize {
+    keyword_pad + UnicodeWidthStr::width(keyword) + 1
+}
+
+/// Appends one step's Gherkin data table below its step line.
+///
+/// The first row is the header. Every rendered row becomes an
+/// [`ClickableRegion::ExploreStep`] hit target for `step_idx`, so clicking a
+/// table cell selects the step that owns it. Returns the number of rows added.
+fn push_step_table_rows(
+    lines: &mut Vec<Line<'static>>,
+    regions: &mut Vec<ClickableRegion>,
+    rows: &[Vec<String>],
+    indent: usize,
+    inner: Rect,
+    step_idx: Option<usize>,
+    style: Style,
+) -> u16 {
+    let Some((headers, body)) = rows.split_first() else {
+        return 0;
+    };
+    let prefix = " ".repeat(indent);
+    let mut appended = 0;
+
+    for row in render_gherkin_table_lines(headers, body) {
+        let line = pad_line_to_width(
+            Line::styled(format!("{prefix}{row}"), style),
+            inner.width,
+            style,
+        );
+        lines.push(line);
+        if let Some(step_idx) = step_idx {
+            regions.push(ClickableRegion::ExploreStep {
+                step_idx,
+                row_y: inner.y + (lines.len() as u16).saturating_sub(1),
+                col_x: inner.x,
+                col_right: inner.right(),
+            });
+        }
+        appended += 1;
+    }
+    u16::try_from(appended).unwrap_or(u16::MAX)
+}
+
+fn render_gherkin_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
     if headers.is_empty() {
         return Vec::new();
     }
@@ -11151,6 +11223,145 @@ Feature: Rule only
                 ..
             }
         )));
+    }
+
+    /// Renders the Explore pane for one Feature and returns the app plus terminal.
+    fn explore_screen(feature_text: &str) -> (App, Terminal<TestBackend>) {
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![gherkin::parse_feature(
+            feature_text,
+            PathBuf::from("table.feature"),
+        )];
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        (app, terminal)
+    }
+
+    fn rendered_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn explore_steps_render_step_data_tables() {
+        let (_, terminal) = explore_screen(
+            "Feature: Tables\n  Scenario: Send\n    Given a request\n      | field | value |\n      | name  | Ada   |\n    Then it works\n",
+        );
+        let rows = rendered_rows(&terminal);
+        assert!(
+            rows.iter().any(|row| row.contains("| field | value |")),
+            "table header missing: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("| name  | Ada   |")),
+            "table body missing: {rows:#?}"
+        );
+        let (body_x, step_y) = cell_at_text(&terminal, "a request").expect("step body");
+        let (table_x, table_y) =
+            cell_at_text(&terminal, "| field | value |").expect("table header");
+        assert_eq!(table_y, step_y + 1, "the table starts under its step");
+        assert_eq!(table_x, body_x, "table cells start at the step body column");
+        assert_eq!(
+            cell_at_text(&terminal, "Then it works").map(|(_, y)| y),
+            Some(step_y + 3),
+            "the next step follows the whole table"
+        );
+    }
+
+    #[test]
+    fn explore_steps_data_tables_align_wide_cells_by_display_width() {
+        let (_, terminal) = explore_screen(
+            "Feature: Tables\n  Scenario: Send\n    Given rows\n      | 名称 | kind |\n      | a    | b    |\n    Then ok\n",
+        );
+        let rows = rendered_rows(&terminal);
+        let header_y = rows
+            .iter()
+            .position(|row| row.contains('名'))
+            .unwrap_or_else(|| panic!("{rows:#?}")) as u16;
+        let body_y = rows
+            .iter()
+            .position(|row| row.contains("| a "))
+            .unwrap_or_else(|| panic!("{rows:#?}")) as u16;
+        // Measure cell columns directly: a wide glyph occupies two buffer cells,
+        // so string widths would count it twice.
+        let bar_columns = |y: u16| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.width)
+                .filter(|x| buffer[(*x, y)].symbol() == "|")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bar_columns(header_y),
+            bar_columns(body_y),
+            "wide cells must not shift later columns:\n{}\n{}",
+            rows[header_y as usize],
+            rows[body_y as usize]
+        );
+    }
+
+    #[test]
+    fn explore_steps_data_table_rows_select_their_step() {
+        let (app, terminal) = explore_screen(
+            "Feature: Tables\n  Scenario: Send\n    Given a request\n      | field | value |\n    Then it works\n",
+        );
+        let (_, header_y) = cell_at_text(&terminal, "| field | value |").expect("table header");
+        let (_, then_y) = cell_at_text(&terminal, "Then it works").expect("second step");
+        let selects = |step_idx: usize, row_y: u16| {
+            app.clickable_regions.iter().any(|region| {
+                matches!(
+                    region,
+                    ClickableRegion::ExploreStep { step_idx: s, row_y: y, .. }
+                        if *s == step_idx && *y == row_y
+                )
+            })
+        };
+        assert!(
+            selects(0, header_y),
+            "a table row selects the step above it"
+        );
+        assert!(
+            !selects(1, header_y),
+            "a table row does not select the following step"
+        );
+        assert!(selects(1, then_y), "the next step keeps its own hit target");
+    }
+
+    #[test]
+    fn explore_steps_render_background_step_data_tables() {
+        let (_, terminal) = explore_screen(
+            "Feature: Tables\n  Background:\n    Given accounts\n      | id | name |\n      | 1  | Ada  |\n  Scenario: Send\n    Then it works\n",
+        );
+        let rows = rendered_rows(&terminal);
+        assert!(
+            rows.iter().any(|row| row.contains("| id | name |")),
+            "background table missing: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn explore_steps_render_outline_step_tables_before_examples() {
+        let (_, terminal) = explore_screen(
+            "Feature: Tables\n  Scenario Outline: Send\n    Given a user <name>\n      | role |\n      | admin |\n    Then ok\n\n    Examples:\n      | name |\n      | Ada  |\n",
+        );
+        let rows = rendered_rows(&terminal);
+        let position = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle}: {rows:#?}"))
+        };
+        assert!(
+            position("| role") < position("Examples:"),
+            "the step table stays with the step, above Examples: {rows:#?}"
+        );
     }
 
     #[test]
