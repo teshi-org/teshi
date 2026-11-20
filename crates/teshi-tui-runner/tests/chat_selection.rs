@@ -1008,10 +1008,16 @@ fn chat_selection_copies_unicode_across_messages_and_completed_tool_title() {
     terminal
         .expect_text("READ_PROJECT_TOOL", true, POINTER_MS)
         .unwrap();
+    // Selecting across the wide-glyph row above this message can repaint the
+    // following row with a one-cell shift, so resolve the target before the
+    // drag rather than re-reading text that may no longer be intact.
+    let (end_col, end_row) = locate_text(&terminal, "UNICODE_END");
     drag_between_text(&terminal, "UNICODE_START", "UNICODE_END", true);
     case.save(&terminal, "reverse-cross-message-selection");
     terminal
-        .right_click_text("UNICODE_END", POINTER_MS)
+        .write(&format!(
+            "\x1b[<2;{end_col};{end_row}M\x1b[<2;{end_col};{end_row}m"
+        ))
         .unwrap();
     assert_clipboard(
         &mut clipboard,

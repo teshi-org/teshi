@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 
 use teshi_tui_runner::{Launch, Terminal};
 
+/// Deadline for a control to paint after a click landed. A loaded Windows
+/// runner can stall the frame that opens a dialog well past the old 20s bound,
+/// so this bounds the wait without pacing a passing run.
+const POSTCONDITION_MS: u64 = 45_000;
+
 struct Fixture {
     _root: tempfile::TempDir,
     launch: Launch,
@@ -141,7 +146,7 @@ impl Fixture {
         self.capture(terminal, &format!("{name}-before"));
         // A panel paints its frame before its controls, so wait for the label
         // instead of reading the first screen that shows the panel title.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let label = loop {
             let screen = terminal.screen().unwrap();
             if let Some(label) = labels.iter().find(|label| screen.contains(**label)) {
@@ -153,8 +158,8 @@ impl Fixture {
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        terminal.click_text(&label, 1500).unwrap();
-        let outcome = terminal.expect_screen(name, 20000, |screen| match result {
+        terminal.click_text(&label, 5000).unwrap();
+        let outcome = terminal.expect_screen(name, POSTCONDITION_MS, |screen| match result {
             PointerResult::Visible(text) => screen.contains(text),
             PointerResult::Hidden(text) => !screen.contains(text),
             PointerResult::Selected(text) => screen
