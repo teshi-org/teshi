@@ -1008,12 +1008,20 @@ fn chat_selection_copies_unicode_across_messages_and_completed_tool_title() {
     terminal
         .expect_text("READ_PROJECT_TOOL", true, POINTER_MS)
         .unwrap();
-    // Selecting across the wide-glyph row above this message can repaint the
-    // following row with a one-cell shift, so resolve the target before the
-    // drag instead of re-reading shifted text, and aim at the middle of the
-    // word so a one-cell mispaint still lands inside the selection.
+    // Selecting across the wide-glyph row above this message can shift the
+    // following row by one cell, and the hit test follows that shift. Reserve
+    // one extra cell past the word (the app clamps to the block end) so the
+    // final character still lands inside the selection, and click the middle
+    // of the word rather than its edged first cell.
     let (end_col, end_row) = locate_text(&terminal, "UNICODE_END");
-    drag_between_text(&terminal, "UNICODE_START", "UNICODE_END", true);
+    let (start_col, start_row) = locate_text(&terminal, "UNICODE_START");
+    let from_col = end_col + "UNICODE_END".chars().count() + 1;
+    terminal
+        .write(&format!(
+            "\x1b[<0;{from_col};{end_row}M\x1b[<32;{start_col};{start_row}M\x1b[<0;{start_col};{start_row}m"
+        ))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(80));
     case.save(&terminal, "reverse-cross-message-selection");
     let target = end_col + 4;
     terminal
