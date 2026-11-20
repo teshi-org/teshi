@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -12,6 +12,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use teshi_tui_runner::{Launch, Terminal};
+
+/// Deadline for a control to paint after a click landed. A loaded Windows
+/// runner can stall the frame that opens a dialog well past the old 20s bound,
+/// so this bounds the wait without pacing a passing run.
+const POSTCONDITION_MS: u64 = 45_000;
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -141,7 +146,7 @@ impl Fixture {
         self.capture(terminal, &format!("{name}-before"));
         // A panel paints its frame before its controls, so wait for the label
         // instead of reading the first screen that shows the panel title.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let label = loop {
             let screen = terminal.screen().unwrap();
             if let Some(label) = labels.iter().find(|label| screen.contains(**label)) {
@@ -153,8 +158,8 @@ impl Fixture {
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        terminal.click_text(&label, 1500).unwrap();
-        let outcome = terminal.expect_screen(name, 20000, |screen| match result {
+        terminal.click_text(&label, 5000).unwrap();
+        let outcome = terminal.expect_screen(name, POSTCONDITION_MS, |screen| match result {
             PointerResult::Visible(text) => screen.contains(text),
             PointerResult::Hidden(text) => !screen.contains(text),
             PointerResult::Selected(text) => screen
@@ -222,45 +227,22 @@ impl OwnedRegistry {
         let stop = Arc::new(AtomicBool::new(false));
         let request_log = Arc::clone(&requests);
         let stop_worker = Arc::clone(&stop);
-        let payload = serde_json::to_vec(&serde_json::json!({"agents":[
+        let payload = Arc::new(
+            serde_json::to_vec(&serde_json::json!({"agents":[
             {"id":"installed-alpha", "name":"ACP Alpha", "description":"Registry alpha description", "distribution":{"binary":{"windows-x86_64":{"archive":format!("http://{address}/archive/alpha.zip"),"cmd":"agent.exe"}}}},
             {"id":"available-beta", "name":"Registry Beta", "description":"Registry beta description", "distribution":{"binary":{"windows-x86_64":{"archive":format!("http://{address}/archive/beta.zip"),"cmd":"agent.exe"}}}}
-        ]})).unwrap();
+        ]}))
+            .unwrap(),
+        );
         let worker = std::thread::spawn(move || {
             while !stop_worker.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((mut connection, _)) => {
-                        connection
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        let mut request_bytes = Vec::new();
-                        let mut buffer = [0u8; 1024];
-                        while request_bytes.len() < 8192 {
-                            match connection.read(&mut buffer) {
-                                Ok(0) | Err(_) => break,
-                                Ok(count) => request_bytes.extend_from_slice(&buffer[..count]),
-                            }
-                            if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                        let request = String::from_utf8_lossy(&request_bytes);
-                        let first_line = request.lines().next().unwrap_or("").to_string();
-                        request_log.lock().unwrap().push(first_line.clone());
-                        let (status, body) = if first_line.starts_with("GET /registry.json ") {
-                            ("200 OK", payload.as_slice())
-                        } else {
-                            (
-                                "404 Not Found",
-                                b"unexpected registry fixture request".as_slice(),
-                            )
-                        };
-                        let headers = format!(
-                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = connection.write_all(headers.as_bytes());
-                        let _ = connection.write_all(body);
+                    Ok((connection, _)) => {
+                        // Serve each connection on its own thread: an idle
+                        // connection must not block the request behind it.
+                        let payload = Arc::clone(&payload);
+                        let requests = Arc::clone(&request_log);
+                        std::thread::spawn(move || serve_registry(connection, &payload, &requests));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10))
@@ -283,6 +265,60 @@ impl Drop for OwnedRegistry {
         self.stop.store(true, Ordering::Release);
         self.worker.take().unwrap().join().unwrap();
     }
+}
+
+/// Answers one registry request on `connection`.
+///
+/// The client completes the TCP handshake before it writes the request, and a
+/// loaded runner can delay that write past a single read window. A read timeout
+/// therefore means "not yet", never "request over": answering a silent
+/// connection with 404 made the caller's fetch fail, which closed the picker
+/// before the rows the test waits for could ever paint.
+fn serve_registry(mut connection: TcpStream, payload: &[u8], requests: &Mutex<Vec<String>>) {
+    // Accepted sockets inherit the non-blocking listener mode on Windows, where
+    // a read timeout does not apply: the first read would report "no bytes yet"
+    // immediately. Blocking mode makes the timeout mean what it says.
+    let _ = connection.set_nonblocking(false);
+    let _ = connection.set_read_timeout(Some(Duration::from_secs(1)));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while Instant::now() < deadline && request_bytes.len() < 8192 {
+        match connection.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(count) => {
+                request_bytes.extend_from_slice(&buffer[..count]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return,
+        }
+    }
+    let request = String::from_utf8_lossy(&request_bytes);
+    let Some(first_line) = request.lines().next().filter(|line| !line.is_empty()) else {
+        return;
+    };
+    requests.lock().unwrap().push(first_line.to_string());
+    let (status, body) = if first_line.starts_with("GET /registry.json ") {
+        ("200 OK", payload)
+    } else {
+        (
+            "404 Not Found",
+            b"unexpected registry fixture request".as_slice(),
+        )
+    };
+    let headers = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut response = Vec::with_capacity(headers.len() + body.len());
+    response.extend_from_slice(headers.as_bytes());
+    response.extend_from_slice(body);
+    let _ = connection.write_all(&response);
 }
 
 fn command(terminal: &Terminal, command: &str) {

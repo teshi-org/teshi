@@ -15,6 +15,11 @@ use teshi_tui_runner::{Launch, Terminal};
 /// pacing the test; passing runs return as soon as the condition holds.
 const WAIT_MS: u64 = 15_000;
 
+/// Deadline for the proposal round trip. The overlay only appears after the
+/// model fixture answers over HTTP, so a loaded runner needs more headroom than
+/// a purely local postcondition.
+const PROPOSAL_MS: u64 = 60_000;
+
 struct Fixture {
     root: tempfile::TempDir,
     config: Launch,
@@ -652,7 +657,9 @@ fn change_summary_pointer_select_jump_and_close_preserve_pending_source() {
             .write("Propose a Beta step change for human review.")
             .unwrap();
         terminal.key("Enter").unwrap();
-        terminal.expect_text("Change Summary", true, 15000).unwrap();
+        terminal
+            .expect_text("Change Summary", true, PROPOSAL_MS)
+            .unwrap();
         assert_background_owned(&terminal, "Change Summary", cols);
         capture(&terminal, &format!("{stage}-summary-open-owned"));
         terminal
