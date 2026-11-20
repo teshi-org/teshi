@@ -10,6 +10,11 @@ use teshi_tui_runner::{Launch, Terminal};
 /// Clipboard tests run serially because the desktop clipboard is global.
 static CLIPBOARD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Deadline for locating a viewport cell that was just rendered. Hosted Windows
+/// ConPTY runners can stall a repaint after a drag, so a short bound turns that
+/// stall into a spurious failure.
+const POINTER_MS: u64 = 15_000;
+
 struct ClipboardRestore {
     clipboard: Clipboard,
     previous: Option<String>,
@@ -838,8 +843,8 @@ fn locate_text(terminal: &Terminal, needle: &str) -> (usize, usize) {
 }
 
 fn drag_between_text(terminal: &Terminal, first: &str, last: &str, reverse: bool) {
-    terminal.expect_text(first, true, 5000).unwrap();
-    terminal.expect_text(last, true, 5000).unwrap();
+    terminal.expect_text(first, true, POINTER_MS).unwrap();
+    terminal.expect_text(last, true, POINTER_MS).unwrap();
     let start = locate_text(terminal, first);
     let (last_col, last_row) = locate_text(terminal, last);
     let end = (last_col + last.chars().count(), last_row);
@@ -1001,19 +1006,23 @@ fn chat_selection_copies_unicode_across_messages_and_completed_tool_title() {
     let terminal = case.launch(120, 40);
     command(&terminal, "/resume");
     terminal
-        .expect_text("READ_PROJECT_TOOL", true, 5000)
+        .expect_text("READ_PROJECT_TOOL", true, POINTER_MS)
         .unwrap();
     drag_between_text(&terminal, "UNICODE_START", "UNICODE_END", true);
     case.save(&terminal, "reverse-cross-message-selection");
-    terminal.right_click_text("UNICODE_END", 5000).unwrap();
+    terminal
+        .right_click_text("UNICODE_END", POINTER_MS)
+        .unwrap();
     assert_clipboard(
         &mut clipboard,
         "UNICODE_START\n中文 e\u{301} 😀\n\nUNICODE_END",
     );
     // A completed call folds behind a header row that only toggles it; the
     // selectable title lives on the detail row the header reveals.
-    terminal.click_text("Done READ_PROJECT_TOOL", 5000).unwrap();
-    terminal.expect_text("✓ Done", true, 5000).unwrap();
+    terminal
+        .click_text("Done READ_PROJECT_TOOL", POINTER_MS)
+        .unwrap();
+    terminal.expect_text("✓ Done", true, POINTER_MS).unwrap();
     let screen = terminal.screen().unwrap();
     let (row, line) = screen
         .lines()
