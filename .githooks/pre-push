@@ -31,9 +31,7 @@ while read local_ref local_sha remote_ref remote_sha; do
         if [ ! -f "$msi" ]; then
             echo -e "${RED}   x  MSI not found: ${msi}${NC}"
             echo -e "${RED}   x  Build the MSI locally first:${NC}"
-            echo -e "${RED}      cd desktop && npx tauri build --bundles msi${NC}"
-            echo -e "${RED}      && Remove-Item target/release/bundle/msi/*.msi${NC}"
-            echo -e "${RED}      && cargo wix ... -o ${msi}${NC}"
+            echo -e "${RED}      pwsh -File scripts/build-msi.ps1${NC}"
             PASS=false
             continue
         fi

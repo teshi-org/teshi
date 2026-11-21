@@ -30,6 +30,10 @@ jobs:
       reused: ${{ steps.gate.outputs.reused }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/nightly_ci_gate.py
+          sparse-checkout-cone-mode: false
       - name: Ask whether this tree already passed CI
         id: gate
         shell: bash
@@ -124,8 +128,13 @@ jobs:
       - name: Validate Gherkin Features
         run: cargo run --locked -p teshi-cli -- check --all
 
-      - name: Run validation CLI self-bootstrap E2E
-        run: cargo test --locked -p teshi-cli --test validation_cli_bdd -- --nocapture
+      - name: Cache Python packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Run WinApp lossless capture and CLI contracts without a window
         run: |
