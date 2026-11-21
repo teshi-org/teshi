@@ -797,6 +797,9 @@ fn en(key: &str) -> Option<&'static str> {
             "Review proposed test points in Test Points tab [5], then press c to continue generation"
         }
         "status.run_started" => "Run started",
+        "status.already_showing_the_latest_run" => "Already showing the latest run",
+        "status.no_older_runs_for_this_scenario" => "No older runs recorded for this scenario",
+        "status.no_newer_runs_for_this_scenario" => "No newer runs recorded for this scenario",
         "status.runner_already_active" => "Runner already active",
         "status.runner_exited_with_error" => "Runner exited with error",
         "status.runner_is_still_active_wait_for_its_owned_process_to_exit" => {
@@ -1801,6 +1804,9 @@ fn zh_cn(key: &str) -> Option<&'static str> {
             "请在测试点页 [5] 审阅提议的测试点，然后按 c 继续生成"
         }
         "status.run_started" => "运行已开始",
+        "status.already_showing_the_latest_run" => "已在最近一次运行",
+        "status.no_older_runs_for_this_scenario" => "该场景没有更早的运行记录",
+        "status.no_newer_runs_for_this_scenario" => "该场景没有更新的运行记录",
         "status.runner_already_active" => "运行器已在运行",
         "status.runner_exited_with_error" => "运行器异常退出",
         "status.runner_is_still_active_wait_for_its_owned_process_to_exit" => {

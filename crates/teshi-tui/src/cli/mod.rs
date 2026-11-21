@@ -791,6 +791,37 @@ pub enum StepsCommand {
     List(StepsListArgs),
     /// Remove a confirmed binding for one step line
     Unbind(StepsUnbindArgs),
+    /// Set or clear the feature-level execution target
+    SetTarget(StepsSetTargetArgs),
+}
+
+/// Writes the Feature-level target that replay prepares before the first case.
+#[derive(Debug, Args)]
+pub struct StepsSetTargetArgs {
+    /// Feature path relative to the project root
+    #[arg(long)]
+    pub feature: String,
+    /// Target kind (`winapp` or `browser`)
+    #[arg(long, default_value = "winapp")]
+    pub kind: String,
+    /// Name of a `[targets.<name>]` profile in `teshi.toml`
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Window title fragment used when attaching without launching
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Process name used when attaching without launching
+    #[arg(long)]
+    pub process_name: Option<String>,
+    /// Process id used when attaching without launching
+    #[arg(long)]
+    pub pid: Option<u32>,
+    /// Window handle used when attaching without launching
+    #[arg(long)]
+    pub hwnd: Option<u64>,
+    /// Remove the feature-level target instead of writing one
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1434,6 +1465,10 @@ pub struct BrowserReplayArgs {
     /// stdout (used by the `builtin = "browser"` runner); progress goes to stderr
     #[arg(long, value_name = "CASE_ID", hide = true)]
     pub emit_runner_protocol: Option<String>,
+    /// Evidence directory owned by the spawning runner; captures and protocol
+    /// events are written for it instead of a private run.
+    #[arg(long, value_name = "DIR", hide = true)]
+    pub evidence_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -2095,6 +2130,10 @@ pub struct WinAppReplayArgs {
     /// stdout (used by the `builtin = "winapp"` runner); progress goes to stderr
     #[arg(long, value_name = "CASE_ID", hide = true)]
     pub emit_runner_protocol: Option<String>,
+    /// Evidence directory owned by the spawning runner; captures and protocol
+    /// events are written for it instead of a private run.
+    #[arg(long, value_name = "DIR", hide = true)]
+    pub evidence_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

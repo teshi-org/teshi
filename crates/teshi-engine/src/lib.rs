@@ -22,6 +22,7 @@ pub mod project_identity;
 mod project_settings;
 pub mod replay_evidence;
 pub mod run_routing;
+pub mod run_target;
 pub mod runner_protocol;
 mod screen;
 mod sidecar;
@@ -44,9 +45,9 @@ pub mod python_env {
 
 pub use api_dispatch::start_replay_run;
 pub use api_dispatch::{
-    api_endpoint_path, dispatch_cases, ensure_api_sidecar, list_runnable_scenarios,
-    mode_uses_teshi_dispatch, read_api_endpoint, send_api_command, stop_api_sidecar, ApiEndpoint,
-    DispatchCase, RunnableScenario,
+    api_endpoint_path, dispatch_cases, dispatch_cases_in_run, ensure_api_sidecar,
+    list_runnable_scenarios, mode_uses_teshi_dispatch, read_api_endpoint, send_api_command,
+    stop_api_sidecar, ApiEndpoint, DispatchCase, RunnableScenario,
 };
 pub use app_data::{
     add_recent_project, app_data_dir, ensure_migrated_from_teshi_desktop_at,
@@ -106,11 +107,12 @@ pub use locator::{
     confirm_pending_locator, first_unbound_feature_step, get_active_step, get_pending_locator,
     highlight_locator, list_feature_step_refs, list_step_bindings, normalize_step_text,
     propose_locator, read_active_step, read_pending, reject_locator, reject_pending_locator,
-    resolve_step_bindings, resolve_step_context, sanitize_feature_path, start_locator_watch,
-    step_binding_statuses, sync_active_step, unbind_step, unbind_step_binding,
-    update_binding_locator, wait_for_step_status, write_active_step, ActiveStep, FeatureStepRef,
-    HighlightInfo, LocatorCandidate, LocatorPrimary, LocatorWatcherState, PendingLocator,
-    StepBinding, StepBindingStatus, StepBindingsFile, StepWaitResult, StepWaitUntil,
+    resolve_step_bindings, resolve_step_context, sanitize_feature_path, set_step_binding_target,
+    start_locator_watch, step_binding_statuses, step_binding_target, sync_active_step, unbind_step,
+    unbind_step_binding, update_binding_locator, wait_for_step_status, write_active_step,
+    ActiveStep, FeatureStepRef, HighlightInfo, LocatorCandidate, LocatorPrimary,
+    LocatorWatcherState, PendingLocator, StepBinding, StepBindingStatus, StepBindingsFile,
+    StepWaitResult, StepWaitUntil,
 };
 pub use managed_runtime::{
     ensure_winapp_runtime, validate_manifest as validate_runtime_manifest, validate_runtime_dir,
@@ -136,6 +138,7 @@ pub use project_settings::{
     load_project_settings, ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC,
     DEFAULT_PLAYWRIGHT_TEST_ID_ATTRIBUTE,
 };
+pub use run_target::{load_target_profile, TargetProfile};
 pub use screen::{Cell, Color, ProcessState, ScreenGrid};
 pub use sidecar::{
     authenticated_sidecar_ws_url, chrome_broker_endpoint_path, chrome_broker_pairing_approve,
@@ -147,6 +150,7 @@ pub use sidecar::{
     BrowserStartResult, ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
+pub use teshi_core::locator::{StepBindingAttach, StepBindingTarget};
 pub use ui_locale::{
     effective_from_system_locale, resolve_effective_ui_locale, resolve_feature_discovery_locale,
     EffectiveUiLocale, UiLocalePreference, TESHI_FEATURE_LANGUAGE_ENV, TESHI_LOCALE_ENV,

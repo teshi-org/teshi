@@ -1,6 +1,13 @@
 {
-  "format_version": 2,
+  "format_version": 3,
   "feature": "features/winapp/negative_assertion.feature",
+  "target": {
+    "kind": "winapp",
+    "profile": "teshi-desktop",
+    "attach": {
+      "title": "teshi"
+    }
+  },
   "steps": [
     {
       "step_line": 8,
@@ -10,6 +17,7 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
+        "capture_before": false,
         "strategy": "uia",
         "value": "uia:control_type=WindowControl;name=teshi",
         "action": "assert_visible"
@@ -24,6 +32,7 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
+        "capture_before": false,
         "strategy": "uia",
         "value": "uia:control_type=ButtonControl;name=Teshi missing marker",
         "action": "assert_not_exists"

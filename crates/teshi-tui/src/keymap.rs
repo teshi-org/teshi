@@ -284,6 +284,12 @@ pub enum Action {
     ExploreDetailScrollUp,
     /// Scroll Run Details content down without changing the selected step.
     ExploreDetailScrollDown,
+    /// Show the previous (older) run for the selected scenario.
+    ExploreRunOlder,
+    /// Show the next (newer) run for the selected scenario.
+    ExploreRunNewer,
+    /// Open or close the run-history selector.
+    ExploreRunMenu,
     /// Open the selected Run Details artifact or URL outside Teshi.
     ExploreOpenExternal,
     /// Copy the selected Run Details path or URL.
@@ -1764,6 +1770,11 @@ impl Action {
                 (KeyCode::End, _) => Some(Self::MoveEnd),
                 (KeyCode::PageUp, _) => Some(Self::ExploreDetailScrollUp),
                 (KeyCode::PageDown, _) => Some(Self::ExploreDetailScrollDown),
+                (KeyCode::Char('['), KeyModifiers::NONE) => Some(Self::ExploreRunOlder),
+                (KeyCode::Char(']'), KeyModifiers::NONE) => Some(Self::ExploreRunNewer),
+                (KeyCode::Char('H'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::ExploreRunMenu)
+                }
                 (KeyCode::Enter, _) => Some(Self::ExploreDetailEnter),
                 (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ExploreDetailToggle),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RunScenario),
@@ -3725,6 +3736,39 @@ mod tests {
                 context
             ),
             Some(Action::ReqReloadStore)
+        );
+    }
+
+    #[test]
+    fn explore_run_menu_binds_h_only_outside_modals() {
+        let h_key = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT);
+        let explore = KeyContext {
+            active_tab: MainTab::Explore,
+            ..requirements_tree_context()
+        };
+        assert_eq!(
+            Action::from_key_event(h_key, explore),
+            Some(Action::ExploreRunMenu)
+        );
+        assert_ne!(
+            Action::from_key_event(
+                h_key,
+                KeyContext {
+                    command_line_active: true,
+                    ..explore
+                }
+            ),
+            Some(Action::ExploreRunMenu)
+        );
+        assert_ne!(
+            Action::from_key_event(
+                h_key,
+                KeyContext {
+                    project_switch_active: true,
+                    ..explore
+                }
+            ),
+            Some(Action::ExploreRunMenu)
         );
     }
 

@@ -1956,10 +1956,25 @@ class WinAppSession:
         args = payload.get("args") or []
         if not isinstance(args, list):
             return {"ok": False, "error": "args must be a list"}
+        cwd = payload.get("cwd")
+        cwd = str(cwd).strip() if cwd not in (None, "") else None
+        env_payload = payload.get("env") or {}
+        if env_payload and not isinstance(env_payload, dict):
+            return {"ok": False, "error": "env must be an object"}
+        env = None
+        if env_payload:
+            env = os.environ.copy()
+            env.update({str(key): str(value) for key, value in env_payload.items()})
         try:
-            self.process = subprocess.Popen([path, *[str(a) for a in args]], text=True,
-                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL)
+            self.process = subprocess.Popen(
+                [path, *[str(a) for a in args]],
+                text=True,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except OSError as exc:
             return {"ok": False, "error": f"launch failed: {exc}"}
         deadline = time.monotonic() + float(payload.get("timeout_ms") or 15000) / 1000.0
@@ -3342,6 +3357,12 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
                 **session.capture_metadata(),
             }
         if cmd == "get_target":
+            if session.hwnd is not None and native_target_identity(session.hwnd) is None:
+                with session._capture_switch_lock:
+                    session._stop_capture_backend()
+                    session.hwnd = None
+                    session.target_pid = None
+                    session.title = ""
             return {"ok": True, "target": session.target_info()}
         return {"ok": False, "error": f"unknown command: {cmd}"}
     except Exception as exc:
@@ -3413,7 +3434,28 @@ def run_executor(project_root: Path | None, supervisor_pid: int) -> None:
                     session.target_pid = identity["pid"]
                     result = {"ok": True}
                 elif native_target_identity(identity["hwnd"]) != identity:
-                    result = {"ok": False, "code": "target_invalid", "error": "Saved target identity changed"}
+                    # Stale HWND must not block launch/attach/status: drop it and
+                    # continue so feature target profiles can relaunch.
+                    cmd = str(payload.get("cmd") or "")
+                    if cmd in (
+                        "attach_window",
+                        "launch_app",
+                        "list_windows",
+                        "get_status",
+                        "get_target",
+                        "instance",
+                        "external_check",
+                        "health",
+                    ):
+                        session.hwnd = None
+                        session.target_pid = None
+                        result = loop.run_until_complete(handle_command(session, payload))
+                    else:
+                        result = {
+                            "ok": False,
+                            "code": "target_invalid",
+                            "error": "Saved target identity changed",
+                        }
                 else:
                     result = session.attach({"hwnd": identity["hwnd"], "pid": identity["pid"]})
             else:
@@ -3534,6 +3576,14 @@ class WinAppSupervisor:
             generation = self.generation
             try:
                 async with asyncio.timeout_at(deadline):
+                    if cmd == "get_target" and self.target_identity:
+                        # Report detached instead of failing when the saved window died,
+                        # so replay can relaunch from a feature target profile.
+                        if native_target_identity(self.target_identity["hwnd"]) != self.target_identity:
+                            self.target_identity = None
+                            self.save_identity()
+                            await self.stop_worker()
+                            return {"ok": True, "target": {"attached": False}}
                     if self.worker is None or self.worker.returncode is not None:
                         args = self.executor_command or [sys.executable, str(Path(__file__).resolve()),
                                                          "--executor", "--supervisor-pid", str(os.getpid())]
@@ -3558,7 +3608,7 @@ class WinAppSupervisor:
                         cmd == "execute_locator" and (not selector.startswith("exec:") or selector.startswith("exec:close")))
                     if needs_target and self.target_identity is None:
                         return {"ok": False, "code": "target_invalid", "error": "No verified target; attach explicitly"}
-                    if self.target_identity and cmd not in ("attach_window", "launch_app", "list_windows", "get_status", "instance", "external_check"):
+                    if self.target_identity and cmd not in ("attach_window", "launch_app", "list_windows", "get_status", "get_target", "instance", "external_check"):
                         if cmd == "wait_window":
                             valid = native_process_created(self.target_identity["pid"]) == self.target_identity["created"]
                         else:

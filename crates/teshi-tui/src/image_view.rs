@@ -604,11 +604,6 @@ struct Manifest {
 fn manifests(project: &Path, max: usize) -> Vec<Manifest> {
     let root = history_root(project);
     let mut runs = Vec::new();
-    if let Ok(bytes) = std::fs::read(root.join("index.json"))
-        && let Ok(index) = serde_json::from_slice::<Value>(&bytes)
-    {
-        runs.push(legacy_manifest(&index));
-    }
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
             let Ok(bytes) = std::fs::read(entry.path().join("run.json")) else {
@@ -617,6 +612,11 @@ fn manifests(project: &Path, max: usize) -> Vec<Manifest> {
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
                 continue;
             };
+            // Legacy indexes and runs without the current event schema are
+            // ignored; Explore only presents conforming runs.
+            if value["schema_version"].as_u64().unwrap_or(0) < 2 {
+                continue;
+            }
             runs.push(Manifest {
                 id: entry.file_name().to_string_lossy().to_string(),
                 started_at: value["started_at"].as_str().unwrap_or_default().to_string(),
@@ -627,25 +627,6 @@ fn manifests(project: &Path, max: usize) -> Vec<Manifest> {
     runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     runs.truncate(max);
     runs
-}
-
-/// Historical captures recorded before per-run directories existed.
-fn legacy_manifest(index: &Value) -> Manifest {
-    let feature = index["feature"].clone();
-    let mut events = Vec::new();
-    for step in index["steps"].as_array().into_iter().flatten() {
-        let mut event = step.clone();
-        event["type"] = Value::from("step_screenshot");
-        event["feature"] = feature.clone();
-        event["capture_status"] = Value::from("available");
-        event["status"] = Value::from("unknown");
-        events.push(event);
-    }
-    Manifest {
-        id: "legacy".to_string(),
-        started_at: index["started_at"].as_str().unwrap_or_default().to_string(),
-        events,
-    }
 }
 
 /// Captures of one run that belong to `feature` and, when known, `scenario`.
@@ -691,7 +672,11 @@ fn run_screenshots(
         .collect()
 }
 
-/// Captures of the newest run that recorded any for `feature`/\`scenario\`.
+/// Captures of the newest run that recorded any for `feature`/`scenario`.
+///
+/// Explore reads runs through `run_history`; this stays for the Windows
+/// graphics probe and the capture-resolution tests.
+#[allow(dead_code)]
 pub fn screenshots_for(
     project: &Path,
     feature: &str,
@@ -709,13 +694,13 @@ pub fn screenshots_for(
     Vec::new()
 }
 
-/// Which scenarios have captures, newest run first.
+/// Which scenarios each newest run contains, and how many captures it made.
 ///
-/// Only the newest run that recorded captures for a scenario contributes, so
-/// the panel and the tree marker agree with what the viewer will show.
+/// The newest run that recorded a scenario decides its marker: a run with no
+/// captures clears the marker instead of leaving an older run's count behind.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureIndex {
-    /// Scenarios with captures, newest run first.
+    /// Scenarios reached by their newest run, newest run first.
     pub entries: Vec<CaptureEntry>,
 }
 
@@ -738,7 +723,60 @@ impl CaptureIndex {
                 break;
             }
             let mut per_scenario: HashMap<(String, String), ScenarioCaptures> = HashMap::new();
+            // `start_case` may omit the Feature path; step events carry it.
+            let mut features_by_case: HashMap<String, (String, String)> = HashMap::new();
             for event in &run.events {
+                if !matches!(
+                    event["type"].as_str(),
+                    Some("step_screenshot" | "planned_step")
+                ) {
+                    continue;
+                }
+                let Some(case_id) = event["case_id"].as_str() else {
+                    continue;
+                };
+                let feature =
+                    normalize_feature(root, event["feature"].as_str().unwrap_or_default());
+                if feature.is_empty() {
+                    continue;
+                }
+                let scenario = event["scenario"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let resolved =
+                            scenario_at_line(project, &feature, event["step_line"].as_u64());
+                        (!resolved.is_empty()).then_some(resolved)
+                    })
+                    .unwrap_or_default();
+                features_by_case
+                    .entry(case_id.to_string())
+                    .or_insert((feature, scenario));
+            }
+            for event in &run.events {
+                // A scenario's newest run decides whether it is marked, even
+                // when that run captured nothing.
+                if event["type"] == "start_case" {
+                    let mut feature =
+                        normalize_feature(root, event["feature"].as_str().unwrap_or_default());
+                    let mut scenario = event["name"].as_str().unwrap_or_default().to_string();
+                    if let Some((known_feature, known_scenario)) = event["case_id"]
+                        .as_str()
+                        .and_then(|id| features_by_case.get(id))
+                    {
+                        if feature.is_empty() {
+                            feature.clone_from(known_feature);
+                        }
+                        if scenario.is_empty() {
+                            scenario.clone_from(known_scenario);
+                        }
+                    }
+                    if !feature.is_empty() && !scenario.is_empty() {
+                        per_scenario.entry((feature, scenario)).or_default();
+                    }
+                    continue;
+                }
                 if event["type"] != "step_screenshot" || event["capture_status"] != "available" {
                     continue;
                 }
@@ -795,7 +833,7 @@ impl ScenarioCaptures {
 ///
 /// Runners sometimes record an absolute path, including the Windows
 /// extended-length prefix; both forms must line up with the parsed project.
-fn normalize_feature(root: &Path, recorded: &str) -> String {
+pub(crate) fn normalize_feature(root: &Path, recorded: &str) -> String {
     let recorded = recorded.replace('\\', "/");
     let recorded = recorded
         .strip_prefix("//?/")
@@ -1402,6 +1440,109 @@ mod tests {
         // step line instead.
         assert_eq!(entry.scenario, "First");
         assert_eq!(entry.count, 1);
+    }
+
+    #[test]
+    fn capture_index_clears_a_scenario_when_its_newest_run_captured_nothing() {
+        let dir = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(dir.path().join(".teshi/logs/replay-screenshots")).unwrap();
+        std::fs::write(
+            dir.path().join("demo.feature"),
+            "Feature: Demo\n  Scenario: First\n    Given a\n",
+        )
+        .unwrap();
+        let project = teshi_core::gherkin::parse_project(dir.path());
+        let png = {
+            let image = image::RgbaImage::from_pixel(4, 2, image::Rgba([1, 2, 3, 255]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("encode png");
+            bytes.into_inner()
+        };
+        let mut captured =
+            teshi_engine::replay_evidence::ReplayEvidenceRun::create(dir.path()).unwrap();
+        captured
+            .screenshot(
+                &png,
+                serde_json::json!({
+                    "case_id":"case","step_id":"L3","feature":"demo.feature",
+                    "step_text":"Given a","step_line":3,"status":"passed"
+                }),
+            )
+            .expect("record capture");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut newer =
+            teshi_engine::replay_evidence::ReplayEvidenceRun::create(dir.path()).unwrap();
+        newer
+            .record(serde_json::json!({
+                "type":"start_case","case_id":"case","feature":"demo.feature","name":"First"
+            }))
+            .unwrap();
+        newer
+            .record(serde_json::json!({"type":"end_run","passed":1,"failed":0}))
+            .unwrap();
+
+        let index = CaptureIndex::scan(&project);
+
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].scenario, "First");
+        assert_eq!(index.entries[0].count, 0);
+    }
+
+    #[test]
+    fn capture_index_clears_a_scenario_when_a_featureless_newest_run_captured_nothing() {
+        let dir = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(dir.path().join(".teshi/logs/replay-screenshots")).unwrap();
+        std::fs::write(
+            dir.path().join("demo.feature"),
+            "Feature: Demo\n  Scenario: First\n    Given a\n",
+        )
+        .unwrap();
+        let project = teshi_core::gherkin::parse_project(dir.path());
+        let png = {
+            let image = image::RgbaImage::from_pixel(4, 2, image::Rgba([1, 2, 3, 255]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("encode png");
+            bytes.into_inner()
+        };
+        let mut captured =
+            teshi_engine::replay_evidence::ReplayEvidenceRun::create(dir.path()).unwrap();
+        captured
+            .screenshot(
+                &png,
+                serde_json::json!({
+                    "case_id":"f0:s0","step_id":"L3","feature":"demo.feature",
+                    "step_text":"Given a","step_line":3,"status":"passed"
+                }),
+            )
+            .expect("record capture");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut newer =
+            teshi_engine::replay_evidence::ReplayEvidenceRun::create(dir.path()).unwrap();
+        // Real dispatch runs record the Feature on planned steps, not start_case.
+        newer
+            .record(serde_json::json!({
+                "type":"start_case","case_id":"f0:s0","name":"First"
+            }))
+            .unwrap();
+        newer
+            .record(serde_json::json!({
+                "type":"planned_step","case_id":"f0:s0","feature":"demo.feature",
+                "step_line":3,"screenshot_required":false
+            }))
+            .unwrap();
+        newer
+            .record(serde_json::json!({"type":"end_run","passed":1,"failed":0}))
+            .unwrap();
+
+        let index = CaptureIndex::scan(&project);
+
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].scenario, "First");
+        assert_eq!(index.entries[0].count, 0);
     }
 
     #[test]

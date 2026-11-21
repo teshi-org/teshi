@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -353,14 +353,23 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
         );
         return Ok(());
     }
-    let target = ensure_winapp_sidecar(project_root, false)
-        .context("start the Teshi WinApp service")
-        .and_then(|()| ensure_winapp_attached(project_root, args.launch.as_deref()));
-    if let Err(error) = target {
-        emitter.blocked(TARGET_UNAVAILABLE, &format!("{error:#}"));
+    let feature = resolve_feature(project_root, args)?;
+    let target = match resolve_winapp_target(project_root, &feature, args.launch.as_deref()) {
+        Ok(target) => target,
+        Err(error) => {
+            emitter.target_blocked("winapp", error.code, &error.message);
+            emitter.blocked(TARGET_UNAVAILABLE, &error.message);
+            return Ok(());
+        }
+    };
+    if !args.dry_run
+        && let Err(error) = prepare_winapp_target(project_root, target.as_ref(), Some(&emitter))
+    {
+        emitter.target_blocked("winapp", error.code, &error.message);
+        emitter.blocked(TARGET_UNAVAILABLE, &error.message);
         return Ok(());
     }
-    let result = replay_steps(project_root, args, Some(&emitter));
+    let result = replay_steps_with_feature(project_root, args, Some(&emitter), &feature);
     emitter.finish(&result);
     Ok(())
 }
@@ -370,19 +379,38 @@ fn replay_steps(
     args: &WinAppReplayArgs,
     emitter: Option<&super::replay_protocol::CaseEmitter>,
 ) -> Result<()> {
+    let feature = resolve_feature(project_root, args)?;
+    if !args.dry_run {
+        let target = resolve_winapp_target(project_root, &feature, args.launch.as_deref())
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+        prepare_winapp_target(project_root, target.as_ref(), emitter)
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    }
+    replay_steps_with_feature(project_root, args, emitter, &feature)
+}
+
+fn resolve_feature(project_root: &Path, args: &WinAppReplayArgs) -> Result<String> {
+    Ok(match args.feature.as_deref() {
+        Some(feature) => feature.replace('\\', "/"),
+        None => read_active_step(project_root)?.feature_relative_path,
+    })
+}
+
+fn replay_steps_with_feature(
+    project_root: &Path,
+    args: &WinAppReplayArgs,
+    emitter: Option<&super::replay_protocol::CaseEmitter>,
+    feature: &str,
+) -> Result<()> {
     let protocol = emitter.is_some();
     let print_json_response = |value: serde_json::Value| -> Result<()> {
         super::replay_protocol::progress(protocol, &serde_json::to_string_pretty(&value)?);
         Ok(())
     };
-    let feature = match args.feature.as_deref() {
-        Some(feature) => feature.replace('\\', "/"),
-        None => read_active_step(project_root)?.feature_relative_path,
-    };
-    preflight_feature(project_root, &feature)?;
+    preflight_feature(project_root, feature)?;
     let plan = super::replay_plan::build_selected(
         project_root,
-        &feature,
+        feature,
         args.until_line,
         args.scenario.as_deref(),
     )?;
@@ -416,27 +444,53 @@ fn replay_steps(
         }
         return Ok(());
     }
-    let mut run = super::replay_screenshots::create_cli_replay(
-        project_root,
-        &feature,
-        args.scenario.as_deref(),
-    )?;
-    if let Some(program) = args.launch.as_deref() {
-        run.record(teshi_engine::replay_evidence::target_executable_identity(
-            Path::new(program),
-        ))?;
+    let external_dir = args.evidence_dir.clone();
+    let mut run = if external_dir.is_some() {
+        None
+    } else {
+        Some(super::replay_screenshots::create_cli_replay(
+            project_root,
+            feature,
+            args.scenario.as_deref(),
+        )?)
+    };
+    let run_id = run
+        .as_ref()
+        .map(|run| run.id().to_string())
+        .unwrap_or_else(|| {
+            external_dir
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    macro_rules! record {
+        ($value:expr) => {{
+            let value = $value;
+            if let Some(run) = run.as_mut() {
+                run.record(value)?;
+            }
+        }};
     }
-    run.record(json!({"type":"coverage","coverage":coverage,"screenshot_policy":"required"}))?;
-    print_json_response(json!({"event":"replay_started","run_id":run.id(),"coverage":coverage}))?;
+    if let Some(program) = args.launch.as_deref() {
+        record!(teshi_engine::replay_evidence::target_executable_identity(
+            Path::new(program),
+        ));
+    }
+    record!(json!({"type":"coverage","coverage":coverage,"screenshot_policy":"required"}));
+    print_json_response(json!({"event":"replay_started","run_id":run_id,"coverage":coverage}))?;
     for planned in &plan.steps {
-        run.record(
+        record!(
             json!({"type":"planned_step","step_id":planned.step_id,"case_id":planned.case_id,
             "feature":feature,"scenario":planned.scenario,"step_line":planned.binding.step_line,
-            "screenshot_required":true,"source":"windows_window"}),
-        )?;
+            "screenshot_required":true,"source":"windows_window"})
+        );
     }
-    let directory = run.directory().to_path_buf();
-    let mut index = load_or_create_index(&directory, &feature);
+    let directory = external_dir
+        .clone()
+        .or_else(|| run.as_ref().map(|run| run.directory().to_path_buf()))
+        .unwrap_or_else(|| project_root.join(".teshi/logs/replay-screenshots"));
+    let mut index = load_or_create_index(&directory, feature);
     save_index(&directory, &index)?;
     let mut failed_line = None;
     let mut capture_failures = 0usize;
@@ -447,20 +501,19 @@ fn replay_steps(
                 &args.mode,
                 args.allow_interactive_input,
             ) {
-                run.record(json!({"type":"preflight_error","response":error}))?;
+                record!(json!({"type":"preflight_error","response":error}));
                 print_json_response(error.clone())?;
                 ensure_ok(&error)?;
             }
         }
         ensure_winapp_sidecar(project_root, false)?;
-        ensure_winapp_attached(project_root, args.launch.as_deref())?;
         for planned in &plan.steps {
             let step = &planned.binding;
             if !args.non_interactive && !args.yes {
                 prompt_continue(step)?;
             }
-            run.record(json!({"type":"start_step","step_id":planned.step_id,
-                "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,"text":step.step_text}))?;
+            record!(json!({"type":"start_step","step_id":planned.step_id,
+                "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,"text":step.step_text}));
             if let Some(emitter) = emitter {
                 emitter.start_step(
                     step.step_line,
@@ -472,7 +525,7 @@ fn replay_steps(
                     capture_and_save_screenshot(
                         &endpoint.ws_url,
                         project_root,
-                        &teshi_engine::sanitize_feature_path(&feature),
+                        &teshi_engine::sanitize_feature_path(feature),
                         step.step_line,
                         &step.step_keyword,
                         &step.step_text,
@@ -483,21 +536,23 @@ fn replay_steps(
             let closing = step.primary.capture_before
                 || teshi_engine::replay_evidence::capture_before_action(&step.primary.action);
             let before_capture = closing.then(capture_frame);
+            // Cold-launched GPUI windows often need more than 5s before the first
+            // UIA query completes; keep the transport budget above the deadline.
             let response = execute_locator(
                 project_root,
                 &step.primary.value,
                 &step.primary.action,
                 step.primary.value_arg.as_deref(),
-                5000,
-                command_timeout_for_ms(5000),
+                15_000,
+                command_timeout_for_ms(15_000),
                 &if step.primary.action == "assert_screenshot" {
                     format!(
                         "{}-L{}",
-                        teshi_engine::sanitize_feature_path(&feature),
+                        teshi_engine::sanitize_feature_path(feature),
                         step.step_line
                     )
                 } else {
-                    format!("{}:{}", run.id(), planned.step_id)
+                    format!("{run_id}:{}", planned.step_id)
                 },
                 &args.mode,
                 args.allow_interactive_input,
@@ -505,13 +560,24 @@ fn replay_steps(
             .unwrap_or_else(|error| transport_failure(&error.to_string()));
             let passed = ensure_ok(&response).is_ok();
             // The action result is durable before any potentially failing capture.
-            run.record(json!({"type":"step_result","step_id":planned.step_id,
+            record!(json!({"type":"step_result","step_id":planned.step_id,
                 "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,
-                "status":if passed {"passed"} else {"failed"},"response":response}))?;
+                "status":if passed {"passed"} else {"failed"},"response":response}));
             print_json_response(response.clone())?;
             let capture = before_capture.unwrap_or_else(capture_frame);
-            let mut event = json!({"type":"step_screenshot","step_id":planned.step_id,
-                "case_id":planned.case_id,"scenario":planned.scenario,"feature":feature,
+            // Protocol case ids belong to the TUI (`f0:s0`); plan ids
+            // (`scenario:7:0`) are only for the local replay plan. Screenshots
+            // must use the protocol id or the TUI demotes them to Logs and
+            // never shows a Screenshots tab.
+            let (case_id, step_id) = match emitter {
+                Some(emitter) => (
+                    emitter.case_id().to_string(),
+                    emitter.step_id(step.step_line),
+                ),
+                None => (planned.case_id.clone(), planned.step_id.clone()),
+            };
+            let mut event = json!({"type":"step_screenshot","step_id":step_id,
+                "case_id":case_id,"scenario":planned.scenario,"feature":feature,
                 "step_line":step.step_line,"step_keyword":step.step_keyword,"step_text":step.step_text,
                 "status":if passed {"passed"} else {"failed"}, "source":"windows_window",
                 "capture_timing":if closing {"before_close"} else {"after_step"}});
@@ -528,7 +594,12 @@ fn replay_steps(
                     event["message"] = json!(error.to_string());
                 }
             }
-            run.record(event)?;
+            if let Some(run) = run.as_mut() {
+                run.record(event)?;
+            } else if protocol {
+                // The owning TUI process records this capture in its shared run.
+                println!("{}", serde_json::to_string(&event)?);
+            }
             if let Some(emitter) = emitter {
                 let message = ensure_ok(&response).err().map(|error| error.to_string());
                 emitter.end_step(step.step_line, passed, message.as_deref());
@@ -555,19 +626,363 @@ fn replay_steps(
     } else {
         "passed"
     };
-    index = load_or_create_index(&directory, &feature);
+    index = load_or_create_index(&directory, feature);
     index.status = status.into();
     index.completed_at = Some(iso_now());
     save_index(&directory, &index)?;
-    run.record(json!({"type":"end_run","status":status,"failed":usize::from(result.is_err()),
-        "capture_failures":capture_failures,"error":result.as_ref().err().map(ToString::to_string)}))?;
+    record!(
+        json!({"type":"end_run","status":status,"failed":usize::from(result.is_err()),
+        "capture_failures":capture_failures,"error":result.as_ref().err().map(ToString::to_string)})
+    );
+    let (run_status, acceptance, evidence) = match run.as_ref() {
+        Some(run) => (
+            run.snapshot().status.clone(),
+            run.snapshot().acceptance_status.clone(),
+            json!(run.snapshot().evidence),
+        ),
+        None => (status.to_string(), "unverified".to_string(), json!(null)),
+    };
     print_json_response(
-        json!({"event":"replay_complete","run_id":run.id(),"status":run.snapshot().status,"test_status":status,"acceptance_status":run.snapshot().acceptance_status,"evidence":run.snapshot().evidence,
+        json!({"event":"replay_complete","run_id":run_id,"status":run_status,"test_status":status,"acceptance_status":acceptance,"evidence":evidence,
         "coverage":coverage,"screenshot_policy":"required","capture_failures":capture_failures,
         "screenshot_dir":directory,"screenshots":index.steps.len(),"failed_line":failed_line}),
     )?;
     result?;
-    run.ensure_accepted()
+    if let Some(run) = run.as_ref() {
+        run.ensure_accepted()?;
+    }
+    Ok(())
+}
+
+/// Feature-level WinApp target resolved from the binding and its profile.
+struct WinappTarget {
+    profile: Option<String>,
+    launch: Option<PathBuf>,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    env: std::collections::HashMap<String, String>,
+    attach: Option<teshi_engine::StepBindingAttach>,
+    title: Option<String>,
+}
+
+struct TargetPrepError {
+    code: &'static str,
+    message: String,
+}
+
+fn target_error(code: &'static str, message: impl Into<String>) -> TargetPrepError {
+    TargetPrepError {
+        code,
+        message: message.into(),
+    }
+}
+
+fn resolve_winapp_target(
+    project_root: &Path,
+    feature: &str,
+    cli_launch: Option<&str>,
+) -> Result<Option<WinappTarget>, TargetPrepError> {
+    let binding = teshi_engine::step_binding_target(project_root, feature).map_err(|error| {
+        target_error(
+            "target_binding_invalid",
+            format!("read step bindings: {error:#}"),
+        )
+    })?;
+    let Some(binding) = binding else {
+        return Ok(cli_launch.map(|path| WinappTarget {
+            profile: None,
+            launch: Some(PathBuf::from(path)),
+            args: Vec::new(),
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            attach: None,
+            title: None,
+        }));
+    };
+    let kind = if binding.kind.trim().is_empty() {
+        "winapp".to_string()
+    } else {
+        binding.kind.clone()
+    };
+    if !kind.eq_ignore_ascii_case("winapp") {
+        return Err(target_error(
+            "target_kind_mismatch",
+            format!("feature target is `{kind}`, but this is a WinApp replay"),
+        ));
+    }
+    let profile = match binding.profile.as_deref() {
+        Some(name) => {
+            let profile = teshi_engine::load_target_profile(project_root, name)
+                .map_err(|error| {
+                    target_error(
+                        "target_profile_invalid",
+                        format!("read target profile `{name}`: {error}"),
+                    )
+                })?
+                .ok_or_else(|| {
+                    target_error(
+                        "target_profile_missing",
+                        format!(
+                            "target profile `{name}` is missing from teshi.toml; add [targets.{name}]"
+                        ),
+                    )
+                })?;
+            if !profile.kind.trim().is_empty() && !profile.is_winapp() {
+                return Err(target_error(
+                    "target_kind_mismatch",
+                    format!(
+                        "target profile `{name}` has kind `{}`, expected winapp",
+                        profile.kind
+                    ),
+                ));
+            }
+            Some(profile)
+        }
+        None => None,
+    };
+    let launch = cli_launch
+        .map(PathBuf::from)
+        .or_else(|| profile.as_ref().and_then(|profile| profile.launch.clone()));
+    let attach = binding
+        .attach
+        .clone()
+        .or_else(|| profile.as_ref().and_then(|profile| profile.attach.clone()));
+    let args = profile
+        .as_ref()
+        .map(|profile| profile.args.clone())
+        .unwrap_or_default();
+    let cwd = profile.as_ref().and_then(|profile| profile.cwd.clone());
+    let env = profile
+        .as_ref()
+        .map(|profile| profile.env.clone())
+        .unwrap_or_default();
+    let title = attach.as_ref().and_then(|attach| attach.title.clone());
+    Ok(Some(WinappTarget {
+        profile: binding.profile,
+        launch,
+        args,
+        cwd,
+        env,
+        attach,
+        title,
+    }))
+}
+
+fn prepare_winapp_target(
+    project_root: &Path,
+    target: Option<&WinappTarget>,
+    emitter: Option<&super::replay_protocol::CaseEmitter>,
+) -> Result<(), TargetPrepError> {
+    let action = if target.and_then(|target| target.launch.as_ref()).is_some() {
+        "launch"
+    } else {
+        "attach"
+    };
+    if let Some(emitter) = emitter {
+        emitter.target_preparing(
+            "winapp",
+            target.and_then(|target| target.profile.as_deref()),
+            action,
+        );
+    }
+    ensure_winapp_sidecar(project_root, false)
+        .map_err(|error| target_error("target_unavailable", format!("{error:#}")))?;
+    // A stale saved HWND must not block profile launch/attach: treat identity
+    // loss (or an unrelated attached window) as needing preparation.
+    match winapp_target_identity(project_root) {
+        Ok(Some(identity)) if identity_matches_target(&identity, target) => {
+            if let Some(emitter) = emitter {
+                emitter.target_ready(
+                    "winapp",
+                    target.and_then(|target| target.profile.as_deref()),
+                    identity.title.as_deref(),
+                    identity.process.as_deref(),
+                );
+            }
+            return Ok(());
+        }
+        Ok(Some(_) | None) => {}
+        Err(error) if is_recoverable_target_loss(&error) => {}
+        Err(error) => {
+            return Err(target_error("target_unavailable", format!("{error:#}")));
+        }
+    }
+    let Some(target) = target else {
+        return Err(target_error(
+            "target_unavailable",
+            "no target configured; add a feature target profile or pass --launch",
+        ));
+    };
+    if let Some(launch) = &target.launch {
+        let response = send_winapp_command(
+            project_root,
+            json!({
+                "cmd": "launch_app",
+                "request_id": "winapp-replay-launch",
+                "path": launch.display().to_string(),
+                "args": &target.args,
+                "cwd": target.cwd.as_ref().map(|path| path.display().to_string()),
+                "env": &target.env,
+                "title": target.title.as_deref(),
+                "timeout_ms": 15000,
+                "elevated": false
+            }),
+            command_timeout_for_ms(15_000),
+        )
+        .map_err(|error| target_error("target_launch_failed", format!("{error:#}")))?;
+        ensure_ok(&response)
+            .map_err(|error| target_error("target_launch_failed", format!("{error:#}")))?;
+        // Freshly launched windows need a beat before UIA trees are queryable.
+        std::thread::sleep(Duration::from_secs(2));
+    } else if let Some(attach) = &target.attach
+        && !attach.is_empty()
+    {
+        let response = send_winapp_command(
+            project_root,
+            json!({
+                "cmd": "attach_window",
+                "request_id": "winapp-replay-attach",
+                "hwnd": attach.hwnd,
+                "title": attach.title,
+                "pid": attach.pid,
+                "process_name": attach.process_name
+            }),
+            Duration::from_secs(15),
+        )
+        .map_err(|error| target_error("target_attach_failed", format!("{error:#}")))?;
+        ensure_ok(&response)
+            .map_err(|error| target_error("target_attach_failed", format!("{error:#}")))?;
+    } else {
+        return Err(target_error(
+            "target_unavailable",
+            "no WinApp window attached; add an attach selector or launch command to the target profile",
+        ));
+    }
+    let identity = winapp_target_identity(project_root)
+        .map_err(|error| target_error("target_unavailable", format!("{error:#}")))?
+        .ok_or_else(|| {
+            target_error(
+                "target_unavailable",
+                "target preparation finished without an attached window",
+            )
+        })?;
+    if let Some(emitter) = emitter {
+        emitter.target_ready(
+            "winapp",
+            target.profile.as_deref(),
+            identity.title.as_deref(),
+            identity.process.as_deref(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AttachedTargetIdentity {
+    hwnd: Option<u64>,
+    pid: Option<u32>,
+    title: Option<String>,
+    process: Option<String>,
+}
+
+fn identity_matches_target(
+    identity: &AttachedTargetIdentity,
+    target: Option<&WinappTarget>,
+) -> bool {
+    let Some(attach) = target.and_then(|target| target.attach.as_ref()) else {
+        return true;
+    };
+    if let Some(hwnd) = attach.hwnd
+        && identity.hwnd != Some(hwnd)
+    {
+        return false;
+    }
+    if let Some(pid) = attach.pid
+        && identity.pid != Some(pid)
+    {
+        return false;
+    }
+    if let Some(expected) = attach
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let expected_lower = expected.to_lowercase();
+        if !identity
+            .title
+            .as_deref()
+            .is_some_and(|title| title.to_lowercase().contains(&expected_lower))
+        {
+            return false;
+        }
+    }
+    if let Some(expected) = attach
+        .process_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && let Some(actual) = identity.process.as_deref()
+    {
+        let expected_lower = expected.to_lowercase();
+        if !actual.to_lowercase().contains(&expected_lower) {
+            return false;
+        }
+    }
+    true
+}
+
+fn winapp_target_identity(project_root: &Path) -> Result<Option<AttachedTargetIdentity>> {
+    let target = send_winapp_command(
+        project_root,
+        json!({ "cmd": "get_target", "request_id": "winapp-get-target" }),
+        Duration::from_secs(10),
+    )?;
+    if target.get("ok") == Some(&serde_json::Value::Bool(false))
+        && is_recoverable_target_loss_value(&target)
+    {
+        return Ok(None);
+    }
+    ensure_ok(&target)?;
+    if !target
+        .get("target")
+        .and_then(|target| target.get("attached"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let hwnd = target["target"]["hwnd"].as_u64();
+    let pid = target["target"]["pid"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok());
+    let title = target["target"]["title"].as_str().map(str::to_string);
+    let process = target["target"]["process_name"]
+        .as_str()
+        .or_else(|| target["target"]["process"].as_str())
+        .map(str::to_string);
+    Ok(Some(AttachedTargetIdentity {
+        hwnd,
+        pid,
+        title,
+        process,
+    }))
+}
+
+fn is_recoverable_target_loss(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text.contains("Saved target exited or changed identity")
+        || text.contains("Saved target identity changed")
+        || text.contains("\"code\":\"target_invalid\"")
+        || text.contains("No verified target")
+}
+
+fn is_recoverable_target_loss_value(value: &serde_json::Value) -> bool {
+    value["code"].as_str() == Some("target_invalid")
+        || value["error"].as_str().is_some_and(|message| {
+            message.contains("Saved target exited or changed identity")
+                || message.contains("Saved target identity changed")
+        })
 }
 
 fn transport_failure(error: &str) -> serde_json::Value {
@@ -646,40 +1061,6 @@ fn execute_locator(
         );
     }
     send_winapp_command(project_root, command, sidecar_timeout)
-}
-
-fn ensure_winapp_attached(project_root: &Path, launch: Option<&str>) -> Result<()> {
-    let target = send_winapp_command(
-        project_root,
-        json!({ "cmd": "get_target", "request_id": "winapp-get-target" }),
-        Duration::from_secs(10),
-    )?;
-    ensure_ok(&target)?;
-    let attached = target
-        .get("target")
-        .and_then(|t| t.get("attached"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if attached {
-        return Ok(());
-    }
-    if let Some(path) = launch {
-        let response = send_winapp_command(
-            project_root,
-            json!({
-                "cmd": "launch_app",
-                "request_id": "winapp-replay-launch",
-                "path": path,
-                "timeout_ms": 15000
-            }),
-            command_timeout_for_ms(15_000),
-        )?;
-        ensure_ok(&response)?;
-        return Ok(());
-    }
-    Err(anyhow!(
-        "no WinUI3 window attached; run `teshi winapp attach ...` or `teshi winapp replay --launch <exe>`"
-    ))
 }
 
 fn send_winapp_command(
@@ -877,5 +1258,65 @@ mod tests {
                 assert!(input_permission_error("assert_visible", mode, allowed).is_none());
             }
         }
+    }
+
+    fn target_with_attach(attach: Option<teshi_engine::StepBindingAttach>) -> WinappTarget {
+        WinappTarget {
+            profile: Some("app".into()),
+            launch: None,
+            args: Vec::new(),
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            attach,
+            title: None,
+        }
+    }
+
+    #[test]
+    fn identity_matches_target_checks_hwnd_pid_and_title() {
+        let identity = AttachedTargetIdentity {
+            hwnd: Some(100),
+            pid: Some(42),
+            title: Some("Teshi Desktop - Main".into()),
+            process: Some("teshi-desktop.exe".into()),
+        };
+
+        assert!(identity_matches_target(&identity, None));
+        assert!(identity_matches_target(
+            &identity,
+            Some(&target_with_attach(None))
+        ));
+
+        let matching = target_with_attach(Some(teshi_engine::StepBindingAttach {
+            hwnd: Some(100),
+            pid: Some(42),
+            title: Some("teshi desktop".into()),
+            process_name: Some("TESHI-DESKTOP".into()),
+        }));
+        assert!(identity_matches_target(&identity, Some(&matching)));
+
+        let wrong_title = target_with_attach(Some(teshi_engine::StepBindingAttach {
+            hwnd: None,
+            pid: None,
+            title: Some("Calculator".into()),
+            process_name: None,
+        }));
+        assert!(!identity_matches_target(&identity, Some(&wrong_title)));
+
+        let wrong_pid = target_with_attach(Some(teshi_engine::StepBindingAttach {
+            hwnd: None,
+            pid: Some(99),
+            title: None,
+            process_name: None,
+        }));
+        assert!(!identity_matches_target(&identity, Some(&wrong_pid)));
+
+        let wrong_hwnd = target_with_attach(Some(teshi_engine::StepBindingAttach {
+            hwnd: Some(101),
+            pid: None,
+            title: None,
+            process_name: None,
+        }));
+        assert!(!identity_matches_target(&identity, Some(&wrong_hwnd)));
     }
 }
