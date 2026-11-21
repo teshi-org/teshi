@@ -182,11 +182,15 @@ impl InlineImages {
             }
         };
         let cells = prepared.cells;
+        // Fit never upscales past 100%; when the image is smaller than `area`,
+        // keep native size and center it instead of pinning to the top-left.
+        let draw_w = area.width.min(cells.width);
+        let draw_h = area.height.min(cells.height.saturating_sub(skip));
         let visible = Rect::new(
-            area.x,
-            area.y,
-            area.width.min(cells.width),
-            area.height.min(cells.height.saturating_sub(skip)),
+            area.x + area.width.saturating_sub(draw_w) / 2,
+            area.y + area.height.saturating_sub(draw_h) / 2,
+            draw_w,
+            draw_h,
         );
         if visible.is_empty() {
             return InlineState::Shown;

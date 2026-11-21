@@ -83,12 +83,59 @@ pub struct StepBinding {
     pub confirmed_at: Option<String>,
 }
 
+/// Execution target captured when a Feature's steps are bound.
+///
+/// The target is feature-level: one Feature drives one window or browser.
+/// `profile` names a `[targets.<name>]` entry in `teshi.toml`; `attach`
+/// identifies an already-running target without recording a launch command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StepBindingTarget {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<StepBindingAttach>,
+}
+
+/// Stable window identity recorded with a WinApp binding.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StepBindingAttach {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwnd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_name: Option<String>,
+}
+
+impl StepBindingAttach {
+    /// Whether any attach selector is present.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.hwnd.is_none()
+            && self
+                .title
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            && self.pid.is_none()
+            && self
+                .process_name
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+    }
+}
+
 /// Per-feature binding index committed with the project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepBindingsFile {
     #[serde(default = "legacy_step_binding_version")]
     pub format_version: u16,
     pub feature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<StepBindingTarget>,
     pub steps: Vec<StepBinding>,
 }
 
@@ -167,6 +214,31 @@ mod binding_version_tests {
         assert_eq!(
             current.steps[0].primary.element_reference.as_deref(),
             Some("@e1")
+        );
+    }
+
+    #[test]
+    fn reads_v3_feature_level_target_with_profile() {
+        let file: StepBindingsFile = serde_json::from_str(
+            r#"{
+                "format_version": 3,
+                "feature": "features/winapp/demo.feature",
+                "target": {
+                    "kind": "winapp",
+                    "profile": "teshi-desktop",
+                    "attach": { "title": "teshi" }
+                },
+                "steps": []
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(file.format_version, 3);
+        let target = file.target.expect("target");
+        assert_eq!(target.kind, "winapp");
+        assert_eq!(target.profile.as_deref(), Some("teshi-desktop"));
+        assert_eq!(
+            target.attach.and_then(|attach| attach.title).as_deref(),
+            Some("teshi")
         );
     }
 }

@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -424,23 +425,30 @@ pub fn plan_batches(
     Ok(batches_from_plan(plan, cases))
 }
 
-/// Spawn an external runner and return both its event stream and an owned
-/// cancellation handle. Dropping the event receiver alone never stops the
-/// child process.
+/// Spawn an external runner and return its event stream, an owned
+/// cancellation handle, and the evidence run that receives its events.
+/// Dropping the event receiver alone never stops the child process.
 pub fn spawn_runner_with_control(
     config: RunnerConfig,
     request: RunRequest,
-) -> Result<(Receiver<RunEvent>, Sender<()>)> {
+) -> Result<(Receiver<RunEvent>, Sender<()>, String)> {
+    let project = request
+        .meta
+        .get("project_root")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let evidence = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&project)?;
+    let run_id = evidence.id().to_string();
     let (tx, rx) = mpsc::channel();
     let (cancel_tx, cancel_rx) = mpsc::channel();
     thread::spawn(move || {
-        if let Err(err) = run_child(config, request, tx.clone(), cancel_rx) {
+        if let Err(err) = run_child(config, request, evidence, tx.clone(), cancel_rx) {
             let _ = tx.send(RunEvent::RunnerError {
                 message: err.to_string(),
             });
         }
     });
-    Ok((rx, cancel_tx))
+    Ok((rx, cancel_tx, run_id))
 }
 
 /// Returns whether every selected case has a terminal binding sidecar.
@@ -547,7 +555,9 @@ pub fn run_tui(path: &Path, scenario: Option<&str>, command: Option<String>) -> 
 pub fn spawn_teshi_dispatch_with_control(
     project_root: PathBuf,
     cases: Vec<RunCase>,
-) -> Result<(Receiver<RunEvent>, Sender<()>)> {
+) -> Result<(Receiver<RunEvent>, Sender<()>, String)> {
+    let evidence = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&project_root)?;
+    let run_id = evidence.id().to_string();
     let (tx, rx) = mpsc::channel();
     let (cancel_tx, cancel_rx) = mpsc::channel();
     thread::spawn(move || {
@@ -578,7 +588,8 @@ pub fn spawn_teshi_dispatch_with_control(
                 let _ = tx.send(event);
             }
         };
-        let result = teshi_engine::dispatch_cases(&project_root, &script, &dispatch, emit);
+        let result =
+            teshi_engine::dispatch_cases_in_run(&project_root, &script, &dispatch, evidence, emit);
         let error = gate
             .violation
             .clone()
@@ -591,7 +602,7 @@ pub fn spawn_teshi_dispatch_with_control(
             success: !cancelled && gate.violation.is_none(),
         });
     });
-    Ok((rx, cancel_tx))
+    Ok((rx, cancel_tx, run_id))
 }
 
 /// Enforces runner protocol v1 on one executor's event stream.
@@ -635,6 +646,7 @@ fn is_protocol_event(value: &serde_json::Value) -> bool {
 fn run_child(
     config: RunnerConfig,
     mut request: RunRequest,
+    mut evidence: teshi_engine::replay_evidence::ReplayEvidenceRun,
     tx: Sender<RunEvent>,
     cancel_rx: Receiver<()>,
 ) -> Result<()> {
@@ -643,7 +655,6 @@ fn run_child(
         .get("project_root")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    let mut evidence = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&root)?;
     let directory = evidence.directory().to_path_buf();
     request.meta.insert(
         "evidence_run_directory".into(),
@@ -1745,23 +1756,32 @@ fn spawn_batch(
     batch: &ExecBatch,
     project_root: &Path,
     meta: &HashMap<String, String>,
-) -> Result<(Receiver<RunEvent>, Sender<()>)> {
+) -> Result<(Receiver<RunEvent>, Sender<()>, Option<String>)> {
     match &batch.executor {
         Executor::Dispatch => {
-            spawn_teshi_dispatch_with_control(project_root.to_path_buf(), batch.cases.clone())
+            let (rx, cancel, run_id) =
+                spawn_teshi_dispatch_with_control(project_root.to_path_buf(), batch.cases.clone())?;
+            Ok((rx, cancel, Some(run_id)))
         }
         Executor::Process(config) => {
             let mut meta = meta.clone();
             meta.insert("runner_name".into(), batch.name.clone());
-            spawn_runner_with_control(config.clone(), RunRequest::run(batch.cases.clone(), meta))
+            let (rx, cancel, run_id) = spawn_runner_with_control(
+                config.clone(),
+                RunRequest::run(batch.cases.clone(), meta),
+            )?;
+            Ok((rx, cancel, Some(run_id)))
         }
-        Executor::Manual => Ok(spawn_manual_batch(batch.cases.clone())),
-        Executor::Replay { target, program } => Ok(spawn_replay_batch(
+        Executor::Manual => {
+            let (rx, cancel) = spawn_manual_batch(batch.cases.clone());
+            Ok((rx, cancel, None))
+        }
+        Executor::Replay { target, program } => spawn_replay_batch(
             *target,
             program.clone(),
             project_root.to_path_buf(),
             batch.cases.clone(),
-        )),
+        ),
     }
 }
 
@@ -1808,9 +1828,17 @@ fn spawn_replay_batch(
     program: PathBuf,
     project_root: PathBuf,
     cases: Vec<RunCase>,
-) -> (Receiver<RunEvent>, Sender<()>) {
+) -> Result<(Receiver<RunEvent>, Sender<()>, Option<String>)> {
+    let evidence = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&project_root)?;
+    let run_id = evidence.id().to_string();
+    let run = Arc::new(Mutex::new(evidence));
+    let directory = run
+        .lock()
+        .map(|run| run.directory().to_path_buf())
+        .map_err(|_| anyhow::anyhow!("evidence writer poisoned"))?;
     let (tx, rx) = mpsc::channel();
     let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+    let thread_run = Arc::clone(&run);
     thread::spawn(move || {
         let mut cancelled = false;
         for case in &cases {
@@ -1822,10 +1850,21 @@ fn spawn_replay_batch(
                 case_id: case.id.clone(),
                 name: Some(case.scenario.clone()),
             });
-            match replay_one_case(target, &program, &project_root, case, &tx, &cancel_rx) {
+            match replay_one_case(
+                target,
+                &program,
+                &project_root,
+                case,
+                ReplayEvidenceSink {
+                    directory: &directory,
+                    run: &thread_run,
+                },
+                &tx,
+                &cancel_rx,
+            ) {
                 Ok(stopped) => cancelled = stopped,
                 Err(error) => {
-                    let _ = tx.send(RunEvent::CaseFailed {
+                    let event = RunEvent::CaseFailed {
                         case_id: case.id.clone(),
                         duration_ms: None,
                         error: RunError {
@@ -1833,16 +1872,45 @@ fn spawn_replay_batch(
                             stack: None,
                             attachments: Vec::new(),
                         },
-                    });
+                    };
+                    record_run_event(&thread_run, &event);
+                    let _ = tx.send(event);
                 }
             }
+        }
+        if let Ok(mut run) = thread_run.lock() {
+            let (mut passed, mut failed, mut skipped, mut blocked) = (0, 0, 0, 0);
+            for event in &run.snapshot().events {
+                match event["type"].as_str() {
+                    Some("case_passed") => passed += 1,
+                    Some("case_failed") => failed += 1,
+                    Some("case_skipped") => skipped += 1,
+                    Some("case_blocked") => blocked += 1,
+                    _ => {}
+                }
+            }
+            let end = if cancelled {
+                serde_json::json!({"type":"end_run","status":"interrupted"})
+            } else {
+                serde_json::json!({
+                    "type":"end_run","passed":passed,"failed":failed,
+                    "skipped":skipped,"blocked":blocked
+                })
+            };
+            let _ = run.record(end);
         }
         let _ = tx.send(RunEvent::RunnerExit {
             code: None,
             success: !cancelled,
         });
     });
-    (rx, cancel_tx)
+    Ok((rx, cancel_tx, Some(run_id)))
+}
+
+/// Durable run shared with one replay child.
+struct ReplayEvidenceSink<'a> {
+    directory: &'a Path,
+    run: &'a Arc<Mutex<teshi_engine::replay_evidence::ReplayEvidenceRun>>,
 }
 
 /// Runs one replay child and forwards its events. Returns whether the run was
@@ -1852,6 +1920,7 @@ fn replay_one_case(
     program: &Path,
     project_root: &Path,
     case: &RunCase,
+    sink: ReplayEvidenceSink<'_>,
     tx: &Sender<RunEvent>,
     cancel_rx: &Receiver<()>,
 ) -> Result<bool> {
@@ -1864,11 +1933,21 @@ fn replay_one_case(
                 project_root.display()
             )
         })?;
+    if let Ok(mut run) = sink.run.lock() {
+        let _ = run.record(serde_json::json!({
+            "type": "start_case",
+            "case_id": case.id,
+            "name": case.scenario,
+            "feature": relative,
+        }));
+    }
     let mut command = Command::new(program);
     command
         .args([target.subcommand(), "replay", "--feature", &relative])
         .args(["--scenario", &case.scenario, "--non-interactive"])
         .args(["--emit-runner-protocol", &case.id])
+        .arg("--evidence-dir")
+        .arg(sink.directory)
         .current_dir(project_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1886,12 +1965,20 @@ fn replay_one_case(
     let stderr_thread = child.stderr.take().map(|stderr| {
         let tx = tx.clone();
         let case_id = case.id.clone();
+        let evidence = Arc::clone(sink.run);
         thread::spawn(move || {
             let mut last = None;
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if !line.trim().is_empty() {
                     last = Some(line.clone());
                 }
+                record_run_event(
+                    &evidence,
+                    &RunEvent::Log {
+                        case_id: Some(case_id.clone()),
+                        message: line.clone(),
+                    },
+                );
                 let _ = tx.send(RunEvent::Log {
                     case_id: Some(case_id.clone()),
                     message: line,
@@ -1903,22 +1990,14 @@ fn replay_one_case(
     let stdout_thread = child.stdout.take().map(|stdout| {
         let tx = tx.clone();
         let case_id = case.id.clone();
+        let evidence = Arc::clone(sink.run);
         thread::spawn(move || {
             let mut reported = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                match parse_event_line(&line) {
-                    // A replay speaks only for the case it was started for.
-                    Some(event) if event_case_id(&event) == Some(case_id.as_str()) => {
-                        reported |= case_outcome(&event).is_some();
-                        let _ = tx.send(event);
-                    }
-                    _ => {
-                        let _ = tx.send(RunEvent::Log {
-                            case_id: Some(case_id.clone()),
-                            message: line,
-                        });
-                    }
-                }
+                let (event, outcome) = classify_replay_stdout_line(&line, &case_id);
+                reported |= outcome;
+                record_run_event(&evidence, &event);
+                let _ = tx.send(event);
             }
             reported
         })
@@ -1929,9 +2008,17 @@ fn replay_one_case(
         if !cancelled && matches!(cancel_rx.try_recv(), Ok(())) {
             cancelled = true;
             if let Err(error) = stop_runner_tree(&mut child) {
+                let message = format!("Could not stop replay process tree: {error}");
+                record_run_event(
+                    sink.run,
+                    &RunEvent::Log {
+                        case_id: Some(case.id.clone()),
+                        message: message.clone(),
+                    },
+                );
                 let _ = tx.send(RunEvent::Log {
                     case_id: Some(case.id.clone()),
-                    message: format!("Could not stop replay process tree: {error}"),
+                    message,
                 });
             }
         }
@@ -1946,7 +2033,7 @@ fn replay_one_case(
     let last_diagnostic = stderr_thread.and_then(|handle| handle.join().ok().flatten());
     if !reported && !cancelled {
         let detail = last_diagnostic.unwrap_or_else(|| format!("exit status {status}"));
-        let _ = tx.send(RunEvent::CaseFailed {
+        let event = RunEvent::CaseFailed {
             case_id: case.id.clone(),
             duration_ms: Some(started.elapsed().as_millis() as u64),
             error: RunError {
@@ -1957,9 +2044,74 @@ fn replay_one_case(
                 stack: None,
                 attachments: Vec::new(),
             },
-        });
+        };
+        record_run_event(sink.run, &event);
+        let _ = tx.send(event);
     }
     Ok(cancelled)
+}
+
+fn classify_replay_stdout_line(line: &str, case_id: &str) -> (RunEvent, bool) {
+    match parse_event_line(line) {
+        // A replay speaks only for the case it was started for.
+        Some(event) if event_case_id(&event) == Some(case_id) => {
+            let outcome = case_outcome(&event).is_some();
+            (event, outcome)
+        }
+        // Older winapp/browser builds labeled screenshots with the
+        // local plan case id. Remap them onto this child so the TUI
+        // can still open a Screenshots tab.
+        Some(RunEvent::Other(mut value))
+            if value["type"] == "step_screenshot" && value.get("case_id").is_some() =>
+        {
+            value["case_id"] = serde_json::json!(case_id);
+            if value["step_id"].as_str().is_some()
+                && let Some(line) = value["step_line"].as_u64()
+            {
+                value["step_id"] = serde_json::json!(format!("{case_id}:L{line}"));
+            }
+            (RunEvent::Other(value), false)
+        }
+        // Target lifecycle events are run-level and carry no case_id.
+        Some(RunEvent::Other(value))
+            if matches!(
+                value["type"].as_str(),
+                Some("target_preparing" | "target_ready" | "target_blocked" | "target_lost")
+            ) =>
+        {
+            (RunEvent::Other(value), false)
+        }
+        _ => (
+            RunEvent::Log {
+                case_id: Some(case_id.to_string()),
+                message: line.to_string(),
+            },
+            false,
+        ),
+    }
+}
+
+/// Appends one forwarded runner event to the evidence run.
+///
+/// Run framing (`start_run` / `end_run`) is owned by the batch, so those
+/// events are skipped here.
+fn record_run_event(
+    evidence: &Arc<Mutex<teshi_engine::replay_evidence::ReplayEvidenceRun>>,
+    event: &RunEvent,
+) {
+    if matches!(
+        event,
+        RunEvent::StartRun { .. }
+            | RunEvent::EndRun { .. }
+            | RunEvent::RunnerExit { .. }
+            | RunEvent::RunnerError { .. }
+    ) {
+        return;
+    }
+    let value = event.to_protocol_json();
+    if let Ok(mut run) = evidence.lock() {
+        let _ = run.record(value);
+    }
 }
 
 fn event_case_id(event: &RunEvent) -> Option<&str> {
@@ -1973,6 +2125,7 @@ fn event_case_id(event: &RunEvent) -> Option<&str> {
         | RunEvent::EndStep { case_id, .. }
         | RunEvent::Log { case_id, .. }
         | RunEvent::Artifact { case_id, .. } => case_id.as_deref(),
+        RunEvent::Other(value) => value["case_id"].as_str(),
         _ => None,
     }
 }
@@ -2013,7 +2166,12 @@ pub fn spawn_routed_run(
                     message: format!("runner {}: {} scenario(s)", batch.name, batch.cases.len()),
                 });
                 match spawn_batch(batch, &project_root, &meta) {
-                    Ok((batch_rx, batch_cancel)) => {
+                    Ok((batch_rx, batch_cancel, run_id)) => {
+                        // The pane binds live captures to the batch's run.
+                        let _ = tx.send(RunEvent::Other(serde_json::json!({
+                            "type": "run_evidence",
+                            "run_id": run_id,
+                        })));
                         let exit_ok = forward_batch(
                             batch,
                             &batch_rx,
@@ -2287,7 +2445,8 @@ mod tests {
             }
         };
         let request = RunRequest::run(Vec::new(), HashMap::new());
-        let (rx, cancel) = spawn_runner_with_control(config, request).expect("spawn runner");
+        let (rx, cancel, _run_id) =
+            spawn_runner_with_control(config, request).expect("spawn runner");
         std::thread::sleep(Duration::from_millis(100));
         cancel.send(()).expect("send cancellation");
         let event = rx
@@ -2429,7 +2588,9 @@ mod evidence_tests {
             );
             let (tx, rx) = mpsc::channel();
             let (_cancel, cancel_rx) = mpsc::channel();
-            run_child(config, request, tx, cancel_rx).unwrap();
+            let evidence =
+                teshi_engine::replay_evidence::ReplayEvidenceRun::create(project.path()).unwrap();
+            run_child(config, request, evidence, tx, cancel_rx).unwrap();
             let events: Vec<_> = rx.try_iter().collect();
             assert!(events.iter().any(
                 |event| matches!(event,RunEvent::RunnerExit{success,..} if *success==nonvisual)
@@ -2647,5 +2808,25 @@ mod protocol_tests {
             matches!(events.last(), Some(RunEvent::RunnerError { message }) if message.contains("protocol violation")),
             "events: {events:?}"
         );
+    }
+
+    #[test]
+    fn replay_stdout_forwards_target_lifecycle_events_without_case_id() {
+        for line in [
+            r#"{"type":"target_preparing","target_kind":"winapp","profile":"app","action":"launch"}"#,
+            r#"{"type":"target_ready","target_kind":"winapp","profile":"app","title":"App"}"#,
+            r#"{"type":"target_blocked","target_kind":"winapp","code":"target_unavailable","message":"missing"}"#,
+            r#"{"type":"target_lost","target_kind":"winapp","message":"closed"}"#,
+        ] {
+            let (event, reported) = classify_replay_stdout_line(line, "f0:s0");
+            assert!(!reported);
+            assert!(
+                matches!(event, RunEvent::Other(_)),
+                "expected RunEvent::Other for {line}, got {event:?}"
+            );
+        }
+        let (other_case, _) =
+            classify_replay_stdout_line(r#"{"type":"case_passed","case_id":"other:s0"}"#, "f0:s0");
+        assert!(matches!(other_case, RunEvent::Log { .. }));
     }
 }

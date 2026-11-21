@@ -1523,7 +1523,7 @@ fn replay_steps(
     }
 
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
-    let mut evidence = if args.dry_run {
+    let mut evidence = if args.dry_run || args.evidence_dir.is_some() {
         None
     } else {
         Some(super::replay_screenshots::create_cli_replay(
@@ -1539,9 +1539,10 @@ fn replay_steps(
                 "feature":feature,"scenario":planned.scenario,"step_line":step.step_line,"screenshot_required":true,"source":"web_page"}))?;
         }
     }
-    let screenshot_dir = evidence
-        .as_ref()
-        .map(|run| run.directory().to_path_buf())
+    let screenshot_dir = args
+        .evidence_dir
+        .clone()
+        .or_else(|| evidence.as_ref().map(|run| run.directory().to_path_buf()))
         .unwrap_or_else(|| project_root.join(".teshi/logs/replay-screenshots"));
     let _ = fs::create_dir_all(&screenshot_dir);
 
@@ -1733,24 +1734,35 @@ fn replay_steps(
                 }
             }
         }
+        // When the TUI owns the evidence run, screenshot events must carry the
+        // protocol case id (`f0:s0`), not the local plan id (`scenario:N:R`).
+        let protocol_case = emitter
+            .map(|emitter| emitter.case_id().to_string())
+            .unwrap_or_else(|| planned.case_id.clone());
+        let protocol_step = emitter
+            .map(|emitter| emitter.step_id(step.step_line))
+            .unwrap_or_else(|| planned.step_id.clone());
+        let replay_step = super::replay_screenshots::CliReplayStep {
+            feature: &feature,
+            identity: Some((&protocol_case, &protocol_step, &planned.scenario)),
+            source: (step.step_line, &step.step_keyword, &step.step_text),
+            passed: ensure_ok(&response).is_ok(),
+            response: Some(&response),
+            capture_supported: capture_replay_screenshots,
+            capture_error: capture_error.as_deref(),
+            before_close: closing,
+        };
+        let entry = screenshot_entries
+            .last()
+            .filter(|entry| entry.step_line == step.step_line);
         if let Some(run) = evidence.as_mut() {
-            super::replay_screenshots::record_cli_step(
-                run,
-                project_root,
-                super::replay_screenshots::CliReplayStep {
-                    feature: &feature,
-                    identity: Some((&planned.case_id, &planned.step_id, &planned.scenario)),
-                    source: (step.step_line, &step.step_keyword, &step.step_text),
-                    passed: ensure_ok(&response).is_ok(),
-                    response: Some(&response),
-                    capture_supported: capture_replay_screenshots,
-                    capture_error: capture_error.as_deref(),
-                    before_close: closing,
-                },
-                screenshot_entries
-                    .last()
-                    .filter(|entry| entry.step_line == step.step_line),
-            )?;
+            super::replay_screenshots::record_cli_step(run, project_root, replay_step, entry)?;
+        } else if protocol {
+            // The owning TUI process records this event in its shared run.
+            println!(
+                "{}",
+                super::replay_screenshots::cli_step_event(project_root, replay_step, entry)
+            );
         }
         if let Some(emitter) = emitter {
             let outcome = ensure_ok(&response);
@@ -2460,6 +2472,7 @@ mod tests {
                 lease_token: Some("lease".into()),
             },
             emit_runner_protocol: None,
+            evidence_dir: None,
         };
         assert!(!replay_screenshots_supported(temp.path(), &args).unwrap());
     }
@@ -2517,6 +2530,7 @@ mod tests {
                 lease_token: None,
             },
             emit_runner_protocol: None,
+            evidence_dir: None,
         };
         assert!(
             replay(temp.path(), &args)
@@ -2550,6 +2564,7 @@ mod tests {
                 lease_token: Some("lease".into()),
             },
             emit_runner_protocol: None,
+            evidence_dir: None,
         };
         assert!(replay_screenshots_supported(temp.path(), &args).unwrap());
     }

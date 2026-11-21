@@ -96,6 +96,38 @@ WGC captures the target's composited window surface, so another window may occlu
 
 WinApp mode stores confirmed bindings in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.
 
+Feature-level execution targets (format version 3) tell replay which window to
+prepare before the first case. Bindings name a `[targets.<name>]` profile in
+`teshi.toml` instead of embedding machine-specific launch paths:
+
+```json
+{
+  "format_version": 3,
+  "feature": "features/winapp/demo.feature",
+  "target": {
+    "kind": "winapp",
+    "profile": "teshi-desktop",
+    "attach": { "title": "teshi" }
+  },
+  "steps": []
+}
+```
+
+```toml
+[targets.teshi-desktop]
+kind = "winapp"
+launch = "target/debug/teshi-desktop.exe"
+
+[targets.teshi-desktop.attach]
+title = "teshi"
+```
+
+Write or clear the target with `teshi steps set-target --feature <path>
+--profile teshi-desktop` (optional `--title` / `--process-name` / `--pid` /
+`--hwnd`). Override the launch path locally with
+`TESHI_TARGET_<PROFILE>_LAUNCH`. Bindings without a `target` keep the previous
+behavior: attach or pass `--launch` before replay.
+
 Selector preference:
 
 1. `uia:automation_id=LoginButton`

@@ -28,8 +28,15 @@ impl CaseEmitter {
         }
     }
 
+    /// Case id the owning TUI run registered for this replay child.
+    #[must_use]
+    pub(crate) fn case_id(&self) -> &str {
+        &self.case_id
+    }
+
     /// Step identity shared with the plan Teshi publishes for this case.
-    fn step_id(&self, line: usize) -> String {
+    #[must_use]
+    pub(crate) fn step_id(&self, line: usize) -> String {
         format!("{}:L{line}", self.case_id)
     }
 
@@ -61,6 +68,43 @@ impl CaseEmitter {
     pub(crate) fn blocked(&self, category: &str, reason: &str) {
         self.emit(json!({"type":"case_blocked","case_id":self.case_id,
             "category":category,"reason":reason}));
+    }
+
+    /// Run-level target preparation started.
+    pub(crate) fn target_preparing(&self, kind: &str, profile: Option<&str>, action: &str) {
+        self.emit(json!({
+            "type":"target_preparing",
+            "target_kind":kind,
+            "profile":profile,
+            "action":action
+        }));
+    }
+
+    /// Run-level target is ready for the first case.
+    pub(crate) fn target_ready(
+        &self,
+        kind: &str,
+        profile: Option<&str>,
+        title: Option<&str>,
+        process: Option<&str>,
+    ) {
+        self.emit(json!({
+            "type":"target_ready",
+            "target_kind":kind,
+            "profile":profile,
+            "title":title,
+            "process":process
+        }));
+    }
+
+    /// Run-level target preparation failed; the case is blocked.
+    pub(crate) fn target_blocked(&self, kind: &str, code: &str, message: &str) {
+        self.emit(json!({
+            "type":"target_blocked",
+            "target_kind":kind,
+            "code":code,
+            "message":message
+        }));
     }
 }
 

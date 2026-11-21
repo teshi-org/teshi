@@ -346,6 +346,18 @@ class ExecutorLifecycleTests(unittest.TestCase):
         self.assertEqual(results[2]["_target_identity"], rebuilt)
         self.assertEqual(results[3]["target"]["hwnd"], 11)
 
+    def test_handle_command_get_target_clears_dead_window(self):
+        session = service.WinAppSession(None)
+        session.hwnd = 10
+        session.target_pid = 20
+        session.title = "Old"
+        with patch.object(service, "native_target_identity", return_value=None):
+            result = asyncio.run(service.handle_command(session, {"cmd": "get_target"}))
+        self.assertEqual(result, {"ok": True, "target": {"attached": False}})
+        self.assertIsNone(session.hwnd)
+        self.assertIsNone(session.target_pid)
+        self.assertEqual(session.title, "")
+
     def test_lifecycle_restore_rejects_reused_process(self):
         identity = {"hwnd": 10, "pid": 20, "created": 30}
         output = io.StringIO()
@@ -355,6 +367,38 @@ class ExecutorLifecycleTests(unittest.TestCase):
                 service, "native_target_identity", return_value=None):
             service.run_executor(None, 1)
         self.assertEqual(json.loads(output.getvalue())["code"], "target_invalid")
+
+
+class SupervisorGetTargetTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.supervisor = service.WinAppSupervisor(self.root, [sys.executable, "-u", "-c", WORKER])
+        self.addAsyncCleanup(self.supervisor.stop_worker)
+
+    async def test_get_target_reports_detached_and_stops_worker_when_target_dies(self):
+        identity = {"hwnd": 10, "pid": 20, "created": 30}
+        await self.supervisor.execute({"cmd": "attach_window", "identity": identity})
+        self.assertIsNotNone(self.supervisor.worker)
+        with patch.object(service, "native_target_identity", return_value=None):
+            result = await self.supervisor.execute({"cmd": "get_target"})
+        self.assertEqual(result, {"ok": True, "target": {"attached": False}})
+        self.assertIsNone(self.supervisor.target_identity)
+        self.assertIsNone(self.supervisor.worker)
+        restarted = service.WinAppSupervisor(self.root, [sys.executable, "-u", "-c", WORKER])
+        self.addAsyncCleanup(restarted.stop_worker)
+        self.assertIsNone(restarted.target_identity)
+
+    async def test_get_target_with_dead_persisted_identity_does_not_spawn_worker(self):
+        identity = {"hwnd": 10, "pid": 20, "created": 30}
+        self.supervisor.target_identity = identity
+        self.supervisor.save_identity()
+        with patch.object(service, "native_target_identity", return_value=None):
+            result = await self.supervisor.execute({"cmd": "get_target"})
+        self.assertEqual(result, {"ok": True, "target": {"attached": False}})
+        self.assertIsNone(self.supervisor.worker)
+        self.assertIsNone(self.supervisor.target_identity)
 
 
 if __name__ == "__main__":

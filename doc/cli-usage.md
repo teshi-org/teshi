@@ -643,9 +643,15 @@ teshi steps propose --strategy uia --value 'uia:automation_id=Btn' --action clic
 teshi steps wait --until confirmed --timeout 60 --auto-confirm
 teshi steps confirm | teshi steps reject
 teshi steps unbind --feature test/feature/login.feature --line 12
+teshi steps set-target --feature test/feature/login.feature --kind winapp \
+  --profile teshi-desktop --title 'My App'
+teshi steps set-target --feature test/feature/login.feature --clear
 teshi steps resolve --feature test/feature/login.feature [--until-line N]
 ```
 
+- `set-target` writes a Feature-level `target` (format version 3) that replay
+  prepares before the first case. `--profile` names a `[targets.<name>]` entry
+  in `teshi.toml`; `--clear` removes the target.
 - `--line` on `propose` must match `.teshi/active-step.json` or the command exits 1.
 - `--auto-confirm` on `wait`: after timeout, confirms pending locator (default timeout 60s). On step mismatch, auto-rejects and exits 2.
 - Project setting `.teshi/settings.json`: `{ "locator_auto_confirm_sec": 60 }` (`0` = manual only).

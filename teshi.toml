@@ -112,3 +112,11 @@ exclude_paths = [
     "features/*/tui_project_switch_failures.feature", "features/*/项目切换失败边界.feature",
     "features/*/tui_project_switch_boundaries.feature", "features/*/项目切换持久化边界.feature",
 ]
+
+# Feature-level WinApp targets. Bindings reference one profile by name.
+[targets.teshi-desktop]
+kind = "winapp"
+launch = "target/debug/teshi-desktop.exe"
+
+[targets.teshi-desktop.attach]
+title = "teshi"

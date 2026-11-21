@@ -877,6 +877,117 @@ pub enum MindMapFocus {
     AiPanel,
 }
 
+/// Feature path, scenario name, and inclusive step-line range for history.
+type HistoryTarget = (String, String, Option<(u64, u64)>);
+
+/// One row of the Run Details history selector.
+#[derive(Clone)]
+pub(crate) struct RunRow {
+    pub(crate) started_at: String,
+    pub(crate) status: RunStatus,
+    pub(crate) duration_ms: Option<u64>,
+}
+
+/// Open run-history selector anchored under the Run Details timestamp.
+#[derive(Clone, Copy)]
+pub(crate) struct ExploreRunMenu {
+    /// Scenario the list belongs to; switching columns closes it.
+    pub(crate) key: (usize, usize),
+    /// Highlighted row, newest first.
+    pub(crate) selection: usize,
+}
+
+/// Lazily loaded replay history for the Explore Run Details pane.
+#[derive(Default)]
+pub(crate) struct ExploreHistory {
+    /// Per-scenario run discovery; manifests are read only on demand.
+    scenarios: HashMap<(usize, usize), crate::run_history::ScenarioHistory>,
+    /// Selected run index, newest first. `Some(0)` is the latest run.
+    selected: HashMap<(usize, usize), usize>,
+    /// Number of runs found by the last complete scan, kept across refreshes.
+    totals: HashMap<(usize, usize), usize>,
+    /// Evidence run currently streaming live events.
+    active_run_id: Option<String>,
+    /// Open selector, if any.
+    menu: Option<ExploreRunMenu>,
+    /// Target preparation/readiness text for the active run.
+    target_status: Option<String>,
+}
+
+impl ExploreHistory {
+    /// Drops cached run discovery; the selected index and active run survive.
+    fn invalidate(&mut self) {
+        self.scenarios.clear();
+        self.menu = None;
+    }
+
+    fn clear(&mut self) {
+        self.invalidate();
+        self.selected.clear();
+        self.totals.clear();
+        self.active_run_id = None;
+        self.target_status = None;
+    }
+
+    pub(crate) fn target_status(&self) -> Option<&str> {
+        self.target_status.as_deref()
+    }
+
+    fn set_target_status(&mut self, status: Option<String>) {
+        self.target_status = status;
+    }
+
+    /// Selected run index for a scenario, if history was opened.
+    pub(crate) fn selected(&self, key: (usize, usize)) -> Option<usize> {
+        self.selected.get(&key).copied()
+    }
+
+    /// Number of recorded runs for a scenario once history was scanned.
+    pub(crate) fn total(&self, key: (usize, usize)) -> usize {
+        self.totals.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Whether the pane is pinned to a run older than the latest one.
+    fn pinned(&self, key: (usize, usize)) -> bool {
+        self.selected.get(&key).is_some_and(|index| *index > 0)
+    }
+
+    pub(crate) fn menu(&self) -> Option<ExploreRunMenu> {
+        self.menu
+    }
+
+    fn open_menu(&mut self, key: (usize, usize), selection: usize) {
+        self.menu = Some(ExploreRunMenu { key, selection });
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
+    fn move_menu(&mut self, delta: isize, total: usize) {
+        if let Some(menu) = self.menu.as_mut() {
+            let last = total.saturating_sub(1) as isize;
+            menu.selection = (menu.selection as isize + delta).clamp(0, last) as usize;
+        }
+    }
+
+    fn set_menu_selection(&mut self, index: usize) {
+        if let Some(menu) = self.menu.as_mut() {
+            menu.selection = index;
+        }
+    }
+
+    /// One selector row, or `None` when the run was not discovered.
+    pub(crate) fn row(&self, key: (usize, usize), index: usize) -> Option<RunRow> {
+        let case = self.scenarios.get(&key)?.case_at(index)?;
+        Some(RunRow {
+            started_at: case.started_at.clone(),
+            status: history_status(case.status.as_deref(), &case.run_status),
+            duration_ms: case.duration_ms,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
     Idle,
@@ -890,6 +1001,9 @@ pub enum RunStatus {
 
 #[derive(Debug, Clone)]
 pub struct CaseDetail {
+    /// Runner case id retained for evidence correlation; the compact header no
+    /// longer surfaces it.
+    #[allow(dead_code)]
     pub case_id: String,
     pub status: RunStatus,
     pub duration_ms: Option<u64>,
@@ -903,6 +1017,12 @@ pub struct CaseDetail {
     pub steps: Vec<StepRunRecord>,
     /// When true, Explore fetches plaintext exchanges from the API sidecar.
     pub inspector_plaintext: bool,
+    /// RFC 3339 start time of the evidence run.
+    pub started_at: Option<String>,
+    /// Captures recorded by this run for the scenario, in run order.
+    pub screenshots: Vec<crate::image_view::ScreenshotRef>,
+    /// True when the pane is showing a persisted run rather than live events.
+    pub historical: bool,
 }
 
 /// One Gherkin step observed during an Explore run.
@@ -1053,6 +1173,77 @@ fn index_of_step_capture(
         .position(|shot| shot.step_text.trim() == step_text)
 }
 
+/// Case id carried by a live runner event, when it has one.
+fn case_id_of(event: &RunEvent) -> Option<&str> {
+    match event {
+        RunEvent::StartCase { case_id, .. }
+        | RunEvent::CasePassed { case_id, .. }
+        | RunEvent::CaseFailed { case_id, .. }
+        | RunEvent::CaseSkipped { case_id, .. }
+        | RunEvent::CaseBlocked { case_id, .. } => Some(case_id),
+        RunEvent::Log { case_id, .. }
+        | RunEvent::Artifact { case_id, .. }
+        | RunEvent::StartStep { case_id, .. }
+        | RunEvent::EndStep { case_id, .. } => case_id.as_deref(),
+        RunEvent::HttpExchange(exchange) => exchange.case_id.as_deref(),
+        RunEvent::Other(value) => value["case_id"].as_str(),
+        RunEvent::StartRun { .. }
+        | RunEvent::EndRun { .. }
+        | RunEvent::RunnerExit { .. }
+        | RunEvent::RunnerError { .. } => None,
+    }
+}
+
+fn history_to_detail(case: crate::run_history::HistoryCase) -> CaseDetail {
+    CaseDetail {
+        case_id: case.case_id,
+        status: history_status(case.status.as_deref(), &case.run_status),
+        duration_ms: case.duration_ms,
+        message: case.message,
+        stack: case.stack,
+        attachments: case
+            .attachments
+            .into_iter()
+            .map(|attachment| runner::RunAttachment {
+                kind: attachment.kind,
+                path: attachment.path.display().to_string(),
+                step_id: attachment.step_id,
+            })
+            .collect(),
+        logs: case.logs,
+        exchanges: case.exchanges,
+        steps: case
+            .steps
+            .into_iter()
+            .map(|step| StepRunRecord {
+                step_id: step.step_id,
+                text: step.text,
+                status: step.status,
+                message: step.message,
+            })
+            .collect(),
+        inspector_plaintext: false,
+        started_at: Some(case.started_at),
+        screenshots: case.screenshots,
+        historical: true,
+    }
+}
+
+/// One status vocabulary for live and persisted runs.
+fn history_status(status: Option<&str>, run_status: &str) -> RunStatus {
+    match status
+        .filter(|status| !status.is_empty())
+        .unwrap_or(run_status)
+    {
+        "passed" => RunStatus::Passed,
+        "failed" | "incomplete" | "unverified" | "partial" => RunStatus::Failed,
+        "blocked" | "interrupted" => RunStatus::Blocked,
+        "skipped" | "manual" | "unbound" => RunStatus::Skipped,
+        "running" => RunStatus::Running,
+        _ => RunStatus::Idle,
+    }
+}
+
 fn empty_running_detail(case_id: String) -> CaseDetail {
     CaseDetail {
         case_id,
@@ -1065,6 +1256,9 @@ fn empty_running_detail(case_id: String) -> CaseDetail {
         exchanges: Vec::new(),
         steps: Vec::new(),
         inspector_plaintext: false,
+        started_at: None,
+        screenshots: Vec::new(),
+        historical: false,
     }
 }
 
@@ -1510,6 +1704,9 @@ pub struct App {
     pub explore_case_map: HashMap<String, (usize, usize)>,
     pub explore_case_status: HashMap<(usize, usize), RunStatus>,
     pub explore_case_details: HashMap<(usize, usize), CaseDetail>,
+    /// Persisted runs backing the pane when the current session has no live
+    /// detail, plus the run whose events are streaming now.
+    pub(crate) explore_history: ExploreHistory,
     /// Selected inner tab of the Run Details pane.
     pub explore_details_tab: RunDetailTab,
     /// True once the user explicitly chose an inner tab for this step.
@@ -1528,10 +1725,6 @@ pub struct App {
     pub explore_details_reveal: bool,
     /// Exchange ids whose folded HTTP bodies are rendered.
     pub explore_details_expanded: HashSet<String>,
-    /// Scenario captures backing the current Run Details selection.
-    pub explore_detail_shots: Vec<crate::image_view::ScreenshotRef>,
-    /// `(feature, scenario)` the cached captures belong to.
-    pub explore_detail_shots_key: Option<(usize, usize)>,
     pub explore_run_summary: Option<RunSummary>,
     // ── MindMap AI panel state ────────────────────────────────────────
     pub mindmap_focus: MindMapFocus,
@@ -1952,6 +2145,11 @@ pub enum ClickableRegion {
         index: usize,
         rect: ratatui::layout::Rect,
     },
+    /// One row in the run-history selector.
+    ExploreRunRow {
+        index: usize,
+        rect: ratatui::layout::Rect,
+    },
     /// A tag in the Features pane's filter strip (click toggles it).
     ExploreTag {
         index: usize,
@@ -2270,7 +2468,6 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
-        self.explore_detail_shots_key = None;
         self.explore_run_summary = None;
         self.explore_state = None;
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
@@ -3008,14 +3205,13 @@ impl App {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
+            explore_history: Default::default(),
             explore_details_tab: RunDetailTab::Screenshots,
             explore_details_tab_pinned: false,
             explore_details_selection: 0,
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
-            explore_detail_shots: Vec::new(),
-            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -3258,14 +3454,13 @@ impl App {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
+            explore_history: Default::default(),
             explore_details_tab: RunDetailTab::Screenshots,
             explore_details_tab_pinned: false,
             explore_details_selection: 0,
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
-            explore_detail_shots: Vec::new(),
-            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -3476,14 +3671,13 @@ impl App {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
+            explore_history: Default::default(),
             explore_details_tab: RunDetailTab::Screenshots,
             explore_details_tab_pinned: false,
             explore_details_selection: 0,
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
-            explore_detail_shots: Vec::new(),
-            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -6784,7 +6978,6 @@ impl App {
         self.explore_case_status.clear();
         self.explore_case_details.clear();
         self.explore_run_summary = None;
-        self.explore_detail_shots_key = None;
         self.external_change_prompt = None;
         self.explore_selected_feature = 0;
         self.explore_selected_deleted_feature = None;
@@ -7051,7 +7244,6 @@ impl App {
             .filter(|((i, _), _)| *i != idx)
             .map(|((i, s), value)| ((if i > idx { i - 1 } else { i }, s), value))
             .collect();
-        self.explore_detail_shots_key = None;
         self.external_change_prompt = None;
         self.bump_git_status_revision();
         self.rebuild_project_views(None);
@@ -8097,30 +8289,45 @@ impl App {
     }
 
     fn apply_run_event(&mut self, event: RunEvent) {
+        // Pinned history rows are read-only; live events must not overwrite them.
+        if let Some(case_id) = case_id_of(&event)
+            && let Some(key) = self.explore_case_map.get(case_id).copied()
+            && self.explore_history.pinned(key)
+        {
+            return;
+        }
+        // A live event that reaches a persisted row starts a new view for it.
+        if let Some(case_id) = case_id_of(&event)
+            && let Some(key) = self.explore_case_map.get(case_id).copied()
+            && self
+                .explore_case_details
+                .get(&key)
+                .is_some_and(|detail| detail.historical)
+        {
+            self.explore_case_details
+                .insert(key, empty_running_detail(case_id.to_string()));
+            self.explore_history.selected.remove(&key);
+        }
         match event {
-            RunEvent::StartRun { total, .. } => {
-                self.explore_run_summary = Some(RunSummary {
-                    total: total.unwrap_or(0),
-                    ..RunSummary::default()
-                });
+            RunEvent::StartRun { run_id, total } => {
+                self.explore_history.set_target_status(None);
+                if let Some(run_id) = run_id {
+                    self.explore_history.active_run_id = Some(run_id);
+                }
+                if let Some(total) = total {
+                    self.explore_run_summary = Some(RunSummary {
+                        total,
+                        ..RunSummary::default()
+                    });
+                }
             }
             RunEvent::StartCase { case_id, .. } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
+                    self.follow_live_case(&case_id);
                     self.explore_case_status.insert(key, RunStatus::Running);
                     self.explore_case_details
                         .entry(key)
-                        .or_insert_with(|| CaseDetail {
-                            case_id: case_id.clone(),
-                            status: RunStatus::Running,
-                            duration_ms: None,
-                            message: None,
-                            stack: None,
-                            attachments: Vec::new(),
-                            logs: Vec::new(),
-                            exchanges: Vec::new(),
-                            steps: Vec::new(),
-                            inspector_plaintext: false,
-                        });
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
                 }
             }
             RunEvent::CasePassed {
@@ -8129,21 +8336,10 @@ impl App {
             } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Passed);
-                    let detail =
-                        self.explore_case_details
-                            .entry(key)
-                            .or_insert_with(|| CaseDetail {
-                                case_id: case_id.clone(),
-                                status: RunStatus::Passed,
-                                duration_ms: None,
-                                message: None,
-                                stack: None,
-                                attachments: Vec::new(),
-                                logs: Vec::new(),
-                                exchanges: Vec::new(),
-                                steps: Vec::new(),
-                                inspector_plaintext: false,
-                            });
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
                     detail.status = RunStatus::Passed;
                     detail.duration_ms = duration_ms;
                     detail.message = None;
@@ -8160,21 +8356,10 @@ impl App {
             } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Failed);
-                    let detail =
-                        self.explore_case_details
-                            .entry(key)
-                            .or_insert_with(|| CaseDetail {
-                                case_id: case_id.clone(),
-                                status: RunStatus::Failed,
-                                duration_ms: None,
-                                message: None,
-                                stack: None,
-                                attachments: Vec::new(),
-                                logs: Vec::new(),
-                                exchanges: Vec::new(),
-                                steps: Vec::new(),
-                                inspector_plaintext: false,
-                            });
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
                     detail.status = RunStatus::Failed;
                     detail.duration_ms = duration_ms;
                     detail.message = Some(error.message);
@@ -8190,21 +8375,10 @@ impl App {
             RunEvent::CaseSkipped { case_id, reason } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Skipped);
-                    let detail =
-                        self.explore_case_details
-                            .entry(key)
-                            .or_insert_with(|| CaseDetail {
-                                case_id: case_id.clone(),
-                                status: RunStatus::Skipped,
-                                duration_ms: None,
-                                message: None,
-                                stack: None,
-                                attachments: Vec::new(),
-                                logs: Vec::new(),
-                                exchanges: Vec::new(),
-                                steps: Vec::new(),
-                                inspector_plaintext: false,
-                            });
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
                     detail.status = RunStatus::Skipped;
                     detail.duration_ms = None;
                     detail.message = reason;
@@ -8241,21 +8415,10 @@ impl App {
                 if let Some(case_id) = case_id
                     && let Some(key) = self.explore_case_map.get(&case_id).copied()
                 {
-                    let detail =
-                        self.explore_case_details
-                            .entry(key)
-                            .or_insert_with(|| CaseDetail {
-                                case_id: case_id.clone(),
-                                status: RunStatus::Running,
-                                duration_ms: None,
-                                message: None,
-                                stack: None,
-                                attachments: Vec::new(),
-                                logs: Vec::new(),
-                                exchanges: Vec::new(),
-                                steps: Vec::new(),
-                                inspector_plaintext: false,
-                            });
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
                     if detail.logs.len() >= 200 {
                         detail.logs.remove(0);
                     }
@@ -8316,7 +8479,9 @@ impl App {
                 };
                 // Captures of this run belong to the Explore markers as soon
                 // as it ends, without waiting for the viewer to open.
+                self.explore_history.set_target_status(None);
                 self.refresh_capture_index();
+                self.reload_finished_run();
             }
             RunEvent::StartStep {
                 case_id,
@@ -8324,6 +8489,7 @@ impl App {
                 text,
                 ..
             } => {
+                self.explore_history.set_target_status(None);
                 if let Some(case_id) = case_id
                     && let Some(key) = self.explore_case_map.get(&case_id).copied()
                 {
@@ -8373,6 +8539,7 @@ impl App {
                 }
             }
             RunEvent::RunnerExit { success, .. } => {
+                self.explore_history.set_target_status(None);
                 // A failed or blocked result already explains an unsuccessful
                 // exit; only an otherwise clean run needs the generic error.
                 let explained = self
@@ -8385,6 +8552,7 @@ impl App {
                 self.runner_rx = None;
             }
             RunEvent::RunnerError { message } => {
+                self.explore_history.set_target_status(None);
                 self.status = crate::i18n::fill(
                     crate::i18n::t("status.runner_error"),
                     &[("message", &crate::i18n::arg(&message))],
@@ -8392,18 +8560,161 @@ impl App {
                 self.runner_rx = None;
             }
             // Runner-specific events (for example Examples rows) are not
-            // rendered by Explore.
-            RunEvent::Other(_) => {}
+            // rendered by Explore, but captures are.
+            RunEvent::Other(value) => self.apply_other_run_event(value),
         }
         self.quit_pending_confirm = false;
+    }
+
+    /// Moves the Explore selection to the case that is running.
+    fn follow_live_case(&mut self, case_id: &str) {
+        let Some(key) = self.explore_case_map.get(case_id).copied() else {
+            return;
+        };
+        if self.explore_history.pinned(key) || self.project.features.get(key.0).is_none() {
+            return;
+        }
+        self.explore_selected_deleted_feature = None;
+        self.explore_selected_feature = key.0;
+        self.explore_selected_scenario = key.1;
+        self.normalize_explore_selection();
+    }
+
+    /// Selects the Gherkin step a live event belongs to.
+    fn follow_live_step(&mut self, text: Option<&str>, step_id: Option<&str>) {
+        let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
+            return;
+        };
+        let Some(scenario) = feature.scenario_at(self.explore_selected_scenario) else {
+            return;
+        };
+        let line = step_id.and_then(step_id_line);
+        let wanted = text.map(normalize_step_text).unwrap_or_default();
+        let Some(index) = scenario.steps.iter().position(|step| {
+            line.is_some_and(|line| step.line_number == line)
+                || (!wanted.is_empty() && normalize_step_text(&step.text) == wanted)
+        }) else {
+            return;
+        };
+        self.explore_selected_step = index;
+        self.explore_details_reveal = true;
+    }
+
+    /// Records a capture that arrived as an unparsed protocol event.
+    fn apply_other_run_event(&mut self, value: serde_json::Value) {
+        match value["type"].as_str() {
+            Some("run_evidence") => {
+                self.explore_history.active_run_id = value["run_id"].as_str().map(str::to_string);
+                return;
+            }
+            Some("target_preparing") => {
+                let kind = value["target_kind"].as_str().unwrap_or("target");
+                let profile = value["profile"]
+                    .as_str()
+                    .map(|profile| format!(" · {profile}"))
+                    .unwrap_or_default();
+                let action = value["action"].as_str().unwrap_or("prepare");
+                self.explore_history.set_target_status(Some(format!(
+                    "Preparing {kind} target{profile} · {action}…"
+                )));
+                return;
+            }
+            Some("target_ready") => {
+                let kind = value["target_kind"].as_str().unwrap_or("target");
+                let title = value["title"].as_str().unwrap_or_default();
+                let process = value["process"].as_str().unwrap_or_default();
+                let detail = match (title.is_empty(), process.is_empty()) {
+                    (false, false) => format!(" · {title} ({process})"),
+                    (false, true) => format!(" · {title}"),
+                    (true, false) => format!(" · {process}"),
+                    (true, true) => String::new(),
+                };
+                self.explore_history
+                    .set_target_status(Some(format!("{kind} target ready{detail}")));
+                return;
+            }
+            Some("target_blocked") => {
+                let kind = value["target_kind"].as_str().unwrap_or("target");
+                let message = value["message"]
+                    .as_str()
+                    .or_else(|| value["code"].as_str())
+                    .unwrap_or("target unavailable");
+                self.explore_history
+                    .set_target_status(Some(format!("{kind} target blocked · {message}")));
+                return;
+            }
+            Some("target_lost") => {
+                let kind = value["target_kind"].as_str().unwrap_or("target");
+                let message = value["message"].as_str().unwrap_or("target lost");
+                self.explore_history
+                    .set_target_status(Some(format!("{kind} target lost · {message}")));
+                return;
+            }
+            _ => {}
+        }
+        if value["type"] != "step_screenshot" || value["capture_status"] != "available" {
+            return;
+        }
+        let Some(case_id) = value["case_id"].as_str() else {
+            return;
+        };
+        let Some(file) = value["screenshot_file"]
+            .as_str()
+            .filter(|file| !file.is_empty())
+        else {
+            return;
+        };
+        let Some(key) = self.explore_case_map.get(case_id).copied() else {
+            return;
+        };
+        self.follow_live_case(case_id);
+        self.follow_live_step(value["step_text"].as_str(), value["step_id"].as_str());
+        // Captures are addressed by the run directory the writer created.
+        let Some(run_id) = self.explore_history.active_run_id.clone() else {
+            return;
+        };
+        let capture = crate::image_view::ScreenshotRef {
+            run_id,
+            file: file.to_string(),
+            scenario: value["scenario"].as_str().unwrap_or_default().to_string(),
+            step_text: value["step_text"].as_str().unwrap_or_default().to_string(),
+            step_line: value["step_line"].as_u64(),
+            captured_at: value["captured_at"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            status: value["status"].as_str().unwrap_or("unknown").to_string(),
+            image_path: None,
+        };
+        let detail = self
+            .explore_case_details
+            .entry(key)
+            .or_insert_with(|| empty_running_detail(case_id.to_string()));
+        if !detail
+            .screenshots
+            .iter()
+            .any(|shot| shot.file == capture.file)
+        {
+            detail.screenshots.push(capture);
+        }
+        if self.current_detail_key() == key {
+            self.explore_details_tab = RunDetailTab::Screenshots;
+            self.explore_details_tab_pinned = false;
+            self.explore_details_selection = self
+                .detail_screenshots()
+                .iter()
+                .position(|shot| shot.file == file)
+                .unwrap_or(0);
+            self.explore_details_reveal = true;
+        }
     }
 
     fn reset_explore_run_state(&mut self) {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
+        self.explore_history.clear();
         self.explore_run_summary = None;
-        self.explore_detail_shots_key = None;
     }
 
     fn start_explore_run(&mut self) {
@@ -8506,7 +8817,7 @@ impl App {
         self.normalize_detail_tab();
     }
 
-    fn current_detail_key(&self) -> (usize, usize) {
+    pub(crate) fn current_detail_key(&self) -> (usize, usize) {
         (
             self.explore_selected_feature,
             self.explore_selected_scenario,
@@ -8517,15 +8828,210 @@ impl App {
         self.explore_case_details.get(&self.current_detail_key())
     }
 
-    /// Correlated runner label shown at the right of the detail step line.
-    pub(crate) fn detail_runner_label(&self) -> Option<String> {
-        let detail = self.current_detail()?;
-        let mut label = detail.case_id.clone();
-        if let Some(step) = self.current_run_step(detail) {
-            label.push_str(" · ");
-            label.push_str(&step.step_id);
+    /// Loads the newest persisted run when the pane has nothing to show.
+    pub(crate) fn ensure_explore_detail(&mut self) {
+        let key = self.current_detail_key();
+        if self.explore_case_details.contains_key(&key)
+            || self.explore_selected_deleted_feature.is_some()
+        {
+            return;
         }
-        Some(label)
+        self.load_history_case(key, 0);
+    }
+
+    /// Moves the pane to an older (`delta > 0`) or newer run.
+    pub(crate) fn explore_run_switch(&mut self, delta: isize) {
+        let key = self.current_detail_key();
+        let current = self.explore_history.selected(key).unwrap_or(0);
+        if delta > 0 {
+            if !self.load_history_case(key, current + 1) {
+                self.status = crate::i18n::t("status.no_older_runs_for_this_scenario").into();
+                return;
+            }
+        } else {
+            if current == 0 {
+                self.status = crate::i18n::t("status.already_showing_the_latest_run").into();
+                return;
+            }
+            if !self.load_history_case(key, current - 1) {
+                self.status = crate::i18n::t("status.no_newer_runs_for_this_scenario").into();
+                return;
+            }
+        }
+        self.normalize_detail_tab();
+    }
+
+    /// Case and line range the history lookup uses for the selected scenario.
+    fn history_target(&self, key: (usize, usize)) -> Option<HistoryTarget> {
+        let feature = self.project.features.get(key.0)?;
+        let scenario = feature.scenario_at(key.1)?;
+        let relative =
+            crate::image_view::relative_feature_path(&self.project.root_dir, &feature.file_path);
+        let lines = scenario
+            .steps
+            .last()
+            .map(|step| (scenario.line_number as u64, step.line_number as u64));
+        Some((relative, scenario.name.clone(), lines))
+    }
+
+    /// Loads a scenario's full run list without replacing the current detail.
+    fn ensure_history_for(&mut self, key: (usize, usize)) {
+        if self.explore_history.scenarios.contains_key(&key) {
+            return;
+        }
+        let Some((feature, scenario, lines)) = self.history_target(key) else {
+            return;
+        };
+        let project = self.project.root_dir.clone();
+        let mut history =
+            crate::run_history::ScenarioHistory::open(&project, &feature, &scenario, lines);
+        history.scan_all();
+        let total = history.total();
+        // Keep the displayed historical run selected when it is still present.
+        let started = self
+            .explore_case_details
+            .get(&key)
+            .and_then(|detail| detail.started_at.clone());
+        let index = started
+            .as_deref()
+            .and_then(|started| {
+                (0..total).find(|index| {
+                    history
+                        .case_at(*index)
+                        .is_some_and(|case| case.started_at == started)
+                })
+            })
+            .unwrap_or(0);
+        self.explore_history.scenarios.insert(key, history);
+        self.explore_history.totals.insert(key, total);
+        self.explore_history.selected.entry(key).or_insert(index);
+    }
+
+    fn load_history_case(&mut self, key: (usize, usize), index: usize) -> bool {
+        self.ensure_history_for(key);
+        let Some(history) = self.explore_history.scenarios.get(&key) else {
+            return false;
+        };
+        let case = history.case_at(index).cloned();
+        let total = history.total();
+        let Some(case) = case else {
+            return false;
+        };
+        self.explore_history.totals.insert(key, total);
+        self.install_history_case(key, index, case);
+        true
+    }
+
+    /// Opens or closes the run-history selector.
+    pub(crate) fn toggle_run_menu(&mut self) {
+        if self.explore_history.menu().is_some() {
+            self.explore_history.close_menu();
+            return;
+        }
+        let key = self.current_detail_key();
+        self.ensure_history_for(key);
+        let total = self.explore_history.total(key);
+        if total == 0 {
+            self.status = "No run history for this scenario".into();
+            return;
+        }
+        let selection = self
+            .explore_history
+            .selected(key)
+            .unwrap_or(0)
+            .min(total - 1);
+        self.explore_history.open_menu(key, selection);
+    }
+
+    fn select_menu_run(&mut self) {
+        let Some(menu) = self.explore_history.menu() else {
+            return;
+        };
+        let (key, index) = (menu.key, menu.selection);
+        self.explore_history.close_menu();
+        if self.load_history_case(key, index) {
+            self.explore_details_tab_pinned = false;
+            self.normalize_detail_tab();
+        }
+    }
+
+    /// Keys owned by the open run-history selector.
+    pub(crate) fn handle_run_menu_key(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            || self.active_tab != MainTab::Explore
+            || self.explore_edit_mode
+        {
+            return false;
+        }
+        let Some(menu) = self.explore_history.menu() else {
+            return false;
+        };
+        let total = self.explore_history.total(menu.key);
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('H'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                self.explore_history.close_menu();
+            }
+            (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+                self.explore_history.move_menu(1, total);
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+                self.explore_history.move_menu(-1, total);
+            }
+            (KeyCode::Char('['), KeyModifiers::NONE) => {
+                self.explore_history.move_menu(1, total);
+            }
+            (KeyCode::Char(']'), KeyModifiers::NONE) => {
+                self.explore_history.move_menu(-1, total);
+            }
+            (KeyCode::Home, _) => self.explore_history.set_menu_selection(0),
+            (KeyCode::End, _) => {
+                self.explore_history
+                    .set_menu_selection(total.saturating_sub(1));
+            }
+            (KeyCode::Enter, _) => self.select_menu_run(),
+            (KeyCode::Char('L'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                self.explore_history.set_menu_selection(0);
+                self.select_menu_run();
+            }
+            // The selector owns the keyboard while it is open.
+            _ => {}
+        }
+        true
+    }
+
+    fn install_history_case(
+        &mut self,
+        key: (usize, usize),
+        index: usize,
+        case: crate::run_history::HistoryCase,
+    ) {
+        self.explore_case_details
+            .insert(key, history_to_detail(case));
+        self.explore_history.selected.insert(key, index);
+        self.reset_detail_selection();
+    }
+
+    /// Status chip for the selected step; falls back to the case status.
+    ///
+    /// When the runner has not yet emitted an end status for the step, a live
+    /// case stays `Running`; otherwise the case outcome is shown.
+    pub(crate) fn detail_selection_status(&self) -> RunStatus {
+        let Some(detail) = self.current_detail() else {
+            return RunStatus::Idle;
+        };
+        if let Some(step) = self.current_run_step(detail) {
+            match step.status.as_deref() {
+                Some("passed") => return RunStatus::Passed,
+                Some("failed") => return RunStatus::Failed,
+                Some("skipped") => return RunStatus::Skipped,
+                Some("blocked") => return RunStatus::Blocked,
+                Some("running") => return RunStatus::Running,
+                Some(_) => return detail.status,
+                None if detail.status == RunStatus::Running => return RunStatus::Running,
+                None => {}
+            }
+        }
+        detail.status
     }
 
     /// Run record of the Gherkin step currently selected in Steps.
@@ -8613,7 +9119,10 @@ impl App {
             }
         }
 
-        for capture in &self.explore_detail_shots {
+        let captures = detail
+            .map(|detail| detail.screenshots.as_slice())
+            .unwrap_or(&[]);
+        for capture in captures {
             if !capture_matches_selection(capture, step_text.as_deref(), step_line) {
                 continue;
             }
@@ -8804,7 +9313,7 @@ impl App {
     }
 
     fn explore_detail_primary(&mut self) {
-        self.ensure_detail_shots();
+        self.ensure_explore_detail();
         self.normalize_detail_tab();
         let selection = self.explore_details_selection;
         match self.active_detail_tab() {
@@ -8815,7 +9324,10 @@ impl App {
                 if let Some(capture) = shot.capture {
                     // Open the whole scenario so the viewer's j/k keeps working;
                     // the selected step picks the starting capture.
-                    let refs = self.explore_detail_shots.clone();
+                    let refs = self
+                        .current_detail()
+                        .map(|detail| detail.screenshots.clone())
+                        .unwrap_or_default();
                     let step_text = self.explore_selected_step_text();
                     self.show_screenshot_panel(
                         crate::image_view::ScreenshotOrigin::Explore,
@@ -8857,7 +9369,7 @@ impl App {
     }
 
     fn explore_detail_open_external(&mut self) {
-        self.ensure_detail_shots();
+        self.ensure_explore_detail();
         self.normalize_detail_tab();
         let selection = self.explore_details_selection;
         match self.active_detail_tab() {
@@ -8891,7 +9403,7 @@ impl App {
     }
 
     fn explore_detail_copy_path(&mut self) {
-        self.ensure_detail_shots();
+        self.ensure_explore_detail();
         self.normalize_detail_tab();
         let selection = self.explore_details_selection;
         let Some(target) = (match self.active_detail_tab() {
@@ -9013,20 +9525,9 @@ impl App {
             .replace('\\', "/")
     }
 
-    /// Caches scenario captures for the details pane.
+    /// Makes sure the pane has a run to show; history loads on first render.
     pub(crate) fn ensure_detail_shots(&mut self) {
-        let key = self.current_detail_key();
-        if self.explore_detail_shots_key == Some(key) {
-            return;
-        }
-        self.explore_detail_shots_key = Some(key);
-        self.explore_detail_shots = if self.explore_selected_deleted_feature.is_none()
-            && self.project.features.get(key.0).is_some()
-        {
-            self.collect_explore_screenshots()
-        } else {
-            Vec::new()
-        };
+        self.ensure_explore_detail();
     }
 
     fn toggle_inspector_plaintext(&mut self) {
@@ -9035,6 +9536,10 @@ impl App {
             self.status = "No run details for this step".into();
             return;
         };
+        if detail.historical {
+            self.status = "Historical runs do not include plaintext exchanges".into();
+            return;
+        }
         if detail.inspector_plaintext {
             detail.inspector_plaintext = false;
             self.status = crate::i18n::t("status.hiding_plaintext_secrets").into();
@@ -9125,10 +9630,10 @@ impl App {
             return;
         }
         self.persist_explore_memory();
+        self.explore_history.close_menu();
         self.explore_selected_deleted_feature = None;
         self.explore_selected_feature = idx;
         self.restore_explore_memory();
-        self.explore_detail_shots_key = None;
         self.reset_detail_selection();
     }
 
@@ -9138,15 +9643,16 @@ impl App {
             return;
         }
         self.persist_explore_memory();
+        self.explore_history.close_menu();
         self.explore_selected_deleted_feature = Some(idx);
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
-        self.explore_detail_shots_key = None;
         self.reset_detail_selection();
     }
 
     fn explore_set_scenario(&mut self, idx: usize) {
         self.persist_explore_memory();
+        self.explore_history.close_menu();
         self.explore_selected_scenario = idx;
         if let Some(&step_idx) = self.explore_scenario_step_memory.get(&(
             self.explore_selected_feature,
@@ -9157,7 +9663,6 @@ impl App {
             self.explore_selected_step = 0;
         }
         self.normalize_explore_selection();
-        self.explore_detail_shots_key = None;
         self.reset_detail_selection();
     }
 
@@ -9362,8 +9867,8 @@ impl App {
         self.editor_goto_line(line);
         self.clear_step_input_state();
         self.clear_step_keyword_picker();
+        self.explore_history.close_menu();
         self.explore_edit_mode = true;
-        self.explore_detail_shots_key = None;
         self.status = crate::i18n::t("status.explore_edit_mode").to_string();
     }
 
@@ -9652,8 +10157,29 @@ impl App {
             .map(|(key, entry)| (*key, entry.count))
             .collect();
         self.mindmap_index.set_captured_scenarios(counts);
-        // A new run can change the captures backing Run Details.
-        self.explore_detail_shots_key = None;
+        // A new run can change the captures and the runs backing Run Details.
+        self.explore_history.invalidate();
+    }
+
+    /// Replaces a finished live view with the run it was persisted as.
+    fn reload_finished_run(&mut self) {
+        let key = self.current_detail_key();
+        // A pinned older run is an explicit comparison view; keep it.
+        if self.explore_history.pinned(key) {
+            return;
+        }
+        // Manual batches record no evidence; keep their live result.
+        if self.explore_history.active_run_id.is_none() {
+            return;
+        }
+        let previous = self.explore_case_details.remove(&key);
+        if !self.load_history_case(key, 0) {
+            // Runs without a manifest (for example a manual batch) keep their
+            // live result.
+            if let Some(previous) = previous {
+                self.explore_case_details.insert(key, previous);
+            }
+        }
     }
 
     /// Maps the newest captures onto `(feature index, scenario index)`.
@@ -9842,23 +10368,6 @@ impl App {
             self.status = notice.to_string();
             self.set_status_message(self.status.clone());
         }
-    }
-
-    /// Captures recorded for the scenario selected in Explore, in step order.
-    fn collect_explore_screenshots(&mut self) -> Vec<crate::image_view::ScreenshotRef> {
-        let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
-            return Vec::new();
-        };
-        let feature_rel =
-            crate::image_view::relative_feature_path(&self.project.root_dir, &feature.file_path);
-        let scenario = feature
-            .scenario_at(self.explore_selected_scenario)
-            .map(|item| item.name.clone());
-        crate::image_view::screenshots_for(
-            &self.project.root_dir,
-            &feature_rel,
-            scenario.as_deref(),
-        )
     }
 
     /// Captures recorded for the Explore scenario, `0` when it has none.
@@ -11223,6 +11732,24 @@ impl App {
                 {
                     self.explore_details_scroll = self.explore_details_scroll.saturating_add(10);
                     self.explore_details_reveal = false;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreRunOlder => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_run_switch(1);
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreRunNewer => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_run_switch(-1);
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ExploreRunMenu => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.toggle_run_menu();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -13177,6 +13704,7 @@ impl App {
             self.explore_details_scroll = 0;
         }
         self.quit_pending_confirm = false;
+        self.explore_history.close_menu();
         self.active_tab = tab;
         if self.active_tab == MainTab::MindMap {
             if self.lazy_features.is_some() {
@@ -14798,7 +15326,8 @@ impl App {
                 | ClickableRegion::ExploreTagScroll { rect, .. }
                 | ClickableRegion::ExploreDetailPane { rect }
                 | ClickableRegion::ExploreDetailTab { rect, .. }
-                | ClickableRegion::ExploreDetailItem { rect, .. } => rect.contains(*pos),
+                | ClickableRegion::ExploreDetailItem { rect, .. }
+                | ClickableRegion::ExploreRunRow { rect, .. } => rect.contains(*pos),
                 ClickableRegion::ModelProfileRow { rect, .. }
                 | ClickableRegion::ModelFormField { rect, .. }
                 | ClickableRegion::AgentProfileRow { rect, .. }
@@ -14829,7 +15358,8 @@ impl App {
                 | ClickableRegion::ExploreTagScroll { .. }
                 | ClickableRegion::ExploreDetailPane { .. }
                 | ClickableRegion::ExploreDetailTab { .. }
-                | ClickableRegion::ExploreDetailItem { .. } => {}
+                | ClickableRegion::ExploreDetailItem { .. }
+                | ClickableRegion::ExploreRunRow { .. } => {}
                 ClickableRegion::ModelProfileRow { .. }
                 | ClickableRegion::ModelFormField { .. }
                 | ClickableRegion::AgentProfileRow { .. }
@@ -14968,6 +15498,18 @@ impl App {
                 | ClickableRegion::ExploreTagScroll { .. }
         ) {
             self.feature_tags.focused = false;
+        }
+        // The open run selector is a light popup: any other target dismisses it.
+        if self.explore_history.menu().is_some()
+            && !matches!(
+                region,
+                ClickableRegion::ActionButton {
+                    action: Action::ExploreRunMenu,
+                    ..
+                } | ClickableRegion::ExploreRunRow { .. }
+            )
+        {
+            self.explore_history.close_menu();
         }
         match region {
             ClickableRegion::ActionButton { action, .. } => {
@@ -15111,6 +15653,18 @@ impl App {
                     self.explore_details_selection =
                         (*index).min(self.detail_item_count().saturating_sub(1));
                     self.explore_details_reveal = true;
+                    // Screenshots: click opens the fit/zoom viewer instead of
+                    // only selecting the row.
+                    if self.active_detail_tab() == Some(RunDetailTab::Screenshots) {
+                        self.explore_detail_primary();
+                    }
+                }
+            }
+            ClickableRegion::ExploreRunRow { index, .. } => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus = crate::app::ColumnFocus::Details;
+                    self.explore_history.set_menu_selection(*index);
+                    self.select_menu_run();
                 }
             }
             ClickableRegion::ExploreTag { index, .. } => {
@@ -15951,7 +16505,6 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
-        self.explore_detail_shots_key = None;
         self.explore_run_summary = None;
         self.explore_diff_lines = None;
         self.pending_change_summary.clear();
@@ -19780,6 +20333,25 @@ mod tests {
         assert_eq!(detail.attachments[0].kind, "text");
         assert_eq!(detail.attachments[0].path, "owned-case/screen.txt");
         assert_eq!(detail.duration_ms, Some(50));
+    }
+
+    #[test]
+    fn live_captures_bind_to_the_evidence_run_that_owns_them() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.explore_case_map.insert("f0:s0".into(), (0, 0));
+        for line in [
+            r#"{"type":"start_case","case_id":"f0:s0","name":"Sample"}"#,
+            r#"{"type":"run_evidence","run_id":"run-1"}"#,
+            r#"{"type":"step_screenshot","case_id":"f0:s0","step_id":"L3",
+                "step_text":"a step","step_line":3,"status":"passed",
+                "capture_status":"available","screenshot_file":"shot.png"}"#,
+        ] {
+            app.apply_run_event(crate::runner::parse_event_line(line).expect("valid runner event"));
+        }
+        let detail = app.explore_case_details.get(&(0, 0)).expect("live detail");
+        assert_eq!(detail.screenshots.len(), 1);
+        assert_eq!(detail.screenshots[0].run_id, "run-1");
+        assert_eq!(detail.screenshots[0].file, "shot.png");
     }
 
     #[test]
@@ -25081,14 +25653,13 @@ mod tests {
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
+            explore_history: Default::default(),
             explore_details_tab: RunDetailTab::Screenshots,
             explore_details_tab_pinned: false,
             explore_details_selection: 0,
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
-            explore_detail_shots: Vec::new(),
-            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -25310,14 +25881,13 @@ Feature: B
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
             explore_case_details: HashMap::new(),
+            explore_history: Default::default(),
             explore_details_tab: RunDetailTab::Screenshots,
             explore_details_tab_pinned: false,
             explore_details_selection: 0,
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
-            explore_detail_shots: Vec::new(),
-            explore_detail_shots_key: None,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -25938,6 +26508,8 @@ Feature: B
             .map(|(index, text)| {
                 serde_json::json!({
                     "type": "step_screenshot",
+                    "case_id": "f0:s0",
+                    "step_id": format!("f0:s0:L{}", index + 3),
                     "capture_status": "available",
                     "screenshot_file": format!("step-{index}.png"),
                     "feature": feature,
@@ -25952,8 +26524,38 @@ Feature: B
         fs::write(
             run.join("run.json"),
             serde_json::json!({
+                "schema_version": 2,
+                "id": "11111111-1111-4111-8111-111111111111",
                 "started_at": "2026-10-31T00:00:00Z",
+                "status": "passed",
+                "test_status": "passed",
+                "acceptance_status": "passed",
                 "events": events,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// A newer run that logged one case and captured nothing.
+    fn write_log_run(project: &Path, scenario: &str, message: &str) {
+        let id = "22222222-2222-4222-8222-222222222222";
+        let run = project.join(".teshi/logs/replay-screenshots").join(id);
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join("run.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "id": id,
+                "started_at": "2026-11-01T00:00:00Z",
+                "status": "passed",
+                "test_status": "passed",
+                "acceptance_status": "passed",
+                "events": [
+                    {"type":"start_case","case_id":"f0:s0","feature":"marked.feature","name":scenario},
+                    {"type":"stderr","message":message},
+                    {"type":"case_passed","case_id":"f0:s0","duration_ms":5}
+                ]
             })
             .to_string(),
         )
@@ -26137,6 +26739,37 @@ Feature: B
     }
 
     #[test]
+    fn detail_selection_status_follows_the_selected_step() {
+        let content = "Feature: Login\n  Scenario: Detail\n    Given one\n    Then two\n";
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            content,
+            PathBuf::from("login.feature"),
+        )];
+        let mut detail = super::empty_running_detail("f0:s0".into());
+        detail.status = RunStatus::Failed;
+        detail.steps = vec![
+            super::StepRunRecord {
+                step_id: "f0:s0:L3".into(),
+                text: "one".into(),
+                status: Some("passed".into()),
+                message: None,
+            },
+            super::StepRunRecord {
+                step_id: "f0:s0:L4".into(),
+                text: "two".into(),
+                status: Some("failed".into()),
+                message: Some("boom".into()),
+            },
+        ];
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_selected_step = 0;
+        assert_eq!(app.detail_selection_status(), RunStatus::Passed);
+        app.explore_selected_step = 1;
+        assert_eq!(app.detail_selection_status(), RunStatus::Failed);
+    }
+
+    #[test]
     fn failed_step_prefers_api_until_the_user_pins_a_tab() {
         let content = "Feature: Login\n  Scenario: Detail\n    Given one\n    Then two\n";
         let mut app = App::from_args().expect("app init");
@@ -26187,6 +26820,100 @@ Feature: B
             Some(RunDetailTab::Screenshots),
             "an explicit tab choice wins"
         );
+    }
+
+    #[test]
+    fn run_details_show_the_newest_run_and_can_switch_to_older_ones() {
+        let (mut app, project, _store) = explore_capture_test_app();
+        // A newer run that logged but captured nothing wins the default.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_log_run(project.path(), "Detail", "newest run line");
+        app.ensure_explore_detail();
+        let (logs, screenshots) = {
+            let detail = app.current_detail().expect("history detail");
+            (detail.logs.clone(), detail.screenshots.len())
+        };
+        assert_eq!(logs, vec!["newest run line"]);
+        assert_eq!(screenshots, 0, "the newest run captured nothing");
+        assert_eq!(app.explore_history.selected((0, 0)), Some(0));
+
+        // `[` walks to the older run, whose captures are still intact.
+        app.explore_run_switch(1);
+        assert_eq!(app.explore_history.selected((0, 0)), Some(1));
+        assert_eq!(
+            app.current_detail()
+                .expect("older detail")
+                .screenshots
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn run_details_header_shows_the_latest_run_selector() {
+        let (mut app, project, _store) = explore_capture_test_app();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_log_run(project.path(), "Detail", "newest run line");
+        app.ensure_explore_detail();
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..40)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        assert!(text.contains("11-01 00:00"), "Run Details was: {text}");
+        assert!(text.contains("LATEST"), "Run Details was: {text}");
+        assert!(!text.contains("1/2"), "Run Details was: {text}");
+    }
+
+    #[test]
+    fn the_run_selector_opens_on_h_and_enter_opens_a_row() {
+        let (mut app, project, _store) = explore_capture_test_app();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_log_run(project.path(), "Detail", "newest run line");
+        app.ensure_explore_detail();
+
+        let h_key = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT);
+        assert!(!app.handle_run_menu_key(h_key));
+        app.handle_action(crate::keymap::Action::ExploreRunMenu)
+            .unwrap();
+        assert!(app.explore_history.menu().is_some());
+        assert!(app.handle_run_menu_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.explore_history.menu().unwrap().selection, 1);
+        assert!(app.handle_run_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.explore_history.menu().is_none());
+        assert_eq!(app.explore_history.selected((0, 0)), Some(1));
+        assert_eq!(app.current_detail().unwrap().screenshots.len(), 2);
+    }
+
+    #[test]
+    fn the_run_selector_lists_older_runs_without_repeating_latest() {
+        let (mut app, project, _store) = explore_capture_test_app();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_log_run(project.path(), "Detail", "newest run line");
+        app.ensure_explore_detail();
+        app.toggle_run_menu();
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..40)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        assert!(
+            text.contains("Runs · newest first"),
+            "Run Details was: {text}"
+        );
+        assert!(text.contains("11-01 00:00:00"), "Run Details was: {text}");
+        assert!(text.contains("10-31 00:00:00"), "Run Details was: {text}");
+        assert_eq!(text.matches("LATEST").count(), 1, "only the button: {text}");
     }
 
     #[test]
@@ -26334,5 +27061,76 @@ Feature: B
         // substring match is case-sensitive by default
         assert!(App::is_url_allowed("https://Example.com", &whitelist));
         assert!(!App::is_url_allowed("https://example.com", &whitelist));
+    }
+
+    #[test]
+    fn target_status_updates_on_lifecycle_and_clears_on_step_or_finish() {
+        use crate::runner::RunEvent;
+        let (mut app, _project, _store) = explore_capture_test_app();
+        app.apply_run_event(RunEvent::Other(serde_json::json!({
+            "type": "target_preparing",
+            "target_kind": "winapp",
+            "profile": "desktop",
+            "action": "launch"
+        })));
+        assert_eq!(
+            app.explore_history.target_status(),
+            Some("Preparing winapp target · desktop · launch…")
+        );
+
+        app.apply_run_event(RunEvent::Other(serde_json::json!({
+            "type": "target_ready",
+            "target_kind": "winapp",
+            "title": "Demo App"
+        })));
+        assert_eq!(
+            app.explore_history.target_status(),
+            Some("winapp target ready · Demo App")
+        );
+
+        app.apply_run_event(RunEvent::StartStep {
+            case_id: Some("case-1".into()),
+            step_id: "case-1:L3".into(),
+            text: Some("Given open".into()),
+            is_api: Some(false),
+        });
+        assert_eq!(app.explore_history.target_status(), None);
+
+        app.apply_run_event(RunEvent::Other(serde_json::json!({
+            "type": "target_blocked",
+            "target_kind": "winapp",
+            "message": "window closed"
+        })));
+        assert!(app.explore_history.target_status().is_some());
+        app.apply_run_event(RunEvent::EndRun {
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            blocked: 1,
+        });
+        assert_eq!(app.explore_history.target_status(), None);
+
+        app.apply_run_event(RunEvent::Other(serde_json::json!({
+            "type": "target_lost",
+            "target_kind": "winapp",
+            "message": "crashed"
+        })));
+        assert!(app.explore_history.target_status().is_some());
+        app.apply_run_event(RunEvent::RunnerExit {
+            code: Some(1),
+            success: false,
+        });
+        assert_eq!(app.explore_history.target_status(), None);
+
+        app.apply_run_event(RunEvent::Other(serde_json::json!({
+            "type": "target_preparing",
+            "target_kind": "winapp",
+            "action": "attach"
+        })));
+        assert!(app.explore_history.target_status().is_some());
+        app.apply_run_event(RunEvent::RunnerError {
+            message: "failed".into(),
+        });
+        assert_eq!(app.explore_history.target_status(), None);
     }
 }
