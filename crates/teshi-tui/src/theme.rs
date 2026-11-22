@@ -60,6 +60,8 @@ pub(crate) const SUCCESS: Color = Color::Rgb(0x5F, 0xFF, 0x87);
 pub(crate) const WARNING: Color = Color::Rgb(0xFF, 0xAF, 0x5F);
 /// Error state: failed tools, deleted diff lines, error messages.
 pub(crate) const ERROR: Color = Color::Rgb(0xFF, 0x5F, 0x5F);
+/// Informational cyan accent for navigation, search, MindMap, and edit cues.
+pub(crate) const INFO: Color = Color::Rgb(0x5F, 0xD7, 0xFF);
 /// Default emphasized foreground (headings H4/H5).
 pub(crate) const FG: Color = Color::Rgb(0xEE, 0xEE, 0xEE);
 /// Muted foreground for hints, labels, and secondary metadata.

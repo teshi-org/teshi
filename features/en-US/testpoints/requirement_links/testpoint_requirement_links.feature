@@ -57,7 +57,7 @@ Feature: Test point requirement links
     Then the command succeeds
     And the JSON test point "tp-1" has 1 link
     And the JSON link of test point "tp-1" is stale
-    And the JSON test point "tp-1" is in review state "needs_review"
+    And the JSON test point "tp-1" is in review state "approved"
 
   Scenario: Adding a link to a document outside the store is rejected
     When the tester adds a link on test point "tp-1" to document "missing" range "0:14" as JSON

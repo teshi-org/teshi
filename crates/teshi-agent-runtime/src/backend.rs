@@ -549,9 +549,9 @@ mod tests {
         assert_eq!(backend.messages()[1].content, "proposal saved");
         assert_eq!(
             backend.after_tools(GenerationStage::ReviewingTestPoints, false, false, true),
-            AgentBackendDecision::WaitForHumanReview
+            AgentBackendDecision::Continue { allow_tools: true }
         );
-        assert_eq!(backend.status(), AgentBackendStatus::WaitingForHumanReview);
+        assert_eq!(backend.status(), AgentBackendStatus::Running);
         assert!(backend.try_next_event().unwrap().is_none());
     }
 

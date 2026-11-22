@@ -668,19 +668,6 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
                 ui.linked_scroll,
             ));
         }
-        MainTab::TestPoints => {
-            if let Some(area) = app.clickable_regions.iter().find_map(|r| match r {
-                ClickableRegion::TestPointsPane { pane: 0, rect } => Some(*rect),
-                _ => None,
-            }) {
-                let ui = &mut app.test_points_ui;
-                rows.push((
-                    inner(area),
-                    ui.tree_state.flatten(&ui.tree_items).len(),
-                    ui.tree_state.get_offset(),
-                ));
-            }
-        }
         MainTab::MindMap => {
             if let Some(area) = app.tree_panel_rect {
                 rows.push((
@@ -8500,59 +8487,68 @@ fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 20 || area.height < 3 {
         return;
     }
-    let layout = compact_panes(
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::SCREEN_BG)),
         area,
-        match app.test_points_ui.focus {
-            crate::test_points_tab::TestPointsFocus::Tree => 0,
-            crate::test_points_tab::TestPointsFocus::Details => 1,
-            crate::test_points_tab::TestPointsFocus::Excerpts => 2,
-        },
     );
+    app.test_points_canvas_rect = None;
 
-    // Register the exact pane rectangles used by the render pass.  The
-    // pointer path uses these regions to focus the same pane as Tab/arrow
-    // navigation, and the list is rebuilt every frame so resize and tab
-    // switches cannot leave stale hit targets behind.
-    for (pane, rect) in layout.iter().copied().enumerate() {
-        app.clickable_regions
-            .push(ClickableRegion::TestPointsPane { pane, rect });
+    let root_name = app
+        .project
+        .root_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Test Points")
+        .to_string();
+    app.refresh_test_points_exec_statuses();
+    {
+        let artifacts = app.authoring_ui.artifacts.as_ref();
+        app.test_points_ui
+            .rebuild_canvas_layout(artifacts, &root_name);
     }
 
-    let tree_focused = app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
-    render_test_points_tree(frame, app, layout[0], tree_focused);
-
-    let ui = &mut app.test_points_ui;
-    let artifacts = app.authoring_ui.artifacts.as_ref();
-    if layout.len() == 2 {
-        render_test_points_details(
-            frame,
-            ui,
-            artifacts,
-            layout[1],
-            true,
-            &mut app.clickable_regions,
-        );
+    if app.test_points_ui.fullscreen_canvas {
+        app.clickable_regions.push(ClickableRegion::TestPointsPane {
+            pane: 0,
+            rect: area,
+        });
+        let focused = app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
+        render_test_points_canvas(frame, app, area, focused);
         return;
     }
 
-    let details_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Details;
-    let excerpts_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
-    render_test_points_details(
-        frame,
-        ui,
-        artifacts,
-        layout[1],
-        details_focused,
-        &mut app.clickable_regions,
-    );
-    render_test_points_excerpts(
-        frame,
-        ui,
-        artifacts,
-        layout[2],
-        excerpts_focused,
-        &mut app.clickable_regions,
-    );
+    if area.width < 70 {
+        if app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree {
+            app.clickable_regions.push(ClickableRegion::TestPointsPane {
+                pane: 0,
+                rect: area,
+            });
+            render_test_points_canvas(frame, app, area, true);
+        } else {
+            app.clickable_regions.push(ClickableRegion::TestPointsPane {
+                pane: 1,
+                rect: area,
+            });
+            render_test_points_inspector(frame, app, area, true);
+        }
+        return;
+    }
+
+    let [canvas_rect, inspector_rect] =
+        Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).areas(area);
+    app.clickable_regions.push(ClickableRegion::TestPointsPane {
+        pane: 0,
+        rect: canvas_rect,
+    });
+    app.clickable_regions.push(ClickableRegion::TestPointsPane {
+        pane: 1,
+        rect: inspector_rect,
+    });
+
+    let canvas_focused = app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
+    render_test_points_canvas(frame, app, canvas_rect, canvas_focused);
+    render_test_points_inspector(frame, app, inspector_rect, !canvas_focused);
 }
 
 /// Split a pane interior into a content region and an optional bottom action row.
@@ -8622,19 +8618,24 @@ fn visible_content_rows(inner: Rect, row: usize, count: usize, offset: usize) ->
     })
 }
 
-fn render_test_points_tree(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
-    let ui = &mut app.test_points_ui;
-    let artifacts = app.authoring_ui.artifacts.as_ref();
-    let filter_label = match ui.review_filter {
-        crate::test_points_tab::ReviewFilter::All => crate::i18n::t("tp.filter.all"),
-        crate::test_points_tab::ReviewFilter::Proposed => crate::i18n::t("tp.filter.proposed"),
-        crate::test_points_tab::ReviewFilter::Approved => crate::i18n::t("tp.filter.approved"),
-        crate::test_points_tab::ReviewFilter::Rejected => crate::i18n::t("tp.filter.rejected"),
-        crate::test_points_tab::ReviewFilter::NeedsReview => {
-            crate::i18n::t("tp.filter.needs_review")
-        }
+fn render_test_points_canvas(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    let filter_label = match app.test_points_ui.review_filter {
+        crate::test_points_tab::StatusFilter::All => crate::i18n::t("tp.filter.all"),
+        crate::test_points_tab::StatusFilter::Uncovered => crate::i18n::t("tp.filter.uncovered"),
+        crate::test_points_tab::StatusFilter::Linked => crate::i18n::t("tp.filter.linked"),
+        crate::test_points_tab::StatusFilter::Passed => crate::i18n::t("tp.filter.passed"),
+        crate::test_points_tab::StatusFilter::Failed => crate::i18n::t("tp.filter.failed"),
     };
-    let title = crate::i18n::fill(crate::i18n::t("tp.tree.title"), &[("filter", filter_label)]);
+    let mut title = crate::i18n::fill(
+        crate::i18n::t("tp.canvas.title"),
+        &[("filter", filter_label)],
+    );
+    if app.test_points_ui.fullscreen_canvas {
+        title.push_str(" [ZOOM]");
+    }
+    if app.test_points_ui.inline_edit.is_some() {
+        title.push_str(" [EDIT]");
+    }
     let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -8642,40 +8643,71 @@ fn render_test_points_tree(frame: &mut Frame<'_>, app: &mut App, area: Rect, foc
         return;
     }
     let (content_inner, action_area) = split_pane_action_row(inner);
-    let tp_actions: Vec<(&str, Action)> = if ui.editing {
-        vec![(crate::i18n::t("tp.insert.normal"), Action::TpExitInsert)]
+    let tp_actions: Vec<(&str, Action)> = if app.test_points_ui.editing {
+        vec![
+            (crate::i18n::t("tp.insert.save"), Action::Save),
+            (crate::i18n::t("tp.insert.normal"), Action::TpExitInsert),
+        ]
     } else {
         vec![
-            (crate::i18n::t("tp.approve"), Action::TpApprove),
-            (crate::i18n::t("tp.reject"), Action::TpReject),
+            (crate::i18n::t("tp.btn.add_child"), Action::TpAddChild),
+            (crate::i18n::t("tp.btn.add_sibling"), Action::TpAddSibling),
+            (crate::i18n::t("tp.btn.edit"), Action::TpInlineEdit),
+            (crate::i18n::t("tp.btn.delete"), Action::TpDeleteNode),
+            (crate::i18n::t("tp.btn.gen"), Action::TpGenerateFeature),
+            (crate::i18n::t("tp.btn.run"), Action::TpRunTestPoint),
+            (crate::i18n::t("tp.btn.sync"), Action::TpSyncFromFeatures),
             (crate::i18n::t("tp.filter"), Action::TpReviewFilter),
+            (crate::i18n::t("tp.btn.zoom"), Action::TpToggleFullscreen),
         ]
     };
 
-    if artifacts.is_none() || ui.tree_items.is_empty() {
-        frame.render_widget(
-            Paragraph::new(crate::i18n::t("tp.tree.empty"))
-                .style(Style::default().fg(theme::MUTED)),
-            content_inner,
+    if content_inner.width > 0 && content_inner.height > 0 {
+        let ui = &mut app.test_points_ui;
+        app.test_points_canvas_rect = Some(content_inner);
+        ui.canvas_viewport = (content_inner.width, content_inner.height);
+        ui.canvas_scroll_x = ui
+            .canvas_scroll_x
+            .min(ui.canvas_width.saturating_sub(content_inner.width));
+        ui.canvas_scroll_y = ui
+            .canvas_scroll_y
+            .min(ui.canvas_height.saturating_sub(content_inner.height));
+
+        let canvas = ui.build_canvas(theme::SCREEN_BG);
+        let lines = canvas.to_ratatui_lines(
+            ui.canvas_scroll_x,
+            ui.canvas_scroll_y,
+            content_inner.width,
+            content_inner.height,
+            theme::SCREEN_BG,
         );
-        if let Some(action_area) = action_area {
-            render_action_bar(
-                frame,
-                &mut app.clickable_regions,
-                action_area,
-                "",
-                &tp_actions,
-                false,
-            );
+        frame.render_widget(Paragraph::new(lines), content_inner);
+
+        // Register clickable hit targets for every visible MindMap node box.
+        let vx0 = ui.canvas_scroll_x;
+        let vy0 = ui.canvas_scroll_y;
+        let vx1 = vx0.saturating_add(content_inner.width);
+        let vy1 = vy0.saturating_add(content_inner.height);
+        for node in &ui.placed_nodes {
+            let nx0 = node.x.max(vx0);
+            let ny0 = node.y.max(vy0);
+            let nx1 = node.x.saturating_add(node.width).min(vx1);
+            let ny1 = node.y.saturating_add(node.height).min(vy1);
+            if nx0 < nx1 && ny0 < ny1 {
+                app.clickable_regions
+                    .push(ClickableRegion::TestPointCanvasNode {
+                        rect: Rect::new(
+                            content_inner.x + (nx0 - vx0),
+                            content_inner.y + (ny0 - vy0),
+                            nx1 - nx0,
+                            ny1 - ny0,
+                        ),
+                        node_id: node.id.clone(),
+                    });
+            }
         }
-        return;
     }
 
-    let highlight_style = theme::selected_row(focused);
-    let tree = Tree::new(&ui.tree_items)
-        .expect("test point tree")
-        .highlight_style(highlight_style);
-    frame.render_stateful_widget(tree, content_inner, &mut ui.tree_state);
     if let Some(action_area) = action_area {
         render_action_bar(
             frame,
@@ -8688,15 +8720,47 @@ fn render_test_points_tree(frame: &mut Frame<'_>, app: &mut App, area: Rect, foc
     }
 }
 
-fn render_test_points_details(
-    frame: &mut Frame<'_>,
-    ui: &mut crate::test_points_tab::TestPointsUiState,
-    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
-    area: Rect,
-    focused: bool,
-    regions: &mut Vec<ClickableRegion>,
-) {
-    let title = if ui.editing {
+fn inspector_step_line(keyword: &str, text: &str, max_width: u16) -> Line<'static> {
+    let kw_trim = keyword.trim();
+    let kw_color = if matches!(kw_trim, "Given" | "假如" | "假设") {
+        theme::INFO
+    } else if matches!(kw_trim, "When" | "当") {
+        theme::ACCENT
+    } else if matches!(kw_trim, "Then" | "那么") {
+        theme::SUCCESS
+    } else {
+        theme::MUTED
+    };
+    let full = format!("    {kw_trim} {text}");
+    let clipped = truncate_string_to_cols(&full, max_width);
+    let prefix_len = format!("    {kw_trim} ").len().min(clipped.len());
+    if prefix_len == clipped.len() {
+        Line::from(Span::styled(
+            clipped,
+            Style::default().fg(kw_color).bg(theme::SCREEN_BG),
+        ))
+    } else {
+        let (left, right) = clipped.split_at(prefix_len);
+        Line::from(vec![
+            Span::styled(
+                left.to_owned(),
+                Style::default()
+                    .fg(kw_color)
+                    .bg(theme::SCREEN_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                right.to_owned(),
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG),
+            ),
+        ])
+    }
+}
+
+fn render_test_points_inspector(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    let ui = &mut app.test_points_ui;
+    let artifacts = app.authoring_ui.artifacts.as_ref();
+    let title = if ui.editing && ui.focus != crate::test_points_tab::TestPointsFocus::Tree {
         crate::i18n::t("tp.details.title.edit")
     } else {
         crate::i18n::t("tp.details.title")
@@ -8708,26 +8772,89 @@ fn render_test_points_details(
         return;
     }
 
-    let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
+    let Some(node) = ui.selected_node().cloned() else {
         frame.render_widget(
             Paragraph::new(crate::i18n::t("tp.details.empty"))
-                .style(Style::default().fg(theme::MUTED)),
-            inner,
-        );
-        return;
-    };
-    let Some(tp) =
-        artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| &tp.id == tp_id))
-    else {
-        frame.render_widget(
-            Paragraph::new(crate::i18n::t("tp.details.unavailable"))
-                .style(Style::default().fg(theme::ERROR)),
+                .style(Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG)),
             inner,
         );
         return;
     };
 
-    let fields = [
+    let Some(tp_id) = ui.selected_test_point_id.clone() else {
+        // Branch or Root summary in Inspector
+        let st = node.exec_status;
+        let summary_lines = vec![
+            Line::from(vec![
+                theme::chip(
+                    format!(" {} {} ", st.glyph(), st.label()),
+                    st.style().fg.unwrap_or(theme::MUTED),
+                ),
+                Span::styled(
+                    format!("  {} scenarios", node.scenario_count),
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                ),
+            ]),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled(
+                    "Node: ",
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                ),
+                Span::styled(
+                    truncate_string_to_cols(&node.label, inner.width.saturating_sub(6)),
+                    Style::default()
+                        .fg(theme::FG)
+                        .bg(theme::SCREEN_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!("Direct children: {}", node.children_ids.len()),
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "[a] +Child  [n] +Sibling  [i] Rename",
+                Style::default().fg(theme::INFO).bg(theme::SCREEN_BG),
+            )),
+            Line::from(Span::styled(
+                "[Space] Fold  [r] Run subtree  [d] Delete",
+                Style::default().fg(theme::INFO).bg(theme::SCREEN_BG),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(theme::popup_rows(summary_lines, inner.width)),
+            inner,
+        );
+        return;
+    };
+
+    let Some(tp) =
+        artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| tp.id == tp_id))
+    else {
+        frame.render_widget(
+            Paragraph::new(crate::i18n::t("tp.details.unavailable"))
+                .style(Style::default().fg(theme::ERROR).bg(theme::SCREEN_BG)),
+            inner,
+        );
+        return;
+    };
+
+    let status = ui.exec_status_for(tp);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        theme::chip(
+            format!(" {} {} ", status.glyph(), status.label()),
+            status.style().fg.unwrap_or(theme::MUTED),
+        ),
+        Span::styled(
+            format!("  id: {}", tp.id),
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+        ),
+    ]));
+
+    let mut fields = vec![
         (
             crate::test_points_tab::DetailField::Title,
             crate::i18n::t("tp.field.title"),
@@ -8735,37 +8862,6 @@ fn render_test_points_details(
                 ui.field_buffer.clone()
             } else {
                 tp.title.clone()
-            },
-        ),
-        (
-            crate::test_points_tab::DetailField::Objective,
-            crate::i18n::t("tp.field.objective"),
-            if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
-                ui.field_buffer.clone()
-            } else {
-                tp.objective.clone()
-            },
-        ),
-        (
-            crate::test_points_tab::DetailField::Preconditions,
-            crate::i18n::t("tp.field.preconditions"),
-            if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
-                && ui.field_dirty
-            {
-                ui.field_buffer.clone()
-            } else {
-                tp.preconditions.clone().unwrap_or_default()
-            },
-        ),
-        (
-            crate::test_points_tab::DetailField::ExpectedOutcomes,
-            crate::i18n::t("tp.field.expected"),
-            if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
-                && ui.field_dirty
-            {
-                ui.field_buffer.clone()
-            } else {
-                tp.expected_outcomes.clone().unwrap_or_default()
             },
         ),
         (
@@ -8777,43 +8873,71 @@ fn render_test_points_details(
                 tp.hierarchy_path.segments().join(" / ")
             },
         ),
+        (
+            crate::test_points_tab::DetailField::Objective,
+            crate::i18n::t("tp.field.note"),
+            if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.objective.clone()
+            },
+        ),
     ];
+    if tp.preconditions.is_some()
+        || ui.detail_field == crate::test_points_tab::DetailField::Preconditions
+    {
+        fields.push((
+            crate::test_points_tab::DetailField::Preconditions,
+            crate::i18n::t("tp.field.preconditions"),
+            if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.preconditions.clone().unwrap_or_default()
+            },
+        ));
+    }
+    if tp.expected_outcomes.is_some()
+        || ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
+    {
+        fields.push((
+            crate::test_points_tab::DetailField::ExpectedOutcomes,
+            crate::i18n::t("tp.field.expected"),
+            if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.expected_outcomes.clone().unwrap_or_default()
+            },
+        ));
+    }
 
-    let mut lines = Vec::new();
-    let badge = crate::authoring_tab::review_state_label(tp.review_state);
-    let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
-    lines.push(Line::from(vec![
-        theme::chip(
-            format!("[{badge}] "),
-            badge_style.fg.unwrap_or(theme::MUTED),
-        ),
-        Span::styled(
-            crate::test_points_tab::review_state_name(tp.review_state),
-            Style::default().fg(theme::FG),
-        ),
-        Span::raw(format!("  id: {}", tp.id)),
-    ]));
+    let details_focused = focused && ui.focus != crate::test_points_tab::TestPointsFocus::Excerpts;
+    let excerpts_focused = focused && ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
 
     let mut field_rows = Vec::new();
-    let mut scenario_rows = Vec::new();
     for (field, label, value) in fields {
         field_rows.push((lines.len(), field));
         let active = ui.detail_field == field;
-        let label_style = if active {
-            theme::selected_row(focused)
+        let label_style = if active && details_focused {
+            theme::selected_row(true)
+        } else if active {
+            Style::default().fg(theme::PRIMARY).bg(theme::SCREEN_BG)
         } else {
-            Style::default().fg(theme::MUTED)
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG)
         };
-        let value_style = if active {
-            theme::selected_row(focused)
+        let value_style = if active && details_focused {
+            theme::selected_row(true)
         } else {
-            Style::default()
+            Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
         };
-        let width = inner.width.saturating_sub(label.len() as u16 + 3);
-        let display = if active && focused && ui.editing {
-            input_with_cursor(&value, ui.field_cursor, width)
+        let avail = inner.width.saturating_sub(label.width() as u16 + 3);
+        let display = if active && details_focused && ui.editing {
+            input_with_cursor(&value, ui.field_cursor, avail)
         } else {
-            truncate_string_to_cols(&value, width)
+            truncate_string_to_cols(&value, avail)
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{label}: "), label_style),
@@ -8821,28 +8945,144 @@ fn render_test_points_details(
         ]));
     }
 
-    if !tp.scenario_refs.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            crate::i18n::t("tp.realized"),
-            Style::default().fg(theme::MUTED),
-        ));
-        for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
-            scenario_rows.push((lines.len(), i));
+    // Live Realized Scenarios + Gherkin Step Preview
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        crate::i18n::t("tp.realized"),
+        Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+    ));
+    let mut scenario_rows = Vec::new();
+    let mut matched_live = Vec::new();
+    for (fi, feature) in app.project.features.iter().enumerate() {
+        let rel = feature
+            .file_path
+            .strip_prefix(&app.project.root_dir)
+            .unwrap_or(&feature.file_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (si, sc) in feature.all_scenarios().into_iter().enumerate() {
+            if teshi_core::authoring::parse_teshi_tp_tags(&sc.tags)
+                .iter()
+                .any(|id| id == &tp.id)
+            {
+                matched_live.push((fi, si, rel.clone(), sc));
+            }
+        }
+    }
+
+    if !matched_live.is_empty() {
+        for (idx, (fi, si, rel, sc)) in matched_live.iter().enumerate() {
+            scenario_rows.push((lines.len(), idx));
+            let st_glyph = match app.explore_case_status.get(&(*fi, *si)) {
+                Some(crate::app::RunStatus::Passed) => "✔",
+                Some(crate::app::RunStatus::Failed) => "✖",
+                Some(crate::app::RunStatus::Running) => "⠋",
+                _ => "◐",
+            };
+            let selected = idx == ui.selected_scenario_ref_index;
+            let row_style = if selected && details_focused {
+                theme::selected_row(true)
+            } else {
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
+            };
+            let header = truncate_string_to_cols(
+                &format!("  {st_glyph} {} ({rel})", sc.name),
+                inner.width.saturating_sub(1),
+            );
+            lines.push(Line::from(Span::styled(header, row_style)));
+            for step in sc.steps.iter().take(5) {
+                lines.push(inspector_step_line(
+                    &step.keyword,
+                    &step.text,
+                    inner.width.saturating_sub(1),
+                ));
+            }
+            if sc.steps.len() > 5 {
+                lines.push(Line::from(Span::styled(
+                    format!("    … +{} steps", sc.steps.len() - 5),
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                )));
+            }
+        }
+    } else if !tp.scenario_refs.is_empty() {
+        for (idx, sc_ref) in tp.scenario_refs.iter().enumerate() {
+            scenario_rows.push((lines.len(), idx));
             let label = sc_ref.scenario_name.clone().unwrap_or_else(|| {
                 crate::i18n::t("tp.line")
                     .replace("{n}", &sc_ref.scenario_line.unwrap_or(0).to_string())
             });
-            let selected = i == ui.selected_scenario_ref_index;
-            let style = if selected && focused {
+            let selected = idx == ui.selected_scenario_ref_index;
+            let row_style = if selected && details_focused {
                 theme::selected_row(true)
             } else {
-                Style::default()
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
             };
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {} — {}", label, sc_ref.feature_path),
-                style,
-            )]));
+            lines.push(Line::from(Span::styled(
+                truncate_string_to_cols(
+                    &format!("  ◐ {} — {}", label, sc_ref.feature_path),
+                    inner.width.saturating_sub(1),
+                ),
+                row_style,
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            truncate_string_to_cols(
+                crate::i18n::t("tp.no_scenario_hint"),
+                inner.width.saturating_sub(1),
+            ),
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+        )));
+    }
+
+    // Linked Requirement Documents
+    let excerpts = artifacts
+        .map(|a| crate::test_points_tab::excerpts_for_test_point(tp, a))
+        .unwrap_or_default();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        crate::i18n::t("tp.excerpts.title"),
+        Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+    ));
+    let mut excerpt_rows = Vec::new();
+    if excerpts.is_empty() {
+        lines.push(Line::styled(
+            crate::i18n::t("tp.excerpts.empty"),
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+        ));
+    } else {
+        for (i, ex) in excerpts.iter().enumerate() {
+            excerpt_rows.push((lines.len(), i));
+            let tag = if ex.resolved {
+                crate::i18n::t("tp.excerpt.ok")
+            } else {
+                crate::i18n::t("tp.excerpt.stale")
+            };
+            let tag_color = if ex.resolved {
+                theme::SUCCESS
+            } else {
+                theme::WARNING
+            };
+            let row_style = if i == ui.selected_excerpt_index && excerpts_focused {
+                theme::selected_row(true)
+            } else {
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
+            };
+            let doc = truncate_string_to_cols(&ex.document_title, inner.width.saturating_sub(8));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("[{tag}] "),
+                    Style::default().fg(tag_color).bg(theme::SCREEN_BG),
+                ),
+                Span::styled(doc, row_style),
+            ]));
+            if !ex.quote.is_empty() {
+                let quote = truncate_string_to_cols(&ex.quote, inner.width.saturating_sub(4));
+                lines.push(Line::from(Span::styled(
+                    format!("  \"{quote}\""),
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                )));
+            }
         }
     }
 
@@ -8851,90 +9091,24 @@ fn render_test_points_details(
     ui.scroll_offsets[1] = ui.scroll_offsets[1].min(max_scroll);
     for (row, field) in field_rows {
         if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
-            regions.push(ClickableRegion::TestPointField { rect, field });
+            app.clickable_regions
+                .push(ClickableRegion::TestPointField { rect, field });
         }
     }
     for (row, index) in scenario_rows {
         if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
-            regions.push(ClickableRegion::TestPointScenario { rect, index });
+            app.clickable_regions
+                .push(ClickableRegion::TestPointScenario { rect, index });
+        }
+    }
+    for (row, index) in excerpt_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
+            app.clickable_regions
+                .push(ClickableRegion::TestPointExcerpt { rect, index });
         }
     }
     frame.render_widget(
         Paragraph::new(rows).scroll((ui.scroll_offsets[1] as u16, 0)),
-        inner,
-    );
-}
-
-fn render_test_points_excerpts(
-    frame: &mut Frame<'_>,
-    ui: &mut crate::test_points_tab::TestPointsUiState,
-    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
-    area: Rect,
-    focused: bool,
-    regions: &mut Vec<ClickableRegion>,
-) {
-    let block = theme::panel_block(crate::i18n::t("tp.excerpts.title"), focused);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let excerpts = match (ui.selected_test_point_id.as_ref(), artifacts) {
-        (Some(tp_id), Some(artifacts)) => artifacts
-            .test_points
-            .test_points
-            .iter()
-            .find(|tp| &tp.id == tp_id)
-            .map(|tp| crate::test_points_tab::excerpts_for_test_point(tp, artifacts))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-    let mut excerpt_rows = Vec::new();
-    if excerpts.is_empty() {
-        lines.push(Line::styled(
-            crate::i18n::t("tp.excerpts.empty"),
-            Style::default().fg(theme::MUTED),
-        ));
-    } else {
-        for (i, excerpt) in excerpts.iter().enumerate() {
-            excerpt_rows.push((lines.len(), i));
-            let res_label = match excerpt.resolution {
-                teshi_core::authoring::ResolutionState::Resolved => crate::i18n::t("tp.excerpt.ok"),
-                teshi_core::authoring::ResolutionState::Stale => crate::i18n::t("tp.excerpt.stale"),
-            };
-            let res_style = crate::test_points_tab::excerpt_resolution_style(excerpt.resolution);
-            let doc =
-                truncate_string_to_cols(&excerpt.document_title, inner.width.saturating_sub(8));
-            let quote = truncate_string_to_cols(&excerpt.quote, inner.width.saturating_sub(4));
-            let row_style = if i == ui.selected_excerpt_index {
-                theme::selected_row(focused)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("[{res_label}] "), res_style),
-                Span::styled(doc, row_style),
-            ]));
-            lines.push(Line::from(vec![Span::styled(
-                format!("  \"{quote}\""),
-                row_style,
-            )]));
-        }
-    }
-
-    let rows = theme::popup_rows(lines, inner.width);
-    let max_scroll = rows.len().saturating_sub(inner.height as usize);
-    ui.scroll_offsets[2] = ui.scroll_offsets[2].min(max_scroll);
-    for (row, index) in excerpt_rows {
-        if let Some(rect) = visible_content_rows(inner, row, 2, ui.scroll_offsets[2]) {
-            regions.push(ClickableRegion::TestPointExcerpt { rect, index });
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(rows).scroll((ui.scroll_offsets[2] as u16, 0)),
         inner,
     );
 }

@@ -1,7 +1,7 @@
 //! Anchor creation and deterministic re-resolution for requirement links.
 
 use crate::authoring::positions::{document_char_len, slice_by_char_range};
-use crate::authoring::testpoints::{ReviewState, TestPoint};
+use crate::authoring::testpoints::TestPoint;
 use crate::authoring::{
     CharPosition, QuoteSelector, RequirementLink, RequirementStoreId, ResolutionState, TextRange,
 };
@@ -95,8 +95,8 @@ pub fn resolve_requirement_link(
 
 /// Re-resolves every link on test points that reference `document_id`.
 ///
-/// When a previously approved test point acquires a stale link, its review state
-/// becomes `NeedsReview`. Unrelated approvals are preserved.
+/// Updates link positions and `ResolutionState` without locking or downgrading
+/// `review_state`.
 pub fn re_resolve_document_links(
     text: &str,
     store_id: Option<&RequirementStoreId>,
@@ -105,48 +105,23 @@ pub fn re_resolve_document_links(
     test_points: &mut [TestPoint],
 ) {
     for tp in test_points.iter_mut() {
-        let mut any_stale = false;
-        let mut any_changed = false;
-
         for link in tp.requirement_links.iter_mut() {
             if link.document_id != document_id {
                 continue;
             }
-            let before = (link.position, link.resolution);
             *link = resolve_requirement_link(text, current_revision, store_id, link);
-            if (link.position, link.resolution) != before {
-                any_changed = true;
-            }
-            if link.resolution == ResolutionState::Stale {
-                any_stale = true;
-            }
-        }
-
-        if any_stale && tp.review_state == ReviewState::Approved {
-            tp.review_state = ReviewState::NeedsReview;
-        } else if any_changed && tp.review_state == ReviewState::Approved && !any_stale {
-            // Quote unchanged but position moved — approval remains valid per spec.
         }
     }
 }
 
 /// Marks every link to a removed document as stale without changing its
-/// document id or quote anchor.
-///
-/// The document id remains in the test-point file so a later recovery or
-/// inspection can report the missing source instead of silently retargeting
-/// the link to a newly created document.
+/// document id, quote anchor, or locking the test point's review state.
 pub fn mark_document_links_missing(document_id: &str, test_points: &mut [TestPoint]) {
     for tp in test_points.iter_mut() {
-        let mut affected = false;
         for link in tp.requirement_links.iter_mut() {
             if link.document_id == document_id {
                 link.resolution = ResolutionState::Stale;
-                affected = true;
             }
-        }
-        if affected && tp.review_state == ReviewState::Approved {
-            tp.review_state = ReviewState::NeedsReview;
         }
     }
 }
@@ -228,7 +203,7 @@ fn context_after(text: &str, end: CharPosition, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authoring::testpoints::HierarchyPath;
+    use crate::authoring::testpoints::{HierarchyPath, ReviewState};
 
     fn test_store() -> RequirementStoreId {
         RequirementStoreId::parse("reqstore-test").unwrap()
@@ -333,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_test_point_moves_to_needs_review_on_stale_link() {
+    fn approved_test_point_retains_approval_on_stale_link() {
         let text = "auth login flow";
         let mut tp = TestPoint {
             id: "tp-1".into(),
@@ -355,7 +330,7 @@ mod tests {
             "rev-2",
             std::slice::from_mut(&mut tp),
         );
-        assert_eq!(tp.review_state, ReviewState::NeedsReview);
+        assert_eq!(tp.review_state, ReviewState::Approved);
         assert_eq!(tp.requirement_links[0].resolution, ResolutionState::Stale);
     }
 
@@ -390,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_document_marks_links_stale_and_reopens_approval() {
+    fn missing_document_marks_links_stale_without_locking_test_point() {
         let mut tp = TestPoint {
             id: "tp-1".into(),
             title: "Login".into(),
@@ -405,7 +380,7 @@ mod tests {
 
         mark_document_links_missing("doc-1", std::slice::from_mut(&mut tp));
 
-        assert_eq!(tp.review_state, ReviewState::NeedsReview);
+        assert_eq!(tp.review_state, ReviewState::Approved);
         assert_eq!(tp.requirement_links[0].resolution, ResolutionState::Stale);
         assert_eq!(tp.requirement_links[0].document_id, "doc-1");
     }

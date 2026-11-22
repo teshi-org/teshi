@@ -6,33 +6,35 @@
 use serde::{Deserialize, Serialize};
 use teshi_core::authoring::{
     RequirementDocumentContent, RequirementDocumentIndex, RequirementDocumentMeta,
-    RequirementIterationFilter, RequirementStoreId, ResolutionState, ReviewState, TestPoint,
-    TextRange, document_char_len,
+    RequirementIterationFilter, RequirementStoreId, ReviewState, TestPoint, TextRange,
+    document_char_len,
 };
 
-/// Policy governing whether feature generation requires human test-point review.
+/// Policy governing feature generation stages.
 ///
-/// Strict is the default, so existing sessions keep the human-review gate unless
-/// the user explicitly authorizes a no-review generation.
+/// The blocking human test-point review gate has been removed: both policies
+/// proceed cleanly without pausing for manual approval.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewPolicy {
-    /// Gather, propose test points, wait for human approval, then plan and write.
+    /// Gather, optionally record concise test points, plan, and write without blocking.
     #[default]
     Strict,
-    /// User-authorized no-review: gather, then plan and write, with no approval gate.
+    /// Direct generation: gather, then plan and write directly.
     Direct,
 }
 
 impl ReviewPolicy {
     /// Whether the pipeline must pause for explicit human approval.
     pub fn requires_human_approval(self) -> bool {
-        matches!(self, Self::Strict)
+        let _ = self;
+        false
     }
 
     /// Whether scenarios must carry approved test-point IDs.
     pub fn requires_test_point_ids(self) -> bool {
-        matches!(self, Self::Strict)
+        let _ = self;
+        false
     }
 }
 
@@ -197,17 +199,16 @@ impl GenerationStage {
 
     /// Returns `true` when the agent loop must pause for human review.
     ///
-    /// File-change `ApprovalMode::{Auto, Bypass}` must not resume this stage.
+    /// Human test-point gating is abolished, so this always returns `false`.
     pub fn is_human_review_gate(self) -> bool {
-        matches!(self, Self::ReviewingTestPoints)
+        let _ = self;
+        false
     }
 
     /// Whether this stage pauses the agent loop for human review under `policy`.
-    ///
-    /// The stage alone is not enough: [`ReviewPolicy::Direct`] must never hold
-    /// the gate, even when a review stage was restored from an older session.
     pub fn is_review_gate_for(self, policy: ReviewPolicy) -> bool {
-        policy.requires_human_approval() && self.is_human_review_gate()
+        let _ = policy;
+        self.is_human_review_gate()
     }
 
     /// Stage guidance tailored to the active review policy.
@@ -241,33 +242,29 @@ impl GenerationStage {
                  - Ask about: feature name, user story, verification intents, edge cases, error conditions\n\
                  - Do NOT create any files yet\n\
                  - Do NOT produce FreeMind `.mm` or mock HTML\n\
-                 - Do NOT call generate_plan yet — test points must be proposed and approved first\n\
                  - When you have enough information, call submit_requirements"
             }
             Self::GeneratingTestPoints => {
                 "\n\n## Current Phase: Generating Test Points\n\
-                 Propose non-Gherkin verification intents (test points) from the submitted requirements.\n\
-                 - Each test point needs: title, objective, hierarchy_path, and requirement links when sources exist\n\
+                 Propose concise, single-line heuristic test points from the submitted requirements.\n\
+                 - Each test point needs: concise title, hierarchy_path, optional brief note in objective, and document-level requirement_links when sources exist\n\
                  - Do NOT write Given/When/Then steps inside test points\n\
-                 - Do NOT call generate_plan yet\n\
-                 - Call propose_test_points with the structured proposals"
+                 - Call propose_test_points, then continue directly to Planning or Feature Writing without waiting for approval"
             }
             Self::ReviewingTestPoints => {
-                "\n\n## Current Phase: Reviewing Test Points\n\
-                 Proposed test points are awaiting explicit human approval in the Test Points tab.\n\
-                 - Do NOT call generate_plan\n\
-                 - Do NOT approve, reject, or modify review state via tools\n\
-                 - Wait for the user to approve eligible test points and continue generation"
+                "\n\n## Current Phase: Scenario Planning\n\
+                 Test points are immediately ready without any blocking approval gate.\n\
+                 - Proceed directly with generate_plan, create_feature_file, and insert_scenario"
             }
             Self::Planning => {
                 "\n\n## Current Phase: Scenario Planning\n\
-                 Design Gherkin scenarios that realize the approved test points.\n\
+                 Design Gherkin scenarios that realize the requirement and test points.\n\
                  - Plan which scenarios to include (happy path, error cases, edge cases)\n\
-                 - Every scenario MUST reference one or more approved test-point IDs via test_point_ids\n\
+                 - Reference matching test-point IDs via test_point_ids when test points exist\n\
                  - Plan scenarios so each one is self-contained — treat every scenario\n\
                    as independently runnable, not as steps in a sequence\n\
                  - Use Scenario Outline + Examples for data-driven variations\n\
-                 - When the plan is ready, call generate_plan to record it"
+                 - When the plan is ready, call generate_plan or proceed directly to feature writing"
             }
             Self::Writing => {
                 "\n\n## Current Phase: Feature Writing\n\
@@ -501,47 +498,20 @@ pub fn validate_plan_test_point_ids_with_policy(
     policy: ReviewPolicy,
 ) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
-    let mut referenced = 0usize;
+    let _ = policy;
 
     for feature in &plan.features {
         for scenario in &feature.scenarios {
-            if scenario.test_point_ids.is_empty() {
-                if policy.requires_test_point_ids() {
-                    errors.push(format!(
-                        "scenario '{}' in '{}' must reference at least one approved test_point_id",
-                        scenario.name, feature.file_name
-                    ));
-                }
-                continue;
-            }
             for id in &scenario.test_point_ids {
-                referenced += 1;
                 match test_points.iter().find(|tp| &tp.id == id) {
                     None => errors.push(format!("unknown test point id '{id}'")),
-                    Some(tp) => {
-                        if tp.review_state != ReviewState::Approved {
-                            errors.push(format!(
-                                "test point '{id}' is {:?} (must be Approved)",
-                                tp.review_state
-                            ));
-                        }
-                        if tp
-                            .requirement_links
-                            .iter()
-                            .any(|l| l.resolution == ResolutionState::Stale)
-                        {
-                            errors.push(format!(
-                                "test point '{id}' has stale requirement links and cannot be planned"
-                            ));
-                        }
+                    Some(tp) if tp.review_state == ReviewState::Rejected => {
+                        errors.push(format!("test point '{id}' is Rejected"));
                     }
+                    Some(_) => {}
                 }
             }
         }
-    }
-
-    if referenced == 0 && errors.is_empty() && policy.requires_test_point_ids() {
-        errors.push("plan must reference at least one approved test-point id".into());
     }
 
     if errors.is_empty() {
@@ -551,45 +521,35 @@ pub fn validate_plan_test_point_ids_with_policy(
     }
 }
 
-/// Collects IDs of test points eligible for scenario planning (Approved + resolved links).
+/// Collects IDs of non-rejected test points eligible for scenario planning.
 pub fn approved_resolved_test_point_ids(test_points: &[TestPoint]) -> Vec<String> {
     test_points
         .iter()
-        .filter(|tp| {
-            tp.review_state == ReviewState::Approved
-                && tp
-                    .requirement_links
-                    .iter()
-                    .all(|l| l.resolution == ResolutionState::Resolved)
-        })
+        .filter(|tp| tp.review_state != ReviewState::Rejected)
         .map(|tp| tp.id.clone())
         .collect()
 }
 
-/// Attempts the human-only transition from Reviewing Test Points to Planning.
+/// Transitions from test-point generation/review to scenario planning.
 ///
-/// Returns the new stage on success. `ApprovalMode` is intentionally unused:
-/// Auto/Bypass must never invoke this transition.
+/// With human-approval gating removed, any non-rejected test point (or empty
+/// set during direct planning) may proceed without manual approval.
 ///
 /// # Errors
 ///
-/// Returns an error when the stage is wrong or no eligible approved test points exist.
+/// Returns an error when called outside the test-point stages.
 pub fn continue_from_review(
     current: GenerationStage,
-    test_points: &[TestPoint],
+    _test_points: &[TestPoint],
 ) -> Result<GenerationStage, String> {
-    if current != GenerationStage::ReviewingTestPoints {
+    if !matches!(
+        current,
+        GenerationStage::ReviewingTestPoints | GenerationStage::GeneratingTestPoints
+    ) {
         return Err(format!(
-            "continue generation requires Reviewing Test Points (current: {})",
+            "continue generation requires Generating or Reviewing Test Points (current: {})",
             current.label()
         ));
-    }
-    let approved = approved_resolved_test_point_ids(test_points);
-    if approved.is_empty() {
-        return Err(
-            "approve at least one test point with resolved requirement links before continuing"
-                .into(),
-        );
     }
     Ok(GenerationStage::Planning)
 }
@@ -856,19 +816,21 @@ pub fn evaluate_restored_scope(
     Ok(())
 }
 
-/// Infers a resumable stage from persisted session state and current test points.
+/// Infers a resumable stage from persisted session state.
 ///
-/// Restart never auto-approves. Under [`ReviewPolicy::Strict`], Planning (or
-/// later) with no approved resolved test points falls back to Reviewing Test
-/// Points. Under [`ReviewPolicy::Direct`] the human-review gate is not restored,
-/// and a persisted test-point stage advances to Planning.
+/// Human review gating has been removed, so persisted test-point review or
+/// proposal stages advance straight to Planning without blocking.
 pub fn restore_stage_after_reload(
     saved: &GenerationSessionState,
-    test_points: &[TestPoint],
+    _test_points: &[TestPoint],
 ) -> GenerationStage {
-    let direct = saved.review_policy == ReviewPolicy::Direct;
     match saved.stage {
-        GenerationStage::Idle | GenerationStage::Complete => saved.stage,
+        GenerationStage::Idle
+        | GenerationStage::Complete
+        | GenerationStage::Gathering
+        | GenerationStage::Planning
+        | GenerationStage::Writing
+        | GenerationStage::Validating => saved.stage,
         GenerationStage::Confirming => {
             // File confirmation is ephemeral; resume writing if a plan exists.
             if saved.plan.is_some() {
@@ -877,23 +839,9 @@ pub fn restore_stage_after_reload(
                 GenerationStage::Idle
             }
         }
-        GenerationStage::Planning | GenerationStage::Writing | GenerationStage::Validating => {
-            if direct {
-                saved.stage
-            } else if approved_resolved_test_point_ids(test_points).is_empty() {
-                GenerationStage::ReviewingTestPoints
-            } else {
-                saved.stage
-            }
-        }
         GenerationStage::GeneratingTestPoints | GenerationStage::ReviewingTestPoints => {
-            if direct {
-                GenerationStage::Planning
-            } else {
-                saved.stage
-            }
+            GenerationStage::Planning
         }
-        GenerationStage::Gathering => saved.stage,
     }
 }
 
@@ -974,18 +922,16 @@ mod tests {
     fn generating_test_points_guides_propose_tool() {
         let guidance = GenerationStage::GeneratingTestPoints.prompt_guidance();
         assert!(guidance.contains("propose_test_points"));
-        assert!(
-            !guidance.contains("generate_plan yet")
-                || guidance.contains("Do NOT call generate_plan")
-        );
+        assert!(!guidance.contains("Do NOT call generate_plan"));
     }
 
     #[test]
-    fn reviewing_stage_is_human_gate() {
-        assert!(GenerationStage::ReviewingTestPoints.is_human_review_gate());
+    fn reviewing_stage_is_not_a_blocking_human_gate() {
+        assert!(!GenerationStage::ReviewingTestPoints.is_human_review_gate());
         assert!(!GenerationStage::Planning.is_human_review_gate());
+        assert!(!GenerationStage::ReviewingTestPoints.is_review_gate_for(ReviewPolicy::Strict));
         let guidance = GenerationStage::ReviewingTestPoints.prompt_guidance();
-        assert!(guidance.contains("Do NOT call generate_plan"));
+        assert!(guidance.contains("generate_plan"));
     }
 
     #[test]
@@ -1062,32 +1008,27 @@ mod tests {
     }
 
     #[test]
-    fn continue_from_review_requires_approved_resolved() {
+    fn continue_from_review_advances_to_planning_without_approval_gate() {
         let proposed = vec![sample_tp(
             "tp-1",
             ReviewState::Proposed,
             ResolutionState::Resolved,
         )];
-        let err =
-            continue_from_review(GenerationStage::ReviewingTestPoints, &proposed).unwrap_err();
-        assert!(err.contains("approve at least one"));
-
-        let approved = vec![sample_tp(
-            "tp-1",
-            ReviewState::Approved,
-            ResolutionState::Resolved,
-        )];
         assert_eq!(
-            continue_from_review(GenerationStage::ReviewingTestPoints, &approved).unwrap(),
+            continue_from_review(GenerationStage::ReviewingTestPoints, &proposed).unwrap(),
+            GenerationStage::Planning
+        );
+        assert_eq!(
+            continue_from_review(GenerationStage::GeneratingTestPoints, &proposed).unwrap(),
             GenerationStage::Planning
         );
 
-        let wrong_stage = continue_from_review(GenerationStage::Gathering, &approved).unwrap_err();
-        assert!(wrong_stage.contains("Reviewing Test Points"));
+        let wrong_stage = continue_from_review(GenerationStage::Gathering, &proposed).unwrap_err();
+        assert!(wrong_stage.contains("Generating or Reviewing Test Points"));
     }
 
     #[test]
-    fn validate_plan_rejects_unapproved_and_stale() {
+    fn validate_plan_allows_proposed_and_stale_and_rejects_unknown_or_rejected() {
         let plan = GenerationPlan {
             features: vec![FeaturePlan {
                 file_name: "auth.feature".into(),
@@ -1111,28 +1052,30 @@ mod tests {
             ReviewState::Proposed,
             ResolutionState::Resolved,
         )];
-        let err = validate_plan_test_point_ids(&plan, &proposed).unwrap_err();
-        assert!(err.iter().any(|e| e.contains("Proposed")));
+        assert!(validate_plan_test_point_ids(&plan, &proposed).is_ok());
 
         let stale = vec![sample_tp(
             "tp-1",
             ReviewState::Approved,
             ResolutionState::Stale,
         )];
-        let err = validate_plan_test_point_ids(&plan, &stale).unwrap_err();
-        assert!(err.iter().any(|e| e.contains("stale")));
+        assert!(validate_plan_test_point_ids(&plan, &stale).is_ok());
 
-        let ok = vec![sample_tp(
+        let rejected = vec![sample_tp(
             "tp-1",
-            ReviewState::Approved,
+            ReviewState::Rejected,
             ResolutionState::Resolved,
         )];
-        assert!(validate_plan_test_point_ids(&plan, &ok).is_ok());
+        let err = validate_plan_test_point_ids(&plan, &rejected).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("Rejected")));
+
+        let err = validate_plan_test_point_ids(&plan, &[]).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("unknown test point id")));
     }
 
     #[test]
-    fn restore_falls_back_to_review_without_approvals() {
-        let saved = GenerationSessionState {
+    fn restore_advances_test_point_stages_without_review_gate() {
+        let saved_planning = GenerationSessionState {
             stage: GenerationStage::Planning,
             requirement: None,
             plan: None,
@@ -1145,13 +1088,13 @@ mod tests {
             ResolutionState::Resolved,
         )];
         assert_eq!(
-            restore_stage_after_reload(&saved, &proposed),
-            GenerationStage::ReviewingTestPoints
+            restore_stage_after_reload(&saved_planning, &proposed),
+            GenerationStage::Planning
         );
     }
 
     #[test]
-    fn restore_keeps_reviewing_without_approving() {
+    fn restore_promotes_reviewing_stage_to_planning() {
         let saved = GenerationSessionState {
             stage: GenerationStage::ReviewingTestPoints,
             requirement: None,
@@ -1166,7 +1109,7 @@ mod tests {
         )];
         assert_eq!(
             restore_stage_after_reload(&saved, &proposed),
-            GenerationStage::ReviewingTestPoints
+            GenerationStage::Planning
         );
         assert_eq!(proposed[0].review_state, ReviewState::Proposed);
     }

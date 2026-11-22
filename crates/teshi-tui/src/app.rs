@@ -1442,6 +1442,8 @@ pub struct App {
     pub clickable_regions: Vec<ClickableRegion>,
     /// Screen rectangle of the tree panel, updated each render frame.
     pub tree_panel_rect: Option<ratatui::layout::Rect>,
+    /// Screen rectangle of the Test Points 2D MindMap canvas viewport.
+    pub test_points_canvas_rect: Option<ratatui::layout::Rect>,
     /// Screen rectangle of the preview panel, updated each render frame.
     pub preview_panel_rect: Option<ratatui::layout::Rect>,
     /// Replay screenshot panel state for the MindMap preview.
@@ -1835,6 +1837,11 @@ pub enum ClickableRegion {
     RequirementFilterOption {
         rect: ratatui::layout::Rect,
         index: usize,
+    },
+    /// A rendered Test Points MindMap canvas node box.
+    TestPointCanvasNode {
+        rect: ratatui::layout::Rect,
+        node_id: String,
     },
     /// A rendered editable field in Test Points.
     TestPointField {
@@ -2241,6 +2248,7 @@ impl App {
         self.clickable_regions.clear();
         self.editor_panel_rect = None;
         self.tree_panel_rect = None;
+        self.test_points_canvas_rect = None;
         self.preview_panel_rect = None;
         self.dirty = false;
         self.run_routes = prepared.run_routes;
@@ -2967,6 +2975,7 @@ impl App {
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -3217,6 +3226,7 @@ impl App {
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -3435,6 +3445,7 @@ impl App {
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -6061,20 +6072,15 @@ impl App {
         }
     }
 
-    /// Feature-generation guidance for the default Strict (review-required) policy.
-    const STRICT_PIPELINE_GUIDANCE: &'static str = "\n\n## Feature Generation Pipeline (Strict — human review required)\n\
-         When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
-         1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand; do not assume every Markdown file is already in the prompt. Prefer `source_refs` to persisted documents/ranges in the confirmed store/iteration scope. Pasted or conversational text is not a requirement-library source. Call `submit_requirements` when done.\n\
-         2. **Generating Test Points** — Call `propose_test_points` with non-Gherkin verification intents (title, objective, hierarchy). Do NOT write Given/When/Then inside test points.\n\
-         3. **Reviewing Test Points** — Stop and wait. Humans approve/reject in the Test Points tab. Do NOT call `generate_plan` and do NOT treat Auto/Bypass file approval as test-point approval.\n\
-         4. **Planning** — After the user continues generation, design Gherkin scenarios. Every scenario must include `test_point_ids` for approved test points. Call `generate_plan`.\n\
-         5. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
-         6. **Validation** — Use `validate_feature` to check for issues.\n\
+    /// Streamlined feature-generation guidance without blocking approval gates.
+    const STRICT_PIPELINE_GUIDANCE: &'static str = "\n\n## Feature Generation Pipeline\n\
+         When the user asks to create or generate a feature (including `/generate`), follow this streamlined pipeline:\n\
+         1. **Requirements Gathering** — Ask 1-2 clarifying questions only when needed, or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand. Prefer `source_refs` to persisted documents when available, and call `submit_requirements` when ready.\n\
+         2. **Concise Test Points (Optional, non-blocking)** — Call `propose_test_points` with concise, single-line heuristic test points (`title`, `hierarchy_path`, optional brief `objective` note, and optional document-level `requirement_links`). Do NOT write Given/When/Then inside test points. Test points are ready immediately with NO human-approval pause.\n\
+         3. **Planning & Writing** — Proceed straight to `generate_plan` and/or `create_feature_file` + `insert_scenario` (Gherkin `.feature` only). Reference matching `test_point_ids` so scenarios embed `@teshi-tp:<id>` coverage tags on the MindMap.\n\
+         4. **Validation** — Use `validate_feature` and `run_tests` to check and verify scenarios.\n\
          \n\
-         Test points are durable verification intents, NOT Gherkin scenarios. Scenarios realize approved test points.\n\
          Do NOT produce FreeMind `.mm` files or mock HTML.\n\
-         Do NOT skip the human review gate. Start by gathering requirements.\n\
-         If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
          Always check the [Project Context] to understand existing files before generating.";
 
     /// Feature-generation guidance for the user-authorized Direct (no-review) policy.
@@ -8395,7 +8401,17 @@ impl App {
             // rendered by Explore.
             RunEvent::Other(_) => {}
         }
+        self.refresh_test_points_exec_statuses();
         self.quit_pending_confirm = false;
+    }
+
+    pub(crate) fn refresh_test_points_exec_statuses(&mut self) {
+        self.test_points_ui.compute_exec_statuses(
+            &self.project,
+            &self.explore_case_status,
+            self.runner_rx.is_some(),
+            self.authoring_ui.artifacts.as_ref(),
+        );
     }
 
     fn reset_explore_run_state(&mut self) {
@@ -11290,12 +11306,16 @@ impl App {
                 } else if self.active_tab == MainTab::TestPoints {
                     match self.test_points_ui.focus {
                         crate::test_points_tab::TestPointsFocus::Tree => {
-                            self.test_points_ui.move_tree_selection(-1);
+                            self.test_points_ui.navigate_spatial(
+                                crate::test_points_tab::SpatialDir::Up,
+                                self.authoring_ui.artifacts.as_ref(),
+                            );
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Details => {
                             self.commit_test_point_field_edit()?;
-                            self.test_points_ui.move_detail_field(-1);
+                            self.test_points_ui
+                                .move_detail_field(-1, self.authoring_ui.artifacts.as_ref());
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Excerpts => {
@@ -11338,12 +11358,16 @@ impl App {
                 } else if self.active_tab == MainTab::TestPoints {
                     match self.test_points_ui.focus {
                         crate::test_points_tab::TestPointsFocus::Tree => {
-                            self.test_points_ui.move_tree_selection(1);
+                            self.test_points_ui.navigate_spatial(
+                                crate::test_points_tab::SpatialDir::Down,
+                                self.authoring_ui.artifacts.as_ref(),
+                            );
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Details => {
                             self.commit_test_point_field_edit()?;
-                            self.test_points_ui.move_detail_field(1);
+                            self.test_points_ui
+                                .move_detail_field(1, self.authoring_ui.artifacts.as_ref());
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Excerpts => {
@@ -11380,9 +11404,19 @@ impl App {
                         self.authoring_ui.extend_visual_selection();
                     }
                 } else if self.active_tab == MainTab::TestPoints {
-                    if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+                    if self.test_points_ui.editing
+                        || self.test_points_ui.focus
+                            == crate::test_points_tab::TestPointsFocus::Details
                     {
                         self.test_points_ui.move_field_cursor(-1);
+                    } else if self.test_points_ui.focus
+                        == crate::test_points_tab::TestPointsFocus::Tree
+                    {
+                        self.test_points_ui.navigate_spatial(
+                            crate::test_points_tab::SpatialDir::Left,
+                            self.authoring_ui.artifacts.as_ref(),
+                        );
+                        self.reload_test_point_field_buffer();
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -11397,9 +11431,19 @@ impl App {
                         self.authoring_ui.extend_visual_selection();
                     }
                 } else if self.active_tab == MainTab::TestPoints {
-                    if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+                    if self.test_points_ui.editing
+                        || self.test_points_ui.focus
+                            == crate::test_points_tab::TestPointsFocus::Details
                     {
                         self.test_points_ui.move_field_cursor(1);
+                    } else if self.test_points_ui.focus
+                        == crate::test_points_tab::TestPointsFocus::Tree
+                    {
+                        self.test_points_ui.navigate_spatial(
+                            crate::test_points_tab::SpatialDir::Right,
+                            self.authoring_ui.artifacts.as_ref(),
+                        );
+                        self.reload_test_point_field_buffer();
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -11408,7 +11452,9 @@ impl App {
                 }
             }
             Action::MoveHome => {
-                if self.is_test_points_details_active() {
+                if self.active_tab == MainTab::TestPoints
+                    && (self.test_points_ui.editing || self.is_test_points_details_active())
+                {
                     self.test_points_ui.field_line_boundary(false);
                 } else if self.is_requirements_editor_active() {
                     self.authoring_ui.cursor_col = 0;
@@ -11422,7 +11468,9 @@ impl App {
                 }
             }
             Action::MoveEnd => {
-                if self.is_test_points_details_active() {
+                if self.active_tab == MainTab::TestPoints
+                    && (self.test_points_ui.editing || self.is_test_points_details_active())
+                {
                     self.test_points_ui.field_line_boundary(true);
                 } else if self.is_requirements_editor_active() {
                     let col = self
@@ -11503,7 +11551,7 @@ impl App {
                         self.authoring_ui.insert_char(ch);
                     }
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() && self.test_points_ui.editing {
+                } else if self.active_tab == MainTab::TestPoints && self.test_points_ui.editing {
                     self.test_points_ui.insert_char(ch);
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -11541,7 +11589,7 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.backspace();
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() {
+                } else if self.active_tab == MainTab::TestPoints && self.test_points_ui.editing {
                     self.test_points_ui.backspace();
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -11566,7 +11614,7 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.delete_forward();
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() {
+                } else if self.active_tab == MainTab::TestPoints && self.test_points_ui.editing {
                     self.test_points_ui.delete_forward();
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -11881,105 +11929,155 @@ impl App {
                 }
             }
             Action::TpExitInsert => {
-                self.commit_test_point_field_edit()?;
-                self.test_points_ui.editing = false;
+                if self.test_points_ui.inline_edit.is_some() {
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && self.test_points_ui.commit_inline_edit(artifacts, false)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                    }
+                    self.reload_test_point_field_buffer();
+                    self.refresh_test_points_exec_statuses();
+                } else {
+                    self.commit_test_point_field_edit()?;
+                    self.test_points_ui.editing = false;
+                }
+            }
+            Action::TpAddChild => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if self
+                        .test_points_ui
+                        .start_add_child(&mut self.authoring_ui.artifacts)
+                        && let Some(artifacts) = self.authoring_ui.artifacts.as_ref()
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpAddSibling => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if self
+                        .test_points_ui
+                        .start_add_sibling(&mut self.authoring_ui.artifacts)
+                        && let Some(artifacts) = self.authoring_ui.artifacts.as_ref()
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpInlineEdit => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Tree;
+                    if !self
+                        .test_points_ui
+                        .start_inline_edit(self.authoring_ui.artifacts.as_ref())
+                    {
+                        self.status = "Select a branch or test point node to edit".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpDeleteNode => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && let Some(removed) = self.test_points_ui.delete_selected(artifacts)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                        self.reload_test_point_field_buffer();
+                        self.status = format!("Deleted test point node '{removed}' ([u] undo)");
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpUndo => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && self.test_points_ui.undo(artifacts)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                        self.reload_test_point_field_buffer();
+                        self.status = "Undid Test Points edit ([Ctrl+R] redo)".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpRedo => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && self.test_points_ui.redo(artifacts)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                        self.reload_test_point_field_buffer();
+                        self.status = "Redid Test Points edit".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpToggleCollapse => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui
+                        .toggle_collapse_selected(self.authoring_ui.artifacts.as_ref());
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpGenerateFeature => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.generate_feature_for_selected_test_point()?;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpSyncFromFeatures => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.sync_test_points_from_features()?;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpRunTestPoint => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.run_selected_test_point_scenarios()?;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpToggleFullscreen => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.fullscreen_canvas = !self.test_points_ui.fullscreen_canvas;
+                    if self.test_points_ui.fullscreen_canvas {
+                        self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Tree;
+                    }
+                    self.quit_pending_confirm = false;
+                }
             }
             Action::DeleteConfirm | Action::DeleteCancel => {}
-            Action::TpApprove => {
-                if self.active_tab == MainTab::TestPoints {
-                    self.commit_test_point_field_edit()?;
-                    let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
-                        self.status = crate::i18n::t("status.select_a_test_point_to_approve").to_string();
-                        self.quit_pending_confirm = false;
-                        return Ok(());
-                    };
-                    let mut approved = false;
-                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
-                        && let Some(tp) = artifacts
-                            .test_points
-                            .test_points
-                            .iter_mut()
-                            .find(|tp| tp.id == tp_id)
-                    {
-                        approved = crate::test_points_tab::TestPointsUiState::approve(tp);
-                        if approved {
-                            crate::test_points_tab::TestPointsUiState::save_test_points(
-                                &self.project.root_dir,
-                                artifacts,
-                            )?;
-                            self.test_points_ui.rebuild_tree(Some(artifacts));
-                        }
-                    }
-                    self.status = if approved {
-                        crate::i18n::fill(crate::i18n::t("status.approved_test_point"), &[("tp_id", &crate::i18n::arg(&tp_id))])
-                    } else {
-                        crate::i18n::t("status.cannot_approve_resolve_stale_links_or_review_state").to_string()
-                    };
-                    self.quit_pending_confirm = false;
-                }
-            }
-            Action::TpReject => {
-                if self.active_tab == MainTab::TestPoints {
-                    self.commit_test_point_field_edit()?;
-                    let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
-                        self.status = crate::i18n::t("status.select_a_test_point_to_reject").to_string();
-                        self.quit_pending_confirm = false;
-                        return Ok(());
-                    };
-                    let mut rejected = false;
-                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
-                        && let Some(tp) = artifacts
-                            .test_points
-                            .test_points
-                            .iter_mut()
-                            .find(|tp| tp.id == tp_id)
-                    {
-                        rejected = crate::test_points_tab::TestPointsUiState::reject(tp);
-                        if rejected {
-                            crate::test_points_tab::TestPointsUiState::save_test_points(
-                                &self.project.root_dir,
-                                artifacts,
-                            )?;
-                            self.test_points_ui.rebuild_tree(Some(artifacts));
-                        }
-                    }
-                    self.status = if rejected {
-                        crate::i18n::fill(crate::i18n::t("status.rejected_test_point"), &[("tp_id", &crate::i18n::arg(&tp_id))])
-                    } else {
-                        crate::i18n::t("status.cannot_reject_this_test_point").to_string()
-                    };
-                    self.quit_pending_confirm = false;
-                }
-            }
-            Action::TpBatchApprove => {
-                if self.active_tab == MainTab::TestPoints {
-                    self.commit_test_point_field_edit()?;
-                    let ids = self.test_points_ui.visible_leaf_ids.clone();
-                    let count = if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
-                        let approved = crate::test_points_tab::TestPointsUiState::batch_approve(
-                            &mut artifacts.test_points.test_points,
-                            &ids,
-                        );
-                        if approved > 0 {
-                            crate::test_points_tab::TestPointsUiState::save_test_points(
-                                &self.project.root_dir,
-                                artifacts,
-                            )?;
-                            self.test_points_ui.rebuild_tree(Some(artifacts));
-                        }
-                        approved
-                    } else {
-                        0
-                    };
-                    self.status = crate::i18n::fill(crate::i18n::t("status.batch_approved_test_point_s"), &[("count", &crate::i18n::arg(&count))]);
-                    self.quit_pending_confirm = false;
-                }
-            }
+            Action::TpApprove | Action::TpReject | Action::TpBatchApprove => {}
             Action::TpReviewFilter => {
                 if self.active_tab == MainTab::TestPoints {
-                    self.test_points_ui.cycle_review_filter();
-                    let artifacts = self.authoring_ui.artifacts.as_ref();
-                    self.test_points_ui.rebuild_tree(artifacts);
+                    self.test_points_ui
+                        .cycle_filter(self.authoring_ui.artifacts.as_ref());
                     self.reload_test_point_field_buffer();
                     self.status = crate::i18n::t("status.cycled_test_point_review_filter").to_string();
                     self.quit_pending_confirm = false;
@@ -13352,6 +13450,10 @@ impl App {
                     self.tree_move_up();
                 }
             }
+        } else if self.active_tab == MainTab::TestPoints
+            && self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree
+        {
+            self.test_points_ui.page_canvas(down);
         } else if self.active_tab == MainTab::Requirements
             || self.active_tab == MainTab::TestPoints
             || (self.active_tab == MainTab::Explore && !self.explore_edit_mode)
@@ -13492,11 +13594,11 @@ impl App {
             self.commit_test_point_field_edit()?;
             match self.test_points_ui.focus {
                 crate::test_points_tab::TestPointsFocus::Tree => {
-                    self.test_points_ui.move_tree_selection(delta)
+                    self.test_points_ui.move_canvas_boundary(end)
                 }
-                crate::test_points_tab::TestPointsFocus::Details => {
-                    self.test_points_ui.move_detail_field(delta)
-                }
+                crate::test_points_tab::TestPointsFocus::Details => self
+                    .test_points_ui
+                    .move_detail_field(delta, self.authoring_ui.artifacts.as_ref()),
                 crate::test_points_tab::TestPointsFocus::Excerpts => {
                     let count = self.current_excerpt_count();
                     self.test_points_ui.move_excerpt_selection(delta, count);
@@ -13693,6 +13795,269 @@ impl App {
         } else {
             self.test_points_ui.load_field_buffer();
         }
+    }
+
+    fn tp_feature_slug(segment: &str) -> String {
+        let mut slug = String::new();
+        for ch in segment.chars() {
+            if ch.is_ascii_alphanumeric() {
+                slug.push(ch.to_ascii_lowercase());
+            } else if !slug.ends_with('_') && !slug.is_empty() {
+                slug.push('_');
+            }
+        }
+        let trimmed = slug.trim_matches('_');
+        if trimmed.is_empty() {
+            "generated_features".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn resolve_or_create_feature_for_hierarchy(&mut self, hierarchy: &[String]) -> Result<PathBuf> {
+        if let Some(first) = hierarchy.first() {
+            let needle = first.trim().to_ascii_lowercase();
+            let needle_slug = Self::tp_feature_slug(first);
+            for feature in &self.project.features {
+                let stem = feature
+                    .file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let name = feature.name.trim().to_ascii_lowercase();
+                if name == needle || stem == needle || stem == needle_slug {
+                    return Ok(feature.file_path.clone());
+                }
+            }
+        }
+        if self.project.features.len() == 1 {
+            return Ok(self.project.features[0].file_path.clone());
+        }
+
+        let module = hierarchy
+            .first()
+            .map(String::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Test Points");
+        let file_name = format!("{}.feature", Self::tp_feature_slug(module));
+        let full_path = self.project.root_dir.join(&file_name);
+        if full_path.exists() {
+            return Ok(full_path);
+        }
+
+        let header = format!("Feature: {module}\n");
+        fs::write(&full_path, &header)
+            .with_context(|| format!("create {}", full_path.display()))?;
+        let feature = gherkin::parse_feature(&header, full_path.clone());
+        self.project.features.push(feature);
+        self.buffers.push(EditorBuffer::from_string(header));
+        self.buffer_dirty.push(false);
+        self.disk_stamps.push(FileStamp::capture(&full_path));
+        Ok(full_path)
+    }
+
+    /// Scaffold `.feature` Scenarios linked with `@teshi-tp:<id>` for uncovered selected test points.
+    fn generate_feature_for_selected_test_point(&mut self) -> Result<()> {
+        self.commit_test_point_field_edit()?;
+        let Some(artifacts) = self.authoring_ui.artifacts.as_ref() else {
+            self.status = "No test points yet — press [a] to create one first".to_string();
+            return Ok(());
+        };
+        let target_ids = self.test_points_ui.selected_test_point_ids(artifacts);
+        if target_ids.is_empty() {
+            self.status = "No test points under selection — press [a] to create one".to_string();
+            return Ok(());
+        }
+
+        let id_set: HashSet<String> = target_ids.iter().cloned().collect();
+        let mut already_linked: HashSet<String> = HashSet::new();
+        for feature in &self.project.features {
+            for sc in feature.all_scenarios() {
+                for id in teshi_core::authoring::parse_teshi_tp_tags(&sc.tags) {
+                    if id_set.contains(&id) {
+                        already_linked.insert(id);
+                    }
+                }
+            }
+        }
+
+        let to_generate: Vec<(String, String, String, Vec<String>)> = artifacts
+            .test_points
+            .test_points
+            .iter()
+            .filter(|tp| id_set.contains(&tp.id) && !already_linked.contains(&tp.id))
+            .map(|tp| {
+                (
+                    tp.id.clone(),
+                    tp.title.clone(),
+                    tp.concise_note(),
+                    tp.hierarchy_path.as_slice().to_vec(),
+                )
+            })
+            .collect();
+
+        if to_generate.is_empty() {
+            self.status =
+                "Selected test point(s) already have linked scenarios ([o] open / [r] run)"
+                    .to_string();
+            return Ok(());
+        }
+
+        let mut last_rel = String::new();
+        let count = to_generate.len();
+        for (id, title, note, hierarchy) in to_generate {
+            let full_path = self.resolve_or_create_feature_for_hierarchy(&hierarchy)?;
+            let rel = full_path
+                .strip_prefix(&self.project.root_dir)
+                .unwrap_or(&full_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let line = self.line_count_for_file(&rel).unwrap_or(1);
+            let outcome = if note.is_empty() {
+                "the expected behavior holds"
+            } else {
+                note.as_str()
+            };
+            let block = format!(
+                "\n  @teshi-tp:{id}\n  Scenario: {title}\n    Given a precondition for {title}\n    When the action executes\n    Then {outcome}\n"
+            );
+            self.insert_text_into_buffer(&rel, line, &block)?;
+            if let Some(idx) = self.find_feature_idx_for_file(&rel) {
+                fs::write(&full_path, self.buffers[idx].as_string())
+                    .with_context(|| format!("write {}", full_path.display()))?;
+                self.set_buffer_dirty(idx, false);
+                if let Some(slot) = self.disk_stamps.get_mut(idx) {
+                    *slot = FileStamp::capture(&full_path);
+                }
+            }
+            last_rel = rel;
+        }
+
+        self.refresh_project_from_buffers();
+        self.sync_test_point_scenario_refs();
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            crate::test_points_tab::TestPointsUiState::save_test_points(
+                &self.project.root_dir,
+                artifacts,
+            )?;
+            self.test_points_ui.rebuild_tree(Some(artifacts));
+        }
+        self.refresh_test_points_exec_statuses();
+        self.status = format!(
+            "Scaffolded {count} scenario(s) in {last_rel} — press [r] to run or [o] to open"
+        );
+        Ok(())
+    }
+
+    /// Reverse-extract unlinked Scenarios from `.feature` files into Test Points (`S`).
+    fn sync_test_points_from_features(&mut self) -> Result<()> {
+        self.commit_test_point_field_edit()?;
+        let artifacts = self
+            .authoring_ui
+            .artifacts
+            .get_or_insert_with(Default::default);
+        let prev = artifacts.test_points.test_points.clone();
+        let added = teshi_core::authoring::extract_unlinked_scenarios_as_test_points(
+            &self.project,
+            &mut artifacts.test_points.test_points,
+        );
+        if added.is_empty() {
+            artifacts.test_points.test_points = prev;
+            self.status = "All existing scenarios are already linked to test points".to_string();
+            return Ok(());
+        }
+        let added_count = added.len();
+        let first_added_id = added.first().map(|(_, id, _)| format!("tp:{id}"));
+        let artifacts_snapshot = std::mem::replace(&mut artifacts.test_points.test_points, prev);
+        self.test_points_ui.push_undo(artifacts);
+        artifacts.test_points.test_points = artifacts_snapshot;
+        crate::test_points_tab::TestPointsUiState::save_test_points(
+            &self.project.root_dir,
+            artifacts,
+        )?;
+        self.sync_test_point_scenario_refs();
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            if let Some(node_id) = first_added_id {
+                self.test_points_ui.selected_node_id = Some(node_id);
+            }
+            self.test_points_ui.rebuild_tree(Some(artifacts));
+        }
+        self.refresh_test_points_exec_statuses();
+        self.reload_test_point_field_buffer();
+        self.status = format!("Synced {added_count} scenario(s) from .feature files into MindMap");
+        Ok(())
+    }
+
+    /// Execute all Gherkin scenarios linked to the selected MindMap node or subtree (`r`).
+    fn run_selected_test_point_scenarios(&mut self) -> Result<()> {
+        if self.runner_rx.is_some() {
+            self.status = crate::i18n::t("status.runner_already_active").to_string();
+            return Ok(());
+        }
+        let Some(artifacts) = self.authoring_ui.artifacts.as_ref() else {
+            self.status = "No test points selected".to_string();
+            return Ok(());
+        };
+        let target_ids: HashSet<String> = self
+            .test_points_ui
+            .selected_test_point_ids(artifacts)
+            .into_iter()
+            .collect();
+        if target_ids.is_empty() {
+            self.status = "No test points under selected node".to_string();
+            return Ok(());
+        }
+
+        let mut cases = Vec::new();
+        for (fi, feature) in self.project.features.iter().enumerate() {
+            for (si, sc) in feature.all_scenarios().into_iter().enumerate() {
+                if teshi_core::authoring::parse_teshi_tp_tags(&sc.tags)
+                    .iter()
+                    .any(|id| target_ids.contains(id))
+                {
+                    cases.push(build_case(fi, si, feature, sc));
+                }
+            }
+        }
+        if cases.is_empty() {
+            self.status = "No linked scenarios yet — press [g] to scaffold one".to_string();
+            return Ok(());
+        }
+
+        let case_ids: Vec<String> = cases.iter().map(|c| c.id.clone()).collect();
+        let total = cases.len();
+        let (rx, cancel) =
+            match runner::start_routed_run(&self.project.root_dir, &self.run_routes, cases) {
+                Ok(started) => started,
+                Err(err) => {
+                    let message = format!("{err:#}");
+                    let first_line = message.lines().next().unwrap_or_default();
+                    self.status = crate::i18n::fill(
+                        crate::i18n::t("status.run_not_started"),
+                        &[("first_line", &crate::i18n::arg(&first_line))],
+                    );
+                    return Ok(());
+                }
+            };
+
+        self.reset_explore_run_state();
+        self.explore_run_summary = Some(RunSummary {
+            total,
+            ..RunSummary::default()
+        });
+        for case_id in case_ids {
+            if let Some((fi, si)) = parse_case_key(&case_id) {
+                self.explore_case_map.insert(case_id, (fi, si));
+                self.explore_case_status
+                    .insert((fi, si), RunStatus::Running);
+            }
+        }
+        self.runner_rx = Some(rx);
+        self.runner_cancel = Some(cancel);
+        self.refresh_test_points_exec_statuses();
+        self.status = format!("Running {total} scenario(s) for selected test point(s)...");
+        Ok(())
     }
 
     fn current_excerpt_count(&self) -> usize {
@@ -14581,9 +14946,8 @@ impl App {
             }
         }
 
-        // Test Points has no global scroll focus: a wheel event belongs to
-        // the pane beneath the pointer. TreeState owns the tree offset while
-        // the two text panes keep independent bounded offsets.
+        // Test Points 2D Canvas & Inspector pointer scrolling:
+        // Shift+wheel (or ScrollLeft/ScrollRight) pans canvas horizontally; normal wheel scrolls vertically.
         if self.active_tab == MainTab::TestPoints
             && matches!(
                 kind,
@@ -14602,20 +14966,39 @@ impl App {
                     _ => None,
                 })
         {
-            match (pane, kind) {
-                (0, MouseEventKind::ScrollUp) => {
-                    self.test_points_ui.tree_state.scroll_up(3);
+            if pane == 0 {
+                let horiz = modifiers.contains(KeyModifiers::SHIFT)
+                    || matches!(
+                        kind,
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                    );
+                match kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
+                        if horiz {
+                            self.test_points_ui.pan_canvas(-4, 0);
+                        } else {
+                            self.test_points_ui.pan_canvas(0, -2);
+                        }
+                    }
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => {
+                        if horiz {
+                            self.test_points_ui.pan_canvas(4, 0);
+                        } else {
+                            self.test_points_ui.pan_canvas(0, 2);
+                        }
+                    }
+                    _ => {}
                 }
-                (0, MouseEventKind::ScrollDown) => {
-                    self.test_points_ui.tree_state.scroll_down(3);
+            } else {
+                match kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
+                        self.test_points_ui.scroll_pane(1, -3);
+                    }
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => {
+                        self.test_points_ui.scroll_pane(1, 3);
+                    }
+                    _ => {}
                 }
-                (_, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) => {
-                    self.test_points_ui.scroll_pane(pane, -3)
-                }
-                (_, MouseEventKind::ScrollDown | MouseEventKind::ScrollRight) => {
-                    self.test_points_ui.scroll_pane(pane, 3)
-                }
-                _ => {}
             }
             return Ok(());
         }
@@ -14623,6 +15006,24 @@ impl App {
         match kind {
             MouseEventKind::Moved => {
                 self.mouse_position = Some((col, row));
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.hovered_node_id = self
+                        .test_points_canvas_rect
+                        .filter(|r| r.contains(pos))
+                        .and_then(|r| {
+                            let cx = self
+                                .test_points_ui
+                                .canvas_scroll_x
+                                .saturating_add(col - r.x);
+                            let cy = self
+                                .test_points_ui
+                                .canvas_scroll_y
+                                .saturating_add(row - r.y);
+                            self.test_points_ui
+                                .node_at_canvas(cx, cy)
+                                .map(|n| n.id.clone())
+                        });
+                }
                 return Ok(());
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -14661,6 +15062,17 @@ impl App {
             }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left
+                    && self.active_tab == MainTab::TestPoints
+                    && let Some((sx, sy, ox, oy)) = self.test_points_ui.canvas_drag
+                {
+                    let (vp_w, vp_h) = self.test_points_ui.canvas_viewport;
+                    let max_sx = self.test_points_ui.canvas_width.saturating_sub(vp_w) as i32;
+                    let max_sy = self.test_points_ui.canvas_height.saturating_sub(vp_h) as i32;
+                    let dx = sx as i32 - col as i32;
+                    let dy = sy as i32 - row as i32;
+                    self.test_points_ui.canvas_scroll_x = (ox as i32 + dx).clamp(0, max_sx) as u16;
+                    self.test_points_ui.canvas_scroll_y = (oy as i32 + dy).clamp(0, max_sy) as u16;
+                } else if button == MouseButton::Left
                     && let Some((column, grab)) = self.explore_horizontal_scroll_grab
                     && let Some(bar) = self.explore_scrollbar(column)
                 {
@@ -14676,6 +15088,7 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.explore_horizontal_scroll_grab = None;
+                self.test_points_ui.canvas_drag = None;
             }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Composer selection wins on a right-click inside the input
@@ -14790,6 +15203,7 @@ impl App {
             .find(|region| match region {
                 ClickableRegion::ActionButton { rect, .. }
                 | ClickableRegion::RequirementFilterOption { rect, .. }
+                | ClickableRegion::TestPointCanvasNode { rect, .. }
                 | ClickableRegion::TestPointField { rect, .. }
                 | ClickableRegion::TestPointExcerpt { rect, .. }
                 | ClickableRegion::TestPointScenario { rect, .. }
@@ -14821,6 +15235,7 @@ impl App {
             match region {
                 ClickableRegion::ActionButton { .. }
                 | ClickableRegion::RequirementFilterOption { .. }
+                | ClickableRegion::TestPointCanvasNode { .. }
                 | ClickableRegion::TestPointField { .. }
                 | ClickableRegion::TestPointExcerpt { .. }
                 | ClickableRegion::TestPointScenario { .. }
@@ -14996,6 +15411,40 @@ impl App {
                 {
                     *selection = *index;
                     self.handle_action(Action::OverlayConfirm)?;
+                }
+            }
+            ClickableRegion::TestPointCanvasNode { node_id, .. } => {
+                self.commit_test_point_field_edit()?;
+                self.test_points_ui.editing = false;
+                self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Tree;
+                let now = Instant::now();
+                let is_double =
+                    self.test_points_ui
+                        .last_click
+                        .as_ref()
+                        .is_some_and(|(prev_id, at)| {
+                            prev_id == node_id
+                                && now.duration_since(*at) < Duration::from_millis(450)
+                        });
+                self.test_points_ui.last_click = Some((node_id.clone(), now));
+                self.test_points_ui
+                    .select_node_by_id(node_id, self.authoring_ui.artifacts.as_ref());
+                self.reload_test_point_field_buffer();
+                if is_double {
+                    match self.test_points_ui.selected_node().map(|n| &n.kind) {
+                        Some(
+                            crate::test_points_tab::TpNodeKind::Root
+                            | crate::test_points_tab::TpNodeKind::Branch { .. },
+                        ) => {
+                            self.test_points_ui
+                                .toggle_collapse_selected(self.authoring_ui.artifacts.as_ref());
+                        }
+                        Some(crate::test_points_tab::TpNodeKind::Leaf { .. }) => {
+                            self.test_points_ui
+                                .start_inline_edit(self.authoring_ui.artifacts.as_ref());
+                        }
+                        None => {}
+                    }
                 }
             }
             ClickableRegion::TestPointField { field, .. } => {
@@ -15182,8 +15631,7 @@ impl App {
                 self.commit_test_point_field_edit()?;
                 let focus = match pane {
                     0 => crate::test_points_tab::TestPointsFocus::Tree,
-                    1 => crate::test_points_tab::TestPointsFocus::Details,
-                    _ => crate::test_points_tab::TestPointsFocus::Excerpts,
+                    _ => crate::test_points_tab::TestPointsFocus::Details,
                 };
                 if self.test_points_ui.focus != focus {
                     self.test_points_ui.commit_field_if_dirty();
@@ -15192,17 +15640,12 @@ impl App {
                     self.reload_test_point_field_buffer();
                 }
                 if *pane == 0 {
-                    self.test_points_ui.tree_state.click_at(*pos);
-                    if let Some(id) = self
-                        .test_points_ui
-                        .tree_state
-                        .selected()
-                        .last()
-                        .and_then(|node| node.strip_prefix(crate::test_points_tab::TREE_TP_PREFIX))
-                        .map(str::to_owned)
-                    {
-                        self.test_points_ui.select_test_point(&id);
-                    }
+                    self.test_points_ui.canvas_drag = Some((
+                        pos.x,
+                        pos.y,
+                        self.test_points_ui.canvas_scroll_x,
+                        self.test_points_ui.canvas_scroll_y,
+                    ));
                 }
             }
             ClickableRegion::ProjectRecent { index, .. } => {
@@ -16979,8 +17422,9 @@ mod tests {
         assert!(direct.contains("test_point_ids` may be empty"));
         assert!(direct.contains("user-authorized no-review"));
         let strict = App::generation_pipeline_prompt(ReviewPolicy::Strict);
-        assert!(strict.contains("Do NOT skip the human review gate"));
-        assert!(strict.contains("Stop and wait"));
+        assert!(!strict.contains("human review gate"));
+        assert!(!strict.contains("Stop and wait"));
+        assert!(strict.contains("NO human-approval pause"));
     }
 
     #[test]
@@ -19214,15 +19658,17 @@ mod tests {
     }
 
     #[test]
-    fn project_switch_during_human_review_never_approves_or_loses_test_points() {
+    fn project_switch_during_generation_preserves_test_points() {
         let (mut app, project_a, project_b, _store) = project_switch_app();
+        app.approval_mode = teshi_agent::approval::ApprovalMode::Auto;
         start_mcp_fixture(&mut app, "mcp_review");
         wait_mcp_fixture(&mut app, |app| {
             app.agents[0].backend.status() == teshi_agent::backend::AgentBackendStatus::Completed
         });
+        app.buffer_dirty.fill(false);
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            teshi_agent::pipeline::GenerationStage::Complete
         );
         let points_path = project_a.path().join("testpoints/testpoints.json");
         let proposed = fs::read(&points_path).unwrap();
@@ -19234,10 +19680,6 @@ mod tests {
         ));
         app.project_switch_action(Action::OverlayCancel).unwrap();
         assert_eq!(app.current_project_stamp(), before);
-        assert_eq!(
-            app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
-        );
         assert_eq!(fs::read(&points_path).unwrap(), proposed);
 
         app.request_project_switch(project_b.path()).unwrap();
@@ -19247,7 +19689,7 @@ mod tests {
         while app.project.root_dir != project_b.path() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "review switch did not finish"
+                "generation switch did not finish"
             );
             app.poll_llm_events();
             app.poll_project_switch();
@@ -19267,7 +19709,7 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(
             points[0].review_state,
-            teshi_core::authoring::ReviewState::Proposed
+            teshi_core::authoring::ReviewState::Approved
         );
         assert_eq!(fs::read(&points_path).unwrap(), proposed);
         stop_fixture_agents(&mut app);
@@ -20400,7 +20842,7 @@ mod tests {
     }
 
     #[test]
-    fn native_review_gate_stops_followup_after_tool_event() {
+    fn native_reviewing_stage_continues_after_tool_event() {
         let (mut app, _project, _store) = slash_test_app();
         let (tx, rx) = mpsc::channel();
         app.agents[0]
@@ -20422,11 +20864,10 @@ mod tests {
         })
         .unwrap();
         app.poll_llm_events();
-        assert_eq!(
+        assert_ne!(
             app.agents[0].backend.status(),
             teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
-        assert_eq!(app.agents[0].status, AiStatus::Idle);
         assert_eq!(app.agents[0].messages().len(), 2);
     }
 
@@ -21138,7 +21579,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_mcp_tools_persist_test_points_and_enforce_human_review() {
+    fn acp_mcp_tools_persist_test_points_and_generate_feature_without_gate() {
         for mode in [
             teshi_agent::approval::ApprovalMode::Manual,
             teshi_agent::approval::ApprovalMode::Auto,
@@ -21147,13 +21588,25 @@ mod tests {
             let (mut app, project, _store) = requirements_test_app();
             app.approval_mode = mode;
             start_mcp_fixture(&mut app, "mcp_review");
-            wait_mcp_fixture(&mut app, |app| {
-                app.agents[0].backend.status()
-                    == teshi_agent::backend::AgentBackendStatus::Completed
-            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while app.agents[0].backend.status()
+                != teshi_agent::backend::AgentBackendStatus::Completed
+            {
+                app.poll_llm_events();
+                while !app.pending_agent_changes.is_empty() {
+                    assert_eq!(mode, teshi_agent::approval::ApprovalMode::Manual);
+                    app.handle_action(Action::AgentChangeAccept).unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "ACP fixture timed out: {}",
+                    app.status
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(
                 app.generation_stage,
-                teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+                teshi_agent::pipeline::GenerationStage::Complete
             );
             let points = &app
                 .authoring_ui
@@ -21165,34 +21618,9 @@ mod tests {
             assert_eq!(points.len(), 1);
             assert_eq!(
                 points[0].review_state,
-                teshi_core::authoring::ReviewState::Proposed
+                teshi_core::authoring::ReviewState::Approved
             );
             assert!(project.path().join("testpoints/testpoints.json").exists());
-            assert!(!project.path().join("blocked.feature").exists());
-            let result: serde_json::Value =
-                serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
-            assert_eq!(result[0]["isError"], false);
-            assert_eq!(result[1]["isError"], false);
-            assert_eq!(result[2]["isError"], true);
-            assert_eq!(result[3]["isError"], true);
-            // Use the same review state and continue action that the TUI uses;
-            // an external agent must not be able to grant this approval itself.
-            assert!(crate::test_points_tab::TestPointsUiState::approve(
-                &mut app
-                    .authoring_ui
-                    .artifacts
-                    .as_mut()
-                    .unwrap()
-                    .test_points
-                    .test_points[0]
-            ));
-            app.approval_mode = teshi_agent::approval::ApprovalMode::Auto;
-            app.active_tab = MainTab::TestPoints;
-            app.handle_action(Action::TpContinueGeneration).unwrap();
-            wait_mcp_fixture(&mut app, |app| {
-                app.agents[0].backend.status()
-                    == teshi_agent::backend::AgentBackendStatus::Completed
-            });
             let result: serde_json::Value =
                 serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
             for (index, result) in result.as_array().unwrap().iter().enumerate() {
@@ -21338,7 +21766,7 @@ mod tests {
     }
 
     #[test]
-    fn native_propose_test_points_enters_human_review_without_followup() {
+    fn native_propose_test_points_advances_to_planning_without_gate() {
         let (mut app, _project, _store) = requirements_test_app();
         teshi_agent::execute_tool(
             &mut app,
@@ -21357,24 +21785,27 @@ mod tests {
             tool_calls: vec![crate::llm::ToolCall {
                 id: "proposal".into(),
                 name: "propose_test_points".into(),
-                arguments: r#"{"test_points":[{"title":"Valid login","objective":"User authenticates","hierarchy_path":["Auth","Login"]}]}"#.into(),
+                arguments:
+                    r#"{"test_points":[{"title":"Valid login","hierarchy_path":["Auth","Login"]}]}"#
+                        .into(),
                 execution_duration_ms: None,
             }],
             reasoning_content: None,
             input_tokens: None,
             output_tokens: None,
             finish_reason: None,
-        }).unwrap();
+        })
+        .unwrap();
         app.poll_llm_events();
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            teshi_agent::pipeline::GenerationStage::Planning
         );
-        assert_eq!(
+        assert_ne!(
             app.agents[0].backend.status(),
             teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
-        assert_eq!(app.agents[0].status, AiStatus::Idle);
+        assert_eq!(app.agents[0].messages().len(), 2);
         assert_eq!(
             app.authoring_ui
                 .artifacts
@@ -21388,7 +21819,7 @@ mod tests {
     }
 
     #[test]
-    fn native_model_proposal_pauses_before_another_request() {
+    fn native_model_proposal_continues_to_followup_request() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -21398,12 +21829,15 @@ mod tests {
                 .unwrap();
             let mut request = [0u8; 8192];
             assert!(socket.read(&mut request).unwrap() > 0);
-            let args = serde_json::json!({"test_points":[{"title":"Valid login","objective":"User authenticates","hierarchy_path":["Auth","Login"]}]}).to_string();
+            let args = serde_json::json!({"test_points":[{"title":"Valid login","hierarchy_path":["Auth","Login"]}]}).to_string();
             let body = serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"proposal","type":"function","function":{"name":"propose_test_points","arguments":args}}]}}]}).to_string();
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            listener.set_nonblocking(true).unwrap();
-            thread::sleep(Duration::from_millis(200));
-            listener.accept().is_ok()
+            let (mut socket2, _) = listener.accept().unwrap();
+            let mut req2 = [0u8; 8192];
+            let _ = socket2.read(&mut req2);
+            let done_body = serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":"Done"}}]}).to_string();
+            write!(socket2, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", done_body.len(), done_body).unwrap();
+            true
         });
         let (mut app, _project, _store) = requirements_test_app();
         teshi_agent::execute_tool(
@@ -21449,21 +21883,14 @@ mod tests {
         }
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
-        );
-        assert_eq!(
-            app.agents[0].backend.status(),
-            teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
+            teshi_agent::pipeline::GenerationStage::Planning
         );
         app.active_tab = MainTab::TestPoints;
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
-        assert!(
-            !server.join().unwrap(),
-            "human review must prevent another model request"
-        );
+        assert!(server.join().unwrap(), "streamlined runtime must continue");
     }
 
     #[test]
@@ -22536,9 +22963,8 @@ mod tests {
 
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            teshi_agent::pipeline::GenerationStage::Planning
         );
-        assert!(app.status.contains("approve at least one test point"));
     }
 
     /// Waits for the launch selection to install the first discovered Feature.
@@ -24242,7 +24668,7 @@ mod tests {
     }
 
     #[test]
-    fn test_test_points_review_state_transitions() {
+    fn test_test_points_field_edits_keep_approved_without_review_reset() {
         use crate::test_points_tab::{DetailField, TestPointsUiState};
         use teshi_core::authoring::{HierarchyPath, QuoteSelector, ReviewState, TestPoint};
 
@@ -24253,7 +24679,7 @@ mod tests {
             preconditions: None,
             expected_outcomes: None,
             hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
-            review_state: ReviewState::Proposed,
+            review_state: ReviewState::Approved,
             requirement_links: vec![teshi_core::authoring::RequirementLink {
                 store_id: None,
                 document_id: "doc-1".into(),
@@ -24269,20 +24695,12 @@ mod tests {
             scenario_refs: Vec::new(),
         };
 
-        assert!(TestPointsUiState::approve(&mut tp));
-        assert_eq!(tp.review_state, ReviewState::Approved);
-
         TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Objective, "Changed objective");
-        assert_eq!(tp.review_state, ReviewState::Proposed);
-
-        assert!(TestPointsUiState::reject(&mut tp));
-        assert_eq!(tp.review_state, ReviewState::Rejected);
-
-        tp.review_state = ReviewState::NeedsReview;
-        assert!(TestPointsUiState::approve(&mut tp));
         assert_eq!(tp.review_state, ReviewState::Approved);
+        assert_eq!(tp.objective, "Changed objective");
 
-        TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Hierarchy, "Billing");
+        TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Hierarchy, "Auth / Billing");
+        assert_eq!(tp.hierarchy_path.as_slice(), &["Auth", "Billing"]);
         assert_eq!(tp.review_state, ReviewState::Approved);
     }
 
@@ -25040,6 +25458,7 @@ mod tests {
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -25269,6 +25688,7 @@ Feature: B
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),

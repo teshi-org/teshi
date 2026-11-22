@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn save_and_restore_keeps_review_without_approving() {
+    fn save_and_restore_advances_review_stage_to_planning() {
         let dir = tempdir().unwrap();
         let state = GenerationSessionState {
             stage: GenerationStage::ReviewingTestPoints,
@@ -117,9 +117,9 @@ mod tests {
         };
         save_generation_state(dir.path(), &state).unwrap();
         let (stage, restored) = restore_generation_session(dir.path(), &[proposed_tp()]).unwrap();
-        assert_eq!(stage, GenerationStage::ReviewingTestPoints);
+        assert_eq!(stage, GenerationStage::Planning);
         let restored = restored.expect("state");
-        assert_eq!(restored.stage, GenerationStage::ReviewingTestPoints);
+        assert_eq!(restored.stage, GenerationStage::Planning);
         assert_eq!(proposed_tp().review_state, ReviewState::Proposed);
     }
 

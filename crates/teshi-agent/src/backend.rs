@@ -155,15 +155,15 @@ mod tests {
     }
 
     #[test]
-    fn approval_modes_do_not_bypass_human_test_point_review_gate() {
+    fn approval_modes_never_stall_in_human_test_point_review_gate() {
         for mode in [
             ApprovalMode::Manual,
             ApprovalMode::Auto,
             ApprovalMode::Bypass,
         ] {
             assert!(
-                GenerationStage::ReviewingTestPoints.is_human_review_gate(),
-                "{mode:?} must not change review-gate semantics"
+                !GenerationStage::ReviewingTestPoints.is_human_review_gate(),
+                "{mode:?} must not block on abolished review gate"
             );
         }
     }

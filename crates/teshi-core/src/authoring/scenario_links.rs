@@ -6,7 +6,7 @@
 //! - Multiple IDs ⇒ multiple tags (avoids comma-in-ID ambiguity)
 //! - Existing scenarios with no `@teshi-tp:*` tags are treated as unlinked
 
-use crate::authoring::testpoints::{ScenarioRef, TestPoint};
+use crate::authoring::testpoints::{HierarchyPath, ReviewState, ScenarioRef, TestPoint};
 use crate::gherkin::BddProject;
 
 /// Prefix for Teshi test-point tags embedded in Gherkin.
@@ -179,6 +179,86 @@ pub fn sync_scenario_refs_from_project(project: &BddProject, test_points: &mut [
             }
         }
     }
+}
+
+/// Extracts scenarios in `project` that have no `@teshi-tp:*` link yet into concise [`TestPoint`]s.
+///
+/// Appends new approved test points to `existing` and returns `(feature_idx, scenario_name, tp_id)`
+/// for each extracted scenario so callers can also embed `@teshi-tp:<id>` tags into `.feature` files.
+pub fn extract_unlinked_scenarios_as_test_points(
+    project: &BddProject,
+    existing: &mut Vec<TestPoint>,
+) -> Vec<(usize, String, String)> {
+    let mut next_num = existing
+        .iter()
+        .filter_map(|tp| tp.id.strip_prefix("tp-")?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut created = Vec::new();
+    let root = &project.root_dir;
+
+    for (fi, feature) in project.features.iter().enumerate() {
+        let feature_path = feature
+            .file_path
+            .strip_prefix(root)
+            .unwrap_or(&feature.file_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let branch_name = {
+            let trimmed = feature.name.trim();
+            if trimmed.is_empty() {
+                feature
+                    .file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Feature")
+                    .to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
+
+        for sc in feature.all_scenarios() {
+            if !parse_teshi_tp_tags_for_test_points(&sc.tags, existing).is_empty() {
+                continue;
+            }
+            let already_linked = existing.iter().any(|tp| {
+                tp.scenario_refs.iter().any(|r| {
+                    r.feature_path == feature_path
+                        && r.scenario_name.as_deref() == Some(sc.name.as_str())
+                })
+            });
+            if already_linked {
+                continue;
+            }
+            let new_id = format!("tp-{next_num}");
+            next_num += 1;
+            let title = if sc.name.trim().is_empty() {
+                format!("Scenario line {}", sc.line_number)
+            } else {
+                sc.name.trim().to_string()
+            };
+            existing.push(TestPoint {
+                id: new_id.clone(),
+                title,
+                objective: String::new(),
+                preconditions: None,
+                expected_outcomes: None,
+                hierarchy_path: HierarchyPath::new(vec![branch_name.clone()]),
+                review_state: ReviewState::Approved,
+                requirement_links: Vec::new(),
+                scenario_refs: vec![ScenarioRef {
+                    feature_path: feature_path.clone(),
+                    scenario_name: Some(sc.name.clone()),
+                    scenario_line: Some(sc.line_number),
+                }],
+            });
+            created.push((fi, sc.name.clone(), new_id));
+        }
+    }
+
+    created
 }
 
 #[cfg(test)]

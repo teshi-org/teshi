@@ -223,20 +223,42 @@ pub enum Action {
     GenerationScopeCancel,
     /// Change the pending generation iteration without starting gathering.
     GenerationScopeChangeIteration,
-    // Test Points tab review and navigation
+    // Test Points 2D MindMap canvas, CRUD, and linked workflow
     TpApprove,
     TpReject,
     TpBatchApprove,
     TpReviewFilter,
     TpFollowExcerpt,
-    /// Human-only: advance from Reviewing Test Points to Planning.
+    /// Advance from legacy review stage to Planning.
     TpContinueGeneration,
     /// Open a realized Gherkin scenario linked from the selected test point.
     TpFollowScenario,
-    /// Start editing the selected test-point field.
+    /// Start editing the selected test-point field in Inspector.
     TpEnterInsert,
-    /// Commit the field and return to Normal mode.
+    /// Commit the field or inline box edit and return to Normal mode.
     TpExitInsert,
+    /// Add a child test point beneath the selected node (`a`).
+    TpAddChild,
+    /// Add a sibling test point alongside the selected node (`n` / `O`).
+    TpAddSibling,
+    /// Start inline editing on the selected canvas node (`i` / `e` / `Enter`).
+    TpInlineEdit,
+    /// Delete the selected test point or branch subtree (`d` / `Delete`).
+    TpDeleteNode,
+    /// Undo the last Test Points MindMap edit (`u`).
+    TpUndo,
+    /// Redo the undone Test Points MindMap edit (`Ctrl+R`).
+    TpRedo,
+    /// Collapse or expand the selected MindMap branch (`Space`).
+    TpToggleCollapse,
+    /// Scaffold or link a `.feature` scenario for the selected test point (`g`).
+    TpGenerateFeature,
+    /// Reverse-extract unlinked Scenarios from `.feature` files into Test Points (`S`).
+    TpSyncFromFeatures,
+    /// Execute linked scenarios for the selected test point/branch (`r`).
+    TpRunTestPoint,
+    /// Toggle fullscreen 2D MindMap canvas vs 72/28 Inspector split (`z`).
+    TpToggleFullscreen,
     /// Confirm a pending model/session deletion.
     DeleteConfirm,
     /// Cancel a pending model/session deletion.
@@ -1245,6 +1267,7 @@ impl Action {
                 }
                 (KeyCode::Char('g'), KeyModifiers::NONE)
                     if !chat_browsing
+                        && context.active_tab != MainTab::TestPoints
                         && (context.active_tab != MainTab::Requirements
                             || context.requirements_focus == RequirementsFocus::Editor) =>
                 {
@@ -1659,10 +1682,9 @@ impl Action {
             };
         }
 
-        // Test Points tab: three-pane navigation, editing, and review
+        // Test Points tab: 2D MindMap canvas + Linked Inspector + inline CRUD
         if context.active_tab == MainTab::TestPoints {
-            if context.test_points_focus == TestPointsFocus::Details && context.test_points_editing
-            {
+            if context.test_points_editing {
                 return match (event.code, event.modifiers) {
                     (KeyCode::Esc, _) | (KeyCode::Enter, KeyModifiers::NONE) => {
                         Some(Self::TpExitInsert)
@@ -1698,39 +1720,56 @@ impl Action {
                 (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
                 (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE)
-                    if context.test_points_focus == TestPointsFocus::Details =>
+                    if context.test_points_focus == TestPointsFocus::Excerpts =>
                 {
-                    Some(Self::MoveLeft)
-                }
-                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::FocusPrevColumn)
                 }
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::MoveLeft)
+                }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE)
-                    if context.test_points_focus == TestPointsFocus::Details =>
+                    if context.test_points_focus == TestPointsFocus::Excerpts =>
                 {
-                    Some(Self::MoveRight)
+                    Some(Self::FocusNextColumn)
                 }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                    Some(Self::FocusNextColumn)
+                    Some(Self::MoveRight)
                 }
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::MoveUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
                 }
+                (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::TpToggleCollapse),
                 (KeyCode::Enter, _) if context.test_points_focus == TestPointsFocus::Excerpts => {
                     Some(Self::TpFollowExcerpt)
                 }
-                (KeyCode::Char('i'), KeyModifiers::NONE) | (KeyCode::Enter, _)
+                (KeyCode::Char('i'), KeyModifiers::NONE)
+                | (KeyCode::Char('e'), KeyModifiers::NONE)
+                | (KeyCode::Enter, _)
                     if context.test_points_focus == TestPointsFocus::Details =>
                 {
                     Some(Self::TpEnterInsert)
                 }
-                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::TpApprove),
-                (KeyCode::Char('A'), KeyModifiers::SHIFT) => Some(Self::TpBatchApprove),
-                (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::TpReject),
-                (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::TpReviewFilter),
-                (KeyCode::Char('c'), KeyModifiers::NONE) => Some(Self::TpContinueGeneration),
+                (KeyCode::Char('i'), KeyModifiers::NONE)
+                | (KeyCode::Char('e'), KeyModifiers::NONE)
+                | (KeyCode::Enter, _) => Some(Self::TpInlineEdit),
+                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::TpAddChild),
+                (KeyCode::Char('n'), KeyModifiers::NONE)
+                | (KeyCode::Char('O'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    Some(Self::TpAddSibling)
+                }
+                (KeyCode::Char('d'), KeyModifiers::NONE)
+                | (KeyCode::Delete, KeyModifiers::NONE) => Some(Self::TpDeleteNode),
+                (KeyCode::Char('u'), KeyModifiers::NONE) => Some(Self::TpUndo),
+                (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::TpRedo),
+                (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::TpGenerateFeature),
+                (KeyCode::Char('S'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    Some(Self::TpSyncFromFeatures)
+                }
+                (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::TpRunTestPoint),
                 (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::TpFollowScenario),
+                (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::TpReviewFilter),
+                (KeyCode::Char('z'), KeyModifiers::NONE) => Some(Self::TpToggleFullscreen),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
@@ -2118,9 +2157,7 @@ fn pane_navigation_allowed(context: KeyContext) -> bool {
     {
         return false;
     }
-    !(context.active_tab == MainTab::TestPoints
-        && context.test_points_focus == TestPointsFocus::Details
-        && context.test_points_editing)
+    !(context.active_tab == MainTab::TestPoints && context.test_points_editing)
 }
 
 #[cfg(test)]
@@ -2171,10 +2208,24 @@ mod tests {
         }
         assert_eq!(
             Action::from_key_event(
-                KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
                 normal
             ),
-            Some(Action::TpBatchApprove)
+            Some(Action::TpAddChild)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                normal
+            ),
+            Some(Action::TpGenerateFeature)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+                normal
+            ),
+            Some(Action::TpToggleFullscreen)
         );
     }
 

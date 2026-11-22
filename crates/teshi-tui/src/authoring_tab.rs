@@ -1894,7 +1894,7 @@ impl AuthoringUiState {
         line_col_range_to_char_range(&body, anchor, end)
     }
 
-    /// Creates a `Proposed` test point from the current non-empty selection.
+    /// Creates an immediately ready (`Approved`) test point from the current non-empty selection.
     pub fn create_test_point_from_selection(&mut self) -> Option<String> {
         let doc_meta = self.current_document_meta()?.clone();
         let range = self.selection_char_range()?;
@@ -1921,7 +1921,7 @@ impl AuthoringUiState {
             preconditions: None,
             expected_outcomes: None,
             hierarchy_path: HierarchyPath::new(vec!["Uncategorized".into()]),
-            review_state: ReviewState::Proposed,
+            review_state: ReviewState::Approved,
             requirement_links: vec![link],
             scenario_refs: Vec::new(),
         };
@@ -3593,7 +3593,7 @@ mod tests {
             .iter()
             .find(|t| t.id == id)
             .unwrap();
-        assert_eq!(tp.review_state, ReviewState::Proposed);
+        assert_eq!(tp.review_state, ReviewState::Approved);
         assert_eq!(tp.requirement_links.len(), 1);
     }
 
@@ -3654,7 +3654,7 @@ mod tests {
             .as_slice()
         );
         let test_point = &state.artifacts.as_ref().unwrap().test_points.test_points[0];
-        assert_eq!(test_point.review_state, ReviewState::NeedsReview);
+        assert_eq!(test_point.review_state, ReviewState::Approved);
         assert_eq!(
             test_point.requirement_links[0].resolution,
             ResolutionState::Stale
@@ -3760,7 +3760,7 @@ mod tests {
             deleted_point.requirement_links[0].resolution,
             ResolutionState::Stale
         );
-        assert_eq!(deleted_point.review_state, ReviewState::NeedsReview);
+        assert_eq!(deleted_point.review_state, ReviewState::Approved);
     }
 
     #[test]
