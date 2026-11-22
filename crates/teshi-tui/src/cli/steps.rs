@@ -7,11 +7,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_engine::{
-    DaemonManifestExt, HighlightInfo, LocatorCandidate, PendingLocator, StepWaitUntil,
-    confirm_pending_locator, first_unbound_feature_step, list_feature_step_refs,
-    list_step_bindings, propose_locator, read_active_step, reject_pending_locator,
-    resolve_step_bindings, send_sidecar_command, step_binding_statuses, unbind_step_binding,
-    wait_for_step_status, write_active_step,
+    DaemonManifestExt, HighlightInfo, LocatorCandidate, PendingLocator, StepBindingAttach,
+    StepBindingTarget, StepWaitUntil, confirm_pending_locator, first_unbound_feature_step,
+    list_feature_step_refs, list_step_bindings, propose_locator, read_active_step,
+    reject_pending_locator, resolve_step_bindings, send_sidecar_command, set_step_binding_target,
+    step_binding_statuses, unbind_step_binding, wait_for_step_status, write_active_step,
 };
 
 use super::check::preflight_feature;
@@ -20,8 +20,8 @@ use teshi_core::{BddProject, StepIndex};
 
 use super::{
     StepsCatalogArgs, StepsCommand, StepsConfirmArgs, StepsFeatureArgs, StepsListArgs,
-    StepsProposeArgs, StepsResolveArgs, StepsSelectArgs, StepsUnbindArgs, StepsWaitArgs,
-    WaitUntilArg,
+    StepsProposeArgs, StepsResolveArgs, StepsSelectArgs, StepsSetTargetArgs, StepsUnbindArgs,
+    StepsWaitArgs, WaitUntilArg,
 };
 
 const VALIDATION_REPORT_HEADER: &str = "x-teshi-validation-report";
@@ -50,6 +50,7 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
         StepsCommand::Resolve(args) => resolve(&project_root, args),
         StepsCommand::List(args) => list(&project_root, args),
         StepsCommand::Unbind(args) => unbind(&project_root, args),
+        StepsCommand::SetTarget(args) => set_target(&project_root, args),
     }
 }
 
@@ -72,6 +73,7 @@ fn steps_project_root(action: &StepsCommand) -> std::path::PathBuf {
         StepsCommand::Resolve(args) => args.feature.as_deref(),
         StepsCommand::List(args) => args.feature.as_deref(),
         StepsCommand::Unbind(args) => Some(args.feature.as_str()),
+        StepsCommand::SetTarget(args) => Some(args.feature.as_str()),
         _ => None,
     };
     match feature.map(Path::new) {
@@ -160,6 +162,7 @@ fn handle_steps_via_daemon(
                 StepsCommand::Resolve(args) => resolve(project_root, args),
                 StepsCommand::List(args) => list(project_root, args),
                 StepsCommand::Unbind(args) => unbind(project_root, args),
+                StepsCommand::SetTarget(args) => set_target(project_root, args),
                 _ => unreachable!(),
             };
         }
@@ -423,6 +426,56 @@ fn unbind(project_root: &Path, args: &StepsUnbindArgs) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn set_target(project_root: &Path, args: &StepsSetTargetArgs) -> Result<()> {
+    preflight_feature(project_root, &args.feature)?;
+    let target = if args.clear {
+        None
+    } else {
+        let attach = StepBindingAttach {
+            hwnd: args.hwnd,
+            title: args.title.clone(),
+            pid: args.pid,
+            process_name: args.process_name.clone(),
+        };
+        let attach = (!attach.is_empty()).then_some(attach);
+        if args
+            .profile
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+            && attach.is_none()
+        {
+            anyhow::bail!(
+                "set-target requires --profile and/or an attach selector (--title/--process-name/--pid/--hwnd), or pass --clear"
+            );
+        }
+        if let Some(name) = args.profile.as_deref() {
+            teshi_engine::load_target_profile(project_root, name)?.ok_or_else(|| {
+                anyhow!("target profile `{name}` is missing from teshi.toml; add [targets.{name}]")
+            })?;
+        }
+        Some(StepBindingTarget {
+            kind: args.kind.clone(),
+            profile: args
+                .profile
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            attach,
+        })
+    };
+    let bindings = set_step_binding_target(project_root, &args.feature, target)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "ok": true,
+            "feature": bindings.feature,
+            "format_version": bindings.format_version,
+            "target": bindings.target
+        }))?
+    );
     Ok(())
 }
 

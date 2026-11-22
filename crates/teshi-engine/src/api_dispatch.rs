@@ -265,6 +265,24 @@ pub fn dispatch_cases<F>(
 where
     F: FnMut(Value),
 {
+    let run = crate::replay_evidence::ReplayEvidenceRun::create(project_root)?;
+    dispatch_cases_in_run(project_root, script, cases, run, &mut emit)
+}
+
+/// Fill an evidence run the caller already created and exposed to its UI.
+///
+/// # Errors
+/// Returns validation, execution, persistence, or acceptance errors.
+pub fn dispatch_cases_in_run<F>(
+    project_root: &Path,
+    script: &Path,
+    cases: &[DispatchCase],
+    run: crate::replay_evidence::ReplayEvidenceRun,
+    mut emit: F,
+) -> Result<()>
+where
+    F: FnMut(Value),
+{
     for case in cases {
         let report = validate_feature_scope(project_root, Some(&case.feature_path))?;
         anyhow::ensure!(
@@ -273,7 +291,6 @@ where
             serde_json::to_string(&report)?
         );
     }
-    let run = crate::replay_evidence::ReplayEvidenceRun::create(project_root)?;
     dispatch_recorded(project_root, script, cases, run, &mut emit)
 }
 

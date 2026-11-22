@@ -25,19 +25,10 @@ else
     echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ---- 2. cargo check --------------------------------------------------------
-echo ":: Compilation check (cargo check) ..."
+# ---- 2. cargo check --locked ---------------------------------------------
+echo ":: Compilation & lock file check (cargo check --locked) ..."
 if ! cargo check --workspace --exclude teshi-web --locked 2>/dev/null; then
-    echo -e "${RED}   x  Compilation errors.${NC}"
-    PASS=false
-else
-    echo -e "${GREEN}   - OK${NC}"
-fi
-
-# ---- 2b. cargo check --locked ---------------------------------------------
-echo ":: Lock file check (cargo check --locked) ..."
-if ! cargo check --workspace --exclude teshi-web --locked 2>/dev/null; then
-    echo -e "${RED}   x  Cargo.lock is out of sync. Run 'cargo check' and stage Cargo.lock too.${NC}"
+    echo -e "${RED}   x  Compilation errors or Cargo.lock is out of sync. Fix errors or stage Cargo.lock.${NC}"
     PASS=false
 else
     echo -e "${GREEN}   - OK${NC}"

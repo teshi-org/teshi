@@ -1,0 +1,43 @@
+{
+  "format_version": 3,
+  "feature": "features/zh-CN/WinApp/窗口/否定UIA断言.feature",
+  "target": {
+    "kind": "winapp",
+    "profile": "teshi-desktop",
+    "attach": {
+      "title": "teshi"
+    }
+  },
+  "steps": [
+    {
+      "step_line": 8,
+      "step_keyword": "假如",
+      "step_text": "teshi 桌面窗口可见",
+      "step_text_normalized": "teshi 桌面窗口可见",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "capture_before": false,
+        "strategy": "uia",
+        "value": "uia:control_type=WindowControl;name=teshi",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-11-21T09:51:00+00:00"
+    },
+    {
+      "step_line": 9,
+      "step_keyword": "那么",
+      "step_text": "缺失的原生标记不存在",
+      "step_text_normalized": "缺失的原生标记不存在",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "capture_before": false,
+        "strategy": "uia",
+        "value": "uia:control_type=ButtonControl;name=Teshi missing marker",
+        "action": "assert_not_exists"
+      },
+      "confirmed_at": "2026-11-21T09:51:00+00:00"
+    }
+  ]
+}

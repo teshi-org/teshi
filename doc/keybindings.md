@@ -84,6 +84,8 @@ work while the prompt is open, and a left click closes it.
 | Tab | Next column; in Run Details, next inner tab |
 | Home/End, `gg/G` | First/last row (or first/last Run Details item) |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Navigate approximately ten rows; in Run Details, scroll the content without moving the selected step |
+| `[` / `]` | Run Details: previous (older) / next (newer) run for the selected scenario |
+| `H` | Run Details: open/close the run-history selector |
 | Enter | Run Details primary action: fullscreen a screenshot, open a recording or unknown artifact, or expand the selected HTTP exchange |
 | Space | Expand/collapse the selected Run Details item; HTTP bodies stay unloaded until this key |
 | `o` | Open the selected Run Details artifact or HTTP URL in the system opener |
@@ -105,25 +107,44 @@ carries the last run's tally on its right edge (for example
 ### Run Details
 
 The pane header always shows the scenario, a solid status chip, the duration,
-the selected step, and its runner correlation id. Inner tabs appear only for
-content families that exist: **Screenshots**, **API**, **Logs**, and **Files**.
-`j/k` selects a row inside the active family; changing the Steps selection
-updates the pane immediately without moving focus.
+the selected step, and its runner correlation id. The right edge of that row
+holds the run selector: `11-21 06:32 · LATEST ▾` when the newest run is shown,
+or `11-21 06:26 ▾` for an older one. Click it or press `H` to open the run list;
+`[`/`]` switch runs without opening it. In the open list, `j/k` (or Up/Down)
+moves, `Enter` opens the highlighted run, `L` jumps to the newest, and `Esc`
+closes it. Inner tabs appear only for content families that exist:
+**Screenshots**, **API**, **Logs**, and **Files**. `j/k` selects a row
+inside the active family; changing the Steps selection updates the pane
+immediately without moving focus.
+
+Every family comes from the same run. The default is the newest run that
+recorded the scenario, including a run still in progress; an older run can be
+selected for comparison. The selector list marks the run currently shown with
+`●`; the first row is always the newest, so it does not repeat `LATEST`.
+Screenshots no longer fall back to an older run that happened to capture the
+step, and a newest run with no captures leaves the Screenshots tab empty. A run
+with only case-level results explains that no step-level screenshots, API or
+logs were recorded. Runs written before the current evidence schema are not
+listed.
 
 HTTP bodies are collapsed by default: the folded rows report header counts and
-body sizes. `Space` renders the redacted request/response bodies; `p` still
-expands plaintext through the running API sidecar. Screenshots draw inline when
-the terminal has a graphics protocol and otherwise keep the same rows with
-`preview unavailable` plus the project-relative path. Recordings and unknown
-artifact kinds keep their path and `Enter` hands them to the system opener.
-Evidence paths must resolve under `.teshi/logs/replay-screenshots/<run>/`;
-anything outside that root is shown but cannot be opened.
+body sizes. `Space` renders the redacted request/response bodies; `p` expands
+plaintext through a running API sidecar for live runs only. Screenshots draw
+inline when the terminal has a graphics protocol and otherwise keep the same
+rows with `preview unavailable` plus the project-relative path. Recordings and
+unknown artifact kinds keep their path and `Enter` hands them to the system
+opener. Evidence paths must resolve under
+`.teshi/logs/replay-screenshots/<run>/`; anything outside that root is shown
+but cannot be opened.
 
 ### Mouse
 
 - Click a **Run Details** inner tab to switch family; the click also focuses the
   pane and pins that tab for the selected step.
-- Click a screenshot, HTTP exchange, log line, recording, or unknown artifact
+- Click the **run selector** to open the history list; click a row to show that
+  run, or click anywhere else to close the list.
+- Click a screenshot in Run Details to open the fit/zoom viewer; click an HTTP
+  exchange, log line, recording, or unknown artifact
   block to select it and focus Run Details. The selected block stays highlighted.
 - Click empty pane chrome to focus Run Details without changing the selected row.
 - The wheel scrolls Run Details content under the pointer without moving the
@@ -194,8 +215,9 @@ terminals fall back to the whole tab. Closing the viewer moves the Steps
 selection to the capture that was last shown. `i` is retired everywhere and no
 longer opens the viewer.
 
-The viewer shows the captures recorded for the selected scenario by
-the newest replay run that has them. `j/k` switch between steps. `+`/`=` and
+The viewer shows the captures of the run selected in Explore; the Scenarios
+and Steps markers follow each scenario's newest run. `j/k` switch between
+steps. `+`/`=` and
 `-` zoom, `1` selects 100 percent, and `0`/`f` resets to fit. In a zoomed view,
 arrow keys pan through original pixels; `h/l` also pan horizontally. In fit
 view, Up/Down retain step navigation. `o` opens the original in the system

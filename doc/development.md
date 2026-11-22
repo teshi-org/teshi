@@ -166,11 +166,12 @@ cargo fmt --all --check                                           # check format
 ### Preflight and hooks
 
 `scripts/preflight.sh` (POSIX) and `scripts/preflight.ps1` (Windows) run the same
-checks CI enforces: workspace and terminal-runner formatting, both clippy runs,
-and both test suites (`--no-tests` / `-NoTests` skips the tests). Enable the
+fast and Rust checks CI enforces: workspace and terminal-runner formatting, fast
+Python catalog/partition/workflow contract checks, both test suites (`--no-tests` /
+`-NoTests` skips the Rust test runs), and both clippy runs. Enable the
 optional hooks once with `git config core.hooksPath .githooks`; `pre-commit`
-keeps the version and `dbg!` checks, and `pre-push` runs the preflight before
-the release-tag gate.
+keeps the formatting, compilation, version, and `dbg!` checks, and `pre-push` runs
+the preflight before the release-tag gate.
 
 ### Test layout
 

@@ -35,6 +35,7 @@ mod prompt_history;
 mod runner;
 
 pub use runner::{RUN_BLOCKED_EXIT_CODE, RunBlocked};
+mod run_history;
 mod session;
 mod terminal_title;
 mod test_frame;
@@ -484,6 +485,9 @@ pub fn run() -> Result<()> {
                         continue;
                     }
                     if app.handle_screenshot_key(key_event) {
+                        continue;
+                    }
+                    if app.handle_run_menu_key(key_event) {
                         continue;
                     }
                     // The project picker reserves j/k for recent-entry

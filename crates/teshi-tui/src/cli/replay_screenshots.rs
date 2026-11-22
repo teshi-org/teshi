@@ -22,6 +22,7 @@ pub fn create_cli_replay(
 }
 
 /// Step identity and execution outcome recorded by a CLI replay.
+#[derive(Clone, Copy)]
 pub struct CliReplayStep<'a> {
     /// Source Feature path relative to the project.
     pub feature: &'a str,
@@ -51,6 +52,32 @@ pub fn record_cli_step(
     step: CliReplayStep<'_>,
     entry: Option<&ReplayScreenshotEntry>,
 ) -> Result<()> {
+    let feature = step.feature;
+    let passed = step.passed;
+    let event = cli_step_event(project, step, entry);
+    run.record(event)?;
+    let mut index = load_or_create_index(run.directory(), feature);
+    index.feature = feature.to_string();
+    if !passed {
+        index.status = "failed".into();
+        index.completed_at = Some(iso_now());
+    }
+    save_index(run.directory(), &index)?;
+    if !passed {
+        run.record(json!({"type":"end_run", "failed":1}))?;
+    }
+    Ok(())
+}
+
+/// Protocol event describing one replayed step and its capture.
+///
+/// A TUI-owned run records this directly; a replay given an external evidence
+/// directory prints it so the owning process can record it.
+pub fn cli_step_event(
+    project: &Path,
+    step: CliReplayStep<'_>,
+    entry: Option<&ReplayScreenshotEntry>,
+) -> serde_json::Value {
     let CliReplayStep {
         feature,
         identity,
@@ -97,18 +124,7 @@ pub fn record_cli_step(
     } else {
         "after_step"
     });
-    run.record(event)?;
-    let mut index = load_or_create_index(run.directory(), feature);
-    index.feature = feature.to_string();
-    if !passed {
-        index.status = "failed".into();
-        index.completed_at = Some(iso_now());
-    }
-    save_index(run.directory(), &index)?;
-    if !passed {
-        run.record(json!({"type":"end_run", "failed":1}))?;
-    }
-    Ok(())
+    event
 }
 
 /// One JPEG captured after a replayed Gherkin step.

@@ -307,6 +307,7 @@ fn read_step_bindings_file(
         return Ok(StepBindingsFile {
             format_version: 2,
             feature: feature_relative_path.to_string(),
+            target: None,
             steps: Vec::new(),
         });
     }
@@ -316,7 +317,7 @@ fn read_step_bindings_file(
 fn write_step_bindings_file(project_root: &Path, bindings: &StepBindingsFile) -> Result<()> {
     let path = step_bindings_path(project_root, &bindings.feature);
     let mut normalized = bindings.clone();
-    normalized.format_version = 2;
+    normalized.format_version = if normalized.target.is_some() { 3 } else { 2 };
     normalized.steps.sort_by(|a, b| {
         a.step_line
             .cmp(&b.step_line)
@@ -621,6 +622,41 @@ pub fn list_step_bindings(
     feature_relative_path: &str,
 ) -> Result<StepBindingsFile> {
     read_step_bindings_file(project_root, feature_relative_path)
+}
+
+/// Reads the feature-level execution target recorded with the bindings.
+///
+/// # Errors
+/// Returns an error when an existing binding file cannot be parsed.
+pub fn step_binding_target(
+    project_root: &Path,
+    feature_relative_path: &str,
+) -> Result<Option<teshi_core::locator::StepBindingTarget>> {
+    Ok(list_step_bindings(project_root, feature_relative_path)?.target)
+}
+
+/// Writes or clears the feature-level execution target on a bindings file.
+///
+/// Passing `None` removes the target and keeps format version 2. A non-empty
+/// target bumps the file to format version 3 so replay can prepare the window
+/// or browser before the first case.
+///
+/// # Errors
+/// Returns an error when the feature path is invalid or the bindings file
+/// cannot be read or written.
+pub fn set_step_binding_target(
+    project_root: &Path,
+    feature_relative_path: &str,
+    target: Option<teshi_core::locator::StepBindingTarget>,
+) -> Result<StepBindingsFile> {
+    let feature_relative = normalize_feature_relative_path(project_root, feature_relative_path)?;
+    let mut bindings = read_step_bindings_file(project_root, &feature_relative)?;
+    bindings.feature = feature_relative;
+    bindings.target = target;
+    // Keep the in-memory copy aligned with what write_step_bindings_file persists.
+    bindings.format_version = if bindings.target.is_some() { 3 } else { 2 };
+    write_step_bindings_file(project_root, &bindings)?;
+    Ok(bindings)
 }
 
 /// Removes a confirmed binding for one step line.
@@ -1094,6 +1130,49 @@ mod tests {
             bindings.steps[0].primary.value,
             "uia:automation_id=LoginButton"
         );
+    }
+
+    #[test]
+    fn set_step_binding_target_bumps_format_version_and_clears() {
+        let dir = TempDir::new().unwrap();
+        let feature_path = dir.path().join("native.feature");
+        fs::write(
+            &feature_path,
+            "Feature: Native\n\n  Scenario: Ready\n    Given the window is visible\n",
+        )
+        .unwrap();
+
+        let written = set_step_binding_target(
+            dir.path(),
+            "native.feature",
+            Some(teshi_core::locator::StepBindingTarget {
+                kind: "winapp".into(),
+                profile: Some("teshi-desktop".into()),
+                attach: Some(teshi_core::locator::StepBindingAttach {
+                    title: Some("teshi".into()),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .unwrap();
+        assert_eq!(written.format_version, 3);
+        assert_eq!(
+            written
+                .target
+                .as_ref()
+                .and_then(|target| target.profile.as_deref()),
+            Some("teshi-desktop")
+        );
+        assert_eq!(
+            step_binding_target(dir.path(), "native.feature")
+                .unwrap()
+                .and_then(|target| target.profile),
+            Some("teshi-desktop".into())
+        );
+
+        let cleared = set_step_binding_target(dir.path(), "native.feature", None).unwrap();
+        assert_eq!(cleared.format_version, 2);
+        assert!(cleared.target.is_none());
     }
 
     #[test]

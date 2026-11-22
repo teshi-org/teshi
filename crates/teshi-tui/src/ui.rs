@@ -3872,7 +3872,12 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else if app.screenshot.refs.is_empty() {
             lines.push(Line::raw("No captured screenshots for this scenario."));
             lines.push(Line::raw(String::new()));
-            let captured = &app.capture_index.entries;
+            let captured: Vec<_> = app
+                .capture_index
+                .entries
+                .iter()
+                .filter(|entry| entry.count > 0)
+                .collect();
             if captured.is_empty() {
                 lines.push(Line::raw("Run a replay for this Feature to capture steps."));
             } else {
@@ -4641,19 +4646,15 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &mut App, editor_area:
 
 /// Renders the Run Details pane beside Steps.
 ///
-/// The header always keeps two rows (scenario/status/duration and step/runner)
-/// plus the inner tab row, so switching families or stepping never moves the
-/// content origin. Content scrolls independently of the Steps selection.
+/// The header keeps two fixed rows (selected step/status/run history, then
+/// inner tabs) so switching families or stepping never moves the content
+/// origin. Content scrolls independently of the Steps selection.
 fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
     app.ensure_detail_shots();
     let block = theme::panel_block("Run Details", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let (body_area, action_area) = split_pane_action_row(inner);
-    if body_area.height == 0 {
         return;
     }
     if !app.explore_edit_mode && area.width > 0 && area.height > 0 {
@@ -4663,29 +4664,37 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
             .push(ClickableRegion::ExploreDetailPane { rect: area });
     }
 
-    let scenario = app
-        .project
-        .features
-        .get(app.explore_selected_feature)
-        .and_then(|feature| feature.scenario_at(app.explore_selected_scenario));
-    let scenario_name = scenario.map_or("-", |scenario| scenario.name.as_str());
     let detail = app.current_detail().cloned();
-    let status = detail
-        .as_ref()
-        .map_or(RunStatus::Idle, |detail| detail.status);
-    let duration = detail.as_ref().and_then(|detail| detail.duration_ms);
-    let step_text = app.explore_selected_step_text().unwrap_or_default();
-    let runner = app.detail_runner_label();
+    let status = app.detail_selection_status();
+    // Target prep replaces the step title briefly while a Feature target is
+    // launching or attaching, so progress stays visible without a third row.
+    let step_text = app
+        .explore_history
+        .target_status()
+        .map(str::to_string)
+        .or_else(|| app.explore_selected_step_text())
+        .unwrap_or_else(|| "-".into());
     let tabs = app.detail_tabs();
     let active_tab = app.active_detail_tab();
+    // Screenshots own the pane: no bottom hint strip, so the fit preview can
+    // use the full remaining height (and reflow when the feature tree hides).
+    let (body_area, action_area) =
+        if matches!(active_tab, Some(crate::app::RunDetailTab::Screenshots)) {
+            (inner, None)
+        } else {
+            split_pane_action_row(inner)
+        };
+    if body_area.height == 0 {
+        return;
+    }
     let item_count = app.detail_item_count();
     if app.explore_details_selection >= item_count {
         app.explore_details_selection = item_count.saturating_sub(1);
     }
     let selection = app.explore_details_selection;
 
-    // Three fixed rows: scenario/status/duration, step/runner, inner tabs.
-    let header_height = 3.min(body_area.height);
+    // Two fixed rows: selected step/status/run history, then inner tabs.
+    let header_height = 2.min(body_area.height);
     let header_area = Rect {
         height: header_height,
         ..body_area
@@ -4697,42 +4706,82 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         height: body_area.height - header_height,
     };
     let (tabs_line, tab_hits) = detail_tabs_line(app, &tabs, active_tab, header_area.width);
+    let run_key = app.current_detail_key();
+    let run_selected = app.explore_history.selected(run_key).unwrap_or(0);
+    let menu_open = app.explore_history.menu().is_some();
+    let run_selector = (!app.explore_edit_mode)
+        .then_some(detail.as_ref())
+        .flatten()
+        .and_then(|detail| detail.started_at.as_deref())
+        .filter(|_| header_area.width > 30)
+        .map(|started| {
+            let time = short_run_time(started);
+            let background = if menu_open {
+                theme::TAB_ACTIVE_BG
+            } else {
+                theme::BLOCK_BG
+            };
+            let mut spans = vec![Span::styled(
+                format!(" {time} "),
+                Style::default().bg(background).fg(theme::FG),
+            )];
+            if run_selected == 0 {
+                spans.push(theme::chip(" LATEST ", theme::PRIMARY));
+            }
+            spans.push(Span::styled(
+                " ▾ ",
+                Style::default().bg(background).fg(theme::MUTED),
+            ));
+            spans
+        });
+    let selector_width = run_selector.as_ref().map_or(0, |spans| {
+        spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum::<usize>() as u16
+    });
     let header = vec![
-        detail_scenario_line(scenario_name, status, duration, header_area.width),
-        detail_step_line(
-            app.explore_selected_step + 1,
-            &step_text,
-            runner.as_deref(),
-            header_area.width,
-        ),
+        detail_step_status_line(&step_text, status, run_selector, header_area.width),
         tabs_line,
     ];
     frame.render_widget(
         Paragraph::new(Text::from(truncate_lines(header, header_area.width))),
         header_area,
     );
-    if !app.explore_edit_mode && header_height == 3 {
+    if !app.explore_edit_mode && header_height == 2 {
         for hit in tab_hits {
             app.clickable_regions
                 .push(ClickableRegion::ExploreDetailTab {
                     tab: hit.tab,
                     rect: Rect::new(
                         header_area.x + hit.x,
-                        header_area.y + 2,
+                        header_area.y + 1,
                         hit.width.min(header_area.width.saturating_sub(hit.x)),
                         1,
                     ),
                 });
         }
+        if selector_width > 0 && selector_width < header_area.width {
+            app.clickable_regions.push(ClickableRegion::ActionButton {
+                rect: Rect::new(
+                    header_area.x + header_area.width - selector_width,
+                    header_area.y,
+                    selector_width,
+                    1,
+                ),
+                action: Action::ExploreRunMenu,
+                modal: false,
+            });
+        }
     }
 
     let pixels = app.inline_images.has_pixels();
-    let preview_rows = (content_area.height / 2).clamp(4, 10);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut content = DetailContent::default();
     match active_tab {
         Some(crate::app::RunDetailTab::Screenshots) => {
             let shots = app.detail_screenshots();
+            // Fill the pane so hiding the feature tree reflows the fit preview.
             content = push_screenshot_rows(
                 &mut lines,
                 app,
@@ -4740,7 +4789,7 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
                 selection,
                 content_area.width,
                 pixels,
-                preview_rows,
+                content_area.height.max(1),
             );
         }
         Some(crate::app::RunDetailTab::Api) => {
@@ -4820,6 +4869,8 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
     }
 
     // Pixels draw over the reserved blank cells after the text frame.
+    // ViewState::Fit already keeps scale ≤ 100% and only shrinks when the
+    // capture exceeds the pane; placement centers the result horizontally.
     if pixels
         && let Some(preview) = content.preview.as_ref()
         && preview.line >= offset
@@ -4827,8 +4878,8 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
     {
         let top = content_area.y + (preview.line - offset) as u16;
         let rows = preview.rows.min(content_area.bottom().saturating_sub(top));
-        if rows > 0 && content_area.width > 2 {
-            let area = Rect::new(content_area.x + 1, top, content_area.width - 2, rows);
+        if rows > 0 && content_area.width > 0 {
+            let area = Rect::new(content_area.x, top, content_area.width, rows);
             let _ =
                 app.inline_images
                     .place(frame, &preview.path, (area.width, area.height), area, 0);
@@ -4837,6 +4888,118 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
 
     if let Some(action_area) = action_area {
         render_detail_actions(frame, app, action_area, active_tab);
+    }
+    if !app.explore_edit_mode && app.explore_history.menu().is_some() {
+        render_run_menu(frame, app, body_area, header_area);
+    }
+}
+
+/// Anchored run-history selector under the timestamp button.
+fn render_run_menu(frame: &mut Frame<'_>, app: &mut App, body: Rect, header: Rect) {
+    let Some(menu) = app.explore_history.menu() else {
+        return;
+    };
+    let total = app.explore_history.total(menu.key);
+    if total == 0 {
+        return;
+    }
+    let rows: Vec<_> = (0..total)
+        .filter_map(|index| {
+            app.explore_history
+                .row(menu.key, index)
+                .map(|row| (index, row))
+        })
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let width = 44u16.min(body.width.saturating_sub(2)).max(28);
+    let visible = rows.len().min(8);
+    let height = (visible as u16 + 3).min(body.height);
+    if height < 3 || width < 20 {
+        return;
+    }
+    let x = body.right().saturating_sub(width + 1);
+    let mut y = header.bottom();
+    if y.saturating_add(height) > body.bottom() {
+        y = body.bottom().saturating_sub(height);
+    }
+    let area = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, area);
+    let block = theme::popup_block(" Runs · newest first ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    let rows_area = Rect {
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let footer_area = Rect {
+        y: inner.bottom().saturating_sub(1),
+        height: 1,
+        ..inner
+    };
+    let visible_rows = rows_area.height as usize;
+    if visible_rows == 0 {
+        return;
+    }
+    let start = menu
+        .selection
+        .saturating_sub(visible_rows.saturating_sub(1));
+    let current = app.explore_history.selected(menu.key).unwrap_or(0);
+    let mut lines = Vec::new();
+    for (offset, (index, row)) in rows.iter().enumerate().skip(start).take(visible_rows) {
+        let marker = if *index == current { "●" } else { " " };
+        let (label, color) = run_status_label(row.status);
+        let line = Line::from(vec![
+            Span::styled(format!(" {marker} "), Style::default().fg(theme::PRIMARY)),
+            Span::styled(
+                short_run_timestamp(&row.started_at),
+                Style::default().fg(theme::FG),
+            ),
+            Span::raw("  "),
+            Span::styled(format!("{label:<7}"), Style::default().fg(color)),
+            Span::styled(
+                format!("{:>6}", format_elapsed(row.duration_ms)),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]);
+        let line = if *index == menu.selection {
+            select_detail_line(line, true, rows_area.width)
+        } else {
+            pad_detail_line(line, rows_area.width)
+        };
+        app.clickable_regions.push(ClickableRegion::ExploreRunRow {
+            index: *index,
+            rect: Rect::new(
+                rows_area.x,
+                rows_area.y + (offset - start) as u16,
+                rows_area.width,
+                1,
+            ),
+        });
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), rows_area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            " j/k move · Enter · L latest · Esc",
+            Style::default().fg(theme::MUTED),
+        )),
+        footer_area,
+    );
+}
+
+fn run_status_label(status: RunStatus) -> (&'static str, Color) {
+    match status {
+        RunStatus::Passed => ("PASSED", theme::SUCCESS),
+        RunStatus::Failed => ("FAILED", theme::ERROR),
+        RunStatus::Blocked => ("BLOCKED", theme::WARNING),
+        RunStatus::Skipped => ("SKIPPED", theme::MUTED),
+        RunStatus::Running => ("RUNNING", theme::WARNING),
+        RunStatus::Idle => ("UNKNOWN", theme::MUTED),
     }
 }
 
@@ -4901,11 +5064,49 @@ struct DetailTabHit {
     width: u16,
 }
 
-/// Scenario name, solid status chip, and tabular duration.
-fn detail_scenario_line(
-    scenario_name: &str,
+/// Compact `MM-DD HH:MM:SS` for a selector row.
+fn short_run_timestamp(started_at: &str) -> String {
+    let bytes = started_at.as_bytes();
+    if started_at.len() >= 19
+        && bytes.get(4) == Some(&b'-')
+        && bytes.get(7) == Some(&b'-')
+        && matches!(bytes.get(10).copied(), Some(b'T' | b' '))
+    {
+        format!(
+            "{}-{} {}",
+            &started_at[5..7],
+            &started_at[8..10],
+            &started_at[11..19]
+        )
+    } else {
+        started_at.to_string()
+    }
+}
+
+/// Compact `MM-DD HH:MM` from an RFC 3339 timestamp; other text is kept as-is.
+fn short_run_time(started_at: &str) -> String {
+    let bytes = started_at.as_bytes();
+    if started_at.len() >= 16
+        && bytes.get(4) == Some(&b'-')
+        && bytes.get(7) == Some(&b'-')
+        && matches!(bytes.get(10).copied(), Some(b'T' | b' '))
+    {
+        format!(
+            "{}-{} {}",
+            &started_at[5..7],
+            &started_at[8..10],
+            &started_at[11..16]
+        )
+    } else {
+        started_at.to_string()
+    }
+}
+
+/// Selected step text, step-level status chip, and the run-history selector.
+fn detail_step_status_line(
+    step_text: &str,
     status: RunStatus,
-    duration: Option<u64>,
+    run_selector: Option<Vec<Span<'static>>>,
     width: u16,
 ) -> Line<'static> {
     let (label, background) = match status {
@@ -4916,52 +5117,30 @@ fn detail_scenario_line(
         RunStatus::Skipped => ("SKIPPED", theme::MUTED),
         RunStatus::Idle => ("IDLE", theme::MUTED),
     };
+    let selector_width = run_selector.as_ref().map_or(0, |spans| {
+        spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum::<usize>()
+    });
+    // Reserve the status chip plus a gap; leave the selector its natural width.
+    let reserved = selector_width + 12;
     let spans = vec![
         Span::styled(
-            truncate_ellipsis(scenario_name, width.saturating_sub(18) as usize),
+            truncate_ellipsis(step_text, width.saturating_sub(reserved as u16) as usize),
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         theme::chip(format!(" {label} "), background),
     ];
-    detail_line_with_right(
-        spans,
-        Span::styled(format_elapsed(duration), Style::default().fg(theme::MUTED)),
-        width,
-    )
-}
-
-/// Selected step index/text and its runner correlation id.
-fn detail_step_line(
-    step_index: usize,
-    step_text: &str,
-    runner: Option<&str>,
-    width: u16,
-) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(format!("#{step_index} "), Style::default().fg(theme::MUTED)),
-        Span::styled(
-            truncate_ellipsis(step_text, width.saturating_sub(18) as usize),
-            Style::default().fg(theme::FG),
-        ),
-    ];
-    if let Some(runner) = runner {
-        spans.push(Span::raw(" "));
-        // Runner labels are long (`f0:s1:L13`); keep them visible when space allows.
-        if UnicodeWidthStr::width(runner) + 12 < width as usize {
-            spans.push(Span::styled(
-                runner.to_string(),
-                Style::default().fg(theme::MUTED),
-            ));
-        }
-    }
-    detail_line_with_right(spans, Span::raw(""), width)
+    detail_line_with_right_spans(spans, run_selector.unwrap_or_default(), width)
 }
 
 /// Inner family tabs, showing only families that have content.
 ///
 /// Returns the rendered line and each tab's span so the caller can register
-/// click targets without duplicating the width arithmetic.
+/// click targets without duplicating the width arithmetic. Active and inactive
+/// tabs share a solid fill so the row reads as a clickable control strip.
 fn detail_tabs_line(
     app: &App,
     tabs: &[crate::app::RunDetailTab],
@@ -4980,11 +5159,10 @@ fn detail_tabs_line(
             }
             crate::app::RunDetailTab::Files => app.detail_files().len(),
         };
-        let label = format!(" {} ", tab.label());
-        let count = format!("{count}");
-        let label_width = UnicodeWidthStr::width(label.as_str());
-        let count_width = UnicodeWidthStr::width(count.as_str());
-        let tab_width = label_width + count_width + 1;
+        // One filled chip per family: label and count share the same background
+        // so inactive tabs still look clickable, not like muted prose.
+        let label = format!(" {} {count} ", tab.label());
+        let tab_width = UnicodeWidthStr::width(label.as_str());
         if used + tab_width + 1 > width as usize {
             break;
         }
@@ -4995,7 +5173,7 @@ fn detail_tabs_line(
                 .bg(theme::TAB_ACTIVE_BG)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
-            Style::default().fg(theme::MUTED)
+            Style::default().fg(theme::TAB_INACTIVE).bg(theme::BLOCK_BG)
         };
         hits.push(DetailTabHit {
             tab: *tab,
@@ -5003,9 +5181,8 @@ fn detail_tabs_line(
             width: tab_width as u16,
         });
         spans.push(Span::styled(label, style));
-        spans.push(Span::styled(count, Style::default().fg(theme::MUTED)));
         spans.push(Span::raw(" "));
-        used += tab_width;
+        used += tab_width + 1;
     }
     (Line::from(spans), hits)
 }
@@ -5028,6 +5205,34 @@ fn push_screenshot_rows(
         ));
         return content;
     }
+    let selected = selection.min(shots.len().saturating_sub(1));
+    let shot = &shots[selected];
+    let can_preview = pixels && shot.size.is_some() && shot.path.is_some();
+    if can_preview {
+        // Image only: filenames appear only when the terminal cannot draw pixels.
+        let start = lines.len();
+        let rows = preview_rows.max(1);
+        for _ in 0..rows {
+            lines.push(pad_detail_line(Line::raw(""), width));
+        }
+        content.selected_line = Some(start);
+        let Some(path) = shot.path.clone() else {
+            return content;
+        };
+        content.preview = Some(DetailPreview {
+            path,
+            line: start,
+            rows,
+        });
+        content.items.push(DetailItemRange {
+            index: selected,
+            start,
+            end: lines.len(),
+        });
+        return content;
+    }
+
+    // Fallback list: keep a path so the step is still actionable without pixels.
     for (index, shot) in shots.iter().enumerate() {
         let start = lines.len();
         let selected = index == selection;
@@ -5058,39 +5263,21 @@ fn push_screenshot_rows(
             width,
         ));
         if selected {
-            if pixels
-                && shot.size.is_some()
-                && let Some(path) = shot.path.clone()
-            {
-                let preview_start = lines.len();
-                for _ in 0..preview_rows {
-                    lines.push(pad_detail_line(Line::raw(""), width));
-                }
-                content.preview = Some(DetailPreview {
-                    path,
-                    line: preview_start,
-                    rows: preview_rows,
-                });
-            } else {
+            lines.push(pad_detail_line(
+                Line::styled(
+                    "  preview unavailable — terminal has no graphics protocol",
+                    Style::default().fg(theme::MUTED),
+                ),
+                width,
+            ));
+            if shot.path.is_none() {
                 lines.push(pad_detail_line(
                     Line::styled(
-                        "  preview unavailable — terminal has no graphics protocol",
-                        Style::default().fg(theme::MUTED),
+                        "  path is outside .teshi/logs/replay-screenshots",
+                        Style::default().fg(theme::WARNING),
                     ),
                     width,
                 ));
-                for _ in 1..preview_rows {
-                    lines.push(pad_detail_line(Line::raw(""), width));
-                }
-                if shot.path.is_none() {
-                    lines.push(pad_detail_line(
-                        Line::styled(
-                            "  path is outside .teshi/logs/replay-screenshots",
-                            Style::default().fg(theme::WARNING),
-                        ),
-                        width,
-                    ));
-                }
             }
         }
         content.items.push(DetailItemRange {
@@ -5411,6 +5598,15 @@ fn push_empty_detail_rows(
             ),
             width,
         ));
+        if detail.historical && detail.steps.is_empty() {
+            lines.push(pad_detail_line(
+                Line::styled(
+                    "  Case-level results only; no step-level screenshots, API or logs.",
+                    Style::default().fg(theme::MUTED),
+                ),
+                width,
+            ));
+        }
         if let Some(message) = detail.message.as_deref()
             && !message.trim().is_empty()
         {
@@ -5453,7 +5649,7 @@ fn render_detail_actions(
     area: Rect,
     active: Option<crate::app::RunDetailTab>,
 ) {
-    let controls: Vec<ActionItem<'_>> = match active {
+    let mut controls: Vec<ActionItem<'_>> = match active {
         Some(crate::app::RunDetailTab::Screenshots) => vec![
             ActionItem::new(
                 "Fullscreen [Enter]",
@@ -5516,27 +5712,48 @@ fn render_detail_actions(
         ],
         None => Vec::new(),
     };
+    // Always first so the hint survives a narrow pane's control clipping.
+    controls.insert(
+        0,
+        ActionItem::new(
+            "[ ] switch run",
+            "Runs",
+            Action::ExploreRunOlder,
+            theme::ActionTone::Neutral,
+        ),
+    );
     render_chip_action_bar(frame, &mut app.clickable_regions, area, &controls, false);
 }
 
 /// Join left and right spans on one row, right-aligning `right`.
 fn detail_line_with_right(
-    mut left: Vec<Span<'static>>,
+    left: Vec<Span<'static>>,
     right: Span<'static>,
+    width: u16,
+) -> Line<'static> {
+    detail_line_with_right_spans(left, vec![right], width)
+}
+
+fn detail_line_with_right_spans(
+    mut left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
     width: u16,
 ) -> Line<'static> {
     let left_width: usize = left
         .iter()
         .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
         .sum();
-    let right_width = UnicodeWidthStr::width(right.content.as_ref());
+    let right_width: usize = right
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum();
     let width = width as usize;
     if left_width + right_width < width {
         left.push(Span::raw(" ".repeat(width - left_width - right_width)));
     } else {
         left.push(Span::raw(" "));
     }
-    left.push(right);
+    left.extend(right);
     Line::from(left)
 }
 
@@ -10906,6 +11123,9 @@ mod truncate_tests {
                 message: None,
             }],
             inspector_plaintext: false,
+            started_at: None,
+            screenshots: Vec::new(),
+            historical: false,
         };
         app.explore_case_details.insert((0, 0), detail);
         app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
@@ -11142,6 +11362,9 @@ mod truncate_tests {
                 message: None,
             }],
             inspector_plaintext: false,
+            started_at: None,
+            screenshots: Vec::new(),
+            historical: false,
         };
         app.explore_case_details.insert((0, 0), detail);
         app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
@@ -11149,18 +11372,25 @@ mod truncate_tests {
         let screen = draw_detail_screen(&mut app, 160, 32);
         for expected in [
             "Run Details",
-            "Successful login",
-            "PASSED",
-            "1.24s",
-            "#2",
             "status is 200",
-            "Screenshots",
+            "PASSED",
+            "Screenshots 1",
             "after-login.png",
             "preview unavailable",
             ".teshi/logs/replay-screenshots/run/after-login.png",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}: {screen}");
         }
+        // Scenario name may still appear in the Scenarios pane; the step index
+        // and case duration left the Run Details header.
+        assert!(
+            !screen.contains("#2"),
+            "step index left the header: {screen}"
+        );
+        assert!(
+            !screen.contains("1.24s"),
+            "case duration left the header: {screen}"
+        );
         assert!(!screen.contains("Failure Details"), "{screen}");
     }
 
@@ -11203,6 +11433,9 @@ mod truncate_tests {
                 message: Some("expected 200, got 401".into()),
             }],
             inspector_plaintext: false,
+            started_at: None,
+            screenshots: Vec::new(),
+            historical: false,
         };
         app.explore_case_details.insert((0, 0), detail);
         app.explore_details_tab = crate::app::RunDetailTab::Screenshots;
@@ -11278,6 +11511,9 @@ mod truncate_tests {
             exchanges: vec![exchange.clone()],
             steps: Vec::new(),
             inspector_plaintext: false,
+            started_at: None,
+            screenshots: Vec::new(),
+            historical: false,
         };
         let mut app = App::from_args().expect("app init");
         let mut lines = Vec::new();
