@@ -298,7 +298,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
         ("2", "MindMap [2]", "Preview"),
         ("3", "AI [3]", "AI Chat"),
         ("4", "Requirements [4]", "body 01"),
-        ("5", "Test Points [5]", "Intent & review"),
+        ("5", "Test Points [5]", "Inspector"),
     ] {
         terminal.resize(150, 30).unwrap();
         terminal.click_text(label, 10000).unwrap();
@@ -319,7 +319,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
         let focused_body = match tab {
             "1" => "sample",
             "4" => "Req 01",
-            "5" => "Test points (",
+            "5" => "Test Points MindMap (",
             _ => body,
         };
         terminal.expect_text(focused_body, true, 10000).unwrap();
@@ -339,11 +339,11 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     terminal.expect_text("Scenarios (30)", true, 10000).unwrap();
     terminal.click_text("Project: project", 10000).unwrap();
     terminal.expect_text("Open path", true, 10000).unwrap();
-    terminal.click_text("Requirements [4]", 10000).unwrap();
     terminal.scroll_at(2, 6, false, false).unwrap();
     terminal.expect_text("Open path", true, 1000).unwrap();
+    // Clicking outside the non-destructive picker dismisses it without switching tabs.
+    terminal.click_text("Requirements [4]", 10000).unwrap();
     capture(&terminal, "project-modal-pointer-owned");
-    terminal.key("Escape").unwrap();
     terminal.expect_text("Open path", false, 10000).unwrap();
     terminal.expect_text("Scenario", true, 1000).unwrap();
     fixture.unchanged();
@@ -870,8 +870,8 @@ fn explore_long_step_horizontal_scroll_and_resize_stays_bounded() {
 fn normal_tabs_place_navigation_left_and_details_vertically_right() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
-    for (tab, nav, upper, lower) in [
-        ("1", "Features", "Scenarios (30)", "Steps"),
+    for (tab, nav, upper, lower, exact_column) in [
+        ("1", "Features", "Scenarios (30)", "Steps", true),
         (
             "4",
             "Current project ·",
@@ -879,12 +879,14 @@ fn normal_tabs_place_navigation_left_and_details_vertically_right() {
             // body carries the title, so a title-based anchor would find the body.
             "Requirement [planned]",
             "Linked test points",
+            true,
         ),
         (
             "5",
-            "Test points (all)",
-            "Intent & review",
-            "Requirement excerpts",
+            "Test Points MindMap (all)",
+            "Inspector [NORMAL]",
+            "Direct children:",
+            false,
         ),
     ] {
         terminal.key(tab).unwrap();
@@ -911,10 +913,17 @@ fn normal_tabs_place_navigation_left_and_details_vertically_right() {
             nav_x < upper_x && upper_y < lower_y,
             "not two-column stacked details: {screen}"
         );
-        assert_eq!(
-            upper_x, lower_x,
-            "detail panes do not share a column: {screen}"
-        );
+        if exact_column {
+            assert_eq!(
+                upper_x, lower_x,
+                "detail panes do not share a column: {screen}"
+            );
+        } else {
+            assert!(
+                upper_x <= lower_x,
+                "inspector section sits outside inspector column: {screen}"
+            );
+        }
         capture(&terminal, &format!("layout-normal-tab-{tab}"));
     }
     fixture.unchanged();

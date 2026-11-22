@@ -389,12 +389,26 @@ fn model_list_add_control(narrow: bool) {
         .expect_text("Add Model Profile", false, 1500)
         .unwrap();
     assert_eq!(fixture.profile_count(), 2);
-    fixture.click(
-        &terminal,
-        &["Edit [e]", "Edit[e]"],
-        "edit-alpha",
-        PointerResult::Visible("Edit Model Profile"),
-    );
+    // Explore's 2x2 layout puts Scenarios' `Edit [e]` at row 4 above the modal,
+    // so target the Model Profiles action bar row specifically.
+    fixture.capture(&terminal, "edit-alpha-before");
+    terminal
+        .click_where("Model Profiles Edit [e]", POSTCONDITION_MS, |screen| {
+            screen.lines().enumerate().find_map(|(row, line)| {
+                if !line.contains("Add [a]") {
+                    return None;
+                }
+                ["Edit [e]", "Edit[e]"].iter().find_map(|label| {
+                    line.find(label)
+                        .map(|byte| (row + 1, line[..byte].chars().count() + 1))
+                })
+            })
+        })
+        .unwrap();
+    terminal
+        .expect_text("Edit Model Profile", true, POSTCONDITION_MS)
+        .unwrap();
+    fixture.capture(&terminal, "edit-alpha-after");
     terminal
         .expect_text("Edit Model Profile", true, 1500)
         .unwrap();

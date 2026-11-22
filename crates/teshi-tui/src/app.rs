@@ -16555,7 +16555,7 @@ impl App {
                     self.test_points_ui.editing = true;
                     let label_key = match field {
                         crate::test_points_tab::DetailField::Title => "tp.field.title",
-                        crate::test_points_tab::DetailField::Objective => "tp.field.objective",
+                        crate::test_points_tab::DetailField::Objective => "tp.field.note",
                         crate::test_points_tab::DetailField::Preconditions => {
                             "tp.field.preconditions"
                         }

@@ -206,9 +206,12 @@ impl Fixture {
         self.capture(terminal, &format!("{name}-before"));
         let screen = terminal.screen().unwrap();
         let rows: Vec<&str> = screen.lines().collect();
+        // Exclude the global status bar on the bottom row whose breadcrumb
+        // (`AI › Chat`) also uses `›`.
         let (row, line) = rows
             .iter()
             .enumerate()
+            .take(rows.len().saturating_sub(1))
             .rev()
             .find(|(_, line)| line.contains('›'))
             .unwrap_or_else(|| panic!("composer prompt is absent:\n{screen}"));

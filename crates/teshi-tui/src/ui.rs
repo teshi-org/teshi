@@ -2184,7 +2184,8 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .as_ref()
                     .and_then(|state| state.error.as_deref())
                     .unwrap_or(crate::i18n::t("scenarios.empty.select")),
-            ),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: false }),
             list_area,
         );
         if let Some(action_area) = action_area {
@@ -2872,6 +2873,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .and_then(|state| state.error.as_deref())
                     .unwrap_or(crate::i18n::t("scenarios.empty.select")),
             )
+            .wrap(ratatui::widgets::Wrap { trim: false })
             .block(explore_block(crate::i18n::t("pane.feature_content"), false)),
             area,
         );
