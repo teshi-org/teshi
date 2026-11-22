@@ -98,13 +98,60 @@ fn input_title(terminal: &Terminal) -> String {
         .to_owned()
 }
 
+fn svg_tags(svg: &str) -> Vec<&str> {
+    svg.split("><").collect()
+}
+
+fn text_y_attr(tag: &str) -> Option<&str> {
+    if !tag.starts_with("text ") && !tag.starts_with("<text ") {
+        return None;
+    }
+    let start = tag.find(" y=\"")? + 4;
+    let end = tag[start..].find('"')?;
+    Some(&tag[start..start + end])
+}
+
+/// Windows ConPTY skips writing untouched spaces on initial render and emits an
+/// explicit `' '` after the mode badge shifts footer text left and back right,
+/// turning `>Settings</text>` into `>Settings </text>` with identical pixels.
+fn idle_visuals_restored(
+    before_svg: &str,
+    current_svg: &str,
+    before_screen: &str,
+    current_screen: &str,
+) -> bool {
+    if before_svg == current_svg {
+        return true;
+    }
+    if before_screen != current_screen {
+        return false;
+    }
+    let before_tags = svg_tags(before_svg);
+    let current_tags = svg_tags(current_svg);
+    let footer_y = before_tags
+        .iter()
+        .filter_map(|tag| text_y_attr(tag))
+        .max_by(|a, b| {
+            a.parse::<f32>()
+                .unwrap_or(0.0)
+                .total_cmp(&b.parse::<f32>().unwrap_or(0.0))
+        });
+    let is_non_footer = |tag: &&str| text_y_attr(tag).is_none_or(|y| Some(y) != footer_y);
+    before_tags
+        .into_iter()
+        .filter(is_non_footer)
+        .eq(current_tags.into_iter().filter(is_non_footer))
+}
+
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn repeated_focus_keeps_input_title_and_context_statistics() {
     let (root, terminal) = setup(false);
     let before = input_title(&terminal);
+    let before_screen = terminal.screen().unwrap();
     let before_svg = root.path().join("blur.svg");
     terminal.screenshot(&before_svg).unwrap();
+    let before_svg_text = fs::read_to_string(&before_svg).unwrap();
     capture(&terminal, "blurred");
     for _ in 0..2 {
         terminal.key("Enter").unwrap();
@@ -129,7 +176,14 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
         loop {
             let current = root.path().join("blur-current.svg");
             terminal.screenshot(&current).unwrap();
-            if fs::read(&before_svg).unwrap() == fs::read(&current).unwrap() {
+            let current_svg_text = fs::read_to_string(&current).unwrap();
+            let current_screen = terminal.screen().unwrap();
+            if idle_visuals_restored(
+                &before_svg_text,
+                &current_svg_text,
+                &before_screen,
+                &current_screen,
+            ) {
                 break;
             }
             assert!(
