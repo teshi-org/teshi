@@ -373,7 +373,9 @@ fn filter_and_group(narrow: bool) {
     terminal
         .expect_text("Filter iteration", false, 1500)
         .unwrap();
-    terminal.expect_text("Alpha requirement", false, 1500).unwrap();
+    terminal
+        .expect_text("Alpha requirement", false, 1500)
+        .unwrap();
     // Filter and View are tree commands, so narrow terminals return to the tree.
     fixture.focus_tree(&terminal);
     fixture.click(&terminal, "Filter", "reset-filter");

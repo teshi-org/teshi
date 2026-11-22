@@ -673,13 +673,9 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     terminal
         .expect_text("Add Model Profile", false, 2000)
         .unwrap();
-    terminal
-        .expect_text("Model Profiles", true, 2000)
-        .unwrap();
+    terminal.expect_text("Model Profiles", true, 2000).unwrap();
     terminal.click_text("Test Points [5]", 1000).unwrap();
-    terminal
-        .expect_text("Model Profiles", false, 2000)
-        .unwrap();
+    terminal.expect_text("Model Profiles", false, 2000).unwrap();
     terminal
         .expect_text("Test Points MindMap", true, 2000)
         .unwrap();
