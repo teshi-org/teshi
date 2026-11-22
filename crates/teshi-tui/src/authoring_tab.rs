@@ -1190,6 +1190,27 @@ impl AuthoringUiState {
         self.rebuild_tree();
     }
 
+    /// Focuses the Requirements tree and activates inline `/` search input.
+    pub(crate) fn begin_search(&mut self) {
+        self.exit_insert_mode();
+        self.focus = RequirementsFocus::Tree;
+        self.search_active = true;
+        self.search_query.move_cursor(CursorMotion::End);
+    }
+
+    /// Commits the current Requirements search query and exits search input mode.
+    pub(crate) fn confirm_search(&mut self) {
+        self.search_active = false;
+        self.commit_requirement_search();
+    }
+
+    /// Clears the active Requirements search query and rebuilds the tree.
+    pub(crate) fn clear_search(&mut self) {
+        self.search_query = LineInput::default();
+        self.search_active = false;
+        self.commit_requirement_search();
+    }
+
     /// Defers a rebuild until typing pauses, or clears it immediately.
     fn schedule_requirement_search(&mut self) {
         if self.search_query.text().trim().is_empty() {
@@ -2912,6 +2933,7 @@ impl App {
             || self.session_panel_active
             || self.approval_panel_active
             || self.settings_panel_active
+            || self.help_guide.active
             || self.agent_profile_panel_active
             || self.change_summary_visible
             || self.scenario_dropdown_open

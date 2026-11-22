@@ -34,6 +34,7 @@ const PROJECT_SWITCH_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Available slash commands: (name, description)
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a new session"),
+    ("help", "Open the User Guide and shortcut reference"),
     ("exit", "Exit Teshi"),
     ("resume", "Resume the most recent session"),
     ("retry", "Continue an interrupted ACP task"),
@@ -220,6 +221,38 @@ pub(crate) fn scrollbar_state(
         crate::theme::ThumbState::Idle
     }
 }
+
+/// Identifies a pane whose vertical scrollbar is tracked for pointer drag and track paging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerticalScrollTarget {
+    ExploreColumn(ColumnFocus),
+    ExploreDetails,
+    ExploreEditor,
+    MindMapTree,
+    MindMapPreview,
+    TestPointsPane(usize),
+    HelpGuideDoc,
+}
+
+/// Identifies a clickable item for double-click detection across tabs and modals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClickTarget {
+    ExploreScenario(usize),
+    ExploreDetailItem(usize),
+    TestPointField(crate::test_points_tab::DetailField),
+    TestPointExcerpt(usize),
+    TestPointScenario(usize),
+    ModelProfileRow(usize),
+    AgentProfileRow(usize),
+    ChangeSummaryRow(usize),
+    StepKeywordRow(usize),
+    SessionRow(usize),
+    MindMapLocation(usize),
+    PreviewPanel,
+}
+
+/// Threshold within which two left-clicks on the same target count as a double-click.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(450);
 
 /// A pending ACP `session/request_permission` prompt for one agent.
 #[derive(Debug, Clone)]
@@ -1431,6 +1464,18 @@ pub struct App {
     pub(crate) chat_scrollbar: Option<ScrollbarBar>,
     /// Pointer offset below the thumb top while the scrollbar is being dragged.
     pub(crate) chat_scrollbar_grab: Option<u16>,
+    /// Vertical scrollbars registered during the last render pass across Explore, MindMap, and Test Points.
+    pub(crate) vertical_scrollbars: Vec<(VerticalScrollTarget, ScrollbarBar)>,
+    /// Active drag state for a vertical scrollbar: target and pointer offset within the thumb.
+    pub(crate) vertical_scrollbar_grab: Option<(VerticalScrollTarget, u16)>,
+    /// Last left-click timestamp and target for global double-click actions.
+    pub(crate) last_click: Option<(Instant, ClickTarget)>,
+    /// Outer rectangle of the active dismissible modal card, for click-outside-to-close.
+    pub(crate) modal_card_rect: Option<ratatui::layout::Rect>,
+    /// Rendered AI composer text rectangle and vertical row scroll, for click-to-caret placement.
+    pub(crate) chat_input_text_rect: Option<(ratatui::layout::Rect, u16)>,
+    /// Rendered `(y_start, height)` spans for visible wrapped Requirements tree rows.
+    pub(crate) req_tree_row_spans: Vec<(u16, u16)>,
     /// Current chat text selection, if any.
     pub chat_selection: Option<ChatSelection>,
     // X11 serves selection data from the owning process. Retain the handle
@@ -1560,6 +1605,8 @@ pub struct App {
     pub settings_panel_active: bool,
     /// Highlighted row in the app Settings overlay.
     pub settings_panel_selection: usize,
+    /// Modal User Guide (`?` / `F1` / `:help` / `/help`) state.
+    pub help_guide: crate::ui::help::HelpGuideState,
     pub slash_suggestion_active: bool,
     pub slash_suggestion_selection: usize,
     /// Project-scoped sent-prompt MRU for Up/Down and Ctrl+R.
@@ -1966,6 +2013,30 @@ pub enum ClickableRegion {
     },
     /// The `X` in the Features title; clears every selected tag.
     ExploreTagClear {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable search prompt in the Explore Features title bar.
+    ExploreSearchTrigger {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✓` in the Explore Features title bar to confirm/commit search.
+    ExploreSearchConfirm {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✗` in the Explore Features title bar to clear the search query.
+    ExploreSearchClear {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable search prompt in the Requirements tree title bar.
+    ReqSearchTrigger {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✓` in the Requirements tree title bar to confirm/commit search.
+    ReqSearchConfirm {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✗` in the Requirements tree title bar to clear the search query.
+    ReqSearchClear {
         rect: ratatui::layout::Rect,
     },
     /// A `^`/`v` scroll affordance inside the tag strip.
@@ -2970,6 +3041,12 @@ impl App {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -3040,6 +3117,7 @@ impl App {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -3196,6 +3274,7 @@ impl App {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -3221,6 +3300,12 @@ impl App {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -3415,6 +3500,7 @@ impl App {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -3440,6 +3526,12 @@ impl App {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -10564,6 +10656,30 @@ impl App {
             };
         }
 
+        // Modal User Guide intercept.
+        if self.help_guide.active {
+            return match action {
+                Action::HelpPanelClose | Action::ClearInputState => {
+                    self.close_help_guide();
+                    Ok(())
+                }
+                Action::HelpSelectTopic(index) => {
+                    self.help_guide.select_topic(index);
+                    self.help_guide.focus_doc = false;
+                    Ok(())
+                }
+                Action::HelpCycleLanguage => {
+                    self.help_guide.cycle_language();
+                    Ok(())
+                }
+                Action::Quit => {
+                    self.quit();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         // Agent profile selection panel intercept.
         if self.agent_profile_panel_active {
             if self.agent_panel_mode != AgentPanelMode::List {
@@ -11489,6 +11605,8 @@ impl App {
             }
             Action::PageUp => self.navigate_page(false)?,
             Action::PageDown => self.navigate_page(true)?,
+            Action::HalfPageUp => self.navigate_half_page(false)?,
+            Action::HalfPageDown => self.navigate_half_page(true)?,
             Action::NavigateFirst => self.navigate_boundary(false)?,
             Action::NavigateLast => self.navigate_boundary(true)?,
             Action::MoveStepUp => self.move_step_block(false),
@@ -12161,6 +12279,9 @@ impl App {
             Action::Quit => self.quit(),
             Action::RequestQuit => self.request_quit_confirmation(),
             Action::SelectTab(tab) => self.select_tab(tab),
+            Action::NextTab => self.cycle_tab(true),
+            Action::PrevTab => self.cycle_tab(false),
+            Action::HelpPanelOpen => self.open_help_guide(),
             Action::ActivateStepInput => self.begin_step_or_title_edit()?,
             Action::StepKeywordPickerUp => self.step_keyword_picker_move(-1),
             Action::StepKeywordPickerDown => self.step_keyword_picker_move(1),
@@ -12945,10 +13066,14 @@ impl App {
             | Action::AgentPanelFormBackspace
             | Action::AgentPanelFormSubmit
             | Action::AgentPanelFormCancel
-            // Settings actions are handled in their own intercept — unreachable here.
+            // Settings and Help overlay actions are handled in their own intercepts.
             | Action::SettingsPanelToggle
             | Action::SettingsPanelActivate(_)
-            | Action::SettingsPanelClose => {}
+            | Action::SettingsPanelClose
+            | Action::HelpPanelClose
+            | Action::HelpSelectTopic(_)
+            | Action::HelpCycleLanguage
+            | Action::CommandLineAutocomplete => {}
         }
         self.clamp_cursor();
         Ok(())
@@ -13125,6 +13250,91 @@ impl App {
         self.command_line = Some(crate::authoring_tab::LineInput::default());
     }
 
+    /// Supported `:` Ex commands for inline hints and `Tab` completion.
+    const EX_COMMANDS: &'static [&'static str] = &[
+        "q",
+        "quit",
+        "w",
+        "write",
+        "wq",
+        "x",
+        "help",
+        "settings",
+        "preferences",
+        "models",
+        "sessions",
+        "project",
+        "agents",
+        "explore",
+        "mindmap",
+        "ai",
+        "requirements",
+        "testpoints",
+    ];
+
+    /// Returns up to 6 Ex command names matching the current `:` prompt prefix.
+    pub(crate) fn matching_ex_commands(&self) -> Vec<&'static str> {
+        let Some(input) = self.command_line.as_ref() else {
+            return Vec::new();
+        };
+        let prefix = input.text().trim().to_ascii_lowercase();
+        if prefix.is_empty() {
+            return vec![
+                "help", "settings", "models", "sessions", "project", "q", "w", "wq",
+            ];
+        }
+        Self::EX_COMMANDS
+            .iter()
+            .copied()
+            .filter(|cmd| cmd.starts_with(prefix.as_str()))
+            .take(6)
+            .collect()
+    }
+
+    fn autocomplete_command_line(&mut self) {
+        let Some(input) = self.command_line.as_mut() else {
+            return;
+        };
+        let prefix = input.text().trim().to_ascii_lowercase();
+        if prefix.is_empty() {
+            *input = crate::authoring_tab::LineInput::new("help");
+            return;
+        }
+        let matches: Vec<&str> = Self::EX_COMMANDS
+            .iter()
+            .copied()
+            .filter(|cmd| cmd.starts_with(prefix.as_str()))
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+        if matches.len() == 1 {
+            *input = crate::authoring_tab::LineInput::new(matches[0]);
+            return;
+        }
+        if let Some(pos) = matches.iter().position(|&cmd| cmd == prefix) {
+            *input = crate::authoring_tab::LineInput::new(matches[(pos + 1) % matches.len()]);
+            return;
+        }
+        // Extend to the longest common prefix when longer than typed text,
+        // otherwise pick the first candidate.
+        let mut lcp = matches[0].to_string();
+        for candidate in &matches[1..] {
+            let shared: String = lcp
+                .chars()
+                .zip(candidate.chars())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect();
+            lcp = shared;
+        }
+        if lcp.len() > prefix.len() {
+            *input = crate::authoring_tab::LineInput::new(lcp);
+        } else {
+            *input = crate::authoring_tab::LineInput::new(matches[0]);
+        }
+    }
+
     /// Runs the buffered `:` command through the same guarded paths as the
     /// `Ctrl+Q` and `Ctrl+S` chords, so unsaved work still prompts.
     fn execute_command_line(&mut self) -> Result<()> {
@@ -13138,6 +13348,17 @@ impl App {
                 self.save()?;
                 self.quit();
             }
+            "h" | "help" => self.open_help_guide(),
+            "set" | "settings" | "pref" | "preferences" => self.open_settings_panel(),
+            "model" | "models" => self.handle_action(Action::ModelPanelOpen)?,
+            "session" | "sessions" => self.handle_action(Action::SessionPanelOpen)?,
+            "proj" | "project" => self.cmd_project(None)?,
+            "agent" | "agents" => self.handle_action(Action::AiOpenAgentSelector)?,
+            "explore" | "1" => self.select_tab(MainTab::Explore),
+            "mindmap" | "map" | "2" => self.select_tab(MainTab::MindMap),
+            "ai" | "chat" | "3" => self.select_tab(MainTab::Ai),
+            "req" | "requirements" | "4" => self.select_tab(MainTab::Requirements),
+            "tp" | "testpoints" | "5" => self.select_tab(MainTab::TestPoints),
             "" => self.set_status_message(crate::i18n::t("status.type_q_w_wq_or_x").to_string()),
             other => self.set_status_message(crate::i18n::fill(
                 crate::i18n::t("status.unknown_command"),
@@ -13154,6 +13375,7 @@ impl App {
                     input.insert(ch);
                 }
             }
+            Action::CommandLineAutocomplete => self.autocomplete_command_line(),
             Action::CommandLineBackspace => {
                 // Backspace removes the `:` itself once the command is empty,
                 // so the prompt closes the way it was opened.
@@ -13238,6 +13460,26 @@ impl App {
             MainTab::Ai | MainTab::MindMap | MainTab::Explore => {}
         }
         self.quit_pending_confirm = false;
+    }
+
+    fn cycle_tab(&mut self, forward: bool) {
+        const ORDER: [MainTab; 5] = [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ];
+        let idx = ORDER
+            .iter()
+            .position(|&tab| tab == self.active_tab)
+            .unwrap_or(0);
+        let next = if forward {
+            ORDER[(idx + 1) % ORDER.len()]
+        } else {
+            ORDER[(idx + ORDER.len() - 1) % ORDER.len()]
+        };
+        self.select_tab(next);
     }
 
     fn select_tab(&mut self, tab: MainTab) {
@@ -13435,6 +13677,48 @@ impl App {
         }
     }
 
+    fn navigate_half_page(&mut self, down: bool) -> Result<()> {
+        if self.chat_browse_active() {
+            self.handle_action(if down {
+                Action::AiHalfPageDown
+            } else {
+                Action::AiHalfPageUp
+            })?;
+        } else if self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::Main {
+            for _ in 0..5 {
+                if down {
+                    self.tree_move_down();
+                } else {
+                    self.tree_move_up();
+                }
+            }
+        } else if self.active_tab == MainTab::TestPoints
+            && self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree
+        {
+            self.test_points_ui.page_canvas(down);
+        } else if self.active_tab == MainTab::Requirements
+            || self.active_tab == MainTab::TestPoints
+            || (self.active_tab == MainTab::Explore && !self.explore_edit_mode)
+        {
+            for _ in 0..5 {
+                self.handle_action(if down {
+                    Action::MoveDown
+                } else {
+                    Action::MoveUp
+                })?;
+            }
+        } else {
+            for _ in 0..5 {
+                if down {
+                    self.move_down();
+                } else {
+                    self.move_up();
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn navigate_page(&mut self, down: bool) -> Result<()> {
         if self.chat_browse_active() {
             self.handle_action(if down {
@@ -13527,6 +13811,135 @@ impl App {
     /// counts rows up from the bottom, so new output still pins to the end.
     fn set_chat_scroll_start(&mut self, start: usize, max_start: usize) {
         self.agent_mut().scroll_offset = max_start.saturating_sub(start);
+    }
+
+    /// Pointer handling for vertical scrollbars across Explore, MindMap,
+    /// Feature Editor, and Test Points.
+    fn handle_vertical_scrollbar_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        pos: ratatui::layout::Position,
+    ) -> bool {
+        if matches!(kind, MouseEventKind::Up(MouseButton::Left))
+            && self.vertical_scrollbar_grab.take().is_some()
+        {
+            return true;
+        }
+        if matches!(kind, MouseEventKind::Drag(MouseButton::Left))
+            && let Some((target, grab)) = self.vertical_scrollbar_grab
+            && let Some((_, bar)) = self
+                .vertical_scrollbars
+                .iter()
+                .find(|(candidate, _)| *candidate == target)
+                .copied()
+        {
+            let pointer = bar.track_pos(pos);
+            let value = scrollbar_drag_offset(&bar, pointer, grab);
+            self.set_vertical_scroll_start(target, value, bar.max_start());
+            return true;
+        }
+        if !matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let Some((target, bar)) = self
+            .vertical_scrollbars
+            .iter()
+            .rev()
+            .find(|(_, bar)| bar.rect.contains(pos))
+            .copied()
+        else {
+            return false;
+        };
+        let start = self.vertical_scroll_start(target);
+        match scrollbar_mouse(kind, pos, &bar, start) {
+            Some(ScrollbarAction::Grab(offset)) => {
+                self.vertical_scrollbar_grab = Some((target, offset));
+                true
+            }
+            Some(ScrollbarAction::PageBack) => {
+                self.set_vertical_scroll_start(
+                    target,
+                    start.saturating_sub(bar.view()),
+                    bar.max_start(),
+                );
+                true
+            }
+            Some(ScrollbarAction::PageForward) => {
+                self.set_vertical_scroll_start(
+                    target,
+                    start.saturating_add(bar.view()),
+                    bar.max_start(),
+                );
+                true
+            }
+            Some(ScrollbarAction::DragTo(_)) | None => false,
+        }
+    }
+
+    fn vertical_scroll_start(&self, target: VerticalScrollTarget) -> usize {
+        match target {
+            VerticalScrollTarget::ExploreColumn(col) => self.explore_viewports[col.index()].offset,
+            VerticalScrollTarget::ExploreDetails => self.explore_details_scroll,
+            VerticalScrollTarget::ExploreEditor => self.scroll_row,
+            VerticalScrollTarget::MindMapTree => self.tree_state.get_offset(),
+            VerticalScrollTarget::MindMapPreview => self.preview_scroll_row,
+            VerticalScrollTarget::TestPointsPane(0) => self.test_points_ui.canvas_scroll_y as usize,
+            VerticalScrollTarget::TestPointsPane(pane) => self
+                .test_points_ui
+                .scroll_offsets
+                .get(pane)
+                .copied()
+                .unwrap_or(0),
+            VerticalScrollTarget::HelpGuideDoc => self.help_guide.doc_scroll,
+        }
+    }
+
+    fn set_vertical_scroll_start(
+        &mut self,
+        target: VerticalScrollTarget,
+        value: usize,
+        max_start: usize,
+    ) {
+        let clamped = value.min(max_start);
+        match target {
+            VerticalScrollTarget::ExploreColumn(col) => {
+                let view = &mut self.explore_viewports[col.index()];
+                view.offset = clamped.min(view.max_vertical);
+            }
+            VerticalScrollTarget::ExploreDetails => {
+                self.explore_details_scroll = clamped;
+                self.explore_details_reveal = false;
+            }
+            VerticalScrollTarget::ExploreEditor => {
+                let visible = self.visible_editor_rows();
+                if let Some(&row) = visible.get(clamped) {
+                    self.scroll_row = row;
+                    self.cursor_row = row;
+                }
+            }
+            VerticalScrollTarget::MindMapTree => {
+                let old = self.tree_state.get_offset();
+                if clamped < old {
+                    self.tree_state.scroll_up(old - clamped);
+                } else {
+                    self.tree_state.scroll_down(clamped - old);
+                }
+            }
+            VerticalScrollTarget::MindMapPreview => {
+                self.preview_cursor_row = clamped;
+            }
+            VerticalScrollTarget::TestPointsPane(0) => {
+                self.test_points_ui.canvas_scroll_y = clamped as u16;
+            }
+            VerticalScrollTarget::TestPointsPane(pane) => {
+                if let Some(slot) = self.test_points_ui.scroll_offsets.get_mut(pane) {
+                    *slot = clamped;
+                }
+            }
+            VerticalScrollTarget::HelpGuideDoc => {
+                self.help_guide.doc_scroll = clamped;
+            }
+        }
     }
 
     /// The Explore column's scrollbar as drawn last frame.
@@ -14555,32 +14968,49 @@ impl App {
             crate::project_context::SwitchOverlay::None
         ) {
             let pos = ratatui::layout::Position::new(col, row);
-            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(region) = self.hit_test(&pos).cloned()
-                && matches!(
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(region) = self.hit_test(&pos).cloned()
+                    && matches!(
+                        self.project_switch.overlay,
+                        crate::project_context::SwitchOverlay::Picker { .. }
+                    )
+                    && matches!(
+                        region,
+                        ClickableRegion::ProjectRecent { .. }
+                            | ClickableRegion::ProjectOpenPath { .. }
+                    )
+                {
+                    self.handle_region_click(&region, &pos)?;
+                } else if matches!(
                     self.project_switch.overlay,
                     crate::project_context::SwitchOverlay::Picker { .. }
-                )
-                && matches!(
-                    region,
-                    ClickableRegion::ProjectRecent { .. } | ClickableRegion::ProjectOpenPath { .. }
-                )
-            {
-                self.handle_region_click(&region, &pos)?;
+                ) && self.modal_card_rect.is_some_and(|card| !card.contains(pos))
+                {
+                    self.project_switch.overlay = crate::project_context::SwitchOverlay::None;
+                }
             }
             return Ok(());
         }
         if self.authoring_ui.overlay_active() {
             let pos = ratatui::layout::Position::new(col, row);
-            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(region) = self.hit_test(&pos).cloned()
-                && matches!(
-                    region,
-                    ClickableRegion::ActionButton { modal: true, .. }
-                        | ClickableRegion::RequirementFilterOption { .. }
-                )
-            {
-                self.handle_region_click(&region, &pos)?;
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(region) = self.hit_test(&pos).cloned()
+                    && matches!(
+                        region,
+                        ClickableRegion::ActionButton { modal: true, .. }
+                            | ClickableRegion::RequirementFilterOption { .. }
+                    )
+                {
+                    self.handle_region_click(&region, &pos)?;
+                } else if !matches!(
+                    self.authoring_ui.overlay,
+                    crate::authoring_tab::RequirementsOverlay::DeleteConfirmation { .. }
+                        | crate::authoring_tab::RequirementsOverlay::RemoveCollection { .. }
+                        | crate::authoring_tab::RequirementsOverlay::Unsaved { .. }
+                ) && self.modal_card_rect.is_some_and(|card| !card.contains(pos))
+                {
+                    self.handle_action(Action::OverlayCancel)?;
+                }
             }
             return Ok(());
         }
@@ -14590,6 +15020,7 @@ impl App {
             || self.auth_panel_active
             || self.approval_panel_active
             || self.settings_panel_active
+            || self.help_guide.active
             || self.agent_profile_panel_active
             || self.quit_pending_confirm
             || self.change_summary_visible
@@ -14599,8 +15030,30 @@ impl App {
             || self.step_keyword_picker.is_some()
             || self.has_agent_change_prompt()
             || self.has_acp_permission_prompt()
+            || self.history_search.is_some()
         {
             let pos = ratatui::layout::Position::new(col, row);
+            if self.help_guide.active {
+                if self.handle_vertical_scrollbar_mouse(kind, pos) {
+                    return Ok(());
+                }
+                if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    let down = kind == MouseEventKind::ScrollDown;
+                    if self.help_guide.doc_rect.is_some_and(|r| r.contains(pos)) {
+                        self.help_guide.scroll_doc(if down { 3 } else { -3 });
+                        return Ok(());
+                    }
+                    if self.help_guide.tree_rect.is_some_and(|r| r.contains(pos)) {
+                        let next = if down {
+                            self.help_guide.selected_topic.saturating_add(1)
+                        } else {
+                            self.help_guide.selected_topic.saturating_sub(1)
+                        };
+                        self.help_guide.select_topic(next);
+                        return Ok(());
+                    }
+                }
+            }
             if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
                 && let Some(action) =
                     self.clickable_regions
@@ -14619,26 +15072,35 @@ impl App {
             {
                 self.handle_action(action)?;
             }
-            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(region) = self.hit_test(&pos).cloned()
-                && match &region {
-                    ClickableRegion::ActionButton { modal, .. } => *modal,
-                    ClickableRegion::ModelProfileRow { .. } => self.model_panel_active,
-                    ClickableRegion::ModelFormField { .. } => self.model_panel_active,
-                    ClickableRegion::AgentProfileRow { .. } => self.agent_profile_panel_active,
-                    ClickableRegion::ChangeSummaryRow { .. } => self.change_summary_visible,
-                    ClickableRegion::StepKeywordRow { .. } => self.step_keyword_picker.is_some(),
-                    ClickableRegion::SessionRow { .. } => self.session_panel_active,
-                    ClickableRegion::MindMapLocation { .. } => self.scenario_dropdown_open,
-                    ClickableRegion::ApprovalOption { .. } => self.approval_panel_active,
-                    ClickableRegion::QuitConfirmYes { .. }
-                    | ClickableRegion::QuitConfirmNo { .. } => self.quit_pending_confirm,
-                    ClickableRegion::AiInterruptConfirm { .. }
-                    | ClickableRegion::AiInterruptContinue { .. } => self.ai_interrupt_confirm,
-                    _ => false,
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(region) = self.hit_test(&pos).cloned()
+                    && match &region {
+                        ClickableRegion::ActionButton { modal, .. } => *modal,
+                        ClickableRegion::ModelProfileRow { .. } => self.model_panel_active,
+                        ClickableRegion::ModelFormField { .. } => self.model_panel_active,
+                        ClickableRegion::AgentProfileRow { .. } => self.agent_profile_panel_active,
+                        ClickableRegion::ChangeSummaryRow { .. } => self.change_summary_visible,
+                        ClickableRegion::StepKeywordRow { .. } => {
+                            self.step_keyword_picker.is_some()
+                        }
+                        ClickableRegion::SessionRow { .. } => self.session_panel_active,
+                        ClickableRegion::MindMapLocation { .. } => self.scenario_dropdown_open,
+                        ClickableRegion::ApprovalOption { .. } => self.approval_panel_active,
+                        ClickableRegion::QuitConfirmYes { .. }
+                        | ClickableRegion::QuitConfirmNo { .. } => self.quit_pending_confirm,
+                        ClickableRegion::AiInterruptConfirm { .. }
+                        | ClickableRegion::AiInterruptContinue { .. } => self.ai_interrupt_confirm,
+                        _ => false,
+                    }
+                {
+                    self.handle_region_click(&region, &pos)?;
+                } else if self.help_guide.active
+                    && self.help_guide.doc_rect.is_some_and(|r| r.contains(pos))
+                {
+                    self.help_guide.focus_doc = true;
+                } else if self.modal_card_rect.is_some_and(|card| !card.contains(pos)) {
+                    self.dismiss_backdrop_modal()?;
                 }
-            {
-                self.handle_region_click(&region, &pos)?;
             }
             return Ok(());
         }
@@ -14647,6 +15109,9 @@ impl App {
         }
         // Update hover tracking
         let pos = ratatui::layout::Position::new(col, row);
+        if self.handle_vertical_scrollbar_mouse(kind, pos) {
+            return Ok(());
+        }
 
         if self.active_tab == MainTab::Explore
             && !self.explore_edit_mode
@@ -15209,6 +15674,12 @@ impl App {
                 | ClickableRegion::TestPointScenario { rect, .. }
                 | ClickableRegion::ExploreTag { rect, .. }
                 | ClickableRegion::ExploreTagClear { rect }
+                | ClickableRegion::ExploreSearchTrigger { rect }
+                | ClickableRegion::ExploreSearchConfirm { rect }
+                | ClickableRegion::ExploreSearchClear { rect }
+                | ClickableRegion::ReqSearchTrigger { rect }
+                | ClickableRegion::ReqSearchConfirm { rect }
+                | ClickableRegion::ReqSearchClear { rect }
                 | ClickableRegion::ExploreTagScroll { rect, .. }
                 | ClickableRegion::ExploreDetailPane { rect }
                 | ClickableRegion::ExploreDetailTab { rect, .. }
@@ -15241,6 +15712,12 @@ impl App {
                 | ClickableRegion::TestPointScenario { .. }
                 | ClickableRegion::ExploreTag { .. }
                 | ClickableRegion::ExploreTagClear { .. }
+                | ClickableRegion::ExploreSearchTrigger { .. }
+                | ClickableRegion::ExploreSearchConfirm { .. }
+                | ClickableRegion::ExploreSearchClear { .. }
+                | ClickableRegion::ReqSearchTrigger { .. }
+                | ClickableRegion::ReqSearchConfirm { .. }
+                | ClickableRegion::ReqSearchClear { .. }
                 | ClickableRegion::ExploreTagScroll { .. }
                 | ClickableRegion::ExploreDetailPane { .. }
                 | ClickableRegion::ExploreDetailTab { .. }
@@ -15369,6 +15846,79 @@ impl App {
         None
     }
 
+    /// Records a left-click on `target` and returns `true` when it completes a
+    /// double-click within [`DOUBLE_CLICK_WINDOW`]. Resets tracking after a
+    /// double-click so a rapid third click starts a fresh sequence.
+    fn register_click(&mut self, target: ClickTarget) -> bool {
+        let now = Instant::now();
+        let is_double = self.last_click.as_ref().is_some_and(|(at, prev)| {
+            *prev == target && now.duration_since(*at) < DOUBLE_CLICK_WINDOW
+        });
+        if is_double {
+            self.last_click = None;
+        } else {
+            self.last_click = Some((now, target));
+        }
+        is_double
+    }
+
+    /// Dismisses non-destructive modal panels when clicking outside their card.
+    ///
+    /// Destructive confirmations (delete, quit, interrupt, external/agent change,
+    /// ACP permission) intentionally remain open until an explicit button or key.
+    fn dismiss_backdrop_modal(&mut self) -> Result<()> {
+        if self.pending_delete.is_some()
+            || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
+            || self.has_external_change_prompt()
+            || self.has_agent_change_prompt()
+            || self.has_acp_permission_prompt()
+        {
+            return Ok(());
+        }
+        if self.help_guide.active {
+            self.close_help_guide();
+        } else if self.settings_panel_active {
+            self.handle_action(Action::SettingsPanelClose)?;
+        } else if self.approval_panel_active {
+            self.approval_panel_active = false;
+        } else if self.session_panel_active {
+            self.handle_action(Action::SessionPanelClose)?;
+        } else if self.model_panel_active {
+            if self.model_panel_mode == ModelPanelMode::List {
+                self.handle_action(Action::ModelPanelClose)?;
+            } else {
+                self.handle_action(Action::ModelPanelFormCancel)?;
+            }
+        } else if self.agent_profile_panel_active {
+            self.handle_action(Action::AgentPanelClose)?;
+        } else if self.change_summary_visible {
+            self.change_summary_visible = false;
+        } else if self.scenario_dropdown_open {
+            self.handle_action(Action::ScenarioDropdownClose)?;
+        } else if self.step_keyword_picker.is_some() {
+            self.handle_action(Action::StepKeywordPickerCancel)?;
+        } else if self.history_search.is_some() {
+            self.handle_action(Action::AiHistorySearchDismiss)?;
+        }
+        Ok(())
+    }
+
+    /// Maps a visual display column offset inside `text` to the nearest Unicode
+    /// character index (used for single-line form field click-to-caret).
+    fn char_index_for_display_col(text: &str, target_col: usize) -> usize {
+        use unicode_width::UnicodeWidthChar;
+        let mut col = 0usize;
+        for (idx, ch) in text.chars().enumerate() {
+            let w = ch.width().unwrap_or(0);
+            if col + w > target_col {
+                return idx;
+            }
+            col += w;
+        }
+        text.chars().count()
+    }
+
     /// Execute the action associated with clicking on a UI region.
     fn handle_region_click(
         &mut self,
@@ -15447,54 +15997,132 @@ impl App {
                     }
                 }
             }
-            ClickableRegion::TestPointField { field, .. } => {
-                self.commit_test_point_field_edit()?;
-                self.test_points_ui.editing = false;
-                self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
-                self.test_points_ui.detail_field = *field;
-                self.reload_test_point_field_buffer();
+            ClickableRegion::TestPointField { rect, field } => {
+                let already_selected = self.test_points_ui.focus
+                    == crate::test_points_tab::TestPointsFocus::Details
+                    && self.test_points_ui.detail_field == *field;
+                let is_double = self.register_click(ClickTarget::TestPointField(*field));
+                if !already_selected {
+                    self.commit_test_point_field_edit()?;
+                    self.test_points_ui.editing = false;
+                    self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
+                    self.test_points_ui.detail_field = *field;
+                    self.reload_test_point_field_buffer();
+                }
+                if already_selected || is_double {
+                    self.test_points_ui.editing = true;
+                    let label_key = match field {
+                        crate::test_points_tab::DetailField::Title => "tp.field.title",
+                        crate::test_points_tab::DetailField::Objective => "tp.field.objective",
+                        crate::test_points_tab::DetailField::Preconditions => {
+                            "tp.field.preconditions"
+                        }
+                        crate::test_points_tab::DetailField::ExpectedOutcomes => {
+                            "tp.field.expected"
+                        }
+                        crate::test_points_tab::DetailField::Hierarchy => "tp.field.hierarchy",
+                    };
+                    let label_cols =
+                        unicode_width::UnicodeWidthStr::width(crate::i18n::t(label_key)) + 2;
+                    let rel_x = usize::from(pos.x.saturating_sub(rect.x));
+                    let value_col = rel_x.saturating_sub(label_cols);
+                    self.test_points_ui.field_cursor = Self::char_index_for_display_col(
+                        &self.test_points_ui.field_buffer,
+                        value_col,
+                    );
+                }
             }
             ClickableRegion::TestPointExcerpt { index, .. } => {
+                let is_double = self.register_click(ClickTarget::TestPointExcerpt(*index));
                 self.commit_test_point_field_edit()?;
                 self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Excerpts;
                 self.test_points_ui.selected_excerpt_index = *index;
+                if is_double {
+                    self.handle_action(Action::TpFollowExcerpt)?;
+                }
             }
             ClickableRegion::TestPointScenario { index, .. } => {
+                let is_double = self.register_click(ClickTarget::TestPointScenario(*index));
                 self.commit_test_point_field_edit()?;
                 self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
                 self.test_points_ui.selected_scenario_ref_index = *index;
+                if is_double {
+                    self.handle_action(Action::TpFollowScenario)?;
+                }
             }
             ClickableRegion::ModelProfileRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::ModelProfileRow(*index));
                 self.model_panel_selection = *index;
+                if is_double {
+                    self.handle_action(Action::ModelPanelActivate)?;
+                }
             }
-            ClickableRegion::ModelFormField { index, .. } => {
+            ClickableRegion::ModelFormField { rect, index } => {
                 self.model_form_focus = (*index).min(6);
-                self.model_form_cursor = self.model_form_field().chars().count();
+                // Model form renders `"   "` (3) + `format!("{label:12} ")` (13) = 16 columns before value.
+                let rel_x = usize::from(pos.x.saturating_sub(rect.x));
+                let value_col = rel_x.saturating_sub(16);
+                let field_text = self.model_form_field().to_owned();
+                self.model_form_cursor = if rel_x <= 16 {
+                    field_text.chars().count()
+                } else {
+                    Self::char_index_for_display_col(&field_text, value_col)
+                };
             }
             ClickableRegion::AgentProfileRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::AgentProfileRow(*index));
                 self.agent_profile_panel_selection = *index;
+                if is_double {
+                    self.handle_action(Action::AgentPanelSelect)?;
+                }
             }
             ClickableRegion::ChangeSummaryRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::ChangeSummaryRow(*index));
                 self.change_summary_selection = *index;
+                if is_double {
+                    self.handle_action(Action::ChangeSummaryJump)?;
+                }
             }
             ClickableRegion::StepKeywordRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::StepKeywordRow(*index));
                 if let Some(picker) = self.step_keyword_picker.as_mut() {
                     picker.selected = *index;
+                }
+                if is_double {
+                    self.handle_action(Action::StepKeywordPickerConfirm)?;
                 }
             }
             ClickableRegion::ModalList { .. } => {}
             ClickableRegion::SessionRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::SessionRow(*index));
                 self.session_panel_selection = *index;
+                if is_double {
+                    self.handle_action(Action::SessionPanelActivate)?;
+                }
             }
             ClickableRegion::MindMapLocation { index, .. } => {
+                let is_double = self.register_click(ClickTarget::MindMapLocation(*index));
                 self.scenario_dropdown_selection = *index;
+                if is_double {
+                    self.handle_action(Action::ScenarioDropdownSelect)?;
+                }
             }
             ClickableRegion::ChatInput { .. } => {
                 self.focus_ai_input();
                 if self.active_tab == MainTab::MindMap {
                     self.mindmap_focus = MindMapFocus::AiPanel;
+                }
+                if let Some((text_rect, scroll)) = self.chat_input_text_rect
+                    && text_rect.contains(*pos)
+                {
+                    let row = scroll.saturating_add(pos.y.saturating_sub(text_rect.y));
+                    let col = pos.x.saturating_sub(text_rect.x);
+                    let layout =
+                        crate::composer::layout(self.agent().input.text(), text_rect.width);
+                    let char_idx = layout.char_at(row, col);
+                    self.agent_mut().input.set_cursor(char_idx);
                 }
             }
             ClickableRegion::Tab { tab, .. } => {
@@ -15517,7 +16145,14 @@ impl App {
                 }
             }
             ClickableRegion::ExploreFeature { feature_idx, .. } => {
+                let clicked_dir = match self.feature_browser_rows().get(*feature_idx).cloned() {
+                    Some(crate::feature_browser::Row::Directory(path, _)) => Some(path),
+                    _ => None,
+                };
                 self.explore_set_feature_row(*feature_idx);
+                if let Some(path) = clicked_dir {
+                    self.toggle_feature_directory(&path);
+                }
                 self.explore_focus = crate::app::ColumnFocus::Feature;
                 // Reset scenario/step selection
                 self.explore_selected_scenario = 0;
@@ -15528,9 +16163,13 @@ impl App {
                 self.explore_focus = crate::app::ColumnFocus::Feature;
             }
             ClickableRegion::ExploreScenario { scenario_idx, .. } => {
+                let is_double = self.register_click(ClickTarget::ExploreScenario(*scenario_idx));
                 self.explore_selected_scenario = *scenario_idx;
                 self.explore_focus = crate::app::ColumnFocus::Scenario;
                 self.explore_selected_step = 0;
+                if is_double {
+                    self.handle_action(Action::EnterEdit)?;
+                }
             }
             ClickableRegion::ExploreStep { step_idx, .. } => {
                 self.explore_selected_step = *step_idx;
@@ -15556,10 +16195,14 @@ impl App {
             }
             ClickableRegion::ExploreDetailItem { index, .. } => {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    let is_double = self.register_click(ClickTarget::ExploreDetailItem(*index));
                     self.explore_focus = crate::app::ColumnFocus::Details;
                     self.explore_details_selection =
                         (*index).min(self.detail_item_count().saturating_sub(1));
                     self.explore_details_reveal = true;
+                    if is_double {
+                        self.handle_action(Action::ExploreDetailEnter)?;
+                    }
                 }
             }
             ClickableRegion::ExploreTag { index, .. } => {
@@ -15573,6 +16216,12 @@ impl App {
                 self.toggle_feature_tag(&tag);
             }
             ClickableRegion::ExploreTagClear { .. } => self.clear_feature_tags(),
+            ClickableRegion::ExploreSearchTrigger { .. } => self.begin_feature_search(),
+            ClickableRegion::ExploreSearchConfirm { .. } => self.confirm_feature_search(),
+            ClickableRegion::ExploreSearchClear { .. } => self.clear_feature_search(),
+            ClickableRegion::ReqSearchTrigger { .. } => self.authoring_ui.begin_search(),
+            ClickableRegion::ReqSearchConfirm { .. } => self.authoring_ui.confirm_search(),
+            ClickableRegion::ReqSearchClear { .. } => self.authoring_ui.clear_search(),
             ClickableRegion::ExploreTagScroll { down, .. } => {
                 let page = self.feature_tags.visible_rows.max(1);
                 self.scroll_feature_tags(*down, page);
@@ -15623,7 +16272,15 @@ impl App {
                     self.select_approval_mode(mode);
                 }
             }
-            ClickableRegion::EditorPanel | ClickableRegion::PreviewPanel => {}
+            ClickableRegion::EditorPanel => {}
+            ClickableRegion::PreviewPanel => {
+                let is_double = self.register_click(ClickTarget::PreviewPanel);
+                self.mindmap_focus = MindMapFocus::AiPanel;
+                self.ai_input_focused = false;
+                if is_double {
+                    self.handle_action(Action::ToggleScenarioDropdown)?;
+                }
+            }
             ClickableRegion::TestPointsPane { pane, .. } => {
                 if self.active_tab != MainTab::TestPoints {
                     return Ok(());
@@ -16210,6 +16867,7 @@ impl App {
             || self.session_panel_active
             || self.agent_profile_panel_active
             || self.approval_panel_active
+            || self.help_guide.active
             || self.change_summary_visible
             || self.generation_scope_prompt.is_some()
             || self.step_keyword_picker.is_some()
@@ -16234,6 +16892,18 @@ impl App {
 
     pub fn close_settings_panel(&mut self) {
         self.settings_panel_active = false;
+    }
+
+    /// Opens the modal User Guide positioned on the topic for the active tab.
+    pub fn open_help_guide(&mut self) {
+        if self.prompt_owns_input() || self.settings_panel_active {
+            return;
+        }
+        self.help_guide.open_for_tab(self.active_tab);
+    }
+
+    pub fn close_help_guide(&mut self) {
+        self.help_guide.close();
     }
 
     /// Activate the highlighted Settings row (keyboard Enter/Space or a click).
@@ -16475,6 +17145,88 @@ impl App {
                 return !(key.code == KeyCode::Char('q')
                     && key.modifiers.contains(KeyModifiers::CONTROL));
             }
+        }
+        true
+    }
+
+    /// Handles the F1 Help chord and, while the User Guide modal is open, every
+    /// key it owns (mirrors iCode's `GuideDialog` navigation).
+    pub fn handle_help_guide_key(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return false;
+        }
+        if !self.help_guide.active {
+            if key.code == KeyCode::F(1) && key.modifiers.is_empty() {
+                self.open_help_guide();
+                return self.help_guide.active;
+            }
+            return false;
+        }
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc | KeyCode::F(1), _)
+            | (KeyCode::Char('q'), KeyModifiers::NONE)
+            | (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.close_help_guide();
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                self.help_guide.cycle_language();
+            }
+            (KeyCode::Tab | KeyCode::BackTab, _) => {
+                self.help_guide.focus_doc = !self.help_guide.focus_doc;
+            }
+            (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                self.help_guide.focus_doc = false;
+            }
+            (KeyCode::Right | KeyCode::Enter, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                self.help_guide.focus_doc = true;
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.scroll_doc(1);
+                } else {
+                    self.help_guide
+                        .select_topic(self.help_guide.selected_topic.saturating_add(1));
+                }
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.scroll_doc(-1);
+                } else {
+                    self.help_guide
+                        .select_topic(self.help_guide.selected_topic.saturating_sub(1));
+                }
+            }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(10);
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(-10);
+            }
+            (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(20);
+            }
+            (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(-20);
+            }
+            (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.doc_scroll = 0;
+                } else {
+                    self.help_guide.select_topic(0);
+                }
+            }
+            (KeyCode::End, _) | (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.doc_scroll = self.help_guide.doc_max_scroll;
+                } else {
+                    self.help_guide
+                        .select_topic(crate::ui::help::TOPIC_COUNT - 1);
+                }
+            }
+            _ => {}
         }
         true
     }
@@ -16819,6 +17571,10 @@ impl App {
             } else {
                 self.withdraw_queued_message();
             }
+            return Ok(());
+        }
+        if command == "help" {
+            self.open_help_guide();
             return Ok(());
         }
         if command == "preferences" || command == "prefs" {
@@ -21212,10 +21968,11 @@ mod tests {
         assert_eq!(app.agent().input.text(), draft, "opening keeps the draft");
 
         let (buffer, text) = draw(&mut app);
-        // 100x30 terminal: the 28-row content area loses one row top and
+        // 100x30 terminal: row 0 is the tab bar, row 1 is the active-tab
+        // underline rule, so the 27-row content area loses one row top and
         // bottom, and every row loses three columns on each side.
         assert_eq!(
-            buffer[(3, 2)].symbol(),
+            buffer[(3, 3)].symbol(),
             "╭",
             "the viewer starts after the top gutter"
         );
@@ -21233,7 +21990,7 @@ mod tests {
         assert!(text.contains("no image protocol"), "{text}");
         let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
             .expect("the close button is registered");
-        assert_eq!(close.y, 2, "the close button sits on the top border");
+        assert_eq!(close.y, 3, "the close button sits on the top border");
         assert!(text.contains("Close [Esc]"), "{text}");
 
         // Neither the composer below nor typed keys react while it is open.
@@ -25453,6 +26210,12 @@ mod tests {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -25523,6 +26286,7 @@ mod tests {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -25683,6 +26447,12 @@ Feature: B
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
@@ -25753,6 +26523,7 @@ Feature: B
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),

@@ -74,6 +74,20 @@ pub(crate) const BORDER: Color = Color::Rgb(0x5F, 0x5F, 0x5F);
 /// [`crate::ui::render`] paints it under the whole frame so the content keeps its
 /// contrast whatever the terminal profile's own background is.
 pub(crate) const SCREEN_BG: Color = Color::Rgb(0x1C, 0x1C, 0x1C);
+/// Subtle purple-tinted header bar behind the top tab strip and project switcher.
+pub(crate) const TOPBAR_BG: Color = Color::Rgb(0x24, 0x20, 0x2E);
+/// Resting surface for neutral clickable pill buttons inside pane strips.
+pub(crate) const ACTION_CHIP_BG: Color = Color::Rgb(0x31, 0x2C, 0x3E);
+/// Tinted surface for primary clickable action pills.
+pub(crate) const ACTION_CHIP_PRIMARY_BG: Color = Color::Rgb(0x35, 0x2B, 0x4D);
+/// Tinted surface for constructive/run/approve clickable action pills.
+pub(crate) const ACTION_CHIP_SUCCESS_BG: Color = Color::Rgb(0x1E, 0x38, 0x2A);
+/// Tinted surface for informational/edit/view clickable action pills.
+pub(crate) const ACTION_CHIP_INFO_BG: Color = Color::Rgb(0x1E, 0x32, 0x42);
+/// Tinted surface for caution/filter/detail clickable action pills.
+pub(crate) const ACTION_CHIP_WARNING_BG: Color = Color::Rgb(0x3D, 0x2E, 0x1E);
+/// Tinted surface for destructive/reject/close clickable action pills.
+pub(crate) const ACTION_CHIP_DANGER_BG: Color = Color::Rgb(0x3E, 0x21, 0x26);
 /// Surface color for code fences and blockquotes.
 pub(crate) const BLOCK_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
 /// Subtle user-message surface, restricted to the chat transcript.
@@ -313,6 +327,63 @@ pub(crate) fn chip<'a>(label: impl Into<std::borrow::Cow<'a, str>>, bg: Color) -
             .fg(CHIP_FG)
             .add_modifier(Modifier::BOLD),
     )
+}
+
+/// Semantic accent tone for clickable pill controls inside pane strips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionTone {
+    Neutral,
+    Primary,
+    Success,
+    Info,
+    Warning,
+    Danger,
+}
+
+/// Label and shortcut-key styles for a clickable pill control.
+///
+/// Each tone pairs a dark tinted pill surface with a high-contrast semantic
+/// accent for bracketed shortcut hints, so buttons read immediately as
+/// interactive GUI controls while keeping Vim shortcuts discoverable.
+pub(crate) fn action_chip_styles(tone: ActionTone) -> (Style, Style) {
+    let (bg, accent) = match tone {
+        ActionTone::Neutral => (ACTION_CHIP_BG, PRIMARY),
+        ActionTone::Primary => (ACTION_CHIP_PRIMARY_BG, PRIMARY),
+        ActionTone::Success => (ACTION_CHIP_SUCCESS_BG, SUCCESS),
+        ActionTone::Info => (ACTION_CHIP_INFO_BG, INFO),
+        ActionTone::Warning => (ACTION_CHIP_WARNING_BG, WARNING),
+        ActionTone::Danger => (ACTION_CHIP_DANGER_BG, ERROR),
+    };
+    let label = Style::default().fg(FG).bg(bg);
+    let key = Style::default()
+        .fg(accent)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    (label, key)
+}
+
+/// Semantic accent color identifying each top-level tab when active.
+pub(crate) fn tab_accent(tab: crate::app::MainTab) -> Color {
+    match tab {
+        crate::app::MainTab::Explore => PRIMARY,
+        crate::app::MainTab::MindMap => INFO,
+        crate::app::MainTab::Ai => ACCENT,
+        crate::app::MainTab::Requirements => SUCCESS,
+        crate::app::MainTab::TestPoints => WARNING,
+    }
+}
+
+/// Surface style for the top navigation bar.
+pub(crate) fn topbar_style() -> Style {
+    Style::default().fg(TAB_INACTIVE).bg(TOPBAR_BG)
+}
+
+/// Pill style for the clickable project switcher on the top navigation bar.
+pub(crate) fn project_chip_style() -> Style {
+    Style::default()
+        .fg(INFO)
+        .bg(CHAT_CHIP_BG)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Key and description spans retaining the supplied punctuation and spacing.
@@ -712,6 +783,7 @@ mod tests {
             ("authoring_tab.rs", include_str!("authoring_tab.rs"), 0),
             ("test_points_tab.rs", include_str!("test_points_tab.rs"), 0),
             ("ui/chat.rs", include_str!("ui/chat.rs"), 0),
+            ("ui/help.rs", include_str!("ui/help.rs"), 0),
             ("markdown.rs", include_str!("markdown.rs"), 0),
         ];
         for &(path, source, cap) in CAPS {

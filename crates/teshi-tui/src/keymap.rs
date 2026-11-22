@@ -609,6 +609,26 @@ pub enum Action {
     SettingsPanelActivate(usize),
     /// Close the app Settings overlay (the bottom-right Close control).
     SettingsPanelClose,
+    // ── User Guide / Help overlay actions ────────────────
+    /// Open the modal User Guide (`?` / `F1` / `:help` / `/help`).
+    HelpPanelOpen,
+    /// Close the modal User Guide (`Esc` / `q` / Close control).
+    HelpPanelClose,
+    /// Select a topic by index in the User Guide left tree.
+    HelpSelectTopic(usize),
+    /// Cycle the User Guide document body language (`Space` or header pill).
+    HelpCycleLanguage,
+    // ── Unified Vim navigation & Ex command line ─────────
+    /// Scroll or move up by half a page (`Ctrl+U`) across tabs.
+    HalfPageUp,
+    /// Scroll or move down by half a page (`Ctrl+D`) across tabs.
+    HalfPageDown,
+    /// Switch to the next top-level tab (`gt`).
+    NextTab,
+    /// Switch to the previous top-level tab (`gT`).
+    PrevTab,
+    /// Autocomplete the active `:` Ex command prefix (`Tab`).
+    CommandLineAutocomplete,
 }
 
 impl Action {
@@ -789,6 +809,15 @@ impl Action {
                     };
                 }
                 return Some(Self::CancelPaneNavigation);
+            }
+            if pending_char == 'g' {
+                match (event.code, event.modifiers) {
+                    (KeyCode::Char('t'), KeyModifiers::NONE) => return Some(Self::NextTab),
+                    (KeyCode::Char('T'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                        return Some(Self::PrevTab);
+                    }
+                    _ => {}
+                }
             }
             if context.active_tab == MainTab::Requirements
                 && context.requirements_focus == RequirementsFocus::Editor
@@ -1198,6 +1227,7 @@ impl Action {
             return match (event.code, event.modifiers) {
                 (KeyCode::Esc, _) => Some(Self::CommandLineCancel),
                 (KeyCode::Enter, _) => Some(Self::CommandLineConfirm),
+                (KeyCode::Tab, _) => Some(Self::CommandLineAutocomplete),
                 (KeyCode::Backspace, _) => Some(Self::CommandLineBackspace),
                 (KeyCode::Char(ch), modifiers)
                     if !ch.is_control()
@@ -1248,7 +1278,15 @@ impl Action {
                     || (context.active_tab == MainTab::MindMap
                         && context.mindmap_focus == MindMapFocus::AiPanel));
             let navigation = match (event.code, event.modifiers) {
+                (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                | (KeyCode::F(1), KeyModifiers::NONE) => Some(Self::HelpPanelOpen),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) if !chat_browsing => {
+                    Some(Self::HalfPageUp)
+                }
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) if !chat_browsing => {
+                    Some(Self::HalfPageDown)
+                }
                 (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
                     Some(Self::PageUp)
                 }

@@ -98,6 +98,8 @@ pub(super) struct ListDialog<'a> {
 
 /// Click targets drawn by [`ListDialog::render`].
 pub(super) struct ListTargets {
+    /// Outer card rectangle, used to detect backdrop clicks outside the dialog.
+    pub panel: Rect,
     /// Visible rows as `(row index, rect)`.
     pub rows: Vec<(usize, Rect)>,
     /// One rectangle per button, in order; empty when the button did not fit.
@@ -162,7 +164,11 @@ impl ListDialog<'_> {
             );
         }
         let buttons = draw_buttons(frame, &self.buttons, &plan, content, panel);
-        ListTargets { rows, buttons }
+        ListTargets {
+            panel,
+            rows,
+            buttons,
+        }
     }
 }
 

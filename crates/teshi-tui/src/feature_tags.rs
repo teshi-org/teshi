@@ -485,6 +485,7 @@ impl App {
             || self.session_panel_active
             || self.approval_panel_active
             || self.settings_panel_active
+            || self.help_guide.active
             || self.agent_profile_panel_active
             || self.change_summary_visible
             || self.scenario_dropdown_open

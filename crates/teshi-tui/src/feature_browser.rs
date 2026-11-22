@@ -349,6 +349,34 @@ impl App {
             && !self.feature_browser.expanded.contains(path)
     }
 
+    /// Toggles the expanded/collapsed state of a Feature directory row.
+    pub(crate) fn toggle_feature_directory(&mut self, path: &str) {
+        if !self.feature_browser.expanded.remove(path) {
+            self.feature_browser.expanded.insert(path.to_owned());
+        }
+    }
+
+    /// Focuses the Features pane and activates inline `/` search input.
+    pub(crate) fn begin_feature_search(&mut self) {
+        self.explore_focus = ColumnFocus::Feature;
+        self.feature_tags.focused = false;
+        self.feature_browser.searching = true;
+        self.feature_browser.query.move_cursor(CursorMotion::End);
+    }
+
+    /// Commits the current Features search query and exits search input mode.
+    pub(crate) fn confirm_feature_search(&mut self) {
+        self.feature_browser.searching = false;
+        self.commit_feature_browser_search();
+    }
+
+    /// Clears the active Features search query and exits search input mode.
+    pub(crate) fn clear_feature_search(&mut self) {
+        self.feature_browser.query = LineInput::default();
+        self.feature_browser.searching = false;
+        self.commit_feature_browser_search();
+    }
+
     pub(crate) fn handle_feature_browser_key(&mut self, event: KeyEvent) -> bool {
         // While the tag strip owns the cursor, the tree's h/l and Enter keys
         // belong to the strip instead of directory expansion.
@@ -365,6 +393,7 @@ impl App {
             || self.session_panel_active
             || self.approval_panel_active
             || self.settings_panel_active
+            || self.help_guide.active
             || self.agent_profile_panel_active
             || self.change_summary_visible
             || self.scenario_dropdown_open
