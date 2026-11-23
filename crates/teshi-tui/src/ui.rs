@@ -410,6 +410,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.feature_tags.begin_frame();
     app.agent_mut().acp_controls_ui.clear_regions();
     app.chat_history_rect = None;
+    app.ai_sidebar_rect = None;
+    app.ai_sidebar_working_rect = None;
+    app.ai_sidebar_settled_rect = None;
 
     let (tabs_row, tabs_rule_row, content_row, footer_row) = if frame.area().height >= 8 {
         let [tabs_row, tabs_rule_row, content_row, footer_row] = Layout::default()
@@ -6260,7 +6263,7 @@ fn session_relative_age(updated_at: &str) -> String {
     }
 }
 
-fn session_label(text: &str, width: u16) -> String {
+pub(super) fn ellipsize_to_cols(text: &str, width: u16) -> String {
     let truncated = truncate_string_to_cols(text, width);
     if truncated.chars().count() < text.chars().count() && width > 1 {
         format!(
@@ -6270,6 +6273,51 @@ fn session_label(text: &str, width: u16) -> String {
     } else {
         truncated
     }
+}
+
+/// Truncate long identifiers (such as git branch names) in the middle, keeping both prefix and suffix.
+pub(super) fn middle_ellipsize_to_cols(text: &str, width: u16) -> String {
+    let max = width as usize;
+    if max == 0 {
+        return String::new();
+    }
+    if text.width() <= max {
+        return text.to_string();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let avail = max - 1;
+    let head_budget = (avail * 3).div_ceil(5).max(1);
+    let tail_budget = avail.saturating_sub(head_budget);
+    let head = truncate_string_to_cols(text, head_budget as u16);
+    let used_head = head.width();
+    let tail_cap = avail.saturating_sub(used_head);
+    let mut tail_rev = Vec::new();
+    let mut tail_w = 0usize;
+    for ch in text
+        .chars()
+        .skip(head.chars().count())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        let w = ch.width().unwrap_or(0);
+        if tail_w + w > tail_cap {
+            break;
+        }
+        tail_w += w;
+        tail_rev.push(ch);
+    }
+    let tail: String = tail_rev.into_iter().rev().collect();
+    if tail.is_empty() && tail_budget > 0 {
+        return ellipsize_to_cols(text, width);
+    }
+    format!("{head}…{tail}")
+}
+
+fn session_label(text: &str, width: u16) -> String {
+    ellipsize_to_cols(text, width)
 }
 
 fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -9461,7 +9509,7 @@ fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 ///
 /// A one-row interior becomes the action strip alone so Run/Approve-style chips
 /// stay reachable on short panes; taller interiors keep at least one content row.
-fn split_pane_action_row(inner: Rect) -> (Rect, Option<Rect>) {
+pub(super) fn split_pane_action_row(inner: Rect) -> (Rect, Option<Rect>) {
     if inner.width == 0 || inner.height == 0 {
         return (inner, None);
     }
@@ -9606,7 +9654,7 @@ fn render_vertical_scrollbar_into(
 
 /// Paints a 1-column solid vertical scrollbar on `bar_rect` and registers it
 /// for hover, drag, and track-paging pointer interaction.
-fn render_vertical_scrollbar(
+pub(super) fn render_vertical_scrollbar(
     frame: &mut Frame<'_>,
     app: &mut App,
     target: crate::app::VerticalScrollTarget,

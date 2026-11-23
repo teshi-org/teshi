@@ -517,6 +517,9 @@ pub fn run() -> Result<()> {
                     if app.handle_requirement_search_key(key_event) {
                         continue;
                     }
+                    if app.handle_ai_sidebar_search_key(key_event) {
+                        continue;
+                    }
                     if let Some(action) = Action::from_key_event(
                         key_event,
                         KeyContext {
