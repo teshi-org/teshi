@@ -1,18 +1,18 @@
 # language: zh-CN
-# Requirement: doc-73; authored only; not bound, executed or accepted.
+# Requirement: doc-102; authored only; not bound, executed or accepted.
 # Expectations describe the implemented policy; bind and replay before claiming acceptance.
 @tui
 功能: 终端标题规则
 
-  场景: 运行中显示进度与项目
+  场景: 运行中显示运行标记
     假如 有一个 Agent 会话正在运行
     当 我查看终端标题
-    那么 标题包含运行标记与项目名且不包含会话正文
+    那么 标题显示运行标记且不包含项目名与会话正文
 
   场景: 多个会话聚合运行状态
     假如 三个 Agent 会话中有一个正在运行
     当 我查看终端标题
-    那么 标题显示三个会话中一个正在运行
+    那么 标题显示会话运行计数且不出现 0/N running
 
   场景: 等待审批时改用等待标记
     假如 一个 Agent 会话正在等待用户审批

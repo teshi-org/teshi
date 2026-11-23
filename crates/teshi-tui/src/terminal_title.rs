@@ -65,13 +65,6 @@ impl Activity {
         activity
     }
 
-    /// Conversations the user is being asked to look at: still running, or
-    /// finished with an unread answer. Idle ones nobody waits for are left out,
-    /// so the count never grows just because a conversation stays open.
-    fn tracked(self) -> usize {
-        self.running + self.unseen
-    }
-
     fn active(self) -> bool {
         self.running > 0 || self.approval > 0
     }
@@ -137,12 +130,7 @@ impl TerminalTitle {
         } else {
             STATIC_RUNNING
         };
-        let title = compose(
-            &app.project_switch.active.identity.display_name(),
-            activity,
-            self.outcome,
-            mark,
-        );
+        let title = compose(activity, self.outcome, mark);
         if title == self.last {
             return;
         }
@@ -198,55 +186,72 @@ fn supports_animation() -> bool {
     std::env::var("TERM").map_or(true, |term| term != "dumb")
 }
 
-/// Build the title from identity and aggregate state.
+/// Build the title from aggregate state.
 ///
-/// The body deliberately contains only the project name and counts: agent
-/// titles and chat text can carry user content.
-fn compose(identity: &str, activity: Activity, outcome: Outcome, mark: &str) -> String {
-    let base = if identity.is_empty() || identity.eq_ignore_ascii_case("teshi") {
-        "teshi".to_string()
-    } else {
-        format!("teshi · {identity}")
-    };
-
-    if activity.tracked() > 0 {
-        // The numerator is what the user owes a look at, so the badge never
-        // claims progress that is already read: two running conversations read
-        // `0/2`, one of them finishing unread reads `1/2`, reading it `0/1`.
-        let mut title = if activity.running == 0 {
-            // Nothing runs, so a `N/M running` count would be a lie.
-            format!("{mark} {base} · {} unread", activity.unseen)
-        } else if activity.tracked() > 1 || activity.unseen > 0 {
-            format!(
-                "{mark} {base} · {}/{} running",
-                activity.unseen,
-                activity.tracked()
-            )
+/// The title deliberately contains only status and counts: agent titles
+/// and chat text can carry user content, and neither product name nor project
+/// identity are embedded.
+fn compose(activity: Activity, outcome: Outcome, mark: &str) -> String {
+    if activity.running > 0 {
+        let running_str = if activity.running == 1 && activity.unseen == 0 && activity.approval == 0
+        {
+            "running".to_string()
         } else {
-            format!("{mark} {base}")
+            format!("{} running", activity.running)
         };
-        if activity.approval > 0 {
-            title.push_str(&format!(", {} waiting", activity.approval));
+        let mut parts = vec![running_str];
+        if activity.unseen > 0 {
+            parts.push(format!("{} unread", activity.unseen));
         }
-        return title;
+        if activity.approval > 0 {
+            parts.push(format!("{} waiting", activity.approval));
+        }
+        return format!("{mark} {}", parts.join(", "));
     }
+
     if activity.approval > 0 {
-        return if activity.total > 1 {
-            format!(
-                "? {base} · {}/{} waiting",
-                activity.approval, activity.total
-            )
+        let waiting_str = if activity.approval == 1 && activity.unseen == 0 {
+            "waiting".to_string()
         } else {
-            format!("? {base} · waiting")
+            format!("{} waiting", activity.approval)
         };
+        let mut parts = vec![waiting_str];
+        if activity.unseen > 0 {
+            parts.push(format!("{} unread", activity.unseen));
+        }
+        return format!("? {}", parts.join(", "));
     }
+
+    if activity.unseen > 0 {
+        if activity.failed > 0 {
+            return if activity.unseen == activity.failed {
+                let msg = if activity.failed == 1 {
+                    "failed".to_string()
+                } else {
+                    format!("{} failed", activity.failed)
+                };
+                format!("✗ {msg}")
+            } else {
+                let succeeded_unseen = activity.unseen.saturating_sub(activity.failed);
+                format!("✗ {} failed, {} unread", activity.failed, succeeded_unseen)
+            };
+        }
+        let msg = if activity.unseen == 1 {
+            "1 unread".to_string()
+        } else {
+            format!("{} unread", activity.unseen)
+        };
+        return format!("✓ {msg}");
+    }
+
     if activity.failed > 0 {
-        return format!("✗ {base} · failed");
+        return "✗ failed".to_string();
     }
+
     match outcome {
-        Outcome::Succeeded => format!("✓ {base}"),
-        Outcome::Failed => format!("✗ {base}"),
-        Outcome::None => base,
+        Outcome::Succeeded => "✓ completed".to_string(),
+        Outcome::Failed => "✗ failed".to_string(),
+        Outcome::None => String::new(),
     }
 }
 
@@ -301,115 +306,113 @@ mod tests {
     }
 
     #[test]
-    fn idle_title_is_static_identity() {
-        assert_eq!(
-            compose("proj", activity(3, 0, 0, 0), Outcome::None, "⠋"),
-            "teshi · proj"
-        );
-        assert_eq!(
-            compose("teshi", activity(1, 0, 0, 0), Outcome::None, "⠋"),
-            "teshi"
-        );
+    fn idle_title_is_empty() {
+        assert_eq!(compose(activity(3, 0, 0, 0), Outcome::None, "⠋"), "");
+        assert_eq!(compose(activity(1, 0, 0, 0), Outcome::None, "⠋"), "");
     }
 
     #[test]
     fn running_title_animates_and_counts_tracked_agents() {
-        let first = compose("proj", activity(3, 2, 0, 0), Outcome::None, "⠋");
+        let first = compose(activity(3, 2, 0, 0), Outcome::None, "⠋");
         assert!(first.starts_with('⠋'));
-        assert!(first.contains("0/2 running"));
-        assert_ne!(
-            first,
-            compose("proj", activity(3, 2, 0, 0), Outcome::None, "⠙")
-        );
+        assert!(first.contains("2 running"));
+        assert!(!first.contains("0/2"));
+        assert!(!first.contains("teshi"));
+        assert_ne!(first, compose(activity(3, 2, 0, 0), Outcome::None, "⠙"));
     }
 
     #[test]
-    fn unread_answers_are_the_numerator() {
+    fn unread_answers_are_reported_cleanly() {
         // One conversation finished unread while another still runs.
         assert_eq!(
-            compose(
-                "proj",
-                with_unseen(activity(3, 1, 0, 0), 1),
-                Outcome::None,
-                "⠋"
-            ),
-            "⠋ teshi · proj · 1/2 running"
+            compose(with_unseen(activity(3, 1, 0, 0), 1), Outcome::None, "⠋"),
+            "⠋ 1 running, 1 unread"
         );
         // Reading it leaves only the running conversation.
         assert_eq!(
-            compose("proj", activity(3, 1, 0, 0), Outcome::None, "⠋"),
-            "⠋ teshi · proj"
+            compose(activity(3, 1, 0, 0), Outcome::None, "⠋"),
+            "⠋ running"
         );
-        // A lone unread answer still has to surface, with no running count to
-        // inflate it.
+        // A lone unread answer surfaces with completion mark.
         assert_eq!(
-            compose(
-                "proj",
-                with_unseen(activity(1, 0, 0, 0), 1),
-                Outcome::None,
-                "⠋"
-            ),
-            "⠋ teshi · proj · 1 unread"
+            compose(with_unseen(activity(1, 0, 0, 0), 1), Outcome::None, "⠋"),
+            "✓ 1 unread"
         );
     }
 
     #[test]
-    fn idle_conversations_stay_out_of_the_denominator() {
+    fn idle_conversations_stay_out_of_counts() {
         assert_eq!(
-            compose("proj", activity(9, 2, 0, 0), Outcome::None, "⠋"),
-            "⠋ teshi · proj · 0/2 running"
+            compose(activity(9, 2, 0, 0), Outcome::None, "⠋"),
+            "⠋ 2 running"
         );
     }
 
     #[test]
     fn dumb_terminal_uses_a_static_marker() {
         assert_eq!(
-            compose("proj", activity(1, 1, 0, 0), Outcome::None, STATIC_RUNNING),
-            "● teshi · proj"
+            compose(activity(1, 1, 0, 0), Outcome::None, STATIC_RUNNING),
+            "● running"
         );
     }
 
     #[test]
-    fn single_agent_run_omits_counts() {
+    fn single_agent_run_omits_redundant_count() {
         assert_eq!(
-            compose("proj", activity(1, 1, 0, 0), Outcome::None, "⠋"),
-            "⠋ teshi · proj"
+            compose(activity(1, 1, 0, 0), Outcome::None, "⠋"),
+            "⠋ running"
         );
     }
 
     #[test]
     fn approval_takes_over_when_nothing_runs() {
         assert_eq!(
-            compose("proj", activity(2, 0, 2, 0), Outcome::None, "⠋"),
-            "? teshi · proj · 2/2 waiting"
+            compose(activity(2, 0, 2, 0), Outcome::None, "⠋"),
+            "? 2 waiting"
+        );
+        assert_eq!(
+            compose(activity(1, 0, 1, 0), Outcome::None, "⠋"),
+            "? waiting"
         );
     }
 
     #[test]
     fn running_with_approval_mentions_both() {
         assert_eq!(
-            compose("proj", activity(3, 2, 1, 0), Outcome::None, "⠋"),
-            "⠋ teshi · proj · 0/2 running, 1 waiting"
+            compose(activity(3, 2, 1, 0), Outcome::None, "⠋"),
+            "⠋ 2 running, 1 waiting"
+        );
+        assert_eq!(
+            compose(activity(3, 1, 1, 0), Outcome::None, "⠋"),
+            "⠋ 1 running, 1 waiting"
         );
     }
 
     #[test]
     fn failure_mark_wins_over_previous_success() {
         assert_eq!(
-            compose("proj", activity(1, 0, 0, 1), Outcome::Succeeded, "⠋"),
-            "✗ teshi · proj · failed"
+            compose(activity(1, 0, 0, 1), Outcome::Succeeded, "⠋"),
+            "✗ failed"
         );
     }
 
     #[test]
     fn completed_outcome_is_kept_until_next_run() {
         assert_eq!(
-            compose("proj", activity(1, 0, 0, 0), Outcome::Succeeded, "⠋"),
-            "✓ teshi · proj"
+            compose(activity(1, 0, 0, 0), Outcome::Succeeded, "⠋"),
+            "✓ completed"
         );
         assert_eq!(
-            compose("proj", activity(1, 0, 0, 0), Outcome::Failed, "⠋"),
-            "✗ teshi · proj"
+            compose(activity(1, 0, 0, 0), Outcome::Failed, "⠋"),
+            "✗ failed"
+        );
+    }
+
+    #[test]
+    fn unread_failure_surfaces_failed_mark() {
+        assert_eq!(
+            compose(with_unseen(activity(1, 0, 0, 1), 1), Outcome::None, "⠋"),
+            "✗ failed"
         );
     }
 

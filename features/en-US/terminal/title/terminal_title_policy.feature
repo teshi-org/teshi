@@ -1,18 +1,18 @@
 # language: en
-# Requirement: doc-73; authored only; not bound, executed or accepted.
+# Requirement: doc-102; authored only; not bound, executed or accepted.
 # Expectations describe the implemented policy; bind and replay before claiming acceptance.
 @tui
 Feature: Terminal title policy
 
-  Scenario: Show progress and project while running
+  Scenario: Show running marker while running
     Given one agent conversation is running
     When I view the terminal title
-    Then it contains a running marker and the project without exposing conversation text
+    Then it shows a running marker without project name or conversation text
 
   Scenario: Aggregate running state across conversations
     Given three agent conversations with one running
     When I view the terminal title
-    Then it shows one of three conversations running
+    Then it shows the count of running conversations without 0/N running
 
   Scenario: Switch to a waiting marker for approval
     Given one agent conversation is waiting for user approval
