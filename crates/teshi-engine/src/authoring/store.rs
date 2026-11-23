@@ -931,7 +931,7 @@ mod tests {
         assert!(artifacts.documents.is_empty());
         assert_eq!(artifacts.test_points.test_points.len(), 1);
         let point = &artifacts.test_points.test_points[0];
-        assert_eq!(point.review_state, ReviewState::NeedsReview);
+        assert_eq!(point.review_state, ReviewState::Approved);
         assert_eq!(
             point.requirement_links[0].resolution,
             ResolutionState::Stale

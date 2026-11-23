@@ -478,6 +478,9 @@ pub fn run() -> Result<()> {
                     if app.handle_settings_panel_key(key_event) {
                         continue;
                     }
+                    if app.handle_help_guide_key(key_event) {
+                        continue;
+                    }
                     if app.handle_acp_controls_key(key_event) {
                         continue;
                     }
@@ -597,6 +600,7 @@ pub fn run() -> Result<()> {
                         || app.agent_profile_panel_active
                         || app.approval_panel_active
                         || app.settings_panel_active
+                        || app.help_guide.active
                         || (app.model_panel_active
                             && app.model_panel_mode == app::ModelPanelMode::List)
                         || app.agent().acp_controls_ui.picker_active()

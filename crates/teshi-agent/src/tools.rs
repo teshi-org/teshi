@@ -443,12 +443,10 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "propose_test_points".into(),
-            description: "Propose non-Gherkin test points from submitted requirements and \
-                          persist them as Proposed for human review (Strict review policy). Do \
-                          not include Given/When/Then steps. In Strict mode the agent loop then \
-                          pauses until the user approves test points and continues generation. \
-                          Under the Direct no-review policy this tool is not used; call \
-                          generate_plan directly instead."
+            description: "Record concise heuristic test points in the Test Points MindMap \
+                          from submitted requirements. Test points are ready immediately with no \
+                          human-approval pause; follow directly with generate_plan or \
+                          create_feature_file/insert_scenario. Do not include Given/When/Then steps."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -462,8 +460,14 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                                     "type": "string",
                                     "description": "Optional stable ID; generated when omitted"
                                 },
-                                "title": { "type": "string" },
-                                "objective": { "type": "string" },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Concise single-line test point title"
+                                },
+                                "objective": {
+                                    "type": "string",
+                                    "description": "Optional brief heuristic note"
+                                },
                                 "preconditions": { "type": "string" },
                                 "expected_outcomes": { "type": "string" },
                                 "hierarchy_path": {
@@ -500,11 +504,11 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                                                 "required": ["quote"]
                                             }
                                         },
-                                        "required": ["document_id", "document_revision", "position", "quote"]
+                                        "required": ["document_id"]
                                     }
                                 }
                             },
-                            "required": ["title", "objective", "hierarchy_path"]
+                            "required": ["title", "hierarchy_path"]
                         }
                     }
                 },
@@ -513,12 +517,9 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "generate_plan".into(),
-            description: "Submit a complete scenario plan. Under the Strict review policy, \
-                          call it only after human approval advances the pipeline to Planning and \
-                          every scenario must reference approved, resolved test points via \
-                          test_point_ids. Under the Direct no-review policy, call it directly \
-                          after gathering; test_point_ids may be empty or omitted, and must not \
-                          be fabricated."
+            description: "Submit a scenario plan and advance to Feature Writing. Scenarios may \
+                          optionally reference test-point IDs via test_point_ids for MindMap \
+                          coverage linking; do not fabricate nonexistent IDs."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",

@@ -67,14 +67,23 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
         Paragraph::new(Text::from(lines)),
         Rect::new(inner.x, inner.y, inner.width, rows as u16),
     );
-    super::render_action_bar(
+    super::render_chip_action_bar(
         frame,
         &mut app.clickable_regions,
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-        "",
         &[
-            (crate::i18n::t("chat.new"), Action::AgentNew),
-            (crate::i18n::t("chat.close"), Action::AgentClose),
+            super::ActionItem::new(
+                crate::i18n::t("chat.new.key"),
+                crate::i18n::t("chat.new"),
+                Action::AgentNew,
+                theme::ActionTone::Success,
+            ),
+            super::ActionItem::new(
+                crate::i18n::t("chat.close.key"),
+                crate::i18n::t("chat.close"),
+                Action::AgentClose,
+                theme::ActionTone::Danger,
+            ),
         ],
         false,
     );
@@ -147,6 +156,7 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         || app.ai_interrupt_confirm
         || app.approval_panel_active
         || app.settings_panel_active
+        || app.help_guide.active
         || app.agent_profile_panel_active
         || app.authoring_ui.overlay_active()
         || app.generation_scope_prompt.is_some()

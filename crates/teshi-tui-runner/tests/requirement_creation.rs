@@ -234,13 +234,16 @@ fn clipped_footer_blank_space_does_not_trigger_hidden_action() {
     fs::create_dir(&project).unwrap();
     fs::write(project.join("sample.feature"), "Feature: Sample\n").unwrap();
     let mut config = launch_config(&binary, &project, &store, root.path());
-    config.cols = 45;
+    config.cols = 50;
     config.rows = 16;
     let terminal = Terminal::launch(config).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("4").unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("Document 1", true, 10000).unwrap();
+    terminal
+        .expect_text("Requirements › Doc", true, 10000)
+        .unwrap();
     let screen = terminal.screen().unwrap();
     let footer = screen.lines().nth(15).unwrap();
     let blank = footer
@@ -250,7 +253,7 @@ fn clipped_footer_blank_space_does_not_trigger_hidden_action() {
         .rposition(|c| *c != ' ')
         .map(|i| i + 1)
         .unwrap_or(0);
-    assert!(blank < 45, "no unused footer cell: {screen}");
+    assert!(blank < 50, "no unused footer cell: {screen}");
     let before = fs::read(store.join("_teshi.json")).ok();
     terminal
         .write(&format!(

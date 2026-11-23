@@ -529,15 +529,9 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
 fn ensure_feature_writing_allowed(app: &crate::app::App, tool_name: &str) -> Result<()> {
     use teshi_agent::pipeline::GenerationStage;
 
-    if matches!(
-        app.generation_stage,
-        GenerationStage::Gathering
-            | GenerationStage::GeneratingTestPoints
-            | GenerationStage::ReviewingTestPoints
-            | GenerationStage::Planning
-    ) {
+    if matches!(app.generation_stage, GenerationStage::Gathering) {
         anyhow::bail!(
-            "{tool_name} is blocked until generate_plan advances the pipeline to Feature Writing (current stage: {})",
+            "{tool_name} is blocked until requirements gathering finishes (current stage: {})",
             app.generation_stage.label()
         );
     }
@@ -668,53 +662,44 @@ pub(crate) fn validate_insert_scenario_traceability(
     scenario_name: &str,
     test_point_ids: &[String],
 ) -> Result<()> {
-    // Direct (no-review) scenarios may carry no test-point IDs, so no
-    // `@teshi-tp:<id>` tags are emitted. Strict still requires approved IDs.
-    // When Direct IDs are empty, the plan-membership check below still applies
-    // (an empty plan and an empty request match), which blocks invented IDs.
-    if test_point_ids.is_empty() && app.review_policy != teshi_agent::pipeline::ReviewPolicy::Direct
-    {
-        anyhow::bail!("insert_scenario requires at least one approved test_point_id");
-    }
     let unique_ids: HashSet<&str> = test_point_ids.iter().map(String::as_str).collect();
     if unique_ids.len() != test_point_ids.len() {
         anyhow::bail!("insert_scenario test_point_ids must not contain duplicates");
     }
 
-    let plan = app
-        .pipeline_plan
-        .as_ref()
-        .context("insert_scenario requires an accepted generation plan")?;
-    let requested_path = std::path::Path::new(file_path);
-    let relative_path = requested_path
-        .strip_prefix(&app.project.root_dir)
-        .unwrap_or(requested_path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    let relative_path = relative_path.strip_prefix("./").unwrap_or(&relative_path);
-    let feature = plan
-        .features
-        .iter()
-        .find(|feature| feature.file_name.replace('\\', "/") == relative_path)
-        .with_context(|| {
-            format!("insert_scenario file '{file_path}' is not in the accepted plan")
-        })?;
-    let scenario = feature
-        .scenarios
-        .iter()
-        .find(|scenario| scenario.name == scenario_name)
-        .with_context(|| {
-            format!(
-                "insert_scenario scenario '{scenario_name}' is not planned for '{}'",
-                feature.file_name
-            )
-        })?;
-    let planned_ids: HashSet<&str> = scenario.test_point_ids.iter().map(String::as_str).collect();
-    if unique_ids != planned_ids {
-        anyhow::bail!(
-            "insert_scenario test_point_ids for '{}' must exactly match the accepted plan",
-            scenario_name
-        );
+    if let Some(plan) = app.pipeline_plan.as_ref() {
+        let requested_path = std::path::Path::new(file_path);
+        let relative_path = requested_path
+            .strip_prefix(&app.project.root_dir)
+            .unwrap_or(requested_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let relative_path = relative_path.strip_prefix("./").unwrap_or(&relative_path);
+        let feature = plan
+            .features
+            .iter()
+            .find(|feature| feature.file_name.replace('\\', "/") == relative_path)
+            .with_context(|| {
+                format!("insert_scenario file '{file_path}' is not in the accepted plan")
+            })?;
+        let scenario = feature
+            .scenarios
+            .iter()
+            .find(|scenario| scenario.name == scenario_name)
+            .with_context(|| {
+                format!(
+                    "insert_scenario scenario '{scenario_name}' is not planned for '{}'",
+                    feature.file_name
+                )
+            })?;
+        let planned_ids: HashSet<&str> =
+            scenario.test_point_ids.iter().map(String::as_str).collect();
+        if unique_ids != planned_ids {
+            anyhow::bail!(
+                "insert_scenario test_point_ids for '{}' must exactly match the accepted plan",
+                scenario_name
+            );
+        }
     }
 
     let test_points = app
@@ -728,18 +713,8 @@ pub(crate) fn validate_insert_scenario_traceability(
             .iter()
             .find(|test_point| test_point.id == *id)
             .with_context(|| format!("insert_scenario references unknown test point '{id}'"))?;
-        if test_point.review_state != teshi_core::authoring::ReviewState::Approved {
-            anyhow::bail!(
-                "insert_scenario test point '{id}' is {:?} (must be Approved)",
-                test_point.review_state
-            );
-        }
-        if test_point
-            .requirement_links
-            .iter()
-            .any(|link| link.resolution != teshi_core::authoring::ResolutionState::Resolved)
-        {
-            anyhow::bail!("insert_scenario test point '{id}' has stale requirement links");
+        if test_point.review_state == teshi_core::authoring::ReviewState::Rejected {
+            anyhow::bail!("insert_scenario test point '{id}' is Rejected");
         }
     }
     Ok(())
@@ -1699,22 +1674,6 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
         )
         .map_err(|err| anyhow::anyhow!(err))?;
     }
-    for tp in &proposed {
-        if let Some(existing) = artifacts
-            .test_points
-            .test_points
-            .iter()
-            .find(|existing| existing.id == tp.id)
-            && existing.review_state != teshi_core::authoring::ReviewState::Proposed
-        {
-            anyhow::bail!(
-                "cannot re-propose test point '{}' after human review ({:?})",
-                tp.id,
-                existing.review_state
-            );
-        }
-    }
-
     let mut created_ids = Vec::new();
     for tp in proposed {
         created_ids.push(tp.id.clone());
@@ -1735,14 +1694,14 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
     }
 
     teshi_engine::save_test_points(&app.project.root_dir, &artifacts.test_points)
-        .context("persist proposed test points")?;
+        .context("persist test points")?;
     app.test_points_ui.rebuild_tree(Some(artifacts));
 
-    app.generation_stage = teshi_agent::pipeline::GenerationStage::ReviewingTestPoints;
+    app.generation_stage = teshi_agent::pipeline::GenerationStage::Planning;
     app.persist_generation_state()?;
 
     Ok(format!(
-        "Persisted {} Proposed test point(s): {}. Pipeline paused for human review in the Test Points tab (key 5). Do NOT call generate_plan until the user continues generation.",
+        "Persisted {} test point(s) in MindMap: {}. Ready immediately (no approval gate); call `generate_plan` or write scenarios directly.",
         created_ids.len(),
         created_ids.join(", ")
     ))
@@ -1778,12 +1737,8 @@ fn parse_proposed_test_point(
     let objective = item
         .get("objective")
         .and_then(|v| v.as_str())
-        .context("test_points[].objective is required")?
-        .trim()
-        .to_string();
-    if objective.is_empty() {
-        anyhow::bail!("test_points[].objective must be non-empty");
-    }
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let hierarchy_segments: Vec<String> = item
         .get("hierarchy_path")
         .and_then(|v| v.as_array())
@@ -1824,8 +1779,7 @@ fn parse_proposed_test_point(
         preconditions,
         expected_outcomes,
         hierarchy_path: teshi_core::authoring::HierarchyPath::new(hierarchy_segments),
-        // Hard gate: agent proposals are always Proposed; never Approved.
-        review_state: teshi_core::authoring::ReviewState::Proposed,
+        review_state: teshi_core::authoring::ReviewState::Approved,
         requirement_links,
         scenario_refs: Vec::new(),
     })
@@ -1880,19 +1834,32 @@ fn parse_requirement_links(
             .with_context(|| {
                 format!("requirement link references unknown document '{document_id}'")
             })?;
-        let document_revision = item
-            .get("document_revision")
-            .and_then(|v| v.as_str())
-            .context("requirement_links[].document_revision is required")?
-            .trim()
-            .to_string();
-        if document_revision != document.meta.revision.as_str() {
-            anyhow::bail!(
-                "requirement link revision '{}' does not match current revision '{}' for document '{}'",
+        let document_revision = match item.get("document_revision").and_then(|v| v.as_str()) {
+            Some(rev) => {
+                let rev = rev.trim().to_string();
+                if rev != document.meta.revision.as_str() {
+                    anyhow::bail!(
+                        "requirement link revision '{}' does not match current revision '{}' for document '{}'",
+                        rev,
+                        document.meta.revision.as_str(),
+                        document_id
+                    );
+                }
+                rev
+            }
+            None => document.meta.revision.as_str().to_string(),
+        };
+        // Support doc-level links when position and quote are both omitted.
+        if item.get("position").is_none() && item.get("quote").is_none() {
+            links.push(teshi_core::authoring::RequirementLink {
+                store_id: store_id.clone(),
+                document_id,
                 document_revision,
-                document.meta.revision.as_str(),
-                document_id
-            );
+                position: teshi_core::authoring::TextRange::new(0, 0),
+                quote: teshi_core::authoring::QuoteSelector::default(),
+                resolution: teshi_core::authoring::ResolutionState::Resolved,
+            });
+            continue;
         }
         let position = item
             .get("position")
@@ -1970,13 +1937,11 @@ fn parse_requirement_links(
 fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<String> {
     if matches!(
         app.generation_stage,
-        teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
-            | teshi_agent::pipeline::GenerationStage::GeneratingTestPoints
-            | teshi_agent::pipeline::GenerationStage::Gathering
+        teshi_agent::pipeline::GenerationStage::Gathering
             | teshi_agent::pipeline::GenerationStage::Idle
     ) {
         anyhow::bail!(
-            "generate_plan is blocked until the pipeline reaches Planning (current stage: {})",
+            "generate_plan requires submitted requirements first (current stage: {})",
             app.generation_stage.label()
         );
     }
@@ -2602,7 +2567,7 @@ mod pipeline_gate_tests {
     }
 
     #[test]
-    fn propose_pauses_in_review_as_proposed_only() {
+    fn propose_advances_directly_to_planning_as_approved() {
         let (mut app, dir) = app_in_temp_project();
         app.execute_tool(
             "submit_requirements",
@@ -2617,7 +2582,6 @@ mod pipeline_gate_tests {
                 r#"{
                     "test_points": [{
                         "title": "Valid login",
-                        "objective": "User authenticates successfully",
                         "hierarchy_path": ["Auth", "Login"]
                     }]
                 }"#,
@@ -2625,8 +2589,8 @@ mod pipeline_gate_tests {
                 0,
             )
             .expect("propose");
-        assert!(result.contains("Proposed"));
-        assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
+        assert!(result.contains("Ready immediately"));
+        assert_eq!(app.generation_stage, GenerationStage::Planning);
         let tp = &app
             .authoring_ui
             .artifacts
@@ -2634,7 +2598,8 @@ mod pipeline_gate_tests {
             .unwrap()
             .test_points
             .test_points[0];
-        assert_eq!(tp.review_state, ReviewState::Proposed);
+        assert_eq!(tp.review_state, ReviewState::Approved);
+        assert!(tp.objective.is_empty());
         assert!(dir.path().join("testpoints/testpoints.json").is_file());
     }
 
@@ -2748,7 +2713,7 @@ mod pipeline_gate_tests {
     }
 
     #[test]
-    fn generate_plan_blocked_during_review_even_with_bypass() {
+    fn generate_plan_succeeds_immediately_after_propose_test_points() {
         let (mut app, _dir) = app_in_temp_project();
         app.approval_mode = ApprovalMode::Bypass;
         app.execute_tool(
@@ -2760,12 +2725,12 @@ mod pipeline_gate_tests {
         .unwrap();
         app.execute_tool(
             "propose_test_points",
-            r#"{"test_points":[{"title":"t","objective":"o","hierarchy_path":["A"]}]}"#,
+            r#"{"test_points":[{"title":"t","hierarchy_path":["A"]}]}"#,
             "tc-2",
             0,
         )
         .unwrap();
-        let err = app
+        let ok = app
             .execute_tool(
                 "generate_plan",
                 r#"{
@@ -2782,15 +2747,15 @@ mod pipeline_gate_tests {
                 "tc-3",
                 0,
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("blocked"));
-        assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
+            .expect("plan without approval gate");
+        assert!(ok.contains("Plan accepted"));
+        assert_eq!(app.generation_stage, GenerationStage::Writing);
         assert_eq!(app.approval_mode, ApprovalMode::Bypass);
     }
 
     #[test]
-    fn writing_tools_are_blocked_before_plan_even_with_bypass() {
-        let (mut app, dir) = app_in_temp_project();
+    fn writing_tools_allow_planning_and_block_only_gathering() {
+        let (mut app, _dir) = app_in_temp_project();
         app.approval_mode = ApprovalMode::Bypass;
         let file_path = app.project.features[0]
             .file_path
@@ -2801,41 +2766,30 @@ mod pipeline_gate_tests {
         let insert_args =
             format!(r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"]}}"#);
 
-        for stage in [
-            GenerationStage::Gathering,
-            GenerationStage::GeneratingTestPoints,
-            GenerationStage::ReviewingTestPoints,
-            GenerationStage::Planning,
-        ] {
-            app.generation_stage = stage;
-            let insert_error = app
-                .execute_tool("insert_scenario", &insert_args, "tc-insert", 0)
-                .unwrap_err();
-            assert!(
-                insert_error.to_string().contains("blocked"),
-                "insert_scenario should be blocked during {stage:?}"
-            );
+        app.generation_stage = GenerationStage::Gathering;
+        let insert_error = app
+            .execute_tool("insert_scenario", &insert_args, "tc-insert", 0)
+            .unwrap_err();
+        assert!(insert_error.to_string().contains("blocked"));
 
-            let create_error = app
-                .execute_tool(
-                    "create_feature_file",
-                    r#"{"file_name":"blocked.feature","feature_name":"Blocked"}"#,
-                    "tc-create",
-                    0,
-                )
-                .unwrap_err();
-            assert!(
-                create_error.to_string().contains("blocked"),
-                "create_feature_file should be blocked during {stage:?}"
-            );
-        }
+        let create_error = app
+            .execute_tool(
+                "create_feature_file",
+                r#"{"file_name":"blocked.feature","feature_name":"Blocked"}"#,
+                "tc-create",
+                0,
+            )
+            .unwrap_err();
+        assert!(create_error.to_string().contains("blocked"));
 
-        assert!(app.pending_agent_changes.is_empty());
-        assert!(!dir.path().join("blocked.feature").exists());
+        app.generation_stage = GenerationStage::Planning;
+        app.execute_tool("insert_scenario", &insert_args, "tc-insert-ok", 0)
+            .expect("direct insert after proposing test points");
+        assert_eq!(app.pending_agent_changes.len(), 1);
     }
 
     #[test]
-    fn re_proposing_an_approved_test_point_is_rejected_without_mutation() {
+    fn re_proposing_a_test_point_updates_title_and_hierarchy() {
         let (mut app, _dir) = app_in_temp_project();
         app.execute_tool(
             "submit_requirements",
@@ -2851,24 +2805,14 @@ mod pipeline_gate_tests {
             0,
         )
         .unwrap();
-        let tp = &mut app
-            .authoring_ui
-            .artifacts
-            .as_mut()
-            .unwrap()
-            .test_points
-            .test_points[0];
-        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
 
-        let error = app
-            .execute_tool(
-                "propose_test_points",
-                r#"{"test_points":[{"id":"tp-login","title":"Changed","objective":"new","hierarchy_path":["B"]}]}"#,
-                "tc-3",
-                0,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("cannot re-propose"));
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"Changed","objective":"new","hierarchy_path":["B"]}]}"#,
+            "tc-3",
+            0,
+        )
+        .unwrap();
 
         let tp = &app
             .authoring_ui
@@ -2878,7 +2822,8 @@ mod pipeline_gate_tests {
             .test_points
             .test_points[0];
         assert_eq!(tp.review_state, ReviewState::Approved);
-        assert_eq!(tp.title, "Original");
+        assert_eq!(tp.title, "Changed");
+        assert_eq!(tp.hierarchy_path.as_slice(), &["B"]);
     }
 
     #[test]
@@ -2935,7 +2880,7 @@ mod pipeline_gate_tests {
     }
 
     #[test]
-    fn approve_continue_then_generate_plan_accepts_approved_ids() {
+    fn propose_then_generate_plan_accepts_test_point_ids_immediately() {
         let (mut app, _dir) = app_in_temp_project();
         app.approval_mode = ApprovalMode::Auto;
         app.execute_tool(
@@ -2952,32 +2897,6 @@ mod pipeline_gate_tests {
             0,
         )
         .unwrap();
-
-        // Reject generate_plan while still Proposed
-        let err = app
-            .execute_tool(
-                "generate_plan",
-                r#"{"features":[{"file_name":"a.feature","feature_name":"A","scenarios":[{"name":"S","steps":["Given x"],"test_point_ids":["tp-login"]}]}]}"#,
-                "tc-x",
-                0,
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("blocked"));
-
-        // Human approve via UI helper
-        let artifacts = app.authoring_ui.artifacts.as_mut().unwrap();
-        let tp = artifacts
-            .test_points
-            .test_points
-            .iter_mut()
-            .find(|tp| tp.id == "tp-login")
-            .unwrap();
-        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
-
-        // Human continue (Auto mode must not matter)
-        app.active_tab = crate::app::MainTab::TestPoints;
-        app.handle_action(crate::keymap::Action::TpContinueGeneration)
-            .unwrap();
         assert_eq!(app.generation_stage, GenerationStage::Planning);
 
         let ok = app
@@ -2987,7 +2906,7 @@ mod pipeline_gate_tests {
                 "tc-3",
                 0,
             )
-            .expect("plan after approval");
+            .expect("plan immediately after propose_test_points");
         assert!(ok.contains("Plan accepted"));
         assert_eq!(app.generation_stage, GenerationStage::Writing);
     }
@@ -3078,10 +2997,7 @@ mod pipeline_gate_tests {
             0,
         )
         .unwrap();
-        let artifacts = app.authoring_ui.artifacts.as_mut().unwrap();
-        let tp = &mut artifacts.test_points.test_points[0];
-        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
-        app.generation_stage = GenerationStage::Planning;
+        assert_eq!(app.generation_stage, GenerationStage::Planning);
 
         let err = app
             .execute_tool(
@@ -3114,7 +3030,7 @@ mod pipeline_gate_tests {
     }
 
     #[test]
-    fn restart_restores_review_without_approving() {
+    fn restart_restores_planning_without_review_gate() {
         let (mut app, dir) = app_in_temp_project();
         app.execute_tool(
             "submit_requirements",
@@ -3130,7 +3046,7 @@ mod pipeline_gate_tests {
             0,
         )
         .unwrap();
-        assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
+        assert_eq!(app.generation_stage, GenerationStage::Planning);
 
         // Simulate restart by reopening the same project root
         let feature = dir.path().join("sample.feature");
@@ -3140,10 +3056,7 @@ mod pipeline_gate_tests {
             teshi_engine::requirements_data_dir(None).unwrap_or_default(),
         )
         .unwrap();
-        assert_eq!(
-            restored.generation_stage,
-            GenerationStage::ReviewingTestPoints
-        );
+        assert_eq!(restored.generation_stage, GenerationStage::Planning);
         let tp = &restored
             .authoring_ui
             .artifacts
@@ -3154,7 +3067,7 @@ mod pipeline_gate_tests {
             .iter()
             .find(|tp| tp.id == "tp-1")
             .unwrap();
-        assert_eq!(tp.review_state, ReviewState::Proposed);
+        assert_eq!(tp.review_state, ReviewState::Approved);
     }
 
     #[test]
@@ -3209,10 +3122,31 @@ mod pipeline_gate_tests {
         };
         assert_eq!(
             Action::from_key_event(
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
                 context
             ),
-            Some(Action::TpContinueGeneration)
+            Some(Action::TpGenerateFeature)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::TpAddChild)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT),
+                context
+            ),
+            Some(Action::TpSyncFromFeatures)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::TpRunTestPoint)
         );
     }
 
@@ -3314,10 +3248,20 @@ mod pipeline_gate_tests {
         let planned = format!(
             r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
         );
+        let test_point = &mut app
+            .authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        test_point.review_state = ReviewState::Rejected;
+
         let error = app
-            .execute_tool("insert_scenario", &planned, "tc-proposed", 0)
+            .execute_tool("insert_scenario", &planned, "tc-rejected", 0)
             .unwrap_err();
-        assert!(error.to_string().contains("must be Approved"));
+        assert!(error.to_string().contains("Rejected"));
+        assert!(app.pending_agent_changes.is_empty());
 
         let test_point = &mut app
             .authoring_ui
@@ -3326,7 +3270,7 @@ mod pipeline_gate_tests {
             .unwrap()
             .test_points
             .test_points[0];
-        test_point.review_state = ReviewState::Approved;
+        test_point.review_state = ReviewState::Proposed;
         test_point.requirement_links.push(RequirementLink {
             store_id: None,
             document_id: "doc-1".into(),
@@ -3339,12 +3283,9 @@ mod pipeline_gate_tests {
             },
             resolution: ResolutionState::Stale,
         });
-
-        let error = app
-            .execute_tool("insert_scenario", &planned, "tc-stale", 0)
-            .unwrap_err();
-        assert!(error.to_string().contains("stale requirement links"));
-        assert!(app.pending_agent_changes.is_empty());
+        app.execute_tool("insert_scenario", &planned, "tc-stale-ok", 0)
+            .expect("stale/proposed test points remain writable without review gate");
+        assert_eq!(app.pending_agent_changes.len(), 1);
     }
 
     #[test]
@@ -3364,14 +3305,6 @@ mod pipeline_gate_tests {
             0,
         )
         .unwrap();
-        let tp = &mut app
-            .authoring_ui
-            .artifacts
-            .as_mut()
-            .unwrap()
-            .test_points
-            .test_points[0];
-        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
 
         let file_path = app.project.features[0]
             .file_path
@@ -3415,7 +3348,7 @@ mod pipeline_gate_tests {
             .unwrap()
             .test_points
             .test_points[0]
-            .review_state = ReviewState::Proposed;
+            .review_state = ReviewState::Rejected;
         let error = app.accept_agent_change().unwrap_err();
         assert!(
             error

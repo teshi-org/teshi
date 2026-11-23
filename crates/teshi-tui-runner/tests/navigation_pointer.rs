@@ -334,12 +334,14 @@ fn session_modal_blocks_background_pointer_and_selects_target_history() {
     focus_composer(&terminal);
     command(&terminal, "/sessions");
     terminal.expect_text("Load [Enter]", true, 5000).unwrap();
-    terminal.click_text("Requirements [4]", 5000).unwrap();
     for _ in 0..12 {
         terminal.scroll_at(120, 4, true, false).unwrap();
     }
+    terminal.expect_text("Load [Enter]", true, 1000).unwrap();
+    terminal.expect_text("HISTORY_LINE_64", true, 1000).unwrap();
+    // Clicking the tab bar outside the card dismisses the modal without switching tabs.
+    terminal.click_text("Requirements [4]", 5000).unwrap();
     capture(&terminal, "session-modal-background-pointer");
-    terminal.key("Escape").unwrap();
     terminal.expect_text("Load [Enter]", false, 5000).unwrap();
     capture(&terminal, "session-modal-after-close");
     terminal.expect_text("HISTORY_LINE_64", true, 1000).unwrap();
@@ -437,13 +439,17 @@ fn approval_modal_owns_background_pointer_and_its_option_rows() {
     let terminal = fixture.launch();
     terminal.key("3").unwrap();
     terminal.expect_text("AI Chat", true, 5000).unwrap();
-    terminal.key("Enter").unwrap();
+    terminal
+        .expect_text("╭────────────────", true, 5000)
+        .unwrap();
+    focus_composer(&terminal);
     command(&terminal, "/approval");
     terminal.expect_text("Approval Mode", true, 5000).unwrap();
-    terminal.click_text("Requirements [4]", 5000).unwrap();
     terminal.scroll_at(120, 4, false, false).unwrap();
+    terminal.expect_text("Approval Mode", true, 1000).unwrap();
+    // Clicking the tab bar outside the card dismisses the modal without switching tabs.
+    terminal.click_text("Requirements [4]", 5000).unwrap();
     capture(&terminal, "approval-modal-background-pointer");
-    terminal.key("Escape").unwrap();
     terminal.expect_text("Approval Mode", false, 5000).unwrap();
     capture(&terminal, "approval-modal-after-close");
     terminal.expect_text("╭ Chats", true, 1000).unwrap();

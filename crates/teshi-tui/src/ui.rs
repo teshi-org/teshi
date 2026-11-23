@@ -27,6 +27,7 @@ use teshi_core::highlight::{HighlightKind, highlight_line_spans};
 
 pub(crate) mod chat;
 mod dialog;
+pub(crate) mod help;
 mod overlay;
 mod pointer_controls;
 
@@ -336,7 +337,7 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
             1,
         );
         frame.render_widget(
-            Paragraph::new(project_label).style(theme::muted().add_modifier(Modifier::BOLD)),
+            Paragraph::new(project_label).style(theme::project_chip_style()),
             rect,
         );
         app.clickable_regions
@@ -345,10 +346,46 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
     if version_width > 0 {
         frame.render_widget(
             Paragraph::new(version_text)
-                .style(theme::muted())
+                .style(theme::muted().bg(theme::TOPBAR_BG))
                 .alignment(Alignment::Right),
             Rect::new(row.right() - version_width, row.y, version_width, 1),
         );
+    }
+}
+
+/// Draws a full-width subtle header separator with a thick semantic underline
+/// beneath the active tab's registered click region.
+fn render_tab_underline(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let rule = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(rule).style(Style::default().fg(theme::BORDER).bg(theme::SCREEN_BG)),
+        area,
+    );
+    if let Some(tab_rect) = app
+        .clickable_regions
+        .iter()
+        .find_map(|region| match region {
+            ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
+            _ => None,
+        })
+    {
+        let start = tab_rect.x.max(area.x);
+        let end = tab_rect.right().min(area.right());
+        if end > start {
+            let width = end - start;
+            let bar = "━".repeat(width as usize);
+            frame.render_widget(
+                Paragraph::new(bar).style(
+                    Style::default()
+                        .fg(theme::tab_accent(app.active_tab))
+                        .bg(theme::SCREEN_BG),
+                ),
+                Rect::new(start, area.y, width, 1),
+            );
+        }
     }
 }
 
@@ -366,19 +403,39 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
     app.clickable_regions.clear();
+    app.vertical_scrollbars.clear();
+    app.modal_card_rect = None;
+    app.chat_input_text_rect = None;
+    app.req_tree_row_spans.clear();
     app.feature_tags.begin_frame();
     app.agent_mut().acp_controls_ui.clear_regions();
     app.chat_history_rect = None;
 
-    let [tabs_row, content_row, footer_row] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
+    let (tabs_row, tabs_rule_row, content_row, footer_row) = if frame.area().height >= 8 {
+        let [tabs_row, tabs_rule_row, content_row, footer_row] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .areas(frame.area());
+        (tabs_row, tabs_rule_row, content_row, footer_row)
+    } else {
+        let [tabs_row, content_row, footer_row] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .areas(frame.area());
+        (tabs_row, Rect::default(), content_row, footer_row)
+    };
 
+    frame.render_widget(Block::default().style(theme::topbar_style()), tabs_row);
+    let active_tab_accent = theme::tab_accent(app.active_tab);
     let top_tabs = Tabs::new(
         main_tabs(tabs_row.width)
             .iter()
@@ -392,10 +449,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         MainTab::Requirements => 3,
         MainTab::TestPoints => 4,
     })
-    .style(Style::default().fg(theme::TAB_INACTIVE))
+    .style(theme::topbar_style())
     .highlight_style(
         Style::default()
-            .fg(theme::FG)
+            .fg(active_tab_accent)
             .bg(theme::TAB_ACTIVE_BG)
             .add_modifier(Modifier::BOLD),
     )
@@ -405,6 +462,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     register_tab_regions(app, tabs_row);
     render_workspace_meta(frame, app, tabs_row);
+    render_tab_underline(frame, app, tabs_rule_row);
 
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
@@ -488,6 +546,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         || app.ai_interrupt_confirm
         || app.approval_panel_active
         || app.settings_panel_active
+        || app.help_guide.active
         || app.agent_profile_panel_active
         || app.change_summary_visible
         || app.screenshot.visible
@@ -551,6 +610,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_settings_panel(frame, app, frame.area());
     }
 
+    if app.help_guide.active {
+        help::render_help_guide(frame, app, frame.area());
+    }
+
     if app.agent_profile_panel_active {
         if app.agent_panel_mode == crate::app::AgentPanelMode::List {
             render_agent_profile_panel(frame, app, frame.area());
@@ -582,13 +645,192 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_pointer_feedback(frame, app);
 }
 
-/// Draw the compact global action strip (Settings only).
-///
-/// The strip owns the footer row (aside from Exit). Settings advertises its
-/// F10 chord — the same binding icode surfaces in its Textual footer.
+/// Current Vim/GUI interaction mode badge for the global status bar.
+fn active_mode_badge(app: &App) -> (&'static str, Color) {
+    match app.active_tab {
+        MainTab::Explore => {
+            if app.explore_edit_mode {
+                if app.step_input_active {
+                    (crate::i18n::t("mode.badge.insert"), theme::ACCENT)
+                } else {
+                    (crate::i18n::t("mode.badge.normal"), theme::PRIMARY)
+                }
+            } else if app.feature_browser.searching {
+                (crate::i18n::t("mode.badge.search"), theme::INFO)
+            } else {
+                (crate::i18n::t("mode.badge.normal"), theme::PRIMARY)
+            }
+        }
+        MainTab::MindMap => {
+            if app.mindmap_focus == MindMapFocus::AiPanel && app.ai_input_focused {
+                (crate::i18n::t("mode.badge.input"), theme::ACCENT)
+            } else {
+                (crate::i18n::t("mode.badge.normal"), theme::INFO)
+            }
+        }
+        MainTab::Ai => {
+            if app.ai_input_focused {
+                (crate::i18n::t("mode.badge.input"), theme::ACCENT)
+            } else {
+                (crate::i18n::t("mode.badge.normal"), theme::PRIMARY)
+            }
+        }
+        MainTab::Requirements => {
+            if app.authoring_ui.search_active {
+                (crate::i18n::t("mode.badge.search"), theme::INFO)
+            } else if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
+                match app.authoring_ui.editor_mode {
+                    crate::authoring_tab::RequirementsEditorMode::Preview => {
+                        (crate::i18n::t("mode.badge.preview"), theme::SUCCESS)
+                    }
+                    crate::authoring_tab::RequirementsEditorMode::Browse => {
+                        (crate::i18n::t("mode.badge.browse"), theme::PRIMARY)
+                    }
+                    crate::authoring_tab::RequirementsEditorMode::Insert => {
+                        (crate::i18n::t("mode.badge.insert"), theme::ACCENT)
+                    }
+                    crate::authoring_tab::RequirementsEditorMode::VisualChar => {
+                        (crate::i18n::t("mode.badge.visual"), theme::WARNING)
+                    }
+                    crate::authoring_tab::RequirementsEditorMode::VisualLine => {
+                        (crate::i18n::t("mode.badge.visual_line"), theme::WARNING)
+                    }
+                }
+            } else {
+                (crate::i18n::t("mode.badge.normal"), theme::SUCCESS)
+            }
+        }
+        MainTab::TestPoints => {
+            if app.test_points_ui.editing {
+                (crate::i18n::t("mode.badge.insert"), theme::ACCENT)
+            } else {
+                (crate::i18n::t("mode.badge.normal"), theme::WARNING)
+            }
+        }
+    }
+}
+
+/// Active tab and focused pane breadcrumb for the global status bar.
+fn active_pane_breadcrumb(app: &App) -> &'static str {
+    match app.active_tab {
+        MainTab::Explore => {
+            if app.explore_edit_mode {
+                crate::i18n::t("pane.crumb.explore.source")
+            } else {
+                match app.explore_focus {
+                    ColumnFocus::Feature => crate::i18n::t("pane.crumb.explore.features"),
+                    ColumnFocus::Scenario => crate::i18n::t("pane.crumb.explore.scenarios"),
+                    ColumnFocus::Step => crate::i18n::t("pane.crumb.explore.steps"),
+                    ColumnFocus::Details => crate::i18n::t("pane.crumb.explore.details"),
+                }
+            }
+        }
+        MainTab::MindMap => match app.mindmap_focus {
+            MindMapFocus::Main => crate::i18n::t("pane.crumb.mindmap.tree"),
+            MindMapFocus::AiPanel => crate::i18n::t("pane.crumb.mindmap.ai"),
+        },
+        MainTab::Ai => {
+            if app.ai_sidebar_focused {
+                crate::i18n::t("pane.crumb.ai.chats")
+            } else {
+                crate::i18n::t("pane.crumb.ai.chat")
+            }
+        }
+        MainTab::Requirements => match app.authoring_ui.focus {
+            crate::authoring_tab::RequirementsFocus::Tree => crate::i18n::t("pane.crumb.req.tree"),
+            crate::authoring_tab::RequirementsFocus::Editor => crate::i18n::t("pane.crumb.req.doc"),
+            crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
+                crate::i18n::t("pane.crumb.req.linked")
+            }
+        },
+        MainTab::TestPoints => match app.test_points_ui.focus {
+            crate::test_points_tab::TestPointsFocus::Tree => crate::i18n::t("pane.crumb.tp.tree"),
+            crate::test_points_tab::TestPointsFocus::Details => {
+                crate::i18n::t("pane.crumb.tp.details")
+            }
+            crate::test_points_tab::TestPointsFocus::Excerpts => {
+                crate::i18n::t("pane.crumb.tp.excerpts")
+            }
+        },
+    }
+}
+
+/// Draw the global status strip: semantic mode badge, active pane breadcrumb,
+/// and the clickable Settings `[F10]` control.
 fn render_app_actions(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let actions = [(crate::i18n::t("footer.settings"), Action::SettingsPanelOpen)];
-    render_action_bar(frame, &mut app.clickable_regions, area, "", &actions, false);
+    if area.is_empty() {
+        return;
+    }
+    let (mode_label, mode_color) = active_mode_badge(app);
+    let crumb = active_pane_breadcrumb(app);
+    let settings_label = crate::i18n::t("footer.settings");
+    let mode_w = mode_label.width() as u16;
+    let crumb_text = format!(" {crumb} ");
+    let crumb_w = crumb_text.width() as u16;
+    let sep_w = 2u16;
+    let settings_w = settings_label.width() as u16;
+
+    let mut x = area.x;
+    let right = area.right();
+
+    // Paint the mode chip first when Settings still fits beside it.
+    if x + mode_w + 1 + settings_w <= right {
+        frame.render_widget(
+            Paragraph::new(Line::from(theme::chip(mode_label, mode_color))),
+            Rect::new(x, area.y, mode_w, 1),
+        );
+        x += mode_w;
+    }
+    // Paint the active pane breadcrumb when width allows.
+    if x + crumb_w + sep_w + settings_w <= right {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    crumb_text,
+                    Style::default()
+                        .fg(theme::tab_accent(app.active_tab))
+                        .bg(theme::FOOTER_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "│ ",
+                    Style::default().fg(theme::BORDER).bg(theme::FOOTER_BG),
+                ),
+            ])),
+            Rect::new(x, area.y, crumb_w + sep_w, 1),
+        );
+        x += crumb_w + sep_w;
+    } else if x > area.x && x + 1 + settings_w <= right {
+        x += 1;
+    }
+
+    let remaining = Rect::new(x, area.y, right.saturating_sub(x), 1);
+    let help_label = crate::i18n::t("footer.help");
+    let help_w = help_label.width() as u16;
+    if remaining.width >= settings_w + 1 + help_w {
+        let actions = [
+            (settings_label, Action::SettingsPanelOpen),
+            (help_label, Action::HelpPanelOpen),
+        ];
+        render_action_bar(
+            frame,
+            &mut app.clickable_regions,
+            remaining,
+            "",
+            &actions,
+            false,
+        );
+    } else {
+        let actions = [(settings_label, Action::SettingsPanelOpen)];
+        render_action_bar(
+            frame,
+            &mut app.clickable_regions,
+            remaining,
+            "",
+            &actions,
+            false,
+        );
+    }
 }
 
 /// Single-line `:` prompt in the footer strip; the block caret marks the cursor.
@@ -599,7 +841,8 @@ fn render_command_line(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let (before, after) = input.split_at_cursor();
     let mut rest = after.chars();
     let under = rest.next().map_or_else(|| " ".to_string(), String::from);
-    let line = Line::from(vec![
+    let rest_str = rest.as_str();
+    let mut spans = vec![
         Span::styled(
             ":",
             Style::default()
@@ -612,15 +855,28 @@ fn render_command_line(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::default().fg(theme::FOOTER_DESC).bg(theme::FOOTER_BG),
         ),
         Span::styled(
-            under,
+            under.clone(),
             Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
         ),
         Span::styled(
-            rest.as_str().to_string(),
+            rest_str.to_string(),
             Style::default().fg(theme::FOOTER_DESC).bg(theme::FOOTER_BG),
         ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ];
+
+    let used_w = 1 + before.width() + under.width() + rest_str.width();
+    let matches = app.matching_ex_commands();
+    if !matches.is_empty() {
+        let hint = format!("  [Tab] {}", matches.join(" · "));
+        if used_w + 6 < area.width as usize {
+            spans.push(Span::styled(
+                hint,
+                Style::default().fg(theme::MUTED).bg(theme::FOOTER_BG),
+            ));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
@@ -635,6 +891,7 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
         || app.agent_profile_panel_active
         || app.approval_panel_active
         || app.settings_panel_active
+        || app.help_guide.active
         || app.quit_pending_confirm
         || !matches!(
             app.authoring_ui.overlay,
@@ -657,29 +914,23 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
     match app.active_tab {
         MainTab::Requirements => {
             let ui = &mut app.authoring_ui;
-            rows.push((
-                inner(ui.pane_areas[0]),
-                ui.tree_state.flatten(&ui.tree_items).len(),
-                ui.tree_state.get_offset(),
-            ));
+            let tree_inner = inner(ui.pane_areas[0]);
+            if tree_inner.contains((x, y).into()) {
+                for &(row_y, row_h) in &app.req_tree_row_spans {
+                    if y >= row_y && y < row_y.saturating_add(row_h) {
+                        paint_hover(
+                            frame,
+                            Rect::new(tree_inner.x, row_y, tree_inner.width, row_h),
+                        );
+                        break;
+                    }
+                }
+            }
             rows.push((
                 inner(ui.pane_areas[2]),
                 ui.filtered_linked_test_points().len(),
                 ui.linked_scroll,
             ));
-        }
-        MainTab::TestPoints => {
-            if let Some(area) = app.clickable_regions.iter().find_map(|r| match r {
-                ClickableRegion::TestPointsPane { pane: 0, rect } => Some(*rect),
-                _ => None,
-            }) {
-                let ui = &mut app.test_points_ui;
-                rows.push((
-                    inner(area),
-                    ui.tree_state.flatten(&ui.tree_items).len(),
-                    ui.tree_state.get_offset(),
-                ));
-            }
         }
         MainTab::MindMap => {
             if let Some(area) = app.tree_panel_rect {
@@ -756,6 +1007,7 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
             | ClickableRegion::SessionRow { rect, .. }
             | ClickableRegion::MindMapLocation { rect, .. }
             | ClickableRegion::Tab { rect, .. }
+            | ClickableRegion::ProjectControl { rect }
             | ClickableRegion::ProjectRecent { rect, .. }
             | ClickableRegion::ProjectOpenPath { rect, .. }
             | ClickableRegion::QuitConfirmYes { rect }
@@ -764,7 +1016,13 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
             | ClickableRegion::AiInterruptContinue { rect }
             | ClickableRegion::ExploreHorizontalScrollbar { rect, .. }
             | ClickableRegion::ExploreDetailTab { rect, .. }
-            | ClickableRegion::ExploreDetailItem { rect, .. } => *rect,
+            | ClickableRegion::ExploreDetailItem { rect, .. }
+            | ClickableRegion::ExploreSearchTrigger { rect }
+            | ClickableRegion::ExploreSearchConfirm { rect }
+            | ClickableRegion::ExploreSearchClear { rect }
+            | ClickableRegion::ReqSearchTrigger { rect }
+            | ClickableRegion::ReqSearchConfirm { rect }
+            | ClickableRegion::ReqSearchClear { rect } => *rect,
             ClickableRegion::ExploreFeature {
                 row_y,
                 col_x,
@@ -924,6 +1182,7 @@ fn render_picker_dialog(
     actions: &[Action],
 ) {
     let targets = dialog.render(frame, area);
+    app.modal_card_rect = Some(targets.panel);
     for (index, rect) in targets.rows {
         app.clickable_regions
             .push(ClickableRegion::RequirementFilterOption { rect, index });
@@ -1287,13 +1546,27 @@ fn render_explore_viewport<'a>(
     selected_row: Option<usize>,
     render_rows: impl FnOnce(&App, std::ops::Range<usize>) -> Vec<Line<'a>>,
 ) -> Rect {
-    let viewport_width = inner.width as usize;
-    let overflow = content_width > viewport_width && inner.height >= 2;
-    let content_area = if overflow {
-        Rect::new(inner.x, inner.y, inner.width, inner.height - 1)
+    let base_height = inner.height as usize;
+    let preliminary_v_overflow = row_count > base_height && inner.width >= 3;
+    let prelim_width = if preliminary_v_overflow {
+        inner.width.saturating_sub(1) as usize
     } else {
-        inner
+        inner.width as usize
     };
+    let h_overflow = content_width > prelim_width && inner.height >= 2;
+    let body_height = if h_overflow {
+        inner.height - 1
+    } else {
+        inner.height
+    };
+    let v_overflow = row_count > body_height as usize && inner.width >= 3;
+    let content_width_cols = if v_overflow {
+        inner.width - 1
+    } else {
+        inner.width
+    };
+    let content_area = Rect::new(inner.x, inner.y, content_width_cols, body_height);
+    let viewport_width = content_area.width as usize;
     let max_scroll = content_width.saturating_sub(viewport_width);
     let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
     app.explore_horizontal_scroll[column.index()] = offset;
@@ -1339,9 +1612,10 @@ fn render_explore_viewport<'a>(
         }
         view.last_selected = Some(selected);
     }
+    let v_offset = view.offset;
     // Pad and render only the viewport, rather than allocating full-width
     // backgrounds for every file in a large project.
-    let range = view.offset..(view.offset + content_area.height as usize).min(row_count);
+    let range = v_offset..(v_offset + content_area.height as usize).min(row_count);
     let visible_lines = render_rows(app, range);
     frame.render_widget(
         Paragraph::new(Text::from(theme::popup_rows(
@@ -1352,8 +1626,25 @@ fn render_explore_viewport<'a>(
         content_area,
     );
 
-    if overflow {
-        let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    if v_overflow {
+        let vbar = Rect::new(content_area.right(), content_area.y, 1, content_area.height);
+        render_vertical_scrollbar(
+            frame,
+            app,
+            crate::app::VerticalScrollTarget::ExploreColumn(column),
+            vbar,
+            row_count,
+            v_offset,
+        );
+    }
+
+    if h_overflow {
+        let scrollbar = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(1),
+            content_area.width,
+            1,
+        );
         let bar = crate::app::ScrollbarBar {
             rect: scrollbar,
             axis: theme::ScrollAxis::Horizontal,
@@ -1654,9 +1945,12 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             crate::i18n::t("features.loading")
         )));
     }
+    let title_width = title.width() as u16;
     let block = explore_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let search_has_text = !app.feature_browser.query.text().is_empty();
+    let mut title_right_limit = area.right().saturating_sub(1);
     if filter_active && badge_x > area.x {
         let rect = Rect::new(badge_x, area.y, 1, 1);
         app.feature_tags.clear_hit = Some(rect);
@@ -1672,6 +1966,35 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             style = style.add_modifier(Modifier::REVERSED);
         }
         frame.render_widget(Paragraph::new(Line::from(Span::styled("✗", style))), rect);
+        title_right_limit = badge_x.saturating_sub(1);
+    }
+    if (searching || search_has_text) && title_right_limit > area.x + 4 {
+        let clear_rect = Rect::new(title_right_limit.saturating_sub(3), area.y, 3, 1);
+        app.clickable_regions
+            .push(ClickableRegion::ExploreSearchClear { rect: clear_rect });
+        let (_, clear_style) = theme::action_chip_styles(theme::ActionTone::Warning);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" ✗ ", clear_style))),
+            clear_rect,
+        );
+        title_right_limit = clear_rect.x.saturating_sub(1);
+    }
+    if searching && title_right_limit > area.x + 4 {
+        let confirm_rect = Rect::new(title_right_limit.saturating_sub(3), area.y, 3, 1);
+        app.clickable_regions
+            .push(ClickableRegion::ExploreSearchConfirm { rect: confirm_rect });
+        let (_, confirm_style) = theme::action_chip_styles(theme::ActionTone::Success);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" ✓ ", confirm_style))),
+            confirm_rect,
+        );
+        title_right_limit = confirm_rect.x.saturating_sub(1);
+    }
+    let trigger_w = title_width.min(title_right_limit.saturating_sub(area.x + 1));
+    if trigger_w > 0 {
+        let trigger_rect = Rect::new(area.x + 1, area.y, trigger_w, 1);
+        app.clickable_regions
+            .push(ClickableRegion::ExploreSearchTrigger { rect: trigger_rect });
     }
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -1831,9 +2154,24 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let explore_actions = [
-        (crate::i18n::t("explore.run"), Action::RunScenario),
-        (crate::i18n::t("explore.detail"), Action::FocusRunDetails),
-        (crate::i18n::t("explore.edit"), Action::EnterEdit),
+        ActionItem::new(
+            crate::i18n::t("explore.run.key"),
+            crate::i18n::t("explore.run"),
+            Action::RunScenario,
+            theme::ActionTone::Success,
+        ),
+        ActionItem::new(
+            crate::i18n::t("explore.detail.key"),
+            crate::i18n::t("explore.detail"),
+            Action::FocusRunDetails,
+            theme::ActionTone::Warning,
+        ),
+        ActionItem::new(
+            crate::i18n::t("explore.edit.key"),
+            crate::i18n::t("explore.edit"),
+            Action::EnterEdit,
+            theme::ActionTone::Info,
+        ),
     ];
     if !app.catalog_selection_ready() {
         let block = explore_block(crate::i18n::t("pane.feature_content"), false);
@@ -1846,15 +2184,15 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .as_ref()
                     .and_then(|state| state.error.as_deref())
                     .unwrap_or(crate::i18n::t("scenarios.empty.select")),
-            ),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: false }),
             list_area,
         );
         if let Some(action_area) = action_area {
-            render_action_bar(
+            render_chip_action_bar(
                 frame,
                 &mut app.clickable_regions,
                 action_area,
-                "",
                 &explore_actions,
                 false,
             );
@@ -1932,11 +2270,10 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 });
         }
         if let Some(action_area) = action_area {
-            render_action_bar(
+            render_chip_action_bar(
                 frame,
                 &mut app.clickable_regions,
                 action_area,
-                "",
                 &explore_actions,
                 false,
             );
@@ -2106,11 +2443,10 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
     if let Some(action_area) = action_area {
-        render_action_bar(
+        render_chip_action_bar(
             frame,
             &mut app.clickable_regions,
             action_area,
-            "",
             &explore_actions,
             false,
         );
@@ -2537,6 +2873,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .and_then(|state| state.error.as_deref())
                     .unwrap_or(crate::i18n::t("scenarios.empty.select")),
             )
+            .wrap(ratatui::widgets::Wrap { trim: false })
             .block(explore_block(crate::i18n::t("pane.feature_content"), false)),
             area,
         );
@@ -2992,6 +3329,7 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
     }
 
     let popup = CHANGE_SUMMARY_SPEC.rect(area, (0, 0));
+    app.modal_card_rect = Some(popup);
     dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, popup);
     let block = theme::popup_block(crate::i18n::t("change_summary.title"));
@@ -3128,15 +3466,77 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
     let block = theme::panel_block(title, focused);
 
     let block_inner = block.inner(area);
+    frame.render_widget(block, area);
+    if block_inner.width == 0 || block_inner.height == 0 {
+        app.tree_panel_rect = Some(block_inner);
+        return;
+    }
+    let (content_inner, action_area) = split_pane_action_row(block_inner);
+    let total_rows = app.tree_state.flatten(items).len();
+    let has_vbar = total_rows > content_inner.height as usize && content_inner.width >= 3;
+    let tree_inner = if has_vbar {
+        Rect {
+            width: content_inner.width - 1,
+            ..content_inner
+        }
+    } else {
+        content_inner
+    };
     let tree = Tree::new(items)
         .expect("tree construction should succeed")
-        .block(block)
         .highlight_style(highlight_style);
 
-    app.tree_panel_rect = Some(block_inner);
+    app.tree_panel_rect = Some(tree_inner);
     app.clickable_regions.push(ClickableRegion::Tree);
 
-    frame.render_stateful_widget(tree, area, &mut app.tree_state);
+    frame.render_stateful_widget(tree, tree_inner, &mut app.tree_state);
+    if has_vbar {
+        let offset = app.tree_state.get_offset();
+        let vbar = Rect::new(tree_inner.right(), tree_inner.y, 1, tree_inner.height);
+        render_vertical_scrollbar(
+            frame,
+            app,
+            crate::app::VerticalScrollTarget::MindMapTree,
+            vbar,
+            total_rows,
+            offset,
+        );
+    }
+    if let Some(action_area) = action_area {
+        let mindmap_actions = [
+            ActionItem::new(
+                crate::i18n::t("mindmap.btn.toggle.key"),
+                crate::i18n::t("mindmap.btn.toggle"),
+                Action::TreeToggle,
+                theme::ActionTone::Neutral,
+            ),
+            ActionItem::new(
+                crate::i18n::t("mindmap.btn.ai_panel.key"),
+                crate::i18n::t("mindmap.btn.ai_panel"),
+                Action::ToggleMindMapAiPanel,
+                theme::ActionTone::Info,
+            ),
+            ActionItem::new(
+                crate::i18n::t("mindmap.btn.ask_ai.key"),
+                crate::i18n::t("mindmap.btn.ask_ai"),
+                Action::MindMapSendToAi,
+                theme::ActionTone::Primary,
+            ),
+            ActionItem::new(
+                crate::i18n::t("mindmap.btn.locations.key"),
+                crate::i18n::t("mindmap.btn.locations"),
+                Action::ToggleScenarioDropdown,
+                theme::ActionTone::Warning,
+            ),
+        ];
+        render_chip_action_bar(
+            frame,
+            &mut app.clickable_regions,
+            action_area,
+            &mindmap_actions,
+            false,
+        );
+    }
 }
 
 /// Renders the scenario preview panel in the MindMap tab (top-right).
@@ -3151,6 +3551,7 @@ fn render_mindmap_scenario_preview(
         horizontal: 1,
         vertical: 1,
     }));
+    app.clickable_regions.push(ClickableRegion::PreviewPanel);
     if area.width < 10 || area.height < 3 {
         return;
     }
@@ -3207,6 +3608,15 @@ fn render_mindmap_scenario_preview(
 
     // Compute scroll: center the cursor row
     let line_count = buffer.line_count();
+    let has_vbar = line_count > visible_lines && inner.width >= 3;
+    let text_area = if has_vbar {
+        Rect {
+            width: inner.width - 1,
+            ..inner
+        }
+    } else {
+        inner
+    };
     let max_scroll = line_count.saturating_sub(visible_lines);
     let actual_scroll = if cursor_row < visible_lines / 2 || line_count <= visible_lines {
         0
@@ -3225,7 +3635,7 @@ fn render_mindmap_scenario_preview(
         if buf_row >= line_count {
             lines.push(pad_line_to_width(
                 Line::raw(String::new()),
-                inner.width,
+                text_area.width,
                 Style::default(),
             ));
             continue;
@@ -3237,22 +3647,33 @@ fn render_mindmap_scenario_preview(
             styled = apply_line_background(styled, highlight_style);
         }
 
-        styled = truncate_line_to_cols(styled, inner.width);
+        styled = truncate_line_to_cols(styled, text_area.width);
         let pad_trail = if buf_row == cursor_row {
             highlight_style
         } else {
             Style::default()
         };
-        styled = pad_line_to_width(styled, inner.width, pad_trail);
+        styled = pad_line_to_width(styled, text_area.width, pad_trail);
         lines.push(styled);
     }
 
     for (i, line) in lines.iter().enumerate() {
-        let y = inner.y.saturating_add(i as u16);
-        if y >= inner.bottom() {
+        let y = text_area.y.saturating_add(i as u16);
+        if y >= text_area.bottom() {
             break;
         }
-        buf.set_line(inner.x, y, line, inner.width);
+        buf.set_line(text_area.x, y, line, text_area.width);
+    }
+    if has_vbar {
+        let vbar = Rect::new(text_area.right(), text_area.y, 1, text_area.height);
+        render_vertical_scrollbar(
+            frame,
+            app,
+            crate::app::VerticalScrollTarget::MindMapPreview,
+            vbar,
+            line_count,
+            actual_scroll,
+        );
     }
 }
 
@@ -3551,6 +3972,7 @@ fn render_scenario_dropdown(
     if dropdown_area.height < 3 {
         return;
     }
+    app.modal_card_rect = Some(dropdown_area);
 
     // Build item labels
     let mut items: Vec<String> = Vec::with_capacity(count);
@@ -3696,36 +4118,51 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Editor".to_string())
     };
-    let title = if preview {
-        format!("{title_base} (preview)")
+    let title_line: Line<'static> = if preview {
+        Line::from(format!("{title_base} (preview)"))
     } else {
-        title_base
+        let dirty_suffix = if app.dirty { " *" } else { "" };
+        let (mode_label, mode_color) = if app.step_input_active {
+            (crate::i18n::t("mode.insert"), theme::ACCENT)
+        } else {
+            (crate::i18n::t("mode.normal").trim(), theme::PRIMARY)
+        };
+        Line::from(vec![
+            Span::raw(format!("{title_base}{dirty_suffix} ")),
+            theme::chip(mode_label, mode_color),
+        ])
     };
-    let editor_block = theme::panel_block(title, !preview);
+    let editor_block = theme::panel_block(title_line, !preview);
     let editor_inner = editor_block.inner(area);
     frame.render_widget(editor_block, area);
     clear_to_surface(frame, editor_inner);
 
+    let (editor_body, editor_action_area) = if !preview {
+        split_pane_action_row(editor_inner)
+    } else {
+        (editor_inner, None)
+    };
+
     // Keep a small, non-blocking diagnostics pane inside the editor.  The
     // source area retains at least two rows in normal terminal sizes, while
     // very small terminals keep the editor fully usable and omit the pane.
-    let (editor_area, diagnostics_area) =
-        if !preview && !app.buffer_diagnostics.is_empty() && editor_inner.height >= 4 {
+    let (editor_source_area, diagnostics_area) =
+        if !preview && !app.buffer_diagnostics.is_empty() && editor_body.height >= 4 {
             let diagnostic_height = (app.buffer_diagnostics.len().min(4) as u16 + 2)
-                .min(editor_inner.height.saturating_sub(2));
+                .min(editor_body.height.saturating_sub(2));
             if diagnostic_height >= 2 {
                 let [source_area, diagnostics_area] =
                     Layout::vertical([Constraint::Min(2), Constraint::Length(diagnostic_height)])
-                        .areas(editor_inner);
+                        .areas(editor_body);
                 (source_area, diagnostics_area)
             } else {
-                (editor_inner, Rect::default())
+                (editor_body, Rect::default())
             }
         } else {
-            (editor_inner, Rect::default())
+            (editor_body, Rect::default())
         };
 
-    let visible_lines = editor_area.height as usize;
+    let visible_lines = editor_source_area.height as usize;
     let buffer = if preview {
         app.preview_buffer.as_ref().unwrap_or(&app.buffer)
     } else {
@@ -3749,6 +4186,15 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     if visible_rows.is_empty() {
         visible_rows.push(0);
     }
+    let has_vbar = !preview && visible_rows.len() > visible_lines && editor_source_area.width >= 3;
+    let editor_area = if has_vbar {
+        Rect {
+            width: editor_source_area.width - 1,
+            ..editor_source_area
+        }
+    } else {
+        editor_source_area
+    };
     let cursor_idx = visible_rows
         .iter()
         .position(|&row| row == cursor_row)
@@ -3976,7 +4422,76 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     } else {
         app.scroll_row = visible_rows.get(scroll_idx).copied().unwrap_or(0);
         app.editor_panel_rect = Some(editor_area);
+        if has_vbar {
+            let vbar = Rect::new(editor_area.right(), editor_area.y, 1, editor_area.height);
+            render_vertical_scrollbar(
+                frame,
+                app,
+                crate::app::VerticalScrollTarget::ExploreEditor,
+                vbar,
+                visible_rows.len(),
+                scroll_idx,
+            );
+        }
         render_buffer_diagnostics(frame, app, diagnostics_area);
+        if let Some(action_area) = editor_action_area {
+            let controls = if app.step_input_active {
+                vec![
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.commit.key"),
+                        crate::i18n::t("editor.btn.commit"),
+                        Action::Enter,
+                        theme::ActionTone::Success,
+                    ),
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.normal.key"),
+                        crate::i18n::t("editor.btn.normal"),
+                        Action::ClearInputState,
+                        theme::ActionTone::Warning,
+                    ),
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.save.key"),
+                        crate::i18n::t("editor.btn.save"),
+                        Action::Save,
+                        theme::ActionTone::Info,
+                    ),
+                ]
+            } else {
+                vec![
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.back.key"),
+                        crate::i18n::t("editor.btn.back"),
+                        Action::ClearInputState,
+                        theme::ActionTone::Warning,
+                    ),
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.save.key"),
+                        crate::i18n::t("editor.btn.save"),
+                        Action::Save,
+                        theme::ActionTone::Success,
+                    ),
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.run.key"),
+                        crate::i18n::t("editor.btn.run"),
+                        Action::RunBackground,
+                        theme::ActionTone::Primary,
+                    ),
+                    ActionItem::new(
+                        crate::i18n::t("editor.btn.fold.key"),
+                        crate::i18n::t("editor.btn.fold"),
+                        Action::ToggleScenarioFold,
+                        theme::ActionTone::Neutral,
+                    ),
+                ]
+            };
+            render_chip_action_bar(
+                frame,
+                &mut app.clickable_regions,
+                action_area,
+                &controls,
+                false,
+            );
+        }
     }
 }
 
@@ -4071,6 +4586,7 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &mut App, editor_area:
     let h = list_h.min(h_avail).max(3);
     let w = list_w.min(editor_area.width).max(3);
     let area = Rect::new(editor_area.x, y, w, h);
+    app.modal_card_rect = Some(area);
 
     frame.render_widget(Clear, area);
 
@@ -4303,7 +4819,8 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         }
     }
 
-    let max_offset = lines.len().saturating_sub(content_area.height as usize);
+    let total_lines = lines.len();
+    let max_offset = total_lines.saturating_sub(content_area.height as usize);
     let mut offset = app.explore_details_scroll.min(max_offset);
     if app.explore_details_reveal {
         if let Some(line) = content.selected_line {
@@ -4316,17 +4833,42 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         app.explore_details_reveal = false;
     }
     app.explore_details_scroll = offset;
+    let has_vbar = total_lines > content_area.height as usize && content_area.width >= 3;
+    let detail_text_area = if has_vbar {
+        Rect {
+            width: content_area.width - 1,
+            ..content_area
+        }
+    } else {
+        content_area
+    };
     if !app.explore_edit_mode {
-        for (index, rect) in content.item_rects(content_area, offset) {
+        for (index, rect) in content.item_rects(detail_text_area, offset) {
             app.clickable_regions
                 .push(ClickableRegion::ExploreDetailItem { index, rect });
         }
     }
     frame.render_widget(
-        Paragraph::new(Text::from(truncate_lines(lines, content_area.width)))
+        Paragraph::new(Text::from(truncate_lines(lines, detail_text_area.width)))
             .scroll((offset.min(u16::MAX as usize) as u16, 0)),
-        content_area,
+        detail_text_area,
     );
+    if has_vbar {
+        let vbar = Rect::new(
+            detail_text_area.right(),
+            detail_text_area.y,
+            1,
+            detail_text_area.height,
+        );
+        render_vertical_scrollbar(
+            frame,
+            app,
+            crate::app::VerticalScrollTarget::ExploreDetails,
+            vbar,
+            total_lines,
+            offset,
+        );
+    }
 
     // Pixels draw over the reserved blank cells after the text frame.
     // ViewState::Fit already keeps scale ≤ 100% and only shrinks when the
@@ -5109,36 +5651,80 @@ fn render_detail_actions(
     area: Rect,
     active: Option<crate::app::RunDetailTab>,
 ) {
-    let mut controls: Vec<(&str, Action)> = match active {
+    let mut controls: Vec<ActionItem<'_>> = match active {
         Some(crate::app::RunDetailTab::Screenshots) => vec![
-            ("Enter fullscreen", Action::ExploreDetailEnter),
-            ("o open", Action::ExploreOpenExternal),
-            ("y copy path", Action::ExploreCopyPath),
+            ActionItem::new(
+                "Fullscreen [Enter]",
+                "Fullscreen",
+                Action::ExploreDetailEnter,
+                theme::ActionTone::Primary,
+            ),
+            ActionItem::new(
+                "Open [o]",
+                "Open",
+                Action::ExploreOpenExternal,
+                theme::ActionTone::Info,
+            ),
+            ActionItem::new(
+                "Copy path [y]",
+                "Copy",
+                Action::ExploreCopyPath,
+                theme::ActionTone::Neutral,
+            ),
         ],
         Some(crate::app::RunDetailTab::Api) => vec![
-            ("Space expand", Action::ExploreDetailToggle),
-            ("p plaintext", Action::ToggleInspectorPlaintext),
-            ("y copy URL", Action::ExploreCopyPath),
+            ActionItem::new(
+                "Expand [Space]",
+                "Expand",
+                Action::ExploreDetailToggle,
+                theme::ActionTone::Info,
+            ),
+            ActionItem::new(
+                "Plaintext [p]",
+                "Plaintext",
+                Action::ToggleInspectorPlaintext,
+                theme::ActionTone::Warning,
+            ),
+            ActionItem::new(
+                "Copy URL [y]",
+                "Copy",
+                Action::ExploreCopyPath,
+                theme::ActionTone::Neutral,
+            ),
         ],
-        Some(crate::app::RunDetailTab::Logs) => {
-            vec![("y copy line", Action::ExploreCopyPath)]
-        }
+        Some(crate::app::RunDetailTab::Logs) => vec![ActionItem::new(
+            "Copy line [y]",
+            "Copy",
+            Action::ExploreCopyPath,
+            theme::ActionTone::Neutral,
+        )],
         Some(crate::app::RunDetailTab::Files) => vec![
-            ("Enter open", Action::ExploreDetailEnter),
-            ("y copy path", Action::ExploreCopyPath),
+            ActionItem::new(
+                "Open [Enter]",
+                "Open",
+                Action::ExploreDetailEnter,
+                theme::ActionTone::Primary,
+            ),
+            ActionItem::new(
+                "Copy path [y]",
+                "Copy",
+                Action::ExploreCopyPath,
+                theme::ActionTone::Neutral,
+            ),
         ],
         None => Vec::new(),
     };
     // Always first so the hint survives a narrow pane's control clipping.
-    controls.insert(0, ("[ ] switch run  ", Action::ExploreRunOlder));
-    render_action_bar(
-        frame,
-        &mut app.clickable_regions,
-        area,
-        "",
-        &controls,
-        false,
+    controls.insert(
+        0,
+        ActionItem::new(
+            "[ ] switch run",
+            "Runs",
+            Action::ExploreRunOlder,
+            theme::ActionTone::Neutral,
+        ),
     );
+    render_chip_action_bar(frame, &mut app.clickable_regions, area, &controls, false);
 }
 
 /// Join left and right spans on one row, right-aligning `right`.
@@ -5441,6 +6027,7 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         height: overlay::Axis::content(8, 22, height_share),
     };
     let panel_area = spec.rect(area, (0, content_rows));
+    app.modal_card_rect = Some(panel_area);
 
     dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
@@ -5694,6 +6281,7 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Two rows per session plus the hint and action rows; the card stops at
     // 40 rows so a long history still shows the backdrop.
     let panel_area = overlay::OverlaySpec::prompt(88, 10, 40).rect(area, (0, desired_height));
+    app.modal_card_rect = Some(panel_area);
 
     dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
@@ -5851,6 +6439,7 @@ fn render_history_search_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         height: overlay::Axis::percent(55, 10, 24, overlay::DEFAULT_SHARE),
     };
     let popup = HISTORY_SEARCH.rect(area, (0, 0));
+    app.modal_card_rect = Some(popup);
     clear_to(frame, area, theme::OVERLAY_BG);
     let block = theme::popup_block(" Prompt history ");
     let [query_row, list, footer] = Layout::vertical([
@@ -6106,6 +6695,7 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
     let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+    app.modal_card_rect = Some(panel_area);
 
     frame.render_widget(Clear, panel_area);
 
@@ -6208,6 +6798,7 @@ fn render_settings_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if panel_area.width < 12 || panel_area.height < 5 {
         return;
     }
+    app.modal_card_rect = Some(panel_area);
     dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
@@ -6440,6 +7031,7 @@ const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
 
 fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel = agent_profile_panel_rect(area);
+    app.modal_card_rect = Some(panel);
     dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel);
     let title = match app.agent_panel_mode {
@@ -6635,6 +7227,7 @@ fn agent_profile_panel_rect(area: Rect) -> Rect {
 /// Render the agent profile configuration overlay (chrys-style layout).
 fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_area = agent_profile_panel_rect(area);
+    app.modal_card_rect = Some(panel_area);
     dialog::dim_backdrop(frame, area);
     frame.render_widget(Clear, panel_area);
 
@@ -7039,8 +7632,9 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let ui = &mut app.authoring_ui;
         let images = &mut app.inline_images;
         let regions = &mut app.clickable_regions;
+        let row_spans = &mut app.req_tree_row_spans;
         let tree_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
-        render_requirements_tree(frame, ui, regions, layout[0], tree_focused);
+        render_requirements_tree(frame, ui, regions, row_spans, layout[0], tree_focused);
 
         if layout.len() == 2 {
             render_requirements_editor(frame, ui, regions, Some(images), layout[1], true);
@@ -7082,20 +7676,66 @@ fn render_requirements_tree(
     frame: &mut Frame<'_>,
     ui: &mut crate::authoring_tab::AuthoringUiState,
     regions: &mut Vec<ClickableRegion>,
+    row_spans: &mut Vec<(u16, u16)>,
     area: Rect,
     focused: bool,
 ) {
-    let block = theme::panel_block(requirement_tree_title(ui), focused);
+    let title = requirement_tree_title(ui);
+    let title_width = title.width() as u16;
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let mut title_right_limit = area.right().saturating_sub(1);
+    let searching = ui.search_active;
+    let search_has_text = !ui.search_query.text().is_empty();
+    if (searching || search_has_text) && title_right_limit > area.x + 4 {
+        let clear_rect = Rect::new(title_right_limit.saturating_sub(3), area.y, 3, 1);
+        regions.push(ClickableRegion::ReqSearchClear { rect: clear_rect });
+        let (_, clear_style) = theme::action_chip_styles(theme::ActionTone::Warning);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" ✗ ", clear_style))),
+            clear_rect,
+        );
+        title_right_limit = clear_rect.x.saturating_sub(1);
+    }
+    if searching && title_right_limit > area.x + 4 {
+        let confirm_rect = Rect::new(title_right_limit.saturating_sub(3), area.y, 3, 1);
+        regions.push(ClickableRegion::ReqSearchConfirm { rect: confirm_rect });
+        let (_, confirm_style) = theme::action_chip_styles(theme::ActionTone::Success);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" ✓ ", confirm_style))),
+            confirm_rect,
+        );
+        title_right_limit = confirm_rect.x.saturating_sub(1);
+    }
+    let trigger_w = title_width.min(title_right_limit.saturating_sub(area.x + 1));
+    if trigger_w > 0 {
+        let trigger_rect = Rect::new(area.x + 1, area.y, trigger_w, 1);
+        regions.push(ClickableRegion::ReqSearchTrigger { rect: trigger_rect });
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
     let (content_inner, action_area) = split_pane_action_row(inner);
     let tree_actions = [
-        (crate::i18n::t("req.filter"), Action::ReqFilterOverlay),
-        (crate::i18n::t("req.new"), Action::ReqNewDocument),
-        (crate::i18n::t("req.actions"), Action::ReqActionMenu),
+        ActionItem::new(
+            crate::i18n::t("req.filter.key"),
+            crate::i18n::t("req.filter"),
+            Action::ReqFilterOverlay,
+            theme::ActionTone::Warning,
+        ),
+        ActionItem::new(
+            crate::i18n::t("req.new.doc.ctrl"),
+            crate::i18n::t("req.new"),
+            Action::ReqNewDocument,
+            theme::ActionTone::Success,
+        ),
+        ActionItem::new(
+            crate::i18n::t("req.actions.space"),
+            crate::i18n::t("req.actions"),
+            Action::ReqActionMenu,
+            theme::ActionTone::Primary,
+        ),
     ];
 
     if let Some(error) = &ui.project_identity_error {
@@ -7109,7 +7749,7 @@ fn render_requirements_tree(
             content_inner,
         );
         if let Some(action_area) = action_area {
-            render_action_bar(frame, regions, action_area, "", &tree_actions, false);
+            render_chip_action_bar(frame, regions, action_area, &tree_actions, false);
         }
         return;
     }
@@ -7120,7 +7760,7 @@ fn render_requirements_tree(
             content_inner,
         );
         if let Some(action_area) = action_area {
-            render_action_bar(frame, regions, action_area, "", &tree_actions, false);
+            render_chip_action_bar(frame, regions, action_area, &tree_actions, false);
         }
         return;
     }
@@ -7142,7 +7782,7 @@ fn render_requirements_tree(
             content_inner,
         );
         if let Some(action_area) = action_area {
-            render_action_bar(frame, regions, action_area, "", &tree_actions, false);
+            render_chip_action_bar(frame, regions, action_area, &tree_actions, false);
         }
         return;
     }
@@ -7176,6 +7816,21 @@ fn render_requirements_tree(
         .highlight_style(theme::selected_row(focused));
     frame.render_stateful_widget(tree, viewport, &mut ui.tree_state);
     draw_requirement_entry_bars(frame.buffer_mut(), viewport, &wrapped, &ui.tree_state);
+    {
+        let offset = ui.tree_state.get_offset();
+        let bottom = viewport.y + viewport.height;
+        let mut y = viewport.y;
+        for &height in heights.iter().skip(offset) {
+            if y >= bottom {
+                break;
+            }
+            let drawn = (height as u16).min(bottom.saturating_sub(y));
+            if drawn > 0 {
+                row_spans.push((y, drawn));
+            }
+            y = y.saturating_add(drawn);
+        }
+    }
     render_requirement_scrollbars(
         frame,
         ui,
@@ -7214,7 +7869,7 @@ fn render_requirements_tree(
         );
     }
     if let Some(action_area) = action_area {
-        render_action_bar(frame, regions, action_area, "", &tree_actions, false);
+        render_chip_action_bar(frame, regions, action_area, &tree_actions, false);
     }
 }
 
@@ -7474,20 +8129,48 @@ fn render_requirements_editor(
         return;
     }
     let (content_inner, action_area) = split_pane_action_row(inner);
-    let mut editor_actions: Vec<(&str, Action)> = Vec::new();
+    let mut editor_actions: Vec<ActionItem<'_>> = Vec::new();
     match ui.editor_mode {
         crate::authoring_tab::RequirementsEditorMode::Preview => {
-            editor_actions.push((crate::i18n::t("req.edit"), Action::ReqEnterEditView));
+            editor_actions.push(ActionItem::new(
+                crate::i18n::t("req.edit.key"),
+                crate::i18n::t("req.edit"),
+                Action::ReqEnterEditView,
+                theme::ActionTone::Info,
+            ));
         }
         crate::authoring_tab::RequirementsEditorMode::Browse => {
-            editor_actions.push((crate::i18n::t("req.preview"), Action::ReqEnterPreview));
+            editor_actions.push(ActionItem::new(
+                crate::i18n::t("req.preview.esc"),
+                crate::i18n::t("req.preview"),
+                Action::ReqEnterPreview,
+                theme::ActionTone::Info,
+            ));
         }
         _ => {}
     }
     if !ui.is_previewing() {
-        editor_actions.push((crate::i18n::t("req.point"), Action::ReqNewTestPoint));
+        editor_actions.push(ActionItem::new(
+            crate::i18n::t("req.point.key"),
+            crate::i18n::t("req.point"),
+            Action::ReqNewTestPoint,
+            theme::ActionTone::Primary,
+        ));
     }
-    editor_actions.push((crate::i18n::t("req.new"), Action::ReqNewDocument));
+    if ui.buffer_dirty {
+        editor_actions.push(ActionItem::new(
+            crate::i18n::t("req.save.ctrl"),
+            crate::i18n::t("footer.save"),
+            Action::Save,
+            theme::ActionTone::Success,
+        ));
+    }
+    editor_actions.push(ActionItem::new(
+        crate::i18n::t("req.new.doc.ctrl"),
+        crate::i18n::t("req.new"),
+        Action::ReqNewDocument,
+        theme::ActionTone::Success,
+    ));
     clear_to_surface(frame, content_inner);
 
     if missing {
@@ -7497,7 +8180,7 @@ fn render_requirements_editor(
             content_inner,
         );
         if let Some(action_area) = action_area {
-            render_action_bar(frame, regions, action_area, "", &editor_actions, false);
+            render_chip_action_bar(frame, regions, action_area, &editor_actions, false);
         }
         return;
     }
@@ -7510,7 +8193,7 @@ fn render_requirements_editor(
     if ui.is_previewing() {
         render_requirement_preview(frame, ui, area, viewport, images);
         if let Some(action_area) = action_area {
-            render_action_bar(frame, regions, action_area, "", &editor_actions, false);
+            render_chip_action_bar(frame, regions, action_area, &editor_actions, false);
         }
         return;
     }
@@ -7646,7 +8329,7 @@ fn render_requirements_editor(
         viewport.height,
     );
     if let Some(action_area) = action_area {
-        render_action_bar(frame, regions, action_area, "", &editor_actions, false);
+        render_chip_action_bar(frame, regions, action_area, &editor_actions, false);
     }
 }
 
@@ -8592,6 +9275,7 @@ fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selec
         .min(rows.len().saturating_sub(list_height));
     let height = (list_height + reserved).min(area.height as usize) as u16;
     let panel = overlay::centered(area, width, height);
+    app.modal_card_rect = Some(panel);
     let mut lines = Vec::new();
     for (offset, (index, line)) in rows.iter().skip(start).take(list_height).enumerate() {
         lines.push(line.clone());
@@ -8709,59 +9393,68 @@ fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 20 || area.height < 3 {
         return;
     }
-    let layout = compact_panes(
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::SCREEN_BG)),
         area,
-        match app.test_points_ui.focus {
-            crate::test_points_tab::TestPointsFocus::Tree => 0,
-            crate::test_points_tab::TestPointsFocus::Details => 1,
-            crate::test_points_tab::TestPointsFocus::Excerpts => 2,
-        },
     );
+    app.test_points_canvas_rect = None;
 
-    // Register the exact pane rectangles used by the render pass.  The
-    // pointer path uses these regions to focus the same pane as Tab/arrow
-    // navigation, and the list is rebuilt every frame so resize and tab
-    // switches cannot leave stale hit targets behind.
-    for (pane, rect) in layout.iter().copied().enumerate() {
-        app.clickable_regions
-            .push(ClickableRegion::TestPointsPane { pane, rect });
+    let root_name = app
+        .project
+        .root_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Test Points")
+        .to_string();
+    app.refresh_test_points_exec_statuses();
+    {
+        let artifacts = app.authoring_ui.artifacts.as_ref();
+        app.test_points_ui
+            .rebuild_canvas_layout(artifacts, &root_name);
     }
 
-    let tree_focused = app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
-    render_test_points_tree(frame, app, layout[0], tree_focused);
-
-    let ui = &mut app.test_points_ui;
-    let artifacts = app.authoring_ui.artifacts.as_ref();
-    if layout.len() == 2 {
-        render_test_points_details(
-            frame,
-            ui,
-            artifacts,
-            layout[1],
-            true,
-            &mut app.clickable_regions,
-        );
+    if app.test_points_ui.fullscreen_canvas {
+        app.clickable_regions.push(ClickableRegion::TestPointsPane {
+            pane: 0,
+            rect: area,
+        });
+        let focused = app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
+        render_test_points_canvas(frame, app, area, focused);
         return;
     }
 
-    let details_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Details;
-    let excerpts_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
-    render_test_points_details(
-        frame,
-        ui,
-        artifacts,
-        layout[1],
-        details_focused,
-        &mut app.clickable_regions,
-    );
-    render_test_points_excerpts(
-        frame,
-        ui,
-        artifacts,
-        layout[2],
-        excerpts_focused,
-        &mut app.clickable_regions,
-    );
+    if area.width < 70 {
+        if app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree {
+            app.clickable_regions.push(ClickableRegion::TestPointsPane {
+                pane: 0,
+                rect: area,
+            });
+            render_test_points_canvas(frame, app, area, true);
+        } else {
+            app.clickable_regions.push(ClickableRegion::TestPointsPane {
+                pane: 1,
+                rect: area,
+            });
+            render_test_points_inspector(frame, app, area, true);
+        }
+        return;
+    }
+
+    let [canvas_rect, inspector_rect] =
+        Layout::horizontal([Constraint::Percentage(72), Constraint::Percentage(28)]).areas(area);
+    app.clickable_regions.push(ClickableRegion::TestPointsPane {
+        pane: 0,
+        rect: canvas_rect,
+    });
+    app.clickable_regions.push(ClickableRegion::TestPointsPane {
+        pane: 1,
+        rect: inspector_rect,
+    });
+
+    let canvas_focused = app.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
+    render_test_points_canvas(frame, app, canvas_rect, canvas_focused);
+    render_test_points_inspector(frame, app, inspector_rect, !canvas_focused);
 }
 
 /// Split a pane interior into a content region and an optional bottom action row.
@@ -8781,6 +9474,156 @@ fn split_pane_action_row(inner: Rect) -> (Rect, Option<Rect>) {
     };
     let actions = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
     (content, Some(actions))
+}
+
+/// A clickable pill button rendered inside a pane action strip.
+pub(super) struct ActionItem<'a> {
+    pub label: &'a str,
+    pub compact: &'a str,
+    pub action: Action,
+    pub tone: theme::ActionTone,
+}
+
+impl<'a> ActionItem<'a> {
+    pub(super) const fn new(
+        label: &'a str,
+        compact: &'a str,
+        action: Action,
+        tone: theme::ActionTone,
+    ) -> Self {
+        Self {
+            label,
+            compact,
+            action,
+            tone,
+        }
+    }
+}
+
+/// Renders one styled pill label with bracketed shortcut hints highlighted in
+/// the button's semantic accent color.
+fn action_chip_line(text: &str, tone: theme::ActionTone) -> Line<'static> {
+    let (label_style, key_style) = theme::action_chip_styles(tone);
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        let Some(end) = rest[start..].find(']').map(|end| start + end + 1) else {
+            break;
+        };
+        if start > 0 {
+            spans.push(Span::styled(rest[..start].to_owned(), label_style));
+        }
+        spans.push(Span::styled(rest[start..end].to_owned(), key_style));
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_owned(), label_style));
+    }
+    Line::from(spans).style(label_style)
+}
+
+/// Renders a row of distinct, color-tinted clickable pill buttons inside a pane
+/// action strip, automatically falling back to compact labels when narrow.
+pub(super) fn render_chip_action_bar(
+    frame: &mut Frame<'_>,
+    regions: &mut Vec<ClickableRegion>,
+    area: Rect,
+    controls: &[ActionItem<'_>],
+    modal: bool,
+) {
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG)),
+        area,
+    );
+    if controls.is_empty() {
+        return;
+    }
+    let full_total: u16 = controls
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (item.label.trim().width() as u16).saturating_add(2) + u16::from(i > 0))
+        .sum();
+    let use_compact = full_total > area.width;
+    let mut x = area.x;
+    for item in controls {
+        let raw = if use_compact {
+            item.compact.trim()
+        } else {
+            item.label.trim()
+        };
+        let padded = format!(" {raw} ");
+        let width = padded.width() as u16;
+        if x.saturating_add(width) > area.right() {
+            break;
+        }
+        let rect = Rect::new(x, area.y, width, 1);
+        frame.render_widget(Paragraph::new(action_chip_line(&padded, item.tone)), rect);
+        regions.push(ClickableRegion::ActionButton {
+            rect,
+            action: item.action.clone(),
+            modal,
+        });
+        x = x.saturating_add(width + 1);
+    }
+}
+
+/// Paints a 1-column solid vertical scrollbar into an explicit scrollbar list
+/// (used when callers hold split borrows of `App`).
+#[allow(clippy::too_many_arguments)]
+fn render_vertical_scrollbar_into(
+    frame: &mut Frame<'_>,
+    scrollbars: &mut Vec<(crate::app::VerticalScrollTarget, crate::app::ScrollbarBar)>,
+    mouse_position: Option<(u16, u16)>,
+    grab: Option<(crate::app::VerticalScrollTarget, u16)>,
+    target: crate::app::VerticalScrollTarget,
+    bar_rect: Rect,
+    total: usize,
+    start: usize,
+) {
+    if bar_rect.is_empty() || total <= bar_rect.height as usize {
+        return;
+    }
+    let bar = crate::app::ScrollbarBar {
+        rect: bar_rect,
+        axis: theme::ScrollAxis::Vertical,
+        total,
+    };
+    let grabbed = grab.is_some_and(|(active, _)| active == target);
+    let state = crate::app::scrollbar_state(mouse_position, &bar, grabbed);
+    let lines = theme::scrollbar_lines(
+        total,
+        bar_rect.height as usize,
+        start,
+        theme::ScrollAxis::Vertical,
+        state,
+    );
+    frame.render_widget(Paragraph::new(lines), bar_rect);
+    scrollbars.push((target, bar));
+}
+
+/// Paints a 1-column solid vertical scrollbar on `bar_rect` and registers it
+/// for hover, drag, and track-paging pointer interaction.
+fn render_vertical_scrollbar(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    target: crate::app::VerticalScrollTarget,
+    bar_rect: Rect,
+    total: usize,
+    start: usize,
+) {
+    render_vertical_scrollbar_into(
+        frame,
+        &mut app.vertical_scrollbars,
+        app.mouse_position,
+        app.vertical_scrollbar_grab,
+        target,
+        bar_rect,
+        total,
+        start,
+    );
 }
 
 fn render_action_bar(
@@ -8831,81 +9674,227 @@ fn visible_content_rows(inner: Rect, row: usize, count: usize, offset: usize) ->
     })
 }
 
-fn render_test_points_tree(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
-    let ui = &mut app.test_points_ui;
-    let artifacts = app.authoring_ui.artifacts.as_ref();
-    let filter_label = match ui.review_filter {
-        crate::test_points_tab::ReviewFilter::All => crate::i18n::t("tp.filter.all"),
-        crate::test_points_tab::ReviewFilter::Proposed => crate::i18n::t("tp.filter.proposed"),
-        crate::test_points_tab::ReviewFilter::Approved => crate::i18n::t("tp.filter.approved"),
-        crate::test_points_tab::ReviewFilter::Rejected => crate::i18n::t("tp.filter.rejected"),
-        crate::test_points_tab::ReviewFilter::NeedsReview => {
-            crate::i18n::t("tp.filter.needs_review")
-        }
+fn render_test_points_canvas(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    let filter_label = match app.test_points_ui.review_filter {
+        crate::test_points_tab::StatusFilter::All => crate::i18n::t("tp.filter.all"),
+        crate::test_points_tab::StatusFilter::Uncovered => crate::i18n::t("tp.filter.uncovered"),
+        crate::test_points_tab::StatusFilter::Linked => crate::i18n::t("tp.filter.linked"),
+        crate::test_points_tab::StatusFilter::Passed => crate::i18n::t("tp.filter.passed"),
+        crate::test_points_tab::StatusFilter::Failed => crate::i18n::t("tp.filter.failed"),
     };
-    let title = crate::i18n::fill(crate::i18n::t("tp.tree.title"), &[("filter", filter_label)]);
+    let mut title = crate::i18n::fill(
+        crate::i18n::t("tp.canvas.title"),
+        &[("filter", filter_label)],
+    );
+    if app.test_points_ui.fullscreen_canvas {
+        title.push_str(" [ZOOM]");
+    }
+    if app.test_points_ui.inline_edit.is_some() {
+        title.push_str(" [EDIT]");
+    }
     let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+
     let (content_inner, action_area) = split_pane_action_row(inner);
-    let tp_actions: Vec<(&str, Action)> = if ui.editing {
-        vec![(crate::i18n::t("tp.insert.normal"), Action::TpExitInsert)]
+    let tp_actions: Vec<ActionItem<'_>> = if app.test_points_ui.editing {
+        vec![
+            ActionItem::new(
+                crate::i18n::t("editor.btn.save.key"),
+                crate::i18n::t("tp.insert.save"),
+                Action::Save,
+                theme::ActionTone::Success,
+            ),
+            ActionItem::new(
+                crate::i18n::t("editor.btn.normal.key"),
+                crate::i18n::t("tp.insert.normal"),
+                Action::TpExitInsert,
+                theme::ActionTone::Warning,
+            ),
+        ]
     } else {
         vec![
-            (crate::i18n::t("tp.approve"), Action::TpApprove),
-            (crate::i18n::t("tp.reject"), Action::TpReject),
-            (crate::i18n::t("tp.filter"), Action::TpReviewFilter),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.add_child.key"),
+                crate::i18n::t("tp.btn.add_child"),
+                Action::TpAddChild,
+                theme::ActionTone::Primary,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.add_sibling.key"),
+                crate::i18n::t("tp.btn.add_sibling"),
+                Action::TpAddSibling,
+                theme::ActionTone::Info,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.edit.key"),
+                crate::i18n::t("tp.btn.edit"),
+                Action::TpInlineEdit,
+                theme::ActionTone::Neutral,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.delete.key"),
+                crate::i18n::t("tp.btn.delete"),
+                Action::TpDeleteNode,
+                theme::ActionTone::Danger,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.gen.key"),
+                crate::i18n::t("tp.btn.gen"),
+                Action::TpGenerateFeature,
+                theme::ActionTone::Success,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.run.key"),
+                crate::i18n::t("tp.btn.run"),
+                Action::TpRunTestPoint,
+                theme::ActionTone::Warning,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.sync.key"),
+                crate::i18n::t("tp.btn.sync"),
+                Action::TpSyncFromFeatures,
+                theme::ActionTone::Info,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.filter.key"),
+                crate::i18n::t("tp.filter"),
+                Action::TpReviewFilter,
+                theme::ActionTone::Neutral,
+            ),
+            ActionItem::new(
+                crate::i18n::t("tp.btn.zoom.key"),
+                crate::i18n::t("tp.btn.zoom"),
+                Action::TpToggleFullscreen,
+                theme::ActionTone::Neutral,
+            ),
         ]
     };
 
-    if artifacts.is_none() || ui.tree_items.is_empty() {
-        frame.render_widget(
-            Paragraph::new(crate::i18n::t("tp.tree.empty"))
-                .style(Style::default().fg(theme::MUTED)),
-            content_inner,
+    if content_inner.width > 0 && content_inner.height > 0 {
+        let ui = &mut app.test_points_ui;
+        let has_vbar = ui.canvas_height > content_inner.height && content_inner.width >= 4;
+        let canvas_area = if has_vbar {
+            Rect {
+                width: content_inner.width - 1,
+                ..content_inner
+            }
+        } else {
+            content_inner
+        };
+        app.test_points_canvas_rect = Some(canvas_area);
+        ui.canvas_viewport = (canvas_area.width, canvas_area.height);
+        ui.canvas_scroll_x = ui
+            .canvas_scroll_x
+            .min(ui.canvas_width.saturating_sub(canvas_area.width));
+        ui.canvas_scroll_y = ui
+            .canvas_scroll_y
+            .min(ui.canvas_height.saturating_sub(canvas_area.height));
+
+        let canvas = ui.build_canvas(theme::SCREEN_BG);
+        let lines = canvas.to_ratatui_lines(
+            ui.canvas_scroll_x,
+            ui.canvas_scroll_y,
+            canvas_area.width,
+            canvas_area.height,
+            theme::SCREEN_BG,
         );
-        if let Some(action_area) = action_area {
-            render_action_bar(
+        frame.render_widget(Paragraph::new(lines), canvas_area);
+
+        // Register clickable hit targets for every visible MindMap node box.
+        let vx0 = ui.canvas_scroll_x;
+        let vy0 = ui.canvas_scroll_y;
+        let vx1 = vx0.saturating_add(canvas_area.width);
+        let vy1 = vy0.saturating_add(canvas_area.height);
+        for node in &ui.placed_nodes {
+            let nx0 = node.x.max(vx0);
+            let ny0 = node.y.max(vy0);
+            let nx1 = node.x.saturating_add(node.width).min(vx1);
+            let ny1 = node.y.saturating_add(node.height).min(vy1);
+            if nx0 < nx1 && ny0 < ny1 {
+                app.clickable_regions
+                    .push(ClickableRegion::TestPointCanvasNode {
+                        rect: Rect::new(
+                            canvas_area.x + (nx0 - vx0),
+                            canvas_area.y + (ny0 - vy0),
+                            nx1 - nx0,
+                            ny1 - ny0,
+                        ),
+                        node_id: node.id.clone(),
+                    });
+            }
+        }
+
+        if has_vbar {
+            let vbar = Rect::new(canvas_area.right(), canvas_area.y, 1, canvas_area.height);
+            render_vertical_scrollbar_into(
                 frame,
-                &mut app.clickable_regions,
-                action_area,
-                "",
-                &tp_actions,
-                false,
+                &mut app.vertical_scrollbars,
+                app.mouse_position,
+                app.vertical_scrollbar_grab,
+                crate::app::VerticalScrollTarget::TestPointsPane(0),
+                vbar,
+                ui.canvas_height as usize,
+                ui.canvas_scroll_y as usize,
             );
         }
-        return;
     }
 
-    let highlight_style = theme::selected_row(focused);
-    let tree = Tree::new(&ui.tree_items)
-        .expect("test point tree")
-        .highlight_style(highlight_style);
-    frame.render_stateful_widget(tree, content_inner, &mut ui.tree_state);
     if let Some(action_area) = action_area {
-        render_action_bar(
+        render_chip_action_bar(
             frame,
             &mut app.clickable_regions,
             action_area,
-            "",
             &tp_actions,
             false,
         );
     }
 }
 
-fn render_test_points_details(
-    frame: &mut Frame<'_>,
-    ui: &mut crate::test_points_tab::TestPointsUiState,
-    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
-    area: Rect,
-    focused: bool,
-    regions: &mut Vec<ClickableRegion>,
-) {
-    let title = if ui.editing {
+fn inspector_step_line(keyword: &str, text: &str, max_width: u16) -> Line<'static> {
+    let kw_trim = keyword.trim();
+    let kw_color = if matches!(kw_trim, "Given" | "假如" | "假设") {
+        theme::INFO
+    } else if matches!(kw_trim, "When" | "当") {
+        theme::ACCENT
+    } else if matches!(kw_trim, "Then" | "那么") {
+        theme::SUCCESS
+    } else {
+        theme::MUTED
+    };
+    let full = format!("    {kw_trim} {text}");
+    let clipped = truncate_string_to_cols(&full, max_width);
+    let prefix_len = format!("    {kw_trim} ").len().min(clipped.len());
+    if prefix_len == clipped.len() {
+        Line::from(Span::styled(
+            clipped,
+            Style::default().fg(kw_color).bg(theme::SCREEN_BG),
+        ))
+    } else {
+        let (left, right) = clipped.split_at(prefix_len);
+        Line::from(vec![
+            Span::styled(
+                left.to_owned(),
+                Style::default()
+                    .fg(kw_color)
+                    .bg(theme::SCREEN_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                right.to_owned(),
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG),
+            ),
+        ])
+    }
+}
+
+fn render_test_points_inspector(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    let ui = &mut app.test_points_ui;
+    let artifacts = app.authoring_ui.artifacts.as_ref();
+    let title = if ui.editing && ui.focus != crate::test_points_tab::TestPointsFocus::Tree {
         crate::i18n::t("tp.details.title.edit")
     } else {
         crate::i18n::t("tp.details.title")
@@ -8917,26 +9906,89 @@ fn render_test_points_details(
         return;
     }
 
-    let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
+    let Some(node) = ui.selected_node().cloned() else {
         frame.render_widget(
             Paragraph::new(crate::i18n::t("tp.details.empty"))
-                .style(Style::default().fg(theme::MUTED)),
-            inner,
-        );
-        return;
-    };
-    let Some(tp) =
-        artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| &tp.id == tp_id))
-    else {
-        frame.render_widget(
-            Paragraph::new(crate::i18n::t("tp.details.unavailable"))
-                .style(Style::default().fg(theme::ERROR)),
+                .style(Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG)),
             inner,
         );
         return;
     };
 
-    let fields = [
+    let Some(tp_id) = ui.selected_test_point_id.clone() else {
+        // Branch or Root summary in Inspector
+        let st = node.exec_status;
+        let summary_lines = vec![
+            Line::from(vec![
+                theme::chip(
+                    format!(" {} {} ", st.glyph(), st.label()),
+                    st.style().fg.unwrap_or(theme::MUTED),
+                ),
+                Span::styled(
+                    format!("  {} scenarios", node.scenario_count),
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                ),
+            ]),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled(
+                    "Node: ",
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                ),
+                Span::styled(
+                    truncate_string_to_cols(&node.label, inner.width.saturating_sub(6)),
+                    Style::default()
+                        .fg(theme::FG)
+                        .bg(theme::SCREEN_BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!("Direct children: {}", node.children_ids.len()),
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "[a] +Child  [n] +Sibling  [i] Rename",
+                Style::default().fg(theme::INFO).bg(theme::SCREEN_BG),
+            )),
+            Line::from(Span::styled(
+                "[Space] Fold  [r] Run subtree  [d] Delete",
+                Style::default().fg(theme::INFO).bg(theme::SCREEN_BG),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(theme::popup_rows(summary_lines, inner.width)),
+            inner,
+        );
+        return;
+    };
+
+    let Some(tp) =
+        artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| tp.id == tp_id))
+    else {
+        frame.render_widget(
+            Paragraph::new(crate::i18n::t("tp.details.unavailable"))
+                .style(Style::default().fg(theme::ERROR).bg(theme::SCREEN_BG)),
+            inner,
+        );
+        return;
+    };
+
+    let status = ui.exec_status_for(tp);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        theme::chip(
+            format!(" {} {} ", status.glyph(), status.label()),
+            status.style().fg.unwrap_or(theme::MUTED),
+        ),
+        Span::styled(
+            format!("  id: {}", tp.id),
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+        ),
+    ]));
+
+    let mut fields = vec![
         (
             crate::test_points_tab::DetailField::Title,
             crate::i18n::t("tp.field.title"),
@@ -8944,37 +9996,6 @@ fn render_test_points_details(
                 ui.field_buffer.clone()
             } else {
                 tp.title.clone()
-            },
-        ),
-        (
-            crate::test_points_tab::DetailField::Objective,
-            crate::i18n::t("tp.field.objective"),
-            if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
-                ui.field_buffer.clone()
-            } else {
-                tp.objective.clone()
-            },
-        ),
-        (
-            crate::test_points_tab::DetailField::Preconditions,
-            crate::i18n::t("tp.field.preconditions"),
-            if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
-                && ui.field_dirty
-            {
-                ui.field_buffer.clone()
-            } else {
-                tp.preconditions.clone().unwrap_or_default()
-            },
-        ),
-        (
-            crate::test_points_tab::DetailField::ExpectedOutcomes,
-            crate::i18n::t("tp.field.expected"),
-            if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
-                && ui.field_dirty
-            {
-                ui.field_buffer.clone()
-            } else {
-                tp.expected_outcomes.clone().unwrap_or_default()
             },
         ),
         (
@@ -8986,43 +10007,71 @@ fn render_test_points_details(
                 tp.hierarchy_path.segments().join(" / ")
             },
         ),
+        (
+            crate::test_points_tab::DetailField::Objective,
+            crate::i18n::t("tp.field.note"),
+            if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.objective.clone()
+            },
+        ),
     ];
+    if tp.preconditions.is_some()
+        || ui.detail_field == crate::test_points_tab::DetailField::Preconditions
+    {
+        fields.push((
+            crate::test_points_tab::DetailField::Preconditions,
+            crate::i18n::t("tp.field.preconditions"),
+            if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.preconditions.clone().unwrap_or_default()
+            },
+        ));
+    }
+    if tp.expected_outcomes.is_some()
+        || ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
+    {
+        fields.push((
+            crate::test_points_tab::DetailField::ExpectedOutcomes,
+            crate::i18n::t("tp.field.expected"),
+            if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.expected_outcomes.clone().unwrap_or_default()
+            },
+        ));
+    }
 
-    let mut lines = Vec::new();
-    let badge = crate::authoring_tab::review_state_label(tp.review_state);
-    let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
-    lines.push(Line::from(vec![
-        theme::chip(
-            format!("[{badge}] "),
-            badge_style.fg.unwrap_or(theme::MUTED),
-        ),
-        Span::styled(
-            crate::test_points_tab::review_state_name(tp.review_state),
-            Style::default().fg(theme::FG),
-        ),
-        Span::raw(format!("  id: {}", tp.id)),
-    ]));
+    let details_focused = focused && ui.focus != crate::test_points_tab::TestPointsFocus::Excerpts;
+    let excerpts_focused = focused && ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
 
     let mut field_rows = Vec::new();
-    let mut scenario_rows = Vec::new();
     for (field, label, value) in fields {
         field_rows.push((lines.len(), field));
         let active = ui.detail_field == field;
-        let label_style = if active {
-            theme::selected_row(focused)
+        let label_style = if active && details_focused {
+            theme::selected_row(true)
+        } else if active {
+            Style::default().fg(theme::PRIMARY).bg(theme::SCREEN_BG)
         } else {
-            Style::default().fg(theme::MUTED)
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG)
         };
-        let value_style = if active {
-            theme::selected_row(focused)
+        let value_style = if active && details_focused {
+            theme::selected_row(true)
         } else {
-            Style::default()
+            Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
         };
-        let width = inner.width.saturating_sub(label.len() as u16 + 3);
-        let display = if active && focused && ui.editing {
-            input_with_cursor(&value, ui.field_cursor, width)
+        let avail = inner.width.saturating_sub(label.width() as u16 + 3);
+        let display = if active && details_focused && ui.editing {
+            input_with_cursor(&value, ui.field_cursor, avail)
         } else {
-            truncate_string_to_cols(&value, width)
+            truncate_string_to_cols(&value, avail)
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{label}: "), label_style),
@@ -9030,122 +10079,195 @@ fn render_test_points_details(
         ]));
     }
 
-    if !tp.scenario_refs.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            crate::i18n::t("tp.realized"),
-            Style::default().fg(theme::MUTED),
-        ));
-        for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
-            scenario_rows.push((lines.len(), i));
+    // Live Realized Scenarios + Gherkin Step Preview
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        crate::i18n::t("tp.realized"),
+        Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+    ));
+    let mut scenario_rows = Vec::new();
+    let mut matched_live = Vec::new();
+    for (fi, feature) in app.project.features.iter().enumerate() {
+        let rel = feature
+            .file_path
+            .strip_prefix(&app.project.root_dir)
+            .unwrap_or(&feature.file_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (si, sc) in feature.all_scenarios().into_iter().enumerate() {
+            if teshi_core::authoring::parse_teshi_tp_tags(&sc.tags)
+                .iter()
+                .any(|id| id == &tp.id)
+            {
+                matched_live.push((fi, si, rel.clone(), sc));
+            }
+        }
+    }
+
+    if !matched_live.is_empty() {
+        for (idx, (fi, si, rel, sc)) in matched_live.iter().enumerate() {
+            scenario_rows.push((lines.len(), idx));
+            let st_glyph = match app.explore_case_status.get(&(*fi, *si)) {
+                Some(crate::app::RunStatus::Passed) => "✔",
+                Some(crate::app::RunStatus::Failed) => "✖",
+                Some(crate::app::RunStatus::Running) => "⠋",
+                _ => "◐",
+            };
+            let selected = idx == ui.selected_scenario_ref_index;
+            let row_style = if selected && details_focused {
+                theme::selected_row(true)
+            } else {
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
+            };
+            let header = truncate_string_to_cols(
+                &format!("  {st_glyph} {} ({rel})", sc.name),
+                inner.width.saturating_sub(1),
+            );
+            lines.push(Line::from(Span::styled(header, row_style)));
+            for step in sc.steps.iter().take(5) {
+                lines.push(inspector_step_line(
+                    &step.keyword,
+                    &step.text,
+                    inner.width.saturating_sub(1),
+                ));
+            }
+            if sc.steps.len() > 5 {
+                lines.push(Line::from(Span::styled(
+                    format!("    … +{} steps", sc.steps.len() - 5),
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                )));
+            }
+        }
+    } else if !tp.scenario_refs.is_empty() {
+        for (idx, sc_ref) in tp.scenario_refs.iter().enumerate() {
+            scenario_rows.push((lines.len(), idx));
             let label = sc_ref.scenario_name.clone().unwrap_or_else(|| {
                 crate::i18n::t("tp.line")
                     .replace("{n}", &sc_ref.scenario_line.unwrap_or(0).to_string())
             });
-            let selected = i == ui.selected_scenario_ref_index;
-            let style = if selected && focused {
+            let selected = idx == ui.selected_scenario_ref_index;
+            let row_style = if selected && details_focused {
                 theme::selected_row(true)
             } else {
-                Style::default()
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
             };
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {} — {}", label, sc_ref.feature_path),
-                style,
-            )]));
+            lines.push(Line::from(Span::styled(
+                truncate_string_to_cols(
+                    &format!("  ◐ {} — {}", label, sc_ref.feature_path),
+                    inner.width.saturating_sub(1),
+                ),
+                row_style,
+            )));
         }
+    } else {
+        lines.push(Line::from(Span::styled(
+            truncate_string_to_cols(
+                crate::i18n::t("tp.no_scenario_hint"),
+                inner.width.saturating_sub(1),
+            ),
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+        )));
     }
 
-    let rows = theme::popup_rows(lines, inner.width);
-    let max_scroll = rows.len().saturating_sub(inner.height as usize);
-    ui.scroll_offsets[1] = ui.scroll_offsets[1].min(max_scroll);
-    for (row, field) in field_rows {
-        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
-            regions.push(ClickableRegion::TestPointField { rect, field });
-        }
-    }
-    for (row, index) in scenario_rows {
-        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
-            regions.push(ClickableRegion::TestPointScenario { rect, index });
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(rows).scroll((ui.scroll_offsets[1] as u16, 0)),
-        inner,
-    );
-}
-
-fn render_test_points_excerpts(
-    frame: &mut Frame<'_>,
-    ui: &mut crate::test_points_tab::TestPointsUiState,
-    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
-    area: Rect,
-    focused: bool,
-    regions: &mut Vec<ClickableRegion>,
-) {
-    let block = theme::panel_block(crate::i18n::t("tp.excerpts.title"), focused);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let excerpts = match (ui.selected_test_point_id.as_ref(), artifacts) {
-        (Some(tp_id), Some(artifacts)) => artifacts
-            .test_points
-            .test_points
-            .iter()
-            .find(|tp| &tp.id == tp_id)
-            .map(|tp| crate::test_points_tab::excerpts_for_test_point(tp, artifacts))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
+    // Linked Requirement Documents
+    let excerpts = artifacts
+        .map(|a| crate::test_points_tab::excerpts_for_test_point(tp, a))
+        .unwrap_or_default();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        crate::i18n::t("tp.excerpts.title"),
+        Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+    ));
     let mut excerpt_rows = Vec::new();
     if excerpts.is_empty() {
         lines.push(Line::styled(
             crate::i18n::t("tp.excerpts.empty"),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
         ));
     } else {
-        for (i, excerpt) in excerpts.iter().enumerate() {
+        for (i, ex) in excerpts.iter().enumerate() {
             excerpt_rows.push((lines.len(), i));
-            let res_label = match excerpt.resolution {
-                teshi_core::authoring::ResolutionState::Resolved => crate::i18n::t("tp.excerpt.ok"),
-                teshi_core::authoring::ResolutionState::Stale => crate::i18n::t("tp.excerpt.stale"),
-            };
-            let res_style = crate::test_points_tab::excerpt_resolution_style(excerpt.resolution);
-            let doc =
-                truncate_string_to_cols(&excerpt.document_title, inner.width.saturating_sub(8));
-            let quote = truncate_string_to_cols(&excerpt.quote, inner.width.saturating_sub(4));
-            let row_style = if i == ui.selected_excerpt_index {
-                theme::selected_row(focused)
+            let tag = if ex.resolved {
+                crate::i18n::t("tp.excerpt.ok")
             } else {
-                Style::default()
+                crate::i18n::t("tp.excerpt.stale")
             };
+            let tag_color = if ex.resolved {
+                theme::SUCCESS
+            } else {
+                theme::WARNING
+            };
+            let row_style = if i == ui.selected_excerpt_index && excerpts_focused {
+                theme::selected_row(true)
+            } else {
+                Style::default().fg(theme::FG).bg(theme::SCREEN_BG)
+            };
+            let doc = truncate_string_to_cols(&ex.document_title, inner.width.saturating_sub(8));
             lines.push(Line::from(vec![
-                Span::styled(format!("[{res_label}] "), res_style),
+                Span::styled(
+                    format!("[{tag}] "),
+                    Style::default().fg(tag_color).bg(theme::SCREEN_BG),
+                ),
                 Span::styled(doc, row_style),
             ]));
-            lines.push(Line::from(vec![Span::styled(
-                format!("  \"{quote}\""),
-                row_style,
-            )]));
+            if !ex.quote.is_empty() {
+                let quote = truncate_string_to_cols(&ex.quote, inner.width.saturating_sub(4));
+                lines.push(Line::from(Span::styled(
+                    format!("  \"{quote}\""),
+                    Style::default().fg(theme::MUTED).bg(theme::SCREEN_BG),
+                )));
+            }
         }
     }
 
-    let rows = theme::popup_rows(lines, inner.width);
-    let max_scroll = rows.len().saturating_sub(inner.height as usize);
-    ui.scroll_offsets[2] = ui.scroll_offsets[2].min(max_scroll);
+    let total_rows = lines.len();
+    let has_vbar = total_rows > inner.height as usize && inner.width >= 3;
+    let body_area = if has_vbar {
+        Rect {
+            width: inner.width - 1,
+            ..inner
+        }
+    } else {
+        inner
+    };
+    let rows = theme::popup_rows(lines, body_area.width);
+    let max_scroll = rows.len().saturating_sub(body_area.height as usize);
+    ui.scroll_offsets[1] = ui.scroll_offsets[1].min(max_scroll);
+    for (row, field) in field_rows {
+        if let Some(rect) = visible_content_rows(body_area, row, 1, ui.scroll_offsets[1]) {
+            app.clickable_regions
+                .push(ClickableRegion::TestPointField { rect, field });
+        }
+    }
+    for (row, index) in scenario_rows {
+        if let Some(rect) = visible_content_rows(body_area, row, 1, ui.scroll_offsets[1]) {
+            app.clickable_regions
+                .push(ClickableRegion::TestPointScenario { rect, index });
+        }
+    }
     for (row, index) in excerpt_rows {
-        if let Some(rect) = visible_content_rows(inner, row, 2, ui.scroll_offsets[2]) {
-            regions.push(ClickableRegion::TestPointExcerpt { rect, index });
+        if let Some(rect) = visible_content_rows(body_area, row, 1, ui.scroll_offsets[1]) {
+            app.clickable_regions
+                .push(ClickableRegion::TestPointExcerpt { rect, index });
         }
     }
     frame.render_widget(
-        Paragraph::new(rows).scroll((ui.scroll_offsets[2] as u16, 0)),
-        inner,
+        Paragraph::new(rows).scroll((ui.scroll_offsets[1] as u16, 0)),
+        body_area,
     );
+    if has_vbar {
+        let vbar = Rect::new(body_area.right(), body_area.y, 1, body_area.height);
+        render_vertical_scrollbar_into(
+            frame,
+            &mut app.vertical_scrollbars,
+            app.mouse_position,
+            app.vertical_scrollbar_grab,
+            crate::app::VerticalScrollTarget::TestPointsPane(1),
+            vbar,
+            total_rows,
+            ui.scroll_offsets[1],
+        );
+    }
 }
 
 #[cfg(test)]
@@ -11049,7 +12171,14 @@ Feature: Rule only
         let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         assert_eq!(ui.scroll_limits[0][0], 0, "wrapped labels never overflow");
@@ -11064,7 +12193,14 @@ Feature: Rule only
         ui.tree_items.clear();
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         assert_eq!(ui.scroll_limits[0], [0, 0]);
@@ -11080,7 +12216,14 @@ Feature: Rule only
         let mut terminal = Terminal::new(TestBackend::new(12, 9)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         let rows = tree_screen_rows(&terminal);
@@ -11139,7 +12282,14 @@ Feature: Rule only
         let mut terminal = Terminal::new(TestBackend::new(16, 10)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         let buf = terminal.backend().buffer();
@@ -11189,7 +12339,14 @@ Feature: Rule only
         let mut terminal = Terminal::new(TestBackend::new(16, 5)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         let buf = terminal.backend().buffer();
@@ -11239,7 +12396,14 @@ Feature: Rule only
         let mut terminal = Terminal::new(TestBackend::new(20, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         let bar = ui.pane_bars[0][1].expect("overflowing tree draws a vertical bar");
@@ -11261,7 +12425,14 @@ Feature: Rule only
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_requirements_tree(frame, &mut ui, &mut Vec::new(), frame.area(), true)
+                super::render_requirements_tree(
+                    frame,
+                    &mut ui,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    frame.area(),
+                    true,
+                )
             })
             .expect("render");
         let buffer = terminal.backend().buffer();
@@ -12114,5 +13285,465 @@ mod left_pane_width_tests {
             left.width,
             ai_sidebar_width(area.width).expect("AI sidebar fits")
         );
+    }
+}
+
+#[cfg(test)]
+mod gui_chrome_tests {
+    use super::render;
+    use crate::app::{App, ClickableRegion, MainTab, VerticalScrollTarget};
+    use crate::keymap::Action;
+    use crate::theme;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+    use std::path::PathBuf;
+    use teshi_core::gherkin;
+
+    #[test]
+    fn test_top_bar_paints_active_tab_underline_and_project_hover() {
+        for tab in [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ] {
+            let mut app = App::from_args().expect("app init");
+            app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+            app.active_tab = tab;
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let tab_rect = app
+                .clickable_regions
+                .iter()
+                .find_map(|r| match r {
+                    ClickableRegion::Tab { tab: t, rect } if *t == tab => Some(*rect),
+                    _ => None,
+                })
+                .expect("active tab region");
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(tab_rect.x, 1)].symbol(), "━");
+            assert_eq!(buffer[(tab_rect.x, 1)].fg, theme::tab_accent(tab));
+
+            let project_rect = app
+                .clickable_regions
+                .iter()
+                .find_map(|r| match r {
+                    ClickableRegion::ProjectControl { rect } => Some(*rect),
+                    _ => None,
+                })
+                .expect("project control region");
+            let resting_bg = buffer[(project_rect.x, project_rect.y)].bg;
+            app.mouse_position = Some((project_rect.x, project_rect.y));
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let hovered_bg = terminal.backend().buffer()[(project_rect.x, project_rect.y)].bg;
+            assert_ne!(
+                hovered_bg, resting_bg,
+                "hovering the project control lifts its chip fill"
+            );
+        }
+    }
+
+    #[test]
+    fn test_footer_displays_mode_badge_and_breadcrumb_across_tabs() {
+        for (tab, expected_crumb) in [
+            (MainTab::Explore, "Explore ›"),
+            (MainTab::MindMap, "MindMap ›"),
+            (MainTab::Ai, "AI ›"),
+            (MainTab::Requirements, "Requirements ›"),
+            (MainTab::TestPoints, "Test Points ›"),
+        ] {
+            let mut app = App::from_args().expect("app init");
+            app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+            app.active_tab = tab;
+            app.status_message = None;
+            let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let row: String = (0..140)
+                .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
+                .collect();
+            assert!(
+                row.contains("NORMAL") || row.contains("INPUT") || row.contains("PREVIEW"),
+                "{tab:?} footer missing mode badge: {row}"
+            );
+            assert!(
+                row.contains(expected_crumb),
+                "{tab:?} footer missing breadcrumb {expected_crumb:?}: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mindmap_and_editor_expose_clickable_chip_bars() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.active_tab = MainTab::MindMap;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        for expected in [
+            Action::TreeToggle,
+            Action::ToggleMindMapAiPanel,
+            Action::MindMapSendToAi,
+            Action::ToggleScenarioDropdown,
+        ] {
+            assert!(
+                app.clickable_regions.iter().any(|r| matches!(
+                    r,
+                    ClickableRegion::ActionButton { action, .. } if *action == expected
+                )),
+                "MindMap missing chip button {expected:?}"
+            );
+        }
+
+        app.active_tab = MainTab::Explore;
+        app.explore_edit_mode = true;
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        for expected in [
+            Action::ClearInputState,
+            Action::Save,
+            Action::RunBackground,
+            Action::ToggleScenarioFold,
+        ] {
+            assert!(
+                app.clickable_regions.iter().any(|r| matches!(
+                    r,
+                    ClickableRegion::ActionButton { action, .. } if *action == expected
+                )),
+                "Explore editor missing chip button {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_explore_vertical_scrollbar_renders_and_pages_on_click() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.project.features = (0..40)
+            .map(|i| {
+                gherkin::parse_feature(
+                    &format!("Feature: Feature {i}\n  Scenario: S{i}\n    Given step {i}\n"),
+                    PathBuf::from(format!("f{i}.feature")),
+                )
+            })
+            .collect();
+        app.active_tab = MainTab::Explore;
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let bar = app
+            .vertical_scrollbars
+            .iter()
+            .find_map(|(target, bar)| {
+                matches!(target, VerticalScrollTarget::ExploreColumn(_)).then_some(*bar)
+            })
+            .expect("Explore Features column should register a vertical scrollbar");
+        assert_eq!(app.explore_viewports[0].offset, 0);
+        // Click near the bottom of the track to page forward.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            bar.rect.x,
+            bar.rect.bottom().saturating_sub(1),
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(
+            app.explore_viewports[0].offset > 0,
+            "clicking below the thumb pages the Explore column down"
+        );
+    }
+
+    #[test]
+    fn test_explore_directory_click_toggles_expansion_and_search_title_is_clickable() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.project.root_dir = PathBuf::from("/proj");
+        app.project.features = vec![gherkin::parse_feature(
+            "Feature: Login\n  Scenario: Ok\n    Given ready\n",
+            PathBuf::from("/proj/auth/login.feature"),
+        )];
+        app.active_tab = MainTab::Explore;
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(app.feature_directory_collapsed("auth"));
+
+        // Single-click the directory row to expand it immediately.
+        let (dir_x, dir_y) = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ExploreFeature {
+                    feature_idx: 0,
+                    row_y,
+                    col_x,
+                    ..
+                } => Some((*col_x, *row_y)),
+                _ => None,
+            })
+            .expect("directory row target");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            dir_x,
+            dir_y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(
+            !app.feature_directory_collapsed("auth"),
+            "single-clicking a Feature directory expands it"
+        );
+
+        // Clicking the Features title starts inline search; clicking clear resets it.
+        let trigger = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ExploreSearchTrigger { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("Explore search trigger");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            trigger.x,
+            trigger.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.feature_browser.searching);
+
+        app.feature_browser.query = crate::authoring_tab::LineInput::new("login");
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let confirm = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ExploreSearchConfirm { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("Explore search confirm button while searching");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            confirm.x,
+            confirm.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(
+            !app.feature_browser.searching,
+            "clicking confirm commits search and exits search input mode"
+        );
+        assert_eq!(app.feature_browser.query.text(), "login");
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let clear = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ExploreSearchClear { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("Explore search clear button");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            clear.x,
+            clear.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.feature_browser.query.text().is_empty());
+        assert!(!app.feature_browser.searching);
+    }
+
+    #[test]
+    fn test_explore_scenario_double_click_opens_editor() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.project.features = vec![gherkin::parse_feature(
+            "Feature: Checkout\n  Scenario: Pay\n    Given a cart\n",
+            PathBuf::from("checkout.feature"),
+        )];
+        app.active_tab = MainTab::Explore;
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (sx, sy) = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ExploreScenario {
+                    scenario_idx: 0,
+                    row_y,
+                    col_x,
+                    ..
+                } => Some((*col_x, *row_y)),
+                _ => None,
+            })
+            .expect("scenario row target");
+        let left = MouseEventKind::Down(MouseButton::Left);
+        app.handle_mouse_event(left, sx, sy, KeyModifiers::NONE)
+            .unwrap();
+        assert!(!app.explore_edit_mode, "first click selects only");
+        app.handle_mouse_event(left, sx, sy, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.explore_edit_mode, "second click opens editor");
+    }
+
+    #[test]
+    fn test_chat_input_click_positions_caret_and_modal_backdrop_dismisses() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.active_tab = MainTab::Ai;
+        app.agent_mut().input.set_text("hello world".to_string());
+        assert_eq!(app.agent().input.cursor(), 11);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (text_rect, _) = app
+            .chat_input_text_rect
+            .expect("chat input text rect recorded");
+        // Click column 2 ('l') inside "hello world".
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            text_rect.x + 2,
+            text_rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent().input.cursor(),
+            2,
+            "clicking inside ChatInput places caret at clicked character"
+        );
+
+        // Open Settings and verify clicking the dimmed backdrop closes it.
+        app.settings_panel_active = true;
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let card = app.modal_card_rect.expect("settings modal card rect");
+        assert!(card.x > 0, "backdrop left margin exists");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            0,
+            0,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(
+            !app.settings_panel_active,
+            "clicking outside Settings card dismisses it"
+        );
+    }
+
+    #[test]
+    fn test_help_guide_modal_topics_language_scroll_and_dismiss() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        app.active_tab = MainTab::MindMap;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let footer = row_text(terminal.backend().buffer(), 31);
+        assert!(
+            footer.contains("Help [?]"),
+            "footer advertises Help [?], got: {footer}"
+        );
+
+        // Open via F1 (matches active tab = MindMap -> topic 2).
+        assert!(app.handle_help_guide_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(app.help_guide.active);
+        assert_eq!(app.help_guide.selected_topic, 2);
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let top = row_text(terminal.backend().buffer(), 2);
+        assert!(
+            top.contains("Teshi User Guide")
+                || row_text(terminal.backend().buffer(), 1).contains("Teshi User Guide"),
+            "guide title renders on modal top border"
+        );
+
+        // Space switches doc language independently without mutating global locale.
+        let before_global = app.ui_locale;
+        let before_doc = app.help_guide.doc_locale;
+        assert!(app.handle_help_guide_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert_ne!(app.help_guide.doc_locale, before_doc);
+        assert_eq!(app.ui_locale, before_global);
+
+        // Move topic down with j, then focus doc with l and scroll with Ctrl+D.
+        assert!(app.handle_help_guide_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.help_guide.selected_topic, 3);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(app.handle_help_guide_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+        assert!(app.help_guide.focus_doc);
+        assert!(
+            app.handle_help_guide_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        );
+        assert!(
+            app.help_guide.doc_scroll > 0 || app.help_guide.doc_max_scroll == 0,
+            "Ctrl+D scrolls guide body when overflow exists"
+        );
+
+        // Mouse wheel over doc pane scrolls up back to 0.
+        if let Some(doc_rect) = app.help_guide.doc_rect {
+            app.handle_mouse_event(
+                MouseEventKind::ScrollUp,
+                doc_rect.x + 2,
+                doc_rect.y + 1,
+                KeyModifiers::NONE,
+            )
+            .unwrap();
+        }
+
+        // Clicking dimmed backdrop dismisses the User Guide.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            0,
+            0,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(!app.help_guide.active, "backdrop click closes User Guide");
+    }
+
+    #[test]
+    fn test_phase3_vim_tab_cycle_half_page_and_ex_commands() {
+        let mut app = App::from_args().expect("app init");
+        app.set_ui_locale(teshi_engine::UiLocalePreference::En);
+        assert_eq!(app.active_tab, MainTab::Explore);
+
+        // gt / gT cycle across all 5 tabs.
+        app.handle_action(Action::NextTab).unwrap();
+        assert_eq!(app.active_tab, MainTab::MindMap);
+        app.handle_action(Action::NextTab).unwrap();
+        assert_eq!(app.active_tab, MainTab::Ai);
+        app.handle_action(Action::PrevTab).unwrap();
+        assert_eq!(app.active_tab, MainTab::MindMap);
+
+        // `:` command line Tab autocomplete + `:help` execution.
+        app.handle_action(Action::CommandLineOpen).unwrap();
+        for ch in ['h', 'e'] {
+            app.handle_action(Action::CommandLineInsert(ch)).unwrap();
+        }
+        app.handle_action(Action::CommandLineAutocomplete).unwrap();
+        assert_eq!(
+            app.command_line.as_ref().map(|i| i.text()),
+            Some("help"),
+            "Tab autocompletes :he -> :help"
+        );
+        app.handle_action(Action::CommandLineConfirm).unwrap();
+        assert!(app.help_guide.active, ":help opens the User Guide");
+        app.close_help_guide();
+
+        // `:4` jumps directly to Requirements tab.
+        app.handle_action(Action::CommandLineOpen).unwrap();
+        app.handle_action(Action::CommandLineInsert('4')).unwrap();
+        app.handle_action(Action::CommandLineConfirm).unwrap();
+        assert_eq!(app.active_tab, MainTab::Requirements);
+
+        // Half-page actions execute cleanly without panicking.
+        app.handle_action(Action::HalfPageDown).unwrap();
+        app.handle_action(Action::HalfPageUp).unwrap();
     }
 }

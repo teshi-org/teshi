@@ -463,38 +463,37 @@ Markdown source.
 
 ## Test Points
 
+Test Points opens a 2D left-to-right MindMap canvas (`72%`) paired with a Linked
+Inspector (`28%`). Every node displays its live coverage/execution status:
+`○` Uncovered, `◐` Linked, `⠋` Running, `✔` Passed, `✖` Failed.
+
 ### Normal
 
 | Key | Action |
 |-----|--------|
-| Tab/Shift+Tab | Next/previous pane |
-| Ctrl+W then `h/l` or Left/Right | Previous/next pane |
-| `j/k`, Down/Up | Select a point, a detail field, or an excerpt |
-| `h/l`, Left/Right | Move the field cursor in Details; otherwise change panes |
-| `gg/G` | First/last point, field, or excerpt |
-| Home/End | Field line boundaries in Details; first/last list item elsewhere |
-| PageUp/PageDown, Ctrl+B/Ctrl+F | Page through points, fields, or excerpts |
-| `i` / Enter (Details) | Enter Insert for the selected field |
-| `a/A` | Approve selected / batch-approve visible eligible points |
-| `r` | Reject the selected point |
-| `f` | Cycle review-state filter |
-| `c` | Continue generation after human approval (Strict review policy only) |
-| `o` | Open the selected realized Gherkin scenario |
-| Enter (Excerpts) | Follow the excerpt into Requirements |
-| `s` / Ctrl+S | Save |
+| `h/j/k/l`, Left/Down/Up/Right | Navigate spatially across canvas nodes (parent, child, siblings); in Inspector Details move field selection/cursor |
+| Tab/Shift+Tab, Ctrl+W then `h/l` | Switch focus between Canvas, Inspector Fields, and Requirement Links |
+| `Space` | Collapse or expand the selected branch |
+| `a` | Add child test point under the selected branch/node and edit inline (use `Sub / Title` with `/` to create nested branches) |
+| `n` / `O` | Add sibling test point and edit inline |
+| `i` / `e` / Enter | Edit selected node title or branch name inline (or edit active field in Inspector; follow link in Requirement Links) |
+| `d` / Delete | Delete the selected test point or branch subtree |
+| `u` / Ctrl+R | Undo / redo Test Points edits |
+| `g` | Scaffold and link a `@teshi-tp:<id>` Scenario in a matching `.feature` file |
+| `S` | Reverse-extract unlinked `.feature` Scenarios into the MindMap |
+| `r` | Run all Scenarios linked to the selected node or subtree |
+| `o` | Jump to the selected realized Gherkin Scenario in Explore |
+| `f` | Cycle live coverage/execution filter (All / Uncovered / Linked / Passed / Failed) |
+| `z` | Toggle fullscreen MindMap canvas |
+| `s` / Ctrl+S | Save `testpoints/testpoints.json` |
+| Drag / Wheel / Shift+Wheel | Pan the 2D MindMap canvas vertically and horizontally; click selects node, double-click folds branch or edits leaf |
 
-### Insert (Details)
+### Insert (Inline Canvas & Inspector)
 
-All printable characters, including commands and tab digits, insert text.
-Left/Right move by Unicode characters; Up/Down move within multiline text;
-Home/End move to logical line boundaries. Backspace/Delete edit at the cursor.
-Shift+Enter inserts a newline. Esc or Enter commits the field and returns to
-Normal. Ctrl+S saves while staying in Insert; a save that changes the active
-filtered selection can return to Normal. Tab/Shift+Tab commits and moves
-pane focus. Bracketed paste inserts text without executing review commands.
-
-Editing meaning-bearing fields still resets locked review states to Proposed;
-keyboard navigation never approves points automatically.
+All printable characters insert text. Arrows and Home/End move the cursor;
+Backspace/Delete edit. Esc or Enter commits the edit (cancels empty brand-new
+placeholder nodes) and returns to Normal. Including `/` when editing a leaf title
+splits prefix segments into hierarchy branches automatically.
 
 ## Dialogs and pickers
 

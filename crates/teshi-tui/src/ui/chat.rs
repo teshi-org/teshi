@@ -982,23 +982,23 @@ fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
             .to_string(),
             crate::keymap::Action::AiOpenAgentSelector,
+            theme::ActionTone::Info,
         ),
         (
             crate::i18n::fill(crate::i18n::t("chat.model"), &[("model", &model)]),
             crate::keymap::Action::ModelPanelOpen,
+            theme::ActionTone::Primary,
         ),
     ];
     let mut x = area.x;
-    for (label, action) in controls {
+    for (label, action, tone) in controls {
         let width = label.width() as u16;
         if x.saturating_add(width) > area.right() {
             continue;
         }
         let rect = Rect::new(x, area.y, width, 1);
-        frame.render_widget(
-            Paragraph::new(label).style(fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG)),
-            rect,
-        );
+        let (_, chip_style) = theme::action_chip_styles(tone);
+        frame.render_widget(Paragraph::new(label).style(chip_style), rect);
         app.clickable_regions.push(ClickableRegion::ActionButton {
             rect,
             action,
@@ -2549,6 +2549,7 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
             paint_composer_selection(frame, text_area, &layout, selection, scroll);
         }
     }
+    app.chat_input_text_rect = Some((text_area, scroll));
     // Registered after the composer region so a click on a placeholder opens
     // the image instead of only focusing the input.
     for (rect, path) in attachment_hitboxes(app, text_area, scroll) {
@@ -2575,16 +2576,21 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         } else {
             crate::keymap::Action::AiSendMessage
         };
+        let tone = if busy {
+            theme::ActionTone::Warning
+        } else if agent.input.is_empty() {
+            theme::ActionTone::Primary
+        } else {
+            theme::ActionTone::Success
+        };
+        let (_, button_style) = theme::action_chip_styles(tone);
         let button = Rect::new(
             inner.right() - button_width,
             inner.bottom() - 1,
             button_width,
             1,
         );
-        frame.render_widget(
-            Paragraph::new(label).style(fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG)),
-            button,
-        );
+        frame.render_widget(Paragraph::new(label).style(button_style), button);
         app.clickable_regions.push(ClickableRegion::ActionButton {
             rect: button,
             action,

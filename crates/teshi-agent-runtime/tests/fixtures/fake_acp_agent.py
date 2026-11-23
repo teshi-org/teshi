@@ -322,11 +322,16 @@ for line in sys.stdin:
                     ("validate_feature", {"file_path": "approved.feature"}),
                 ]
             elif mode == "mcp_review":
+                steps = ["Given a user", "When the user signs in", "Then access is granted"]
                 calls = [
                     ("submit_requirements", {"feature_name": "Auth", "scenario_descriptions": ["login"]}),
-                    ("propose_test_points", {"test_points": [{"title": "Valid login", "objective": "User authenticates", "hierarchy_path": ["Auth", "Login"]}]}),
-                    ("generate_plan", {"features": []}),
-                    ("create_feature_file", {"file_name": "blocked.feature", "feature_name": "Blocked"}),
+                    ("propose_test_points", {"test_points": [{"title": "Valid login", "hierarchy_path": ["Auth", "Login"]}]}),
+                    ("generate_plan", {"features": [{"file_name": "approved.feature", "feature_name": "Auth",
+                        "scenarios": [{"name": "Valid login", "steps": steps, "test_point_ids": ["tp-1"]}]}]}),
+                    ("create_feature_file", {"file_name": "approved.feature", "feature_name": "Auth"}),
+                    ("insert_scenario", {"file_path": "approved.feature", "scenario_name": "Valid login",
+                        "steps": steps, "test_point_ids": ["tp-1"]}),
+                    ("validate_feature", {"file_path": "approved.feature"}),
                 ]
             else:
                 calls = [("create_feature_file", {"file_name": "mcp-created.feature", "feature_name": "MCP created"})]

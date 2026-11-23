@@ -511,7 +511,17 @@ fn step_keyword_pointer_cancel_and_confirm_save_only_selected_step() {
         terminal.key("Ctrl+g").unwrap();
         terminal.key("Enter").unwrap();
         terminal.expect_text("Step keyword", true, WAIT_MS).unwrap();
-        assert_background_owned(&terminal, "Step keyword", cols);
+        // Wheel outside the non-destructive picker must not dismiss or scroll behind it;
+        // clicking the backdrop dismisses it without switching tabs.
+        terminal.scroll_at(cols - 2, 2, false, false).unwrap();
+        terminal.expect_text("Step keyword", true, WAIT_MS).unwrap();
+        terminal.write("\x1b[<0;2;1M\x1b[<0;2;1m").unwrap();
+        terminal
+            .expect_text("Step keyword", false, WAIT_MS)
+            .unwrap();
+        terminal.expect_text("Back", true, WAIT_MS).unwrap();
+        terminal.key("Enter").unwrap();
+        terminal.expect_text("Step keyword", true, WAIT_MS).unwrap();
         terminal.click_text("When", WAIT_MS).unwrap();
         capture(
             &terminal,

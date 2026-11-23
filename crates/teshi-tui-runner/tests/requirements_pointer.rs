@@ -354,8 +354,16 @@ fn filter_and_group(narrow: bool) {
     terminal
         .expect_text("Filter iteration", true, 1500)
         .unwrap();
+    // Clicking the tab bar outside the non-destructive picker dismisses it without switching tabs.
     terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
     fixture.capture(&terminal, "filter-background-owned");
+    terminal
+        .expect_text("Filter iteration", false, 1500)
+        .unwrap();
+    terminal
+        .expect_text("Alpha requirement", true, 1500)
+        .unwrap();
+    fixture.click(&terminal, "Filter", "reopen-filter");
     terminal
         .expect_text("Filter iteration", true, 1500)
         .unwrap();
@@ -365,7 +373,9 @@ fn filter_and_group(narrow: bool) {
     terminal
         .expect_text("Filter iteration", false, 1500)
         .unwrap();
-    terminal.expect_text("alpha first", false, 1500).unwrap();
+    terminal
+        .expect_text("Alpha requirement", false, 1500)
+        .unwrap();
     // Filter and View are tree commands, so narrow terminals return to the tree.
     fixture.focus_tree(&terminal);
     fixture.click(&terminal, "Filter", "reset-filter");
@@ -487,7 +497,7 @@ fn create_point(narrow: bool) {
     wait_until(|| fixture.points().test_points.len() == 3);
     let points = fixture.points();
     let created = points.test_points.last().unwrap();
-    assert_eq!(created.review_state, ReviewState::Proposed);
+    assert_eq!(created.review_state, ReviewState::Approved);
     assert_eq!(created.requirement_links[0].document_id, "alpha");
     assert_eq!(created.requirement_links[0].quote.quote, "alpha first");
     assert_eq!(
@@ -574,7 +584,18 @@ fn priority_roundtrip(narrow: bool) {
     terminal.key("Escape").unwrap();
     fixture.reveal(&terminal, "Priority: Unset");
     fixture.click(&terminal, "Priority: Unset", "priority-dirty-open");
+    terminal
+        .expect_text("Requirement priority", true, 1500)
+        .unwrap();
+    // Backdrop click dismisses the non-destructive picker without switching tabs or losing the dirty draft.
     terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
+    terminal
+        .expect_text("Requirement priority", false, 1500)
+        .unwrap();
+    terminal
+        .expect_text("draft alpha first", true, 1500)
+        .unwrap();
+    fixture.click(&terminal, "Priority: Unset", "priority-dirty-reopen");
     terminal
         .expect_text("Requirement priority", true, 1500)
         .unwrap();

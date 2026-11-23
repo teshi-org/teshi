@@ -550,14 +550,14 @@ mod tests {
     }
 
     #[test]
-    fn review_gate_precedes_auto_approval_and_continuation() {
+    fn reviewing_stage_continues_without_human_gate() {
         let mut runtime = NativeAgentRuntime::new(100);
         runtime.start();
         assert_eq!(
             runtime.after_tools(GenerationStage::ReviewingTestPoints, true, false, true),
-            NativeContinuation::WaitForHumanReview
+            NativeContinuation::RequestModel { allow_tools: true }
         );
-        assert!(!runtime.accepts_model_event());
+        assert!(runtime.accepts_model_event());
     }
 
     #[test]

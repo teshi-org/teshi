@@ -36,7 +36,7 @@ pub struct RequirementDocumentContent {
 }
 
 /// Loaded authoring artifacts plus validation diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AuthoringArtifacts {
     pub index: RequirementDocumentIndex,
     pub documents: Vec<RequirementDocumentContent>,
@@ -240,15 +240,6 @@ pub fn validate_test_points(
             });
         }
 
-        if tp.objective.trim().is_empty() {
-            diagnostics.push(AuthoringDiagnostic {
-                severity: AuthoringSeverity::Error,
-                location: "testpoints/testpoints.json".into(),
-                record_id: Some(tp.id.clone()),
-                message: "test point objective must not be empty".into(),
-            });
-        }
-
         if let Some(diag) = validate_hierarchy_path(&tp.hierarchy_path) {
             diagnostics.push(AuthoringDiagnostic {
                 record_id: Some(tp.id.clone()),
@@ -315,11 +306,14 @@ pub fn validate_test_points(
                 });
             }
 
-            diagnostics.extend(validate_quote_selector(
-                &link.quote.quote,
-                "testpoints/testpoints.json",
-                Some(&tp.id),
-            ));
+            let is_doc_level = link.position.start.offset() == 0 && link.position.end.offset() == 0;
+            if !is_doc_level {
+                diagnostics.extend(validate_quote_selector(
+                    &link.quote.quote,
+                    "testpoints/testpoints.json",
+                    Some(&tp.id),
+                ));
+            }
         }
 
         for scenario_ref in &tp.scenario_refs {
@@ -399,6 +393,10 @@ pub fn validate_loaded_artifacts(
             let Some(content) = docs_by_id.get(link.document_id.as_str()) else {
                 continue;
             };
+            let is_doc_level = link.position.start.offset() == 0 && link.position.end.offset() == 0;
+            if is_doc_level {
+                continue;
+            }
             let char_len = content.body.chars().count() as u32;
             diagnostics.extend(validate_text_range(
                 link.position,

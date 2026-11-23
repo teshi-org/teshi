@@ -5,16 +5,20 @@ use serde::{Deserialize, Serialize};
 use super::anchors::RequirementLink;
 
 /// Human review state for a test point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Defaults to [`ReviewState::Approved`] so heuristic and agent-proposed test
+/// points are immediately usable without a blocking approval gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewState {
-    /// Awaiting human review (new, edited, or reset after meaningful change).
+    /// Awaiting human review (legacy or manually marked).
     Proposed,
-    /// Explicitly approved for scenario planning.
+    /// Active and ready for scenario realization (default).
+    #[default]
     Approved,
-    /// Explicitly rejected by a human reviewer.
+    /// Explicitly rejected/archived by a user.
     Rejected,
-    /// Previously approved but invalidated by stale anchors or required re-review.
+    /// Legacy state when anchors drifted.
     NeedsReview,
 }
 
@@ -33,6 +37,11 @@ impl HierarchyPath {
 
     /// Returns the path segments.
     pub fn segments(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Returns the path segments as a slice.
+    pub fn as_slice(&self) -> &[String] {
         &self.0
     }
 }
@@ -55,9 +64,10 @@ pub struct ScenarioRef {
 pub struct TestPoint {
     /// Stable identifier referenced by generation and scenario metadata.
     pub id: String,
-    /// Short label shown in trees and review panes.
+    /// Short label shown in mind-map nodes and inspector panes.
     pub title: String,
-    /// What behavior must be verified.
+    /// Optional concise note / verification detail.
+    #[serde(default)]
     pub objective: String,
     /// Optional natural-language preconditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,16 +75,45 @@ pub struct TestPoint {
     /// Optional natural-language expected outcomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_outcomes: Option<String>,
-    /// Business hierarchy path for the Test Points tree.
+    /// Business hierarchy path for the Test Points mind map.
     pub hierarchy_path: HierarchyPath,
-    /// Current human review state.
+    /// Review state (defaults to `Approved`).
+    #[serde(default)]
     pub review_state: ReviewState,
-    /// Trace links to requirement source ranges.
+    /// Trace links to requirement source documents/ranges.
     #[serde(default)]
     pub requirement_links: Vec<RequirementLink>,
     /// Downstream Gherkin scenarios that realize this intent.
     #[serde(default)]
     pub scenario_refs: Vec<ScenarioRef>,
+}
+
+impl TestPoint {
+    /// Returns a concise single-string note combining objective, preconditions, and expected outcomes.
+    pub fn concise_note(&self) -> String {
+        let mut parts = Vec::new();
+        let obj = self.objective.trim();
+        if !obj.is_empty() {
+            parts.push(obj.to_string());
+        }
+        if let Some(pre) = self
+            .preconditions
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(format!("Pre: {pre}"));
+        }
+        if let Some(exp) = self
+            .expected_outcomes
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(format!("Exp: {exp}"));
+        }
+        parts.join(" · ")
+    }
 }
 
 /// Canonical test-point store persisted at `testpoints/testpoints.json`.

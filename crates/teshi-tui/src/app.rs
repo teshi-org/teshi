@@ -34,6 +34,7 @@ const PROJECT_SWITCH_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Available slash commands: (name, description)
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a new session"),
+    ("help", "Open the User Guide and shortcut reference"),
     ("exit", "Exit Teshi"),
     ("resume", "Resume the most recent session"),
     ("retry", "Continue an interrupted ACP task"),
@@ -220,6 +221,38 @@ pub(crate) fn scrollbar_state(
         crate::theme::ThumbState::Idle
     }
 }
+
+/// Identifies a pane whose vertical scrollbar is tracked for pointer drag and track paging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerticalScrollTarget {
+    ExploreColumn(ColumnFocus),
+    ExploreDetails,
+    ExploreEditor,
+    MindMapTree,
+    MindMapPreview,
+    TestPointsPane(usize),
+    HelpGuideDoc,
+}
+
+/// Identifies a clickable item for double-click detection across tabs and modals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClickTarget {
+    ExploreScenario(usize),
+    ExploreDetailItem(usize),
+    TestPointField(crate::test_points_tab::DetailField),
+    TestPointExcerpt(usize),
+    TestPointScenario(usize),
+    ModelProfileRow(usize),
+    AgentProfileRow(usize),
+    ChangeSummaryRow(usize),
+    StepKeywordRow(usize),
+    SessionRow(usize),
+    MindMapLocation(usize),
+    PreviewPanel,
+}
+
+/// Threshold within which two left-clicks on the same target count as a double-click.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(450);
 
 /// A pending ACP `session/request_permission` prompt for one agent.
 #[derive(Debug, Clone)]
@@ -1625,6 +1658,18 @@ pub struct App {
     pub(crate) chat_scrollbar: Option<ScrollbarBar>,
     /// Pointer offset below the thumb top while the scrollbar is being dragged.
     pub(crate) chat_scrollbar_grab: Option<u16>,
+    /// Vertical scrollbars registered during the last render pass across Explore, MindMap, and Test Points.
+    pub(crate) vertical_scrollbars: Vec<(VerticalScrollTarget, ScrollbarBar)>,
+    /// Active drag state for a vertical scrollbar: target and pointer offset within the thumb.
+    pub(crate) vertical_scrollbar_grab: Option<(VerticalScrollTarget, u16)>,
+    /// Last left-click timestamp and target for global double-click actions.
+    pub(crate) last_click: Option<(Instant, ClickTarget)>,
+    /// Outer rectangle of the active dismissible modal card, for click-outside-to-close.
+    pub(crate) modal_card_rect: Option<ratatui::layout::Rect>,
+    /// Rendered AI composer text rectangle and vertical row scroll, for click-to-caret placement.
+    pub(crate) chat_input_text_rect: Option<(ratatui::layout::Rect, u16)>,
+    /// Rendered `(y_start, height)` spans for visible wrapped Requirements tree rows.
+    pub(crate) req_tree_row_spans: Vec<(u16, u16)>,
     /// Current chat text selection, if any.
     pub chat_selection: Option<ChatSelection>,
     // X11 serves selection data from the owning process. Retain the handle
@@ -1636,6 +1681,8 @@ pub struct App {
     pub clickable_regions: Vec<ClickableRegion>,
     /// Screen rectangle of the tree panel, updated each render frame.
     pub tree_panel_rect: Option<ratatui::layout::Rect>,
+    /// Screen rectangle of the Test Points 2D MindMap canvas viewport.
+    pub test_points_canvas_rect: Option<ratatui::layout::Rect>,
     /// Screen rectangle of the preview panel, updated each render frame.
     pub preview_panel_rect: Option<ratatui::layout::Rect>,
     /// Replay screenshot panel state for the MindMap preview.
@@ -1751,6 +1798,8 @@ pub struct App {
     pub settings_panel_active: bool,
     /// Highlighted row in the app Settings overlay.
     pub settings_panel_selection: usize,
+    /// Modal User Guide (`?` / `F1` / `:help` / `/help`) state.
+    pub help_guide: crate::ui::help::HelpGuideState,
     pub slash_suggestion_active: bool,
     pub slash_suggestion_selection: usize,
     /// Project-scoped sent-prompt MRU for Up/Down and Ctrl+R.
@@ -2029,6 +2078,11 @@ pub enum ClickableRegion {
         rect: ratatui::layout::Rect,
         index: usize,
     },
+    /// A rendered Test Points MindMap canvas node box.
+    TestPointCanvasNode {
+        rect: ratatui::layout::Rect,
+        node_id: String,
+    },
     /// A rendered editable field in Test Points.
     TestPointField {
         rect: ratatui::layout::Rect,
@@ -2157,6 +2211,30 @@ pub enum ClickableRegion {
     },
     /// The `X` in the Features title; clears every selected tag.
     ExploreTagClear {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable search prompt in the Explore Features title bar.
+    ExploreSearchTrigger {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✓` in the Explore Features title bar to confirm/commit search.
+    ExploreSearchConfirm {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✗` in the Explore Features title bar to clear the search query.
+    ExploreSearchClear {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable search prompt in the Requirements tree title bar.
+    ReqSearchTrigger {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✓` in the Requirements tree title bar to confirm/commit search.
+    ReqSearchConfirm {
+        rect: ratatui::layout::Rect,
+    },
+    /// Clickable `✗` in the Requirements tree title bar to clear the search query.
+    ReqSearchClear {
         rect: ratatui::layout::Rect,
     },
     /// A `^`/`v` scroll affordance inside the tag strip.
@@ -2439,6 +2517,7 @@ impl App {
         self.clickable_regions.clear();
         self.editor_panel_rect = None;
         self.tree_panel_rect = None;
+        self.test_points_canvas_rect = None;
         self.preview_panel_rect = None;
         self.dirty = false;
         self.run_routes = prepared.run_routes;
@@ -3159,11 +3238,18 @@ impl App {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -3227,6 +3313,7 @@ impl App {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -3383,6 +3470,7 @@ impl App {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -3408,11 +3496,18 @@ impl App {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -3600,6 +3695,7 @@ impl App {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -3625,11 +3721,18 @@ impl App {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -6255,20 +6358,15 @@ impl App {
         }
     }
 
-    /// Feature-generation guidance for the default Strict (review-required) policy.
-    const STRICT_PIPELINE_GUIDANCE: &'static str = "\n\n## Feature Generation Pipeline (Strict — human review required)\n\
-         When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
-         1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand; do not assume every Markdown file is already in the prompt. Prefer `source_refs` to persisted documents/ranges in the confirmed store/iteration scope. Pasted or conversational text is not a requirement-library source. Call `submit_requirements` when done.\n\
-         2. **Generating Test Points** — Call `propose_test_points` with non-Gherkin verification intents (title, objective, hierarchy). Do NOT write Given/When/Then inside test points.\n\
-         3. **Reviewing Test Points** — Stop and wait. Humans approve/reject in the Test Points tab. Do NOT call `generate_plan` and do NOT treat Auto/Bypass file approval as test-point approval.\n\
-         4. **Planning** — After the user continues generation, design Gherkin scenarios. Every scenario must include `test_point_ids` for approved test points. Call `generate_plan`.\n\
-         5. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
-         6. **Validation** — Use `validate_feature` to check for issues.\n\
+    /// Streamlined feature-generation guidance without blocking approval gates.
+    const STRICT_PIPELINE_GUIDANCE: &'static str = "\n\n## Feature Generation Pipeline\n\
+         When the user asks to create or generate a feature (including `/generate`), follow this streamlined pipeline:\n\
+         1. **Requirements Gathering** — Ask 1-2 clarifying questions only when needed, or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand. Prefer `source_refs` to persisted documents when available, and call `submit_requirements` when ready.\n\
+         2. **Concise Test Points (Optional, non-blocking)** — Call `propose_test_points` with concise, single-line heuristic test points (`title`, `hierarchy_path`, optional brief `objective` note, and optional document-level `requirement_links`). Do NOT write Given/When/Then inside test points. Test points are ready immediately with NO human-approval pause.\n\
+         3. **Planning & Writing** — Proceed straight to `generate_plan` and/or `create_feature_file` + `insert_scenario` (Gherkin `.feature` only). Reference matching `test_point_ids` so scenarios embed `@teshi-tp:<id>` coverage tags on the MindMap.\n\
+         4. **Validation** — Use `validate_feature` and `run_tests` to check and verify scenarios.\n\
          \n\
-         Test points are durable verification intents, NOT Gherkin scenarios. Scenarios realize approved test points.\n\
          Do NOT produce FreeMind `.mm` files or mock HTML.\n\
-         Do NOT skip the human review gate. Start by gathering requirements.\n\
-         If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
          Always check the [Project Context] to understand existing files before generating.";
 
     /// Feature-generation guidance for the user-authorized Direct (no-review) policy.
@@ -8563,7 +8661,17 @@ impl App {
             // rendered by Explore, but captures are.
             RunEvent::Other(value) => self.apply_other_run_event(value),
         }
+        self.refresh_test_points_exec_statuses();
         self.quit_pending_confirm = false;
+    }
+
+    pub(crate) fn refresh_test_points_exec_statuses(&mut self) {
+        self.test_points_ui.compute_exec_statuses(
+            &self.project,
+            &self.explore_case_status,
+            self.runner_rx.is_some(),
+            self.authoring_ui.artifacts.as_ref(),
+        );
     }
 
     /// Moves the Explore selection to the case that is running.
@@ -11057,6 +11165,30 @@ impl App {
             };
         }
 
+        // Modal User Guide intercept.
+        if self.help_guide.active {
+            return match action {
+                Action::HelpPanelClose | Action::ClearInputState => {
+                    self.close_help_guide();
+                    Ok(())
+                }
+                Action::HelpSelectTopic(index) => {
+                    self.help_guide.select_topic(index);
+                    self.help_guide.focus_doc = false;
+                    Ok(())
+                }
+                Action::HelpCycleLanguage => {
+                    self.help_guide.cycle_language();
+                    Ok(())
+                }
+                Action::Quit => {
+                    self.quit();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         // Agent profile selection panel intercept.
         if self.agent_profile_panel_active {
             if self.agent_panel_mode != AgentPanelMode::List {
@@ -11817,12 +11949,16 @@ impl App {
                 } else if self.active_tab == MainTab::TestPoints {
                     match self.test_points_ui.focus {
                         crate::test_points_tab::TestPointsFocus::Tree => {
-                            self.test_points_ui.move_tree_selection(-1);
+                            self.test_points_ui.navigate_spatial(
+                                crate::test_points_tab::SpatialDir::Up,
+                                self.authoring_ui.artifacts.as_ref(),
+                            );
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Details => {
                             self.commit_test_point_field_edit()?;
-                            self.test_points_ui.move_detail_field(-1);
+                            self.test_points_ui
+                                .move_detail_field(-1, self.authoring_ui.artifacts.as_ref());
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Excerpts => {
@@ -11865,12 +12001,16 @@ impl App {
                 } else if self.active_tab == MainTab::TestPoints {
                     match self.test_points_ui.focus {
                         crate::test_points_tab::TestPointsFocus::Tree => {
-                            self.test_points_ui.move_tree_selection(1);
+                            self.test_points_ui.navigate_spatial(
+                                crate::test_points_tab::SpatialDir::Down,
+                                self.authoring_ui.artifacts.as_ref(),
+                            );
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Details => {
                             self.commit_test_point_field_edit()?;
-                            self.test_points_ui.move_detail_field(1);
+                            self.test_points_ui
+                                .move_detail_field(1, self.authoring_ui.artifacts.as_ref());
                             self.reload_test_point_field_buffer();
                         }
                         crate::test_points_tab::TestPointsFocus::Excerpts => {
@@ -11907,9 +12047,19 @@ impl App {
                         self.authoring_ui.extend_visual_selection();
                     }
                 } else if self.active_tab == MainTab::TestPoints {
-                    if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+                    if self.test_points_ui.editing
+                        || self.test_points_ui.focus
+                            == crate::test_points_tab::TestPointsFocus::Details
                     {
                         self.test_points_ui.move_field_cursor(-1);
+                    } else if self.test_points_ui.focus
+                        == crate::test_points_tab::TestPointsFocus::Tree
+                    {
+                        self.test_points_ui.navigate_spatial(
+                            crate::test_points_tab::SpatialDir::Left,
+                            self.authoring_ui.artifacts.as_ref(),
+                        );
+                        self.reload_test_point_field_buffer();
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -11924,9 +12074,19 @@ impl App {
                         self.authoring_ui.extend_visual_selection();
                     }
                 } else if self.active_tab == MainTab::TestPoints {
-                    if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+                    if self.test_points_ui.editing
+                        || self.test_points_ui.focus
+                            == crate::test_points_tab::TestPointsFocus::Details
                     {
                         self.test_points_ui.move_field_cursor(1);
+                    } else if self.test_points_ui.focus
+                        == crate::test_points_tab::TestPointsFocus::Tree
+                    {
+                        self.test_points_ui.navigate_spatial(
+                            crate::test_points_tab::SpatialDir::Right,
+                            self.authoring_ui.artifacts.as_ref(),
+                        );
+                        self.reload_test_point_field_buffer();
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -11935,7 +12095,9 @@ impl App {
                 }
             }
             Action::MoveHome => {
-                if self.is_test_points_details_active() {
+                if self.active_tab == MainTab::TestPoints
+                    && (self.test_points_ui.editing || self.is_test_points_details_active())
+                {
                     self.test_points_ui.field_line_boundary(false);
                 } else if self.is_requirements_editor_active() {
                     self.authoring_ui.cursor_col = 0;
@@ -11949,7 +12111,9 @@ impl App {
                 }
             }
             Action::MoveEnd => {
-                if self.is_test_points_details_active() {
+                if self.active_tab == MainTab::TestPoints
+                    && (self.test_points_ui.editing || self.is_test_points_details_active())
+                {
                     self.test_points_ui.field_line_boundary(true);
                 } else if self.is_requirements_editor_active() {
                     let col = self
@@ -11968,6 +12132,8 @@ impl App {
             }
             Action::PageUp => self.navigate_page(false)?,
             Action::PageDown => self.navigate_page(true)?,
+            Action::HalfPageUp => self.navigate_half_page(false)?,
+            Action::HalfPageDown => self.navigate_half_page(true)?,
             Action::NavigateFirst => self.navigate_boundary(false)?,
             Action::NavigateLast => self.navigate_boundary(true)?,
             Action::MoveStepUp => self.move_step_block(false),
@@ -12030,7 +12196,7 @@ impl App {
                         self.authoring_ui.insert_char(ch);
                     }
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() && self.test_points_ui.editing {
+                } else if self.active_tab == MainTab::TestPoints && self.test_points_ui.editing {
                     self.test_points_ui.insert_char(ch);
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -12068,7 +12234,7 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.backspace();
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() {
+                } else if self.active_tab == MainTab::TestPoints && self.test_points_ui.editing {
                     self.test_points_ui.backspace();
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -12093,7 +12259,7 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.delete_forward();
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() {
+                } else if self.active_tab == MainTab::TestPoints && self.test_points_ui.editing {
                     self.test_points_ui.delete_forward();
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -12408,105 +12574,155 @@ impl App {
                 }
             }
             Action::TpExitInsert => {
-                self.commit_test_point_field_edit()?;
-                self.test_points_ui.editing = false;
+                if self.test_points_ui.inline_edit.is_some() {
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && self.test_points_ui.commit_inline_edit(artifacts, false)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                    }
+                    self.reload_test_point_field_buffer();
+                    self.refresh_test_points_exec_statuses();
+                } else {
+                    self.commit_test_point_field_edit()?;
+                    self.test_points_ui.editing = false;
+                }
+            }
+            Action::TpAddChild => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if self
+                        .test_points_ui
+                        .start_add_child(&mut self.authoring_ui.artifacts)
+                        && let Some(artifacts) = self.authoring_ui.artifacts.as_ref()
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpAddSibling => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if self
+                        .test_points_ui
+                        .start_add_sibling(&mut self.authoring_ui.artifacts)
+                        && let Some(artifacts) = self.authoring_ui.artifacts.as_ref()
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpInlineEdit => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Tree;
+                    if !self
+                        .test_points_ui
+                        .start_inline_edit(self.authoring_ui.artifacts.as_ref())
+                    {
+                        self.status = "Select a branch or test point node to edit".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpDeleteNode => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && let Some(removed) = self.test_points_ui.delete_selected(artifacts)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                        self.reload_test_point_field_buffer();
+                        self.status = format!("Deleted test point node '{removed}' ([u] undo)");
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpUndo => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && self.test_points_ui.undo(artifacts)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                        self.reload_test_point_field_buffer();
+                        self.status = "Undid Test Points edit ([Ctrl+R] redo)".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpRedo => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && self.test_points_ui.redo(artifacts)
+                    {
+                        crate::test_points_tab::TestPointsUiState::save_test_points(
+                            &self.project.root_dir,
+                            artifacts,
+                        )?;
+                        self.reload_test_point_field_buffer();
+                        self.status = "Redid Test Points edit".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpToggleCollapse => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui
+                        .toggle_collapse_selected(self.authoring_ui.artifacts.as_ref());
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpGenerateFeature => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.generate_feature_for_selected_test_point()?;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpSyncFromFeatures => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.sync_test_points_from_features()?;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpRunTestPoint => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.run_selected_test_point_scenarios()?;
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpToggleFullscreen => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.fullscreen_canvas = !self.test_points_ui.fullscreen_canvas;
+                    if self.test_points_ui.fullscreen_canvas {
+                        self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Tree;
+                    }
+                    self.quit_pending_confirm = false;
+                }
             }
             Action::DeleteConfirm | Action::DeleteCancel => {}
-            Action::TpApprove => {
-                if self.active_tab == MainTab::TestPoints {
-                    self.commit_test_point_field_edit()?;
-                    let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
-                        self.status = crate::i18n::t("status.select_a_test_point_to_approve").to_string();
-                        self.quit_pending_confirm = false;
-                        return Ok(());
-                    };
-                    let mut approved = false;
-                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
-                        && let Some(tp) = artifacts
-                            .test_points
-                            .test_points
-                            .iter_mut()
-                            .find(|tp| tp.id == tp_id)
-                    {
-                        approved = crate::test_points_tab::TestPointsUiState::approve(tp);
-                        if approved {
-                            crate::test_points_tab::TestPointsUiState::save_test_points(
-                                &self.project.root_dir,
-                                artifacts,
-                            )?;
-                            self.test_points_ui.rebuild_tree(Some(artifacts));
-                        }
-                    }
-                    self.status = if approved {
-                        crate::i18n::fill(crate::i18n::t("status.approved_test_point"), &[("tp_id", &crate::i18n::arg(&tp_id))])
-                    } else {
-                        crate::i18n::t("status.cannot_approve_resolve_stale_links_or_review_state").to_string()
-                    };
-                    self.quit_pending_confirm = false;
-                }
-            }
-            Action::TpReject => {
-                if self.active_tab == MainTab::TestPoints {
-                    self.commit_test_point_field_edit()?;
-                    let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
-                        self.status = crate::i18n::t("status.select_a_test_point_to_reject").to_string();
-                        self.quit_pending_confirm = false;
-                        return Ok(());
-                    };
-                    let mut rejected = false;
-                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
-                        && let Some(tp) = artifacts
-                            .test_points
-                            .test_points
-                            .iter_mut()
-                            .find(|tp| tp.id == tp_id)
-                    {
-                        rejected = crate::test_points_tab::TestPointsUiState::reject(tp);
-                        if rejected {
-                            crate::test_points_tab::TestPointsUiState::save_test_points(
-                                &self.project.root_dir,
-                                artifacts,
-                            )?;
-                            self.test_points_ui.rebuild_tree(Some(artifacts));
-                        }
-                    }
-                    self.status = if rejected {
-                        crate::i18n::fill(crate::i18n::t("status.rejected_test_point"), &[("tp_id", &crate::i18n::arg(&tp_id))])
-                    } else {
-                        crate::i18n::t("status.cannot_reject_this_test_point").to_string()
-                    };
-                    self.quit_pending_confirm = false;
-                }
-            }
-            Action::TpBatchApprove => {
-                if self.active_tab == MainTab::TestPoints {
-                    self.commit_test_point_field_edit()?;
-                    let ids = self.test_points_ui.visible_leaf_ids.clone();
-                    let count = if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
-                        let approved = crate::test_points_tab::TestPointsUiState::batch_approve(
-                            &mut artifacts.test_points.test_points,
-                            &ids,
-                        );
-                        if approved > 0 {
-                            crate::test_points_tab::TestPointsUiState::save_test_points(
-                                &self.project.root_dir,
-                                artifacts,
-                            )?;
-                            self.test_points_ui.rebuild_tree(Some(artifacts));
-                        }
-                        approved
-                    } else {
-                        0
-                    };
-                    self.status = crate::i18n::fill(crate::i18n::t("status.batch_approved_test_point_s"), &[("count", &crate::i18n::arg(&count))]);
-                    self.quit_pending_confirm = false;
-                }
-            }
+            Action::TpApprove | Action::TpReject | Action::TpBatchApprove => {}
             Action::TpReviewFilter => {
                 if self.active_tab == MainTab::TestPoints {
-                    self.test_points_ui.cycle_review_filter();
-                    let artifacts = self.authoring_ui.artifacts.as_ref();
-                    self.test_points_ui.rebuild_tree(artifacts);
+                    self.test_points_ui
+                        .cycle_filter(self.authoring_ui.artifacts.as_ref());
                     self.reload_test_point_field_buffer();
                     self.status = crate::i18n::t("status.cycled_test_point_review_filter").to_string();
                     self.quit_pending_confirm = false;
@@ -12590,6 +12806,9 @@ impl App {
             Action::Quit => self.quit(),
             Action::RequestQuit => self.request_quit_confirmation(),
             Action::SelectTab(tab) => self.select_tab(tab),
+            Action::NextTab => self.cycle_tab(true),
+            Action::PrevTab => self.cycle_tab(false),
+            Action::HelpPanelOpen => self.open_help_guide(),
             Action::ActivateStepInput => self.begin_step_or_title_edit()?,
             Action::StepKeywordPickerUp => self.step_keyword_picker_move(-1),
             Action::StepKeywordPickerDown => self.step_keyword_picker_move(1),
@@ -13374,10 +13593,14 @@ impl App {
             | Action::AgentPanelFormBackspace
             | Action::AgentPanelFormSubmit
             | Action::AgentPanelFormCancel
-            // Settings actions are handled in their own intercept — unreachable here.
+            // Settings and Help overlay actions are handled in their own intercepts.
             | Action::SettingsPanelToggle
             | Action::SettingsPanelActivate(_)
-            | Action::SettingsPanelClose => {}
+            | Action::SettingsPanelClose
+            | Action::HelpPanelClose
+            | Action::HelpSelectTopic(_)
+            | Action::HelpCycleLanguage
+            | Action::CommandLineAutocomplete => {}
         }
         self.clamp_cursor();
         Ok(())
@@ -13554,6 +13777,91 @@ impl App {
         self.command_line = Some(crate::authoring_tab::LineInput::default());
     }
 
+    /// Supported `:` Ex commands for inline hints and `Tab` completion.
+    const EX_COMMANDS: &'static [&'static str] = &[
+        "q",
+        "quit",
+        "w",
+        "write",
+        "wq",
+        "x",
+        "help",
+        "settings",
+        "preferences",
+        "models",
+        "sessions",
+        "project",
+        "agents",
+        "explore",
+        "mindmap",
+        "ai",
+        "requirements",
+        "testpoints",
+    ];
+
+    /// Returns up to 6 Ex command names matching the current `:` prompt prefix.
+    pub(crate) fn matching_ex_commands(&self) -> Vec<&'static str> {
+        let Some(input) = self.command_line.as_ref() else {
+            return Vec::new();
+        };
+        let prefix = input.text().trim().to_ascii_lowercase();
+        if prefix.is_empty() {
+            return vec![
+                "help", "settings", "models", "sessions", "project", "q", "w", "wq",
+            ];
+        }
+        Self::EX_COMMANDS
+            .iter()
+            .copied()
+            .filter(|cmd| cmd.starts_with(prefix.as_str()))
+            .take(6)
+            .collect()
+    }
+
+    fn autocomplete_command_line(&mut self) {
+        let Some(input) = self.command_line.as_mut() else {
+            return;
+        };
+        let prefix = input.text().trim().to_ascii_lowercase();
+        if prefix.is_empty() {
+            *input = crate::authoring_tab::LineInput::new("help");
+            return;
+        }
+        let matches: Vec<&str> = Self::EX_COMMANDS
+            .iter()
+            .copied()
+            .filter(|cmd| cmd.starts_with(prefix.as_str()))
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+        if matches.len() == 1 {
+            *input = crate::authoring_tab::LineInput::new(matches[0]);
+            return;
+        }
+        if let Some(pos) = matches.iter().position(|&cmd| cmd == prefix) {
+            *input = crate::authoring_tab::LineInput::new(matches[(pos + 1) % matches.len()]);
+            return;
+        }
+        // Extend to the longest common prefix when longer than typed text,
+        // otherwise pick the first candidate.
+        let mut lcp = matches[0].to_string();
+        for candidate in &matches[1..] {
+            let shared: String = lcp
+                .chars()
+                .zip(candidate.chars())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect();
+            lcp = shared;
+        }
+        if lcp.len() > prefix.len() {
+            *input = crate::authoring_tab::LineInput::new(lcp);
+        } else {
+            *input = crate::authoring_tab::LineInput::new(matches[0]);
+        }
+    }
+
     /// Runs the buffered `:` command through the same guarded paths as the
     /// `Ctrl+Q` and `Ctrl+S` chords, so unsaved work still prompts.
     fn execute_command_line(&mut self) -> Result<()> {
@@ -13567,6 +13875,17 @@ impl App {
                 self.save()?;
                 self.quit();
             }
+            "h" | "help" => self.open_help_guide(),
+            "set" | "settings" | "pref" | "preferences" => self.open_settings_panel(),
+            "model" | "models" => self.handle_action(Action::ModelPanelOpen)?,
+            "session" | "sessions" => self.handle_action(Action::SessionPanelOpen)?,
+            "proj" | "project" => self.cmd_project(None)?,
+            "agent" | "agents" => self.handle_action(Action::AiOpenAgentSelector)?,
+            "explore" | "1" => self.select_tab(MainTab::Explore),
+            "mindmap" | "map" | "2" => self.select_tab(MainTab::MindMap),
+            "ai" | "chat" | "3" => self.select_tab(MainTab::Ai),
+            "req" | "requirements" | "4" => self.select_tab(MainTab::Requirements),
+            "tp" | "testpoints" | "5" => self.select_tab(MainTab::TestPoints),
             "" => self.set_status_message(crate::i18n::t("status.type_q_w_wq_or_x").to_string()),
             other => self.set_status_message(crate::i18n::fill(
                 crate::i18n::t("status.unknown_command"),
@@ -13583,6 +13902,7 @@ impl App {
                     input.insert(ch);
                 }
             }
+            Action::CommandLineAutocomplete => self.autocomplete_command_line(),
             Action::CommandLineBackspace => {
                 // Backspace removes the `:` itself once the command is empty,
                 // so the prompt closes the way it was opened.
@@ -13667,6 +13987,26 @@ impl App {
             MainTab::Ai | MainTab::MindMap | MainTab::Explore => {}
         }
         self.quit_pending_confirm = false;
+    }
+
+    fn cycle_tab(&mut self, forward: bool) {
+        const ORDER: [MainTab; 5] = [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ];
+        let idx = ORDER
+            .iter()
+            .position(|&tab| tab == self.active_tab)
+            .unwrap_or(0);
+        let next = if forward {
+            ORDER[(idx + 1) % ORDER.len()]
+        } else {
+            ORDER[(idx + ORDER.len() - 1) % ORDER.len()]
+        };
+        self.select_tab(next);
     }
 
     fn select_tab(&mut self, tab: MainTab) {
@@ -13865,6 +14205,48 @@ impl App {
         }
     }
 
+    fn navigate_half_page(&mut self, down: bool) -> Result<()> {
+        if self.chat_browse_active() {
+            self.handle_action(if down {
+                Action::AiHalfPageDown
+            } else {
+                Action::AiHalfPageUp
+            })?;
+        } else if self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::Main {
+            for _ in 0..5 {
+                if down {
+                    self.tree_move_down();
+                } else {
+                    self.tree_move_up();
+                }
+            }
+        } else if self.active_tab == MainTab::TestPoints
+            && self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree
+        {
+            self.test_points_ui.page_canvas(down);
+        } else if self.active_tab == MainTab::Requirements
+            || self.active_tab == MainTab::TestPoints
+            || (self.active_tab == MainTab::Explore && !self.explore_edit_mode)
+        {
+            for _ in 0..5 {
+                self.handle_action(if down {
+                    Action::MoveDown
+                } else {
+                    Action::MoveUp
+                })?;
+            }
+        } else {
+            for _ in 0..5 {
+                if down {
+                    self.move_down();
+                } else {
+                    self.move_up();
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn navigate_page(&mut self, down: bool) -> Result<()> {
         if self.chat_browse_active() {
             self.handle_action(if down {
@@ -13880,6 +14262,10 @@ impl App {
                     self.tree_move_up();
                 }
             }
+        } else if self.active_tab == MainTab::TestPoints
+            && self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Tree
+        {
+            self.test_points_ui.page_canvas(down);
         } else if self.active_tab == MainTab::Requirements
             || self.active_tab == MainTab::TestPoints
             || (self.active_tab == MainTab::Explore && !self.explore_edit_mode)
@@ -13955,6 +14341,135 @@ impl App {
         self.agent_mut().scroll_offset = max_start.saturating_sub(start);
     }
 
+    /// Pointer handling for vertical scrollbars across Explore, MindMap,
+    /// Feature Editor, and Test Points.
+    fn handle_vertical_scrollbar_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        pos: ratatui::layout::Position,
+    ) -> bool {
+        if matches!(kind, MouseEventKind::Up(MouseButton::Left))
+            && self.vertical_scrollbar_grab.take().is_some()
+        {
+            return true;
+        }
+        if matches!(kind, MouseEventKind::Drag(MouseButton::Left))
+            && let Some((target, grab)) = self.vertical_scrollbar_grab
+            && let Some((_, bar)) = self
+                .vertical_scrollbars
+                .iter()
+                .find(|(candidate, _)| *candidate == target)
+                .copied()
+        {
+            let pointer = bar.track_pos(pos);
+            let value = scrollbar_drag_offset(&bar, pointer, grab);
+            self.set_vertical_scroll_start(target, value, bar.max_start());
+            return true;
+        }
+        if !matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let Some((target, bar)) = self
+            .vertical_scrollbars
+            .iter()
+            .rev()
+            .find(|(_, bar)| bar.rect.contains(pos))
+            .copied()
+        else {
+            return false;
+        };
+        let start = self.vertical_scroll_start(target);
+        match scrollbar_mouse(kind, pos, &bar, start) {
+            Some(ScrollbarAction::Grab(offset)) => {
+                self.vertical_scrollbar_grab = Some((target, offset));
+                true
+            }
+            Some(ScrollbarAction::PageBack) => {
+                self.set_vertical_scroll_start(
+                    target,
+                    start.saturating_sub(bar.view()),
+                    bar.max_start(),
+                );
+                true
+            }
+            Some(ScrollbarAction::PageForward) => {
+                self.set_vertical_scroll_start(
+                    target,
+                    start.saturating_add(bar.view()),
+                    bar.max_start(),
+                );
+                true
+            }
+            Some(ScrollbarAction::DragTo(_)) | None => false,
+        }
+    }
+
+    fn vertical_scroll_start(&self, target: VerticalScrollTarget) -> usize {
+        match target {
+            VerticalScrollTarget::ExploreColumn(col) => self.explore_viewports[col.index()].offset,
+            VerticalScrollTarget::ExploreDetails => self.explore_details_scroll,
+            VerticalScrollTarget::ExploreEditor => self.scroll_row,
+            VerticalScrollTarget::MindMapTree => self.tree_state.get_offset(),
+            VerticalScrollTarget::MindMapPreview => self.preview_scroll_row,
+            VerticalScrollTarget::TestPointsPane(0) => self.test_points_ui.canvas_scroll_y as usize,
+            VerticalScrollTarget::TestPointsPane(pane) => self
+                .test_points_ui
+                .scroll_offsets
+                .get(pane)
+                .copied()
+                .unwrap_or(0),
+            VerticalScrollTarget::HelpGuideDoc => self.help_guide.doc_scroll,
+        }
+    }
+
+    fn set_vertical_scroll_start(
+        &mut self,
+        target: VerticalScrollTarget,
+        value: usize,
+        max_start: usize,
+    ) {
+        let clamped = value.min(max_start);
+        match target {
+            VerticalScrollTarget::ExploreColumn(col) => {
+                let view = &mut self.explore_viewports[col.index()];
+                view.offset = clamped.min(view.max_vertical);
+            }
+            VerticalScrollTarget::ExploreDetails => {
+                self.explore_details_scroll = clamped;
+                self.explore_details_reveal = false;
+            }
+            VerticalScrollTarget::ExploreEditor => {
+                let visible = self.visible_editor_rows();
+                if let Some(&row) = visible.get(clamped) {
+                    self.scroll_row = row;
+                    self.cursor_row = row;
+                }
+            }
+            VerticalScrollTarget::MindMapTree => {
+                let old = self.tree_state.get_offset();
+                if clamped < old {
+                    self.tree_state.scroll_up(old - clamped);
+                } else {
+                    self.tree_state.scroll_down(clamped - old);
+                }
+            }
+            VerticalScrollTarget::MindMapPreview => {
+                self.preview_cursor_row = clamped;
+            }
+            VerticalScrollTarget::TestPointsPane(0) => {
+                self.test_points_ui.canvas_scroll_y = clamped as u16;
+            }
+            VerticalScrollTarget::TestPointsPane(pane) => {
+                if let Some(slot) = self.test_points_ui.scroll_offsets.get_mut(pane) {
+                    *slot = clamped;
+                }
+            }
+            VerticalScrollTarget::HelpGuideDoc => {
+                self.help_guide.doc_scroll = clamped;
+            }
+        }
+    }
+
     /// The Explore column's scrollbar as drawn last frame.
     fn explore_scrollbar(&self, column: ColumnFocus) -> Option<ScrollbarBar> {
         self.clickable_regions
@@ -14020,11 +14535,11 @@ impl App {
             self.commit_test_point_field_edit()?;
             match self.test_points_ui.focus {
                 crate::test_points_tab::TestPointsFocus::Tree => {
-                    self.test_points_ui.move_tree_selection(delta)
+                    self.test_points_ui.move_canvas_boundary(end)
                 }
-                crate::test_points_tab::TestPointsFocus::Details => {
-                    self.test_points_ui.move_detail_field(delta)
-                }
+                crate::test_points_tab::TestPointsFocus::Details => self
+                    .test_points_ui
+                    .move_detail_field(delta, self.authoring_ui.artifacts.as_ref()),
                 crate::test_points_tab::TestPointsFocus::Excerpts => {
                     let count = self.current_excerpt_count();
                     self.test_points_ui.move_excerpt_selection(delta, count);
@@ -14221,6 +14736,269 @@ impl App {
         } else {
             self.test_points_ui.load_field_buffer();
         }
+    }
+
+    fn tp_feature_slug(segment: &str) -> String {
+        let mut slug = String::new();
+        for ch in segment.chars() {
+            if ch.is_ascii_alphanumeric() {
+                slug.push(ch.to_ascii_lowercase());
+            } else if !slug.ends_with('_') && !slug.is_empty() {
+                slug.push('_');
+            }
+        }
+        let trimmed = slug.trim_matches('_');
+        if trimmed.is_empty() {
+            "generated_features".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn resolve_or_create_feature_for_hierarchy(&mut self, hierarchy: &[String]) -> Result<PathBuf> {
+        if let Some(first) = hierarchy.first() {
+            let needle = first.trim().to_ascii_lowercase();
+            let needle_slug = Self::tp_feature_slug(first);
+            for feature in &self.project.features {
+                let stem = feature
+                    .file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let name = feature.name.trim().to_ascii_lowercase();
+                if name == needle || stem == needle || stem == needle_slug {
+                    return Ok(feature.file_path.clone());
+                }
+            }
+        }
+        if self.project.features.len() == 1 {
+            return Ok(self.project.features[0].file_path.clone());
+        }
+
+        let module = hierarchy
+            .first()
+            .map(String::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Test Points");
+        let file_name = format!("{}.feature", Self::tp_feature_slug(module));
+        let full_path = self.project.root_dir.join(&file_name);
+        if full_path.exists() {
+            return Ok(full_path);
+        }
+
+        let header = format!("Feature: {module}\n");
+        fs::write(&full_path, &header)
+            .with_context(|| format!("create {}", full_path.display()))?;
+        let feature = gherkin::parse_feature(&header, full_path.clone());
+        self.project.features.push(feature);
+        self.buffers.push(EditorBuffer::from_string(header));
+        self.buffer_dirty.push(false);
+        self.disk_stamps.push(FileStamp::capture(&full_path));
+        Ok(full_path)
+    }
+
+    /// Scaffold `.feature` Scenarios linked with `@teshi-tp:<id>` for uncovered selected test points.
+    fn generate_feature_for_selected_test_point(&mut self) -> Result<()> {
+        self.commit_test_point_field_edit()?;
+        let Some(artifacts) = self.authoring_ui.artifacts.as_ref() else {
+            self.status = "No test points yet — press [a] to create one first".to_string();
+            return Ok(());
+        };
+        let target_ids = self.test_points_ui.selected_test_point_ids(artifacts);
+        if target_ids.is_empty() {
+            self.status = "No test points under selection — press [a] to create one".to_string();
+            return Ok(());
+        }
+
+        let id_set: HashSet<String> = target_ids.iter().cloned().collect();
+        let mut already_linked: HashSet<String> = HashSet::new();
+        for feature in &self.project.features {
+            for sc in feature.all_scenarios() {
+                for id in teshi_core::authoring::parse_teshi_tp_tags(&sc.tags) {
+                    if id_set.contains(&id) {
+                        already_linked.insert(id);
+                    }
+                }
+            }
+        }
+
+        let to_generate: Vec<(String, String, String, Vec<String>)> = artifacts
+            .test_points
+            .test_points
+            .iter()
+            .filter(|tp| id_set.contains(&tp.id) && !already_linked.contains(&tp.id))
+            .map(|tp| {
+                (
+                    tp.id.clone(),
+                    tp.title.clone(),
+                    tp.concise_note(),
+                    tp.hierarchy_path.as_slice().to_vec(),
+                )
+            })
+            .collect();
+
+        if to_generate.is_empty() {
+            self.status =
+                "Selected test point(s) already have linked scenarios ([o] open / [r] run)"
+                    .to_string();
+            return Ok(());
+        }
+
+        let mut last_rel = String::new();
+        let count = to_generate.len();
+        for (id, title, note, hierarchy) in to_generate {
+            let full_path = self.resolve_or_create_feature_for_hierarchy(&hierarchy)?;
+            let rel = full_path
+                .strip_prefix(&self.project.root_dir)
+                .unwrap_or(&full_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let line = self.line_count_for_file(&rel).unwrap_or(1);
+            let outcome = if note.is_empty() {
+                "the expected behavior holds"
+            } else {
+                note.as_str()
+            };
+            let block = format!(
+                "\n  @teshi-tp:{id}\n  Scenario: {title}\n    Given a precondition for {title}\n    When the action executes\n    Then {outcome}\n"
+            );
+            self.insert_text_into_buffer(&rel, line, &block)?;
+            if let Some(idx) = self.find_feature_idx_for_file(&rel) {
+                fs::write(&full_path, self.buffers[idx].as_string())
+                    .with_context(|| format!("write {}", full_path.display()))?;
+                self.set_buffer_dirty(idx, false);
+                if let Some(slot) = self.disk_stamps.get_mut(idx) {
+                    *slot = FileStamp::capture(&full_path);
+                }
+            }
+            last_rel = rel;
+        }
+
+        self.refresh_project_from_buffers();
+        self.sync_test_point_scenario_refs();
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            crate::test_points_tab::TestPointsUiState::save_test_points(
+                &self.project.root_dir,
+                artifacts,
+            )?;
+            self.test_points_ui.rebuild_tree(Some(artifacts));
+        }
+        self.refresh_test_points_exec_statuses();
+        self.status = format!(
+            "Scaffolded {count} scenario(s) in {last_rel} — press [r] to run or [o] to open"
+        );
+        Ok(())
+    }
+
+    /// Reverse-extract unlinked Scenarios from `.feature` files into Test Points (`S`).
+    fn sync_test_points_from_features(&mut self) -> Result<()> {
+        self.commit_test_point_field_edit()?;
+        let artifacts = self
+            .authoring_ui
+            .artifacts
+            .get_or_insert_with(Default::default);
+        let prev = artifacts.test_points.test_points.clone();
+        let added = teshi_core::authoring::extract_unlinked_scenarios_as_test_points(
+            &self.project,
+            &mut artifacts.test_points.test_points,
+        );
+        if added.is_empty() {
+            artifacts.test_points.test_points = prev;
+            self.status = "All existing scenarios are already linked to test points".to_string();
+            return Ok(());
+        }
+        let added_count = added.len();
+        let first_added_id = added.first().map(|(_, id, _)| format!("tp:{id}"));
+        let artifacts_snapshot = std::mem::replace(&mut artifacts.test_points.test_points, prev);
+        self.test_points_ui.push_undo(artifacts);
+        artifacts.test_points.test_points = artifacts_snapshot;
+        crate::test_points_tab::TestPointsUiState::save_test_points(
+            &self.project.root_dir,
+            artifacts,
+        )?;
+        self.sync_test_point_scenario_refs();
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            if let Some(node_id) = first_added_id {
+                self.test_points_ui.selected_node_id = Some(node_id);
+            }
+            self.test_points_ui.rebuild_tree(Some(artifacts));
+        }
+        self.refresh_test_points_exec_statuses();
+        self.reload_test_point_field_buffer();
+        self.status = format!("Synced {added_count} scenario(s) from .feature files into MindMap");
+        Ok(())
+    }
+
+    /// Execute all Gherkin scenarios linked to the selected MindMap node or subtree (`r`).
+    fn run_selected_test_point_scenarios(&mut self) -> Result<()> {
+        if self.runner_rx.is_some() {
+            self.status = crate::i18n::t("status.runner_already_active").to_string();
+            return Ok(());
+        }
+        let Some(artifacts) = self.authoring_ui.artifacts.as_ref() else {
+            self.status = "No test points selected".to_string();
+            return Ok(());
+        };
+        let target_ids: HashSet<String> = self
+            .test_points_ui
+            .selected_test_point_ids(artifacts)
+            .into_iter()
+            .collect();
+        if target_ids.is_empty() {
+            self.status = "No test points under selected node".to_string();
+            return Ok(());
+        }
+
+        let mut cases = Vec::new();
+        for (fi, feature) in self.project.features.iter().enumerate() {
+            for (si, sc) in feature.all_scenarios().into_iter().enumerate() {
+                if teshi_core::authoring::parse_teshi_tp_tags(&sc.tags)
+                    .iter()
+                    .any(|id| target_ids.contains(id))
+                {
+                    cases.push(build_case(fi, si, feature, sc));
+                }
+            }
+        }
+        if cases.is_empty() {
+            self.status = "No linked scenarios yet — press [g] to scaffold one".to_string();
+            return Ok(());
+        }
+
+        let case_ids: Vec<String> = cases.iter().map(|c| c.id.clone()).collect();
+        let total = cases.len();
+        let (rx, cancel) =
+            match runner::start_routed_run(&self.project.root_dir, &self.run_routes, cases) {
+                Ok(started) => started,
+                Err(err) => {
+                    let message = format!("{err:#}");
+                    let first_line = message.lines().next().unwrap_or_default();
+                    self.status = crate::i18n::fill(
+                        crate::i18n::t("status.run_not_started"),
+                        &[("first_line", &crate::i18n::arg(&first_line))],
+                    );
+                    return Ok(());
+                }
+            };
+
+        self.reset_explore_run_state();
+        self.explore_run_summary = Some(RunSummary {
+            total,
+            ..RunSummary::default()
+        });
+        for case_id in case_ids {
+            if let Some((fi, si)) = parse_case_key(&case_id) {
+                self.explore_case_map.insert(case_id, (fi, si));
+                self.explore_case_status
+                    .insert((fi, si), RunStatus::Running);
+            }
+        }
+        self.runner_rx = Some(rx);
+        self.runner_cancel = Some(cancel);
+        self.refresh_test_points_exec_statuses();
+        self.status = format!("Running {total} scenario(s) for selected test point(s)...");
+        Ok(())
     }
 
     fn current_excerpt_count(&self) -> usize {
@@ -14718,32 +15496,49 @@ impl App {
             crate::project_context::SwitchOverlay::None
         ) {
             let pos = ratatui::layout::Position::new(col, row);
-            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(region) = self.hit_test(&pos).cloned()
-                && matches!(
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(region) = self.hit_test(&pos).cloned()
+                    && matches!(
+                        self.project_switch.overlay,
+                        crate::project_context::SwitchOverlay::Picker { .. }
+                    )
+                    && matches!(
+                        region,
+                        ClickableRegion::ProjectRecent { .. }
+                            | ClickableRegion::ProjectOpenPath { .. }
+                    )
+                {
+                    self.handle_region_click(&region, &pos)?;
+                } else if matches!(
                     self.project_switch.overlay,
                     crate::project_context::SwitchOverlay::Picker { .. }
-                )
-                && matches!(
-                    region,
-                    ClickableRegion::ProjectRecent { .. } | ClickableRegion::ProjectOpenPath { .. }
-                )
-            {
-                self.handle_region_click(&region, &pos)?;
+                ) && self.modal_card_rect.is_some_and(|card| !card.contains(pos))
+                {
+                    self.project_switch.overlay = crate::project_context::SwitchOverlay::None;
+                }
             }
             return Ok(());
         }
         if self.authoring_ui.overlay_active() {
             let pos = ratatui::layout::Position::new(col, row);
-            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(region) = self.hit_test(&pos).cloned()
-                && matches!(
-                    region,
-                    ClickableRegion::ActionButton { modal: true, .. }
-                        | ClickableRegion::RequirementFilterOption { .. }
-                )
-            {
-                self.handle_region_click(&region, &pos)?;
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(region) = self.hit_test(&pos).cloned()
+                    && matches!(
+                        region,
+                        ClickableRegion::ActionButton { modal: true, .. }
+                            | ClickableRegion::RequirementFilterOption { .. }
+                    )
+                {
+                    self.handle_region_click(&region, &pos)?;
+                } else if !matches!(
+                    self.authoring_ui.overlay,
+                    crate::authoring_tab::RequirementsOverlay::DeleteConfirmation { .. }
+                        | crate::authoring_tab::RequirementsOverlay::RemoveCollection { .. }
+                        | crate::authoring_tab::RequirementsOverlay::Unsaved { .. }
+                ) && self.modal_card_rect.is_some_and(|card| !card.contains(pos))
+                {
+                    self.handle_action(Action::OverlayCancel)?;
+                }
             }
             return Ok(());
         }
@@ -14753,6 +15548,7 @@ impl App {
             || self.auth_panel_active
             || self.approval_panel_active
             || self.settings_panel_active
+            || self.help_guide.active
             || self.agent_profile_panel_active
             || self.quit_pending_confirm
             || self.change_summary_visible
@@ -14762,8 +15558,30 @@ impl App {
             || self.step_keyword_picker.is_some()
             || self.has_agent_change_prompt()
             || self.has_acp_permission_prompt()
+            || self.history_search.is_some()
         {
             let pos = ratatui::layout::Position::new(col, row);
+            if self.help_guide.active {
+                if self.handle_vertical_scrollbar_mouse(kind, pos) {
+                    return Ok(());
+                }
+                if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    let down = kind == MouseEventKind::ScrollDown;
+                    if self.help_guide.doc_rect.is_some_and(|r| r.contains(pos)) {
+                        self.help_guide.scroll_doc(if down { 3 } else { -3 });
+                        return Ok(());
+                    }
+                    if self.help_guide.tree_rect.is_some_and(|r| r.contains(pos)) {
+                        let next = if down {
+                            self.help_guide.selected_topic.saturating_add(1)
+                        } else {
+                            self.help_guide.selected_topic.saturating_sub(1)
+                        };
+                        self.help_guide.select_topic(next);
+                        return Ok(());
+                    }
+                }
+            }
             if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
                 && let Some(action) =
                     self.clickable_regions
@@ -14782,26 +15600,35 @@ impl App {
             {
                 self.handle_action(action)?;
             }
-            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(region) = self.hit_test(&pos).cloned()
-                && match &region {
-                    ClickableRegion::ActionButton { modal, .. } => *modal,
-                    ClickableRegion::ModelProfileRow { .. } => self.model_panel_active,
-                    ClickableRegion::ModelFormField { .. } => self.model_panel_active,
-                    ClickableRegion::AgentProfileRow { .. } => self.agent_profile_panel_active,
-                    ClickableRegion::ChangeSummaryRow { .. } => self.change_summary_visible,
-                    ClickableRegion::StepKeywordRow { .. } => self.step_keyword_picker.is_some(),
-                    ClickableRegion::SessionRow { .. } => self.session_panel_active,
-                    ClickableRegion::MindMapLocation { .. } => self.scenario_dropdown_open,
-                    ClickableRegion::ApprovalOption { .. } => self.approval_panel_active,
-                    ClickableRegion::QuitConfirmYes { .. }
-                    | ClickableRegion::QuitConfirmNo { .. } => self.quit_pending_confirm,
-                    ClickableRegion::AiInterruptConfirm { .. }
-                    | ClickableRegion::AiInterruptContinue { .. } => self.ai_interrupt_confirm,
-                    _ => false,
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(region) = self.hit_test(&pos).cloned()
+                    && match &region {
+                        ClickableRegion::ActionButton { modal, .. } => *modal,
+                        ClickableRegion::ModelProfileRow { .. } => self.model_panel_active,
+                        ClickableRegion::ModelFormField { .. } => self.model_panel_active,
+                        ClickableRegion::AgentProfileRow { .. } => self.agent_profile_panel_active,
+                        ClickableRegion::ChangeSummaryRow { .. } => self.change_summary_visible,
+                        ClickableRegion::StepKeywordRow { .. } => {
+                            self.step_keyword_picker.is_some()
+                        }
+                        ClickableRegion::SessionRow { .. } => self.session_panel_active,
+                        ClickableRegion::MindMapLocation { .. } => self.scenario_dropdown_open,
+                        ClickableRegion::ApprovalOption { .. } => self.approval_panel_active,
+                        ClickableRegion::QuitConfirmYes { .. }
+                        | ClickableRegion::QuitConfirmNo { .. } => self.quit_pending_confirm,
+                        ClickableRegion::AiInterruptConfirm { .. }
+                        | ClickableRegion::AiInterruptContinue { .. } => self.ai_interrupt_confirm,
+                        _ => false,
+                    }
+                {
+                    self.handle_region_click(&region, &pos)?;
+                } else if self.help_guide.active
+                    && self.help_guide.doc_rect.is_some_and(|r| r.contains(pos))
+                {
+                    self.help_guide.focus_doc = true;
+                } else if self.modal_card_rect.is_some_and(|card| !card.contains(pos)) {
+                    self.dismiss_backdrop_modal()?;
                 }
-            {
-                self.handle_region_click(&region, &pos)?;
             }
             return Ok(());
         }
@@ -14810,6 +15637,9 @@ impl App {
         }
         // Update hover tracking
         let pos = ratatui::layout::Position::new(col, row);
+        if self.handle_vertical_scrollbar_mouse(kind, pos) {
+            return Ok(());
+        }
 
         if self.active_tab == MainTab::Explore
             && !self.explore_edit_mode
@@ -15109,9 +15939,8 @@ impl App {
             }
         }
 
-        // Test Points has no global scroll focus: a wheel event belongs to
-        // the pane beneath the pointer. TreeState owns the tree offset while
-        // the two text panes keep independent bounded offsets.
+        // Test Points 2D Canvas & Inspector pointer scrolling:
+        // Shift+wheel (or ScrollLeft/ScrollRight) pans canvas horizontally; normal wheel scrolls vertically.
         if self.active_tab == MainTab::TestPoints
             && matches!(
                 kind,
@@ -15130,20 +15959,39 @@ impl App {
                     _ => None,
                 })
         {
-            match (pane, kind) {
-                (0, MouseEventKind::ScrollUp) => {
-                    self.test_points_ui.tree_state.scroll_up(3);
+            if pane == 0 {
+                let horiz = modifiers.contains(KeyModifiers::SHIFT)
+                    || matches!(
+                        kind,
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                    );
+                match kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
+                        if horiz {
+                            self.test_points_ui.pan_canvas(-4, 0);
+                        } else {
+                            self.test_points_ui.pan_canvas(0, -2);
+                        }
+                    }
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => {
+                        if horiz {
+                            self.test_points_ui.pan_canvas(4, 0);
+                        } else {
+                            self.test_points_ui.pan_canvas(0, 2);
+                        }
+                    }
+                    _ => {}
                 }
-                (0, MouseEventKind::ScrollDown) => {
-                    self.test_points_ui.tree_state.scroll_down(3);
+            } else {
+                match kind {
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft => {
+                        self.test_points_ui.scroll_pane(1, -3);
+                    }
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollRight => {
+                        self.test_points_ui.scroll_pane(1, 3);
+                    }
+                    _ => {}
                 }
-                (_, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) => {
-                    self.test_points_ui.scroll_pane(pane, -3)
-                }
-                (_, MouseEventKind::ScrollDown | MouseEventKind::ScrollRight) => {
-                    self.test_points_ui.scroll_pane(pane, 3)
-                }
-                _ => {}
             }
             return Ok(());
         }
@@ -15151,6 +15999,24 @@ impl App {
         match kind {
             MouseEventKind::Moved => {
                 self.mouse_position = Some((col, row));
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.hovered_node_id = self
+                        .test_points_canvas_rect
+                        .filter(|r| r.contains(pos))
+                        .and_then(|r| {
+                            let cx = self
+                                .test_points_ui
+                                .canvas_scroll_x
+                                .saturating_add(col - r.x);
+                            let cy = self
+                                .test_points_ui
+                                .canvas_scroll_y
+                                .saturating_add(row - r.y);
+                            self.test_points_ui
+                                .node_at_canvas(cx, cy)
+                                .map(|n| n.id.clone())
+                        });
+                }
                 return Ok(());
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -15189,6 +16055,17 @@ impl App {
             }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left
+                    && self.active_tab == MainTab::TestPoints
+                    && let Some((sx, sy, ox, oy)) = self.test_points_ui.canvas_drag
+                {
+                    let (vp_w, vp_h) = self.test_points_ui.canvas_viewport;
+                    let max_sx = self.test_points_ui.canvas_width.saturating_sub(vp_w) as i32;
+                    let max_sy = self.test_points_ui.canvas_height.saturating_sub(vp_h) as i32;
+                    let dx = sx as i32 - col as i32;
+                    let dy = sy as i32 - row as i32;
+                    self.test_points_ui.canvas_scroll_x = (ox as i32 + dx).clamp(0, max_sx) as u16;
+                    self.test_points_ui.canvas_scroll_y = (oy as i32 + dy).clamp(0, max_sy) as u16;
+                } else if button == MouseButton::Left
                     && let Some((column, grab)) = self.explore_horizontal_scroll_grab
                     && let Some(bar) = self.explore_scrollbar(column)
                 {
@@ -15204,6 +16081,7 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.explore_horizontal_scroll_grab = None;
+                self.test_points_ui.canvas_drag = None;
             }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Composer selection wins on a right-click inside the input
@@ -15318,11 +16196,18 @@ impl App {
             .find(|region| match region {
                 ClickableRegion::ActionButton { rect, .. }
                 | ClickableRegion::RequirementFilterOption { rect, .. }
+                | ClickableRegion::TestPointCanvasNode { rect, .. }
                 | ClickableRegion::TestPointField { rect, .. }
                 | ClickableRegion::TestPointExcerpt { rect, .. }
                 | ClickableRegion::TestPointScenario { rect, .. }
                 | ClickableRegion::ExploreTag { rect, .. }
                 | ClickableRegion::ExploreTagClear { rect }
+                | ClickableRegion::ExploreSearchTrigger { rect }
+                | ClickableRegion::ExploreSearchConfirm { rect }
+                | ClickableRegion::ExploreSearchClear { rect }
+                | ClickableRegion::ReqSearchTrigger { rect }
+                | ClickableRegion::ReqSearchConfirm { rect }
+                | ClickableRegion::ReqSearchClear { rect }
                 | ClickableRegion::ExploreTagScroll { rect, .. }
                 | ClickableRegion::ExploreDetailPane { rect }
                 | ClickableRegion::ExploreDetailTab { rect, .. }
@@ -15350,11 +16235,18 @@ impl App {
             match region {
                 ClickableRegion::ActionButton { .. }
                 | ClickableRegion::RequirementFilterOption { .. }
+                | ClickableRegion::TestPointCanvasNode { .. }
                 | ClickableRegion::TestPointField { .. }
                 | ClickableRegion::TestPointExcerpt { .. }
                 | ClickableRegion::TestPointScenario { .. }
                 | ClickableRegion::ExploreTag { .. }
                 | ClickableRegion::ExploreTagClear { .. }
+                | ClickableRegion::ExploreSearchTrigger { .. }
+                | ClickableRegion::ExploreSearchConfirm { .. }
+                | ClickableRegion::ExploreSearchClear { .. }
+                | ClickableRegion::ReqSearchTrigger { .. }
+                | ClickableRegion::ReqSearchConfirm { .. }
+                | ClickableRegion::ReqSearchClear { .. }
                 | ClickableRegion::ExploreTagScroll { .. }
                 | ClickableRegion::ExploreDetailPane { .. }
                 | ClickableRegion::ExploreDetailTab { .. }
@@ -15484,6 +16376,79 @@ impl App {
         None
     }
 
+    /// Records a left-click on `target` and returns `true` when it completes a
+    /// double-click within [`DOUBLE_CLICK_WINDOW`]. Resets tracking after a
+    /// double-click so a rapid third click starts a fresh sequence.
+    fn register_click(&mut self, target: ClickTarget) -> bool {
+        let now = Instant::now();
+        let is_double = self.last_click.as_ref().is_some_and(|(at, prev)| {
+            *prev == target && now.duration_since(*at) < DOUBLE_CLICK_WINDOW
+        });
+        if is_double {
+            self.last_click = None;
+        } else {
+            self.last_click = Some((now, target));
+        }
+        is_double
+    }
+
+    /// Dismisses non-destructive modal panels when clicking outside their card.
+    ///
+    /// Destructive confirmations (delete, quit, interrupt, external/agent change,
+    /// ACP permission) intentionally remain open until an explicit button or key.
+    fn dismiss_backdrop_modal(&mut self) -> Result<()> {
+        if self.pending_delete.is_some()
+            || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
+            || self.has_external_change_prompt()
+            || self.has_agent_change_prompt()
+            || self.has_acp_permission_prompt()
+        {
+            return Ok(());
+        }
+        if self.help_guide.active {
+            self.close_help_guide();
+        } else if self.settings_panel_active {
+            self.handle_action(Action::SettingsPanelClose)?;
+        } else if self.approval_panel_active {
+            self.approval_panel_active = false;
+        } else if self.session_panel_active {
+            self.handle_action(Action::SessionPanelClose)?;
+        } else if self.model_panel_active {
+            if self.model_panel_mode == ModelPanelMode::List {
+                self.handle_action(Action::ModelPanelClose)?;
+            } else {
+                self.handle_action(Action::ModelPanelFormCancel)?;
+            }
+        } else if self.agent_profile_panel_active {
+            self.handle_action(Action::AgentPanelClose)?;
+        } else if self.change_summary_visible {
+            self.change_summary_visible = false;
+        } else if self.scenario_dropdown_open {
+            self.handle_action(Action::ScenarioDropdownClose)?;
+        } else if self.step_keyword_picker.is_some() {
+            self.handle_action(Action::StepKeywordPickerCancel)?;
+        } else if self.history_search.is_some() {
+            self.handle_action(Action::AiHistorySearchDismiss)?;
+        }
+        Ok(())
+    }
+
+    /// Maps a visual display column offset inside `text` to the nearest Unicode
+    /// character index (used for single-line form field click-to-caret).
+    fn char_index_for_display_col(text: &str, target_col: usize) -> usize {
+        use unicode_width::UnicodeWidthChar;
+        let mut col = 0usize;
+        for (idx, ch) in text.chars().enumerate() {
+            let w = ch.width().unwrap_or(0);
+            if col + w > target_col {
+                return idx;
+            }
+            col += w;
+        }
+        text.chars().count()
+    }
+
     /// Execute the action associated with clicking on a UI region.
     fn handle_region_click(
         &mut self,
@@ -15540,54 +16505,166 @@ impl App {
                     self.handle_action(Action::OverlayConfirm)?;
                 }
             }
-            ClickableRegion::TestPointField { field, .. } => {
+            ClickableRegion::TestPointCanvasNode { node_id, .. } => {
                 self.commit_test_point_field_edit()?;
                 self.test_points_ui.editing = false;
-                self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
-                self.test_points_ui.detail_field = *field;
+                self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Tree;
+                let now = Instant::now();
+                let is_double =
+                    self.test_points_ui
+                        .last_click
+                        .as_ref()
+                        .is_some_and(|(prev_id, at)| {
+                            prev_id == node_id
+                                && now.duration_since(*at) < Duration::from_millis(450)
+                        });
+                self.test_points_ui.last_click = Some((node_id.clone(), now));
+                self.test_points_ui
+                    .select_node_by_id(node_id, self.authoring_ui.artifacts.as_ref());
                 self.reload_test_point_field_buffer();
+                if is_double {
+                    match self.test_points_ui.selected_node().map(|n| &n.kind) {
+                        Some(
+                            crate::test_points_tab::TpNodeKind::Root
+                            | crate::test_points_tab::TpNodeKind::Branch { .. },
+                        ) => {
+                            self.test_points_ui
+                                .toggle_collapse_selected(self.authoring_ui.artifacts.as_ref());
+                        }
+                        Some(crate::test_points_tab::TpNodeKind::Leaf { .. }) => {
+                            self.test_points_ui
+                                .start_inline_edit(self.authoring_ui.artifacts.as_ref());
+                        }
+                        None => {}
+                    }
+                }
+            }
+            ClickableRegion::TestPointField { rect, field } => {
+                let already_selected = self.test_points_ui.focus
+                    == crate::test_points_tab::TestPointsFocus::Details
+                    && self.test_points_ui.detail_field == *field;
+                let is_double = self.register_click(ClickTarget::TestPointField(*field));
+                if !already_selected {
+                    self.commit_test_point_field_edit()?;
+                    self.test_points_ui.editing = false;
+                    self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
+                    self.test_points_ui.detail_field = *field;
+                    self.reload_test_point_field_buffer();
+                }
+                if already_selected || is_double {
+                    self.test_points_ui.editing = true;
+                    let label_key = match field {
+                        crate::test_points_tab::DetailField::Title => "tp.field.title",
+                        crate::test_points_tab::DetailField::Objective => "tp.field.note",
+                        crate::test_points_tab::DetailField::Preconditions => {
+                            "tp.field.preconditions"
+                        }
+                        crate::test_points_tab::DetailField::ExpectedOutcomes => {
+                            "tp.field.expected"
+                        }
+                        crate::test_points_tab::DetailField::Hierarchy => "tp.field.hierarchy",
+                    };
+                    let label_cols =
+                        unicode_width::UnicodeWidthStr::width(crate::i18n::t(label_key)) + 2;
+                    let rel_x = usize::from(pos.x.saturating_sub(rect.x));
+                    let value_col = rel_x.saturating_sub(label_cols);
+                    self.test_points_ui.field_cursor = Self::char_index_for_display_col(
+                        &self.test_points_ui.field_buffer,
+                        value_col,
+                    );
+                }
             }
             ClickableRegion::TestPointExcerpt { index, .. } => {
+                let is_double = self.register_click(ClickTarget::TestPointExcerpt(*index));
                 self.commit_test_point_field_edit()?;
                 self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Excerpts;
                 self.test_points_ui.selected_excerpt_index = *index;
+                if is_double {
+                    self.handle_action(Action::TpFollowExcerpt)?;
+                }
             }
             ClickableRegion::TestPointScenario { index, .. } => {
+                let is_double = self.register_click(ClickTarget::TestPointScenario(*index));
                 self.commit_test_point_field_edit()?;
                 self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
                 self.test_points_ui.selected_scenario_ref_index = *index;
+                if is_double {
+                    self.handle_action(Action::TpFollowScenario)?;
+                }
             }
             ClickableRegion::ModelProfileRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::ModelProfileRow(*index));
                 self.model_panel_selection = *index;
+                if is_double {
+                    self.handle_action(Action::ModelPanelActivate)?;
+                }
             }
-            ClickableRegion::ModelFormField { index, .. } => {
+            ClickableRegion::ModelFormField { rect, index } => {
                 self.model_form_focus = (*index).min(6);
-                self.model_form_cursor = self.model_form_field().chars().count();
+                // Model form renders `"   "` (3) + `format!("{label:12} ")` (13) = 16 columns before value.
+                let rel_x = usize::from(pos.x.saturating_sub(rect.x));
+                let value_col = rel_x.saturating_sub(16);
+                let field_text = self.model_form_field().to_owned();
+                self.model_form_cursor = if rel_x <= 16 {
+                    field_text.chars().count()
+                } else {
+                    Self::char_index_for_display_col(&field_text, value_col)
+                };
             }
             ClickableRegion::AgentProfileRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::AgentProfileRow(*index));
                 self.agent_profile_panel_selection = *index;
+                if is_double {
+                    self.handle_action(Action::AgentPanelSelect)?;
+                }
             }
             ClickableRegion::ChangeSummaryRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::ChangeSummaryRow(*index));
                 self.change_summary_selection = *index;
+                if is_double {
+                    self.handle_action(Action::ChangeSummaryJump)?;
+                }
             }
             ClickableRegion::StepKeywordRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::StepKeywordRow(*index));
                 if let Some(picker) = self.step_keyword_picker.as_mut() {
                     picker.selected = *index;
+                }
+                if is_double {
+                    self.handle_action(Action::StepKeywordPickerConfirm)?;
                 }
             }
             ClickableRegion::ModalList { .. } => {}
             ClickableRegion::SessionRow { index, .. } => {
+                let is_double = self.register_click(ClickTarget::SessionRow(*index));
                 self.session_panel_selection = *index;
+                if is_double {
+                    self.handle_action(Action::SessionPanelActivate)?;
+                }
             }
             ClickableRegion::MindMapLocation { index, .. } => {
+                let is_double = self.register_click(ClickTarget::MindMapLocation(*index));
                 self.scenario_dropdown_selection = *index;
+                if is_double {
+                    self.handle_action(Action::ScenarioDropdownSelect)?;
+                }
             }
             ClickableRegion::ChatInput { .. } => {
                 self.focus_ai_input();
                 if self.active_tab == MainTab::MindMap {
                     self.mindmap_focus = MindMapFocus::AiPanel;
+                }
+                if let Some((text_rect, scroll)) = self.chat_input_text_rect
+                    && text_rect.contains(*pos)
+                {
+                    let row = scroll.saturating_add(pos.y.saturating_sub(text_rect.y));
+                    let col = pos.x.saturating_sub(text_rect.x);
+                    let layout =
+                        crate::composer::layout(self.agent().input.text(), text_rect.width);
+                    let char_idx = layout.char_at(row, col);
+                    self.agent_mut().input.set_cursor(char_idx);
                 }
             }
             ClickableRegion::Tab { tab, .. } => {
@@ -15610,7 +16687,14 @@ impl App {
                 }
             }
             ClickableRegion::ExploreFeature { feature_idx, .. } => {
+                let clicked_dir = match self.feature_browser_rows().get(*feature_idx).cloned() {
+                    Some(crate::feature_browser::Row::Directory(path, _)) => Some(path),
+                    _ => None,
+                };
                 self.explore_set_feature_row(*feature_idx);
+                if let Some(path) = clicked_dir {
+                    self.toggle_feature_directory(&path);
+                }
                 self.explore_focus = crate::app::ColumnFocus::Feature;
                 // Reset scenario/step selection
                 self.explore_selected_scenario = 0;
@@ -15621,9 +16705,13 @@ impl App {
                 self.explore_focus = crate::app::ColumnFocus::Feature;
             }
             ClickableRegion::ExploreScenario { scenario_idx, .. } => {
+                let is_double = self.register_click(ClickTarget::ExploreScenario(*scenario_idx));
                 self.explore_selected_scenario = *scenario_idx;
                 self.explore_focus = crate::app::ColumnFocus::Scenario;
                 self.explore_selected_step = 0;
+                if is_double {
+                    self.handle_action(Action::EnterEdit)?;
+                }
             }
             ClickableRegion::ExploreStep { step_idx, .. } => {
                 self.explore_selected_step = *step_idx;
@@ -15649,6 +16737,7 @@ impl App {
             }
             ClickableRegion::ExploreDetailItem { index, .. } => {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    let is_double = self.register_click(ClickTarget::ExploreDetailItem(*index));
                     self.explore_focus = crate::app::ColumnFocus::Details;
                     self.explore_details_selection =
                         (*index).min(self.detail_item_count().saturating_sub(1));
@@ -15657,6 +16746,8 @@ impl App {
                     // only selecting the row.
                     if self.active_detail_tab() == Some(RunDetailTab::Screenshots) {
                         self.explore_detail_primary();
+                    } else if is_double {
+                        self.handle_action(Action::ExploreDetailEnter)?;
                     }
                 }
             }
@@ -15678,6 +16769,12 @@ impl App {
                 self.toggle_feature_tag(&tag);
             }
             ClickableRegion::ExploreTagClear { .. } => self.clear_feature_tags(),
+            ClickableRegion::ExploreSearchTrigger { .. } => self.begin_feature_search(),
+            ClickableRegion::ExploreSearchConfirm { .. } => self.confirm_feature_search(),
+            ClickableRegion::ExploreSearchClear { .. } => self.clear_feature_search(),
+            ClickableRegion::ReqSearchTrigger { .. } => self.authoring_ui.begin_search(),
+            ClickableRegion::ReqSearchConfirm { .. } => self.authoring_ui.confirm_search(),
+            ClickableRegion::ReqSearchClear { .. } => self.authoring_ui.clear_search(),
             ClickableRegion::ExploreTagScroll { down, .. } => {
                 let page = self.feature_tags.visible_rows.max(1);
                 self.scroll_feature_tags(*down, page);
@@ -15728,7 +16825,15 @@ impl App {
                     self.select_approval_mode(mode);
                 }
             }
-            ClickableRegion::EditorPanel | ClickableRegion::PreviewPanel => {}
+            ClickableRegion::EditorPanel => {}
+            ClickableRegion::PreviewPanel => {
+                let is_double = self.register_click(ClickTarget::PreviewPanel);
+                self.mindmap_focus = MindMapFocus::AiPanel;
+                self.ai_input_focused = false;
+                if is_double {
+                    self.handle_action(Action::ToggleScenarioDropdown)?;
+                }
+            }
             ClickableRegion::TestPointsPane { pane, .. } => {
                 if self.active_tab != MainTab::TestPoints {
                     return Ok(());
@@ -15736,8 +16841,7 @@ impl App {
                 self.commit_test_point_field_edit()?;
                 let focus = match pane {
                     0 => crate::test_points_tab::TestPointsFocus::Tree,
-                    1 => crate::test_points_tab::TestPointsFocus::Details,
-                    _ => crate::test_points_tab::TestPointsFocus::Excerpts,
+                    _ => crate::test_points_tab::TestPointsFocus::Details,
                 };
                 if self.test_points_ui.focus != focus {
                     self.test_points_ui.commit_field_if_dirty();
@@ -15746,17 +16850,12 @@ impl App {
                     self.reload_test_point_field_buffer();
                 }
                 if *pane == 0 {
-                    self.test_points_ui.tree_state.click_at(*pos);
-                    if let Some(id) = self
-                        .test_points_ui
-                        .tree_state
-                        .selected()
-                        .last()
-                        .and_then(|node| node.strip_prefix(crate::test_points_tab::TREE_TP_PREFIX))
-                        .map(str::to_owned)
-                    {
-                        self.test_points_ui.select_test_point(&id);
-                    }
+                    self.test_points_ui.canvas_drag = Some((
+                        pos.x,
+                        pos.y,
+                        self.test_points_ui.canvas_scroll_x,
+                        self.test_points_ui.canvas_scroll_y,
+                    ));
                 }
             }
             ClickableRegion::ProjectRecent { index, .. } => {
@@ -16321,6 +17420,7 @@ impl App {
             || self.session_panel_active
             || self.agent_profile_panel_active
             || self.approval_panel_active
+            || self.help_guide.active
             || self.change_summary_visible
             || self.generation_scope_prompt.is_some()
             || self.step_keyword_picker.is_some()
@@ -16345,6 +17445,18 @@ impl App {
 
     pub fn close_settings_panel(&mut self) {
         self.settings_panel_active = false;
+    }
+
+    /// Opens the modal User Guide positioned on the topic for the active tab.
+    pub fn open_help_guide(&mut self) {
+        if self.prompt_owns_input() || self.settings_panel_active {
+            return;
+        }
+        self.help_guide.open_for_tab(self.active_tab);
+    }
+
+    pub fn close_help_guide(&mut self) {
+        self.help_guide.close();
     }
 
     /// Activate the highlighted Settings row (keyboard Enter/Space or a click).
@@ -16585,6 +17697,88 @@ impl App {
                 return !(key.code == KeyCode::Char('q')
                     && key.modifiers.contains(KeyModifiers::CONTROL));
             }
+        }
+        true
+    }
+
+    /// Handles the F1 Help chord and, while the User Guide modal is open, every
+    /// key it owns (mirrors iCode's `GuideDialog` navigation).
+    pub fn handle_help_guide_key(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return false;
+        }
+        if !self.help_guide.active {
+            if key.code == KeyCode::F(1) && key.modifiers.is_empty() {
+                self.open_help_guide();
+                return self.help_guide.active;
+            }
+            return false;
+        }
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc | KeyCode::F(1), _)
+            | (KeyCode::Char('q'), KeyModifiers::NONE)
+            | (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.close_help_guide();
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                self.help_guide.cycle_language();
+            }
+            (KeyCode::Tab | KeyCode::BackTab, _) => {
+                self.help_guide.focus_doc = !self.help_guide.focus_doc;
+            }
+            (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                self.help_guide.focus_doc = false;
+            }
+            (KeyCode::Right | KeyCode::Enter, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                self.help_guide.focus_doc = true;
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.scroll_doc(1);
+                } else {
+                    self.help_guide
+                        .select_topic(self.help_guide.selected_topic.saturating_add(1));
+                }
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.scroll_doc(-1);
+                } else {
+                    self.help_guide
+                        .select_topic(self.help_guide.selected_topic.saturating_sub(1));
+                }
+            }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(10);
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(-10);
+            }
+            (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(20);
+            }
+            (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                self.help_guide.scroll_doc(-20);
+            }
+            (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.doc_scroll = 0;
+                } else {
+                    self.help_guide.select_topic(0);
+                }
+            }
+            (KeyCode::End, _) | (KeyCode::Char('G'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                if self.help_guide.focus_doc {
+                    self.help_guide.doc_scroll = self.help_guide.doc_max_scroll;
+                } else {
+                    self.help_guide
+                        .select_topic(crate::ui::help::TOPIC_COUNT - 1);
+                }
+            }
+            _ => {}
         }
         true
     }
@@ -16929,6 +18123,10 @@ impl App {
             } else {
                 self.withdraw_queued_message();
             }
+            return Ok(());
+        }
+        if command == "help" {
+            self.open_help_guide();
             return Ok(());
         }
         if command == "preferences" || command == "prefs" {
@@ -17532,8 +18730,9 @@ mod tests {
         assert!(direct.contains("test_point_ids` may be empty"));
         assert!(direct.contains("user-authorized no-review"));
         let strict = App::generation_pipeline_prompt(ReviewPolicy::Strict);
-        assert!(strict.contains("Do NOT skip the human review gate"));
-        assert!(strict.contains("Stop and wait"));
+        assert!(!strict.contains("human review gate"));
+        assert!(!strict.contains("Stop and wait"));
+        assert!(strict.contains("NO human-approval pause"));
     }
 
     #[test]
@@ -19767,15 +20966,17 @@ mod tests {
     }
 
     #[test]
-    fn project_switch_during_human_review_never_approves_or_loses_test_points() {
+    fn project_switch_during_generation_preserves_test_points() {
         let (mut app, project_a, project_b, _store) = project_switch_app();
+        app.approval_mode = teshi_agent::approval::ApprovalMode::Auto;
         start_mcp_fixture(&mut app, "mcp_review");
         wait_mcp_fixture(&mut app, |app| {
             app.agents[0].backend.status() == teshi_agent::backend::AgentBackendStatus::Completed
         });
+        app.buffer_dirty.fill(false);
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            teshi_agent::pipeline::GenerationStage::Complete
         );
         let points_path = project_a.path().join("testpoints/testpoints.json");
         let proposed = fs::read(&points_path).unwrap();
@@ -19787,10 +20988,6 @@ mod tests {
         ));
         app.project_switch_action(Action::OverlayCancel).unwrap();
         assert_eq!(app.current_project_stamp(), before);
-        assert_eq!(
-            app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
-        );
         assert_eq!(fs::read(&points_path).unwrap(), proposed);
 
         app.request_project_switch(project_b.path()).unwrap();
@@ -19800,7 +20997,7 @@ mod tests {
         while app.project.root_dir != project_b.path() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "review switch did not finish"
+                "generation switch did not finish"
             );
             app.poll_llm_events();
             app.poll_project_switch();
@@ -19820,7 +21017,7 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(
             points[0].review_state,
-            teshi_core::authoring::ReviewState::Proposed
+            teshi_core::authoring::ReviewState::Approved
         );
         assert_eq!(fs::read(&points_path).unwrap(), proposed);
         stop_fixture_agents(&mut app);
@@ -20972,7 +22169,7 @@ mod tests {
     }
 
     #[test]
-    fn native_review_gate_stops_followup_after_tool_event() {
+    fn native_reviewing_stage_continues_after_tool_event() {
         let (mut app, _project, _store) = slash_test_app();
         let (tx, rx) = mpsc::channel();
         app.agents[0]
@@ -20994,11 +22191,10 @@ mod tests {
         })
         .unwrap();
         app.poll_llm_events();
-        assert_eq!(
+        assert_ne!(
             app.agents[0].backend.status(),
             teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
-        assert_eq!(app.agents[0].status, AiStatus::Idle);
         assert_eq!(app.agents[0].messages().len(), 2);
     }
 
@@ -21343,10 +22539,11 @@ mod tests {
         assert_eq!(app.agent().input.text(), draft, "opening keeps the draft");
 
         let (buffer, text) = draw(&mut app);
-        // 100x30 terminal: the 28-row content area loses one row top and
+        // 100x30 terminal: row 0 is the tab bar, row 1 is the active-tab
+        // underline rule, so the 27-row content area loses one row top and
         // bottom, and every row loses three columns on each side.
         assert_eq!(
-            buffer[(3, 2)].symbol(),
+            buffer[(3, 3)].symbol(),
             "╭",
             "the viewer starts after the top gutter"
         );
@@ -21364,7 +22561,7 @@ mod tests {
         assert!(text.contains("no image protocol"), "{text}");
         let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
             .expect("the close button is registered");
-        assert_eq!(close.y, 2, "the close button sits on the top border");
+        assert_eq!(close.y, 3, "the close button sits on the top border");
         assert!(text.contains("Close [Esc]"), "{text}");
 
         // Neither the composer below nor typed keys react while it is open.
@@ -21710,7 +22907,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_mcp_tools_persist_test_points_and_enforce_human_review() {
+    fn acp_mcp_tools_persist_test_points_and_generate_feature_without_gate() {
         for mode in [
             teshi_agent::approval::ApprovalMode::Manual,
             teshi_agent::approval::ApprovalMode::Auto,
@@ -21719,13 +22916,25 @@ mod tests {
             let (mut app, project, _store) = requirements_test_app();
             app.approval_mode = mode;
             start_mcp_fixture(&mut app, "mcp_review");
-            wait_mcp_fixture(&mut app, |app| {
-                app.agents[0].backend.status()
-                    == teshi_agent::backend::AgentBackendStatus::Completed
-            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while app.agents[0].backend.status()
+                != teshi_agent::backend::AgentBackendStatus::Completed
+            {
+                app.poll_llm_events();
+                while !app.pending_agent_changes.is_empty() {
+                    assert_eq!(mode, teshi_agent::approval::ApprovalMode::Manual);
+                    app.handle_action(Action::AgentChangeAccept).unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "ACP fixture timed out: {}",
+                    app.status
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(
                 app.generation_stage,
-                teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+                teshi_agent::pipeline::GenerationStage::Complete
             );
             let points = &app
                 .authoring_ui
@@ -21737,34 +22946,9 @@ mod tests {
             assert_eq!(points.len(), 1);
             assert_eq!(
                 points[0].review_state,
-                teshi_core::authoring::ReviewState::Proposed
+                teshi_core::authoring::ReviewState::Approved
             );
             assert!(project.path().join("testpoints/testpoints.json").exists());
-            assert!(!project.path().join("blocked.feature").exists());
-            let result: serde_json::Value =
-                serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
-            assert_eq!(result[0]["isError"], false);
-            assert_eq!(result[1]["isError"], false);
-            assert_eq!(result[2]["isError"], true);
-            assert_eq!(result[3]["isError"], true);
-            // Use the same review state and continue action that the TUI uses;
-            // an external agent must not be able to grant this approval itself.
-            assert!(crate::test_points_tab::TestPointsUiState::approve(
-                &mut app
-                    .authoring_ui
-                    .artifacts
-                    .as_mut()
-                    .unwrap()
-                    .test_points
-                    .test_points[0]
-            ));
-            app.approval_mode = teshi_agent::approval::ApprovalMode::Auto;
-            app.active_tab = MainTab::TestPoints;
-            app.handle_action(Action::TpContinueGeneration).unwrap();
-            wait_mcp_fixture(&mut app, |app| {
-                app.agents[0].backend.status()
-                    == teshi_agent::backend::AgentBackendStatus::Completed
-            });
             let result: serde_json::Value =
                 serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
             for (index, result) in result.as_array().unwrap().iter().enumerate() {
@@ -21910,7 +23094,7 @@ mod tests {
     }
 
     #[test]
-    fn native_propose_test_points_enters_human_review_without_followup() {
+    fn native_propose_test_points_advances_to_planning_without_gate() {
         let (mut app, _project, _store) = requirements_test_app();
         teshi_agent::execute_tool(
             &mut app,
@@ -21929,24 +23113,27 @@ mod tests {
             tool_calls: vec![crate::llm::ToolCall {
                 id: "proposal".into(),
                 name: "propose_test_points".into(),
-                arguments: r#"{"test_points":[{"title":"Valid login","objective":"User authenticates","hierarchy_path":["Auth","Login"]}]}"#.into(),
+                arguments:
+                    r#"{"test_points":[{"title":"Valid login","hierarchy_path":["Auth","Login"]}]}"#
+                        .into(),
                 execution_duration_ms: None,
             }],
             reasoning_content: None,
             input_tokens: None,
             output_tokens: None,
             finish_reason: None,
-        }).unwrap();
+        })
+        .unwrap();
         app.poll_llm_events();
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            teshi_agent::pipeline::GenerationStage::Planning
         );
-        assert_eq!(
+        assert_ne!(
             app.agents[0].backend.status(),
             teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
-        assert_eq!(app.agents[0].status, AiStatus::Idle);
+        assert_eq!(app.agents[0].messages().len(), 2);
         assert_eq!(
             app.authoring_ui
                 .artifacts
@@ -21960,7 +23147,7 @@ mod tests {
     }
 
     #[test]
-    fn native_model_proposal_pauses_before_another_request() {
+    fn native_model_proposal_continues_to_followup_request() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -21970,12 +23157,15 @@ mod tests {
                 .unwrap();
             let mut request = [0u8; 8192];
             assert!(socket.read(&mut request).unwrap() > 0);
-            let args = serde_json::json!({"test_points":[{"title":"Valid login","objective":"User authenticates","hierarchy_path":["Auth","Login"]}]}).to_string();
+            let args = serde_json::json!({"test_points":[{"title":"Valid login","hierarchy_path":["Auth","Login"]}]}).to_string();
             let body = serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"proposal","type":"function","function":{"name":"propose_test_points","arguments":args}}]}}]}).to_string();
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            listener.set_nonblocking(true).unwrap();
-            thread::sleep(Duration::from_millis(200));
-            listener.accept().is_ok()
+            let (mut socket2, _) = listener.accept().unwrap();
+            let mut req2 = [0u8; 8192];
+            let _ = socket2.read(&mut req2);
+            let done_body = serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":"Done"}}]}).to_string();
+            write!(socket2, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", done_body.len(), done_body).unwrap();
+            true
         });
         let (mut app, _project, _store) = requirements_test_app();
         teshi_agent::execute_tool(
@@ -22021,21 +23211,14 @@ mod tests {
         }
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
-        );
-        assert_eq!(
-            app.agents[0].backend.status(),
-            teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
+            teshi_agent::pipeline::GenerationStage::Planning
         );
         app.active_tab = MainTab::TestPoints;
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
-        assert!(
-            !server.join().unwrap(),
-            "human review must prevent another model request"
-        );
+        assert!(server.join().unwrap(), "streamlined runtime must continue");
     }
 
     #[test]
@@ -23108,9 +24291,8 @@ mod tests {
 
         assert_eq!(
             app.generation_stage,
-            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            teshi_agent::pipeline::GenerationStage::Planning
         );
-        assert!(app.status.contains("approve at least one test point"));
     }
 
     /// Waits for the launch selection to install the first discovered Feature.
@@ -24814,7 +25996,7 @@ mod tests {
     }
 
     #[test]
-    fn test_test_points_review_state_transitions() {
+    fn test_test_points_field_edits_keep_approved_without_review_reset() {
         use crate::test_points_tab::{DetailField, TestPointsUiState};
         use teshi_core::authoring::{HierarchyPath, QuoteSelector, ReviewState, TestPoint};
 
@@ -24825,7 +26007,7 @@ mod tests {
             preconditions: None,
             expected_outcomes: None,
             hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
-            review_state: ReviewState::Proposed,
+            review_state: ReviewState::Approved,
             requirement_links: vec![teshi_core::authoring::RequirementLink {
                 store_id: None,
                 document_id: "doc-1".into(),
@@ -24841,20 +26023,12 @@ mod tests {
             scenario_refs: Vec::new(),
         };
 
-        assert!(TestPointsUiState::approve(&mut tp));
-        assert_eq!(tp.review_state, ReviewState::Approved);
-
         TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Objective, "Changed objective");
-        assert_eq!(tp.review_state, ReviewState::Proposed);
-
-        assert!(TestPointsUiState::reject(&mut tp));
-        assert_eq!(tp.review_state, ReviewState::Rejected);
-
-        tp.review_state = ReviewState::NeedsReview;
-        assert!(TestPointsUiState::approve(&mut tp));
         assert_eq!(tp.review_state, ReviewState::Approved);
+        assert_eq!(tp.objective, "Changed objective");
 
-        TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Hierarchy, "Billing");
+        TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Hierarchy, "Auth / Billing");
+        assert_eq!(tp.hierarchy_path.as_slice(), &["Auth", "Billing"]);
         assert_eq!(tp.review_state, ReviewState::Approved);
     }
 
@@ -25607,11 +26781,18 @@ mod tests {
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -25675,6 +26856,7 @@ mod tests {
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
@@ -25835,11 +27017,18 @@ Feature: B
             chat_history_rect: None,
             chat_scrollbar: None,
             chat_scrollbar_grab: None,
+            vertical_scrollbars: Vec::new(),
+            vertical_scrollbar_grab: None,
+            last_click: None,
+            modal_card_rect: None,
+            chat_input_text_rect: None,
+            req_tree_row_spans: Vec::new(),
             chat_selection: None,
             system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
+            test_points_canvas_rect: None,
             preview_panel_rect: None,
             screenshot: Default::default(),
             web_review: Default::default(),
@@ -25903,6 +27092,7 @@ Feature: B
             approval_panel_selection: 0,
             settings_panel_active: false,
             settings_panel_selection: 0,
+            help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             prompt_history: crate::prompt_history::PromptHistory::empty(),

@@ -51,7 +51,7 @@ impl TextRange {
 }
 
 /// Exact quoted text plus bounded prefix/suffix context for disambiguation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuoteSelector {
     /// Exact text covered by the anchor.
     pub quote: String,

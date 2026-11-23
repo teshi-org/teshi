@@ -1190,6 +1190,27 @@ impl AuthoringUiState {
         self.rebuild_tree();
     }
 
+    /// Focuses the Requirements tree and activates inline `/` search input.
+    pub(crate) fn begin_search(&mut self) {
+        self.exit_insert_mode();
+        self.focus = RequirementsFocus::Tree;
+        self.search_active = true;
+        self.search_query.move_cursor(CursorMotion::End);
+    }
+
+    /// Commits the current Requirements search query and exits search input mode.
+    pub(crate) fn confirm_search(&mut self) {
+        self.search_active = false;
+        self.commit_requirement_search();
+    }
+
+    /// Clears the active Requirements search query and rebuilds the tree.
+    pub(crate) fn clear_search(&mut self) {
+        self.search_query = LineInput::default();
+        self.search_active = false;
+        self.commit_requirement_search();
+    }
+
     /// Defers a rebuild until typing pauses, or clears it immediately.
     fn schedule_requirement_search(&mut self) {
         if self.search_query.text().trim().is_empty() {
@@ -1894,7 +1915,7 @@ impl AuthoringUiState {
         line_col_range_to_char_range(&body, anchor, end)
     }
 
-    /// Creates a `Proposed` test point from the current non-empty selection.
+    /// Creates an immediately ready (`Approved`) test point from the current non-empty selection.
     pub fn create_test_point_from_selection(&mut self) -> Option<String> {
         let doc_meta = self.current_document_meta()?.clone();
         let range = self.selection_char_range()?;
@@ -1921,7 +1942,7 @@ impl AuthoringUiState {
             preconditions: None,
             expected_outcomes: None,
             hierarchy_path: HierarchyPath::new(vec!["Uncategorized".into()]),
-            review_state: ReviewState::Proposed,
+            review_state: ReviewState::Approved,
             requirement_links: vec![link],
             scenario_refs: Vec::new(),
         };
@@ -2912,6 +2933,7 @@ impl App {
             || self.session_panel_active
             || self.approval_panel_active
             || self.settings_panel_active
+            || self.help_guide.active
             || self.agent_profile_panel_active
             || self.change_summary_visible
             || self.scenario_dropdown_open
@@ -3593,7 +3615,7 @@ mod tests {
             .iter()
             .find(|t| t.id == id)
             .unwrap();
-        assert_eq!(tp.review_state, ReviewState::Proposed);
+        assert_eq!(tp.review_state, ReviewState::Approved);
         assert_eq!(tp.requirement_links.len(), 1);
     }
 
@@ -3654,7 +3676,7 @@ mod tests {
             .as_slice()
         );
         let test_point = &state.artifacts.as_ref().unwrap().test_points.test_points[0];
-        assert_eq!(test_point.review_state, ReviewState::NeedsReview);
+        assert_eq!(test_point.review_state, ReviewState::Approved);
         assert_eq!(
             test_point.requirement_links[0].resolution,
             ResolutionState::Stale
@@ -3760,7 +3782,7 @@ mod tests {
             deleted_point.requirement_links[0].resolution,
             ResolutionState::Stale
         );
-        assert_eq!(deleted_point.review_state, ReviewState::NeedsReview);
+        assert_eq!(deleted_point.review_state, ReviewState::Approved);
     }
 
     #[test]

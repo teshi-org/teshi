@@ -909,7 +909,7 @@ mod tests {
         let value = fixture.list_json();
         assert_eq!(links(&value, "tp-1").len(), 1);
         assert_eq!(links(&value, "tp-1")[0]["resolution"], "stale");
-        assert_eq!(point(&value, "tp-1")["review_state"], "needs_review");
+        assert_eq!(point(&value, "tp-1")["review_state"], "approved");
     }
 
     #[test]
