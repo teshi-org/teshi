@@ -74,6 +74,21 @@ Concurrent cargo invocations share one package-cache lock, so several agents
 building at once report `Blocking waiting for file lock on package cache` while
 each waits its turn.
 
+### Running `teshi` CLI commands (prefer the installed binary)
+
+For routine CLI operations such as managing requirements (`teshi requirements ...`),
+inspecting projects, or running tasks unrelated to testing new CLI changes, **call
+the globally installed `teshi` binary directly** instead of `cargo run -p teshi-cli -- ...`.
+
+- Check availability first (`where.exe teshi` on Windows / `which teshi` on Linux) rather
+  than defaulting to `cargo run`.
+- `cargo run` pays unnecessary compile/link checks, contends for the Cargo lock with other
+  concurrent agents, and fails whenever another session has uncommitted work-in-progress
+  edits in the working tree.
+- Reserve `cargo run -p teshi-cli` (or reinstalling via `scripts/install-local.ps1` /
+  `scripts/install-local.sh`) strictly for tasks that need to execute uncommitted changes
+  from the current checkout.
+
 ### CI / validation notes
 
 - Linux CI uses the native workspace commands above and excludes the wasm-only `teshi-web` crate.
