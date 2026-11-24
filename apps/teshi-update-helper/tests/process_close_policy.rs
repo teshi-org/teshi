@@ -292,7 +292,10 @@ fn window_less_blocker_fails_with_pid_path_and_force_help() {
 }
 
 #[test]
+#[cfg(any(windows, target_os = "linux"))]
 fn force_close_only_targets_the_verified_installation() {
+    // Safe force-close uses Windows process handles or Linux pidfd; macOS
+    // returns Unsupported (see processes_unix::terminate).
     let _guard = serialize_helper_tests();
     unsafe { std::env::set_var("TESHI_UPDATE_QUIESCE_SECS", "1") };
     let (temporary, root, old, mut child, executable) = setup(BLOCKER_BODY);
@@ -316,4 +319,25 @@ fn force_close_only_targets_the_verified_installation() {
         "2"
     );
     let _ = other_child.0.kill();
+}
+
+#[test]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn force_close_is_unsupported_without_pidfd() {
+    let _guard = serialize_helper_tests();
+    unsafe { std::env::set_var("TESHI_UPDATE_QUIESCE_SECS", "1") };
+    let (_temporary, root, old, mut child, _executable) = setup(BLOCKER_BODY);
+    let (preparation, new) = prepared(&root, BLOCKER_BODY, 2);
+    let result = preparation
+        .handoff_with_close(&root, &old, &new, None, true)
+        .unwrap();
+    assert_eq!(result.status, UpdateStatus::WaitingForExit);
+    let result = wait_for_result(&root);
+    assert_eq!(result.status, UpdateStatus::Errored, "{}", result.detail);
+    assert!(
+        result.detail.contains("pidfd") || result.detail.contains("Windows and Linux"),
+        "expected unsupported force-close detail, got: {}",
+        result.detail
+    );
+    assert!(child.running(), "macOS must not kill without a safe handle");
 }
