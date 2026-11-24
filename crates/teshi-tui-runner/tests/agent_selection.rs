@@ -119,9 +119,15 @@ fn explicit_acp_selection_survives_new_and_restart() {
     let terminal = launch();
     terminal.expect_text("Explore", true, 15000).unwrap();
     terminal.key("3").unwrap();
-    terminal
-        .expect_text("Welcome to AI Chat!", true, 15000)
-        .unwrap();
+    // Per-project sidebar restore reopens the prior cards instead of Welcome.
+    if terminal
+        .expect_text("Welcome to AI Chat!", true, 3000)
+        .is_err()
+    {
+        terminal
+            .expect_text("fresh conversation", true, 15000)
+            .unwrap();
+    }
     terminal.key("Enter").unwrap();
     send(&terminal, "after restart");
     terminal.write("/exit").unwrap();

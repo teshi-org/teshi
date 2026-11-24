@@ -460,10 +460,21 @@ pub enum Action {
     // ── Agent lifecycle ──────────────────────────────
     AgentNew,
     AgentClose,
+    AgentToggleSettle,
     AgentNext,
     AgentPrev,
     /// Select the visible conversation at this index without creating a turn.
     AgentSelect(usize),
+    /// Focus the AI sidebar global session search bar.
+    AiSidebarStartSearch,
+    /// Clear the AI sidebar search query and return to workspace shelves.
+    AiSidebarClearSearch,
+    /// Collapse or expand the Working shelf in the AI sidebar.
+    AiSidebarToggleWorking,
+    /// Collapse or expand the Settled shelf in the AI sidebar.
+    AiSidebarToggleSettled,
+    /// Open a saved global session (from any project) by its session ID.
+    AiSidebarOpenGlobalSession(String),
     // ── Slash command suggestion popup ───────────────
     AiSlashPrev,
     AiSlashNext,
@@ -1363,6 +1374,9 @@ impl Action {
                 | (KeyCode::Esc, _) => Some(Self::FocusNextColumn),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentNew),
                 (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Self::AgentClose),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::AgentToggleSettle),
+                (KeyCode::Char('/'), KeyModifiers::NONE) => Some(Self::AiSidebarStartSearch),
+                (KeyCode::Char('z'), KeyModifiers::NONE) => Some(Self::AiSidebarToggleSettled),
                 // Raw-mode terminals deliver Ctrl+G as BEL with no modifiers.
                 (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _) => {
                     Some(Self::AiToggleSidebar)
@@ -1434,6 +1448,9 @@ impl Action {
                 }
                 (KeyCode::Char('x'), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
                     Some(Self::AgentClose)
+                }
+                (KeyCode::Char('s'), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AgentToggleSettle)
                 }
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
@@ -2450,6 +2467,13 @@ mod tests {
                 "{key:?}"
             );
         }
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::AgentToggleSettle)
+        );
         assert_eq!(
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),

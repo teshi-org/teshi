@@ -299,10 +299,10 @@ fn native_chat_copy_command_reads_completed_responses() {
         .expect_text("NATIVE_REPLY_01", true, 15000)
         .unwrap();
     // A visible streamed chunk precedes completion; wait for the rendered
-    // completion marker before submitting another turn. A finished turn keeps
-    // the green unread dot until the user touches the conversation, and a
-    // runner-driven turn ends without further input.
-    terminal.expect_text("● native first", true, 15000).unwrap();
+    // unread completion text before submitting another turn. A finished turn
+    // keeps the green Done label until the user touches the conversation, and
+    // a runner-driven turn ends without further input.
+    terminal.expect_text("✓ Done", true, 15000).unwrap();
 
     terminal.write("native second response").unwrap();
     terminal.key("Enter").unwrap();
@@ -323,7 +323,7 @@ fn native_chat_copy_command_reads_completed_responses() {
     terminal
         .expect_text("NATIVE_REPLY_02", true, 15000)
         .unwrap();
-    terminal.expect_text("● native first", true, 15000).unwrap();
+    terminal.expect_text("✓ Done", true, 15000).unwrap();
 
     terminal.write("/copy 2").unwrap();
     terminal.expect_text("/copy 2", true, 5000).unwrap();
@@ -562,9 +562,14 @@ impl ChatCase {
         .unwrap();
         terminal.expect_text("Explore", true, 15000).unwrap();
         terminal.key("3").unwrap();
-        terminal
-            .expect_text("Welcome to AI Chat!", true, 15000)
-            .unwrap();
+        // Blank workspaces show the welcome empty state; a restored sidebar
+        // workspace already reopens the prior conversation.
+        if terminal
+            .expect_text("Welcome to AI Chat!", true, 3000)
+            .is_err()
+        {
+            terminal.expect_text("╭ Chats", true, 15000).unwrap();
+        }
         terminal.key("Enter").unwrap();
         terminal
     }
@@ -1130,6 +1135,8 @@ fn chat_selection_survives_scrolling_out_of_view_and_new_session_clears_it() {
     drop(terminal);
 
     let terminal = case.launch(120, 32);
+    // Workspace restore already reopens the session; /resume must be a no-op
+    // that keeps chat_context (no ACP tear-down / session-panel wait).
     command(&terminal, "/resume");
     terminal.expect_text("SCROLL_LINE_79", true, 5000).unwrap();
     terminal.right_click_text("SCROLL_LINE_79", 5000).unwrap();

@@ -620,7 +620,7 @@ fn selected_row() -> Style {
 }
 
 /// Frame-clock helper shared by the animated glyphs below.
-fn frame_index(period_ms: u128, frames: usize) -> usize {
+pub(super) fn frame_index(period_ms: u128, frames: usize) -> usize {
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -3513,25 +3513,44 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_list_marks_an_unread_answer_in_green() {
+    fn the_chat_list_uses_two_line_cards_and_lifecycle_sections_without_completion_dots() {
         use ratatui::{Terminal, backend::TestBackend};
         let (mut app, _project, _store) = activity_test_app();
         app.active_tab = crate::app::MainTab::Ai;
         app.agents[0].status = AiStatus::Waiting;
+        app.agents[0].task_started =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(3));
         app.agents.push(crate::app::AgentThread::new_with_backend(
             1,
             "Second",
             teshi_agent::backend::AgentBackendKind::Native,
         ));
         app.agents[1].unseen_completion = true;
+        app.agents[1].last_activity_at =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        app.agents.push(crate::app::AgentThread::new_with_backend(
+            2,
+            "Third",
+            teshi_agent::backend::AgentBackendKind::Acp,
+        ));
+        app.agents[2].selected_acp_id = Some("claude-code".into());
+        app.installed_acp_agents
+            .push(crate::acp_agents::InstalledAgent {
+                id: "claude-code".into(),
+                name: "Claude Code".into(),
+                program: std::path::PathBuf::from("claude"),
+                args: Vec::new(),
+                env: Default::default(),
+                env_from: Default::default(),
+            });
+        app.agents[2].settled = true;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
 
-        // The sidebar row hitboxes sit on the same line as the status dot.
-        let row_of = |app: &App, agent: usize| {
+        let rect_of = |app: &App, agent: usize| {
             app.clickable_regions
                 .iter()
                 .find_map(|region| match region {
@@ -3542,16 +3561,246 @@ mod tests {
                     } if *index == agent => Some(*rect),
                     _ => None,
                 })
-                .unwrap_or_else(|| panic!("agent {agent} has no sidebar row"))
         };
         let buffer = terminal.backend().buffer();
-        let unread = row_of(&app, 1);
-        let dot = &buffer[(unread.x + 1, unread.y)];
-        assert_eq!(dot.symbol(), "●");
-        assert_eq!(dot.fg, theme::SUCCESS, "an unread answer is green");
+        let row_text = |y: u16, rect: Rect| -> String {
+            (rect.x..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
 
-        let running = row_of(&app, 0);
-        assert_eq!(buffer[(running.x + 1, running.y)].fg, theme::WARNING);
+        let active = rect_of(&app, 1).expect("active card");
+        let working = rect_of(&app, 0).expect("working card");
+        assert_eq!(active.height, 2);
+        assert_eq!(working.height, 2);
+        assert!(active.y < working.y);
+        // Settled is collapsed by default: its card is hidden behind the `Settled 1 >` drawer.
+        assert!(rect_of(&app, 2).is_none());
+
+        let active_top = row_text(active.y, active);
+        assert!(active_top.contains("Second"));
+        assert!(
+            active_top.contains("Done") || active_top.contains("已完成"),
+            "unread finished conversation shows green completion text: {active_top}"
+        );
+        assert!(
+            (active.x..active.right()).any(|x| buffer[(x, active.y)].fg == theme::SUCCESS),
+            "unread completion text uses green accent: {active_top}"
+        );
+        assert!(!active_top.contains('●'));
+
+        let working_top = row_text(working.y, working);
+        assert!(working_top.contains("3s"));
+        assert!(
+            (working.x..working.right()).any(|x| buffer[(x, working.y)].fg == theme::INFO),
+            "working spinner and elapsed seconds use cyan accent: {working_top}"
+        );
+
+        let sidebar_text: String = (0..30)
+            .map(|y| (0..42).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sidebar_text.contains("Working"), "{sidebar_text}");
+        assert!(sidebar_text.contains("Settled"), "{sidebar_text}");
+        assert!(sidebar_text.contains("1 >"), "{sidebar_text}");
+        assert!(!sidebar_text.contains('●'), "{sidebar_text}");
+        assert!(!sidebar_text.contains('⑂'), "{sidebar_text}");
+
+        // Settled header is pinned at the bottom right above the action strip (row 26 of 30).
+        let settled_header_y = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: crate::keymap::Action::AiSidebarToggleSettled,
+                    ..
+                } => Some(rect.y),
+                _ => None,
+            })
+            .expect("settled header exists");
+        assert_eq!(settled_header_y, 26);
+
+        // Selecting the unread card clears its completion label back to compact age.
+        app.handle_action(crate::keymap::Action::AgentSelect(1))
+            .unwrap();
+        assert!(!app.agents[1].unseen_completion);
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let active_after = rect_of(&app, 1).expect("active card after read");
+        let active_after_top: String = (active_after.x..active_after.right())
+            .map(|x| terminal.backend().buffer()[(x, active_after.y)].symbol())
+            .collect();
+        assert!(active_after_top.contains("2h"), "{active_after_top}");
+
+        // Expanding the Settled drawer reveals the 2-line muted Settled card with ACP name.
+        app.handle_action(crate::keymap::Action::AiSidebarToggleSettled)
+            .unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let settled = rect_of(&app, 2).expect("expanded settled card");
+        assert_eq!(settled.height, 2);
+        let working_after = rect_of(&app, 0).expect("working card");
+        assert!(working_after.y < settled.y);
+        let settled_bottom: String = (settled.x..settled.right())
+            .map(|x| terminal.backend().buffer()[(x, settled.y + 1)].symbol())
+            .collect();
+        assert!(settled_bottom.contains("Claude Code"), "{settled_bottom}");
+    }
+
+    #[test]
+    fn working_shelf_caps_visible_cards_at_four_and_exposes_internal_scrollbar() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0].task_started = Some(std::time::Instant::now());
+        for i in 1..6 {
+            let mut agent = crate::app::AgentThread::new_with_backend(
+                i,
+                &format!("Working {i}"),
+                teshi_agent::backend::AgentBackendKind::Native,
+            );
+            agent.status = AiStatus::Waiting;
+            agent.task_started = Some(std::time::Instant::now());
+            app.agents.push(agent);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let working_rect = app.ai_sidebar_working_rect.expect("working rect");
+        assert_eq!(working_rect.height, 11);
+        assert!(
+            app.vertical_scrollbars
+                .iter()
+                .any(|(target, _)| *target == crate::app::VerticalScrollTarget::AiSidebarWorking),
+            "exceeding 4 working cards registers an internal scrollbar"
+        );
+    }
+
+    #[test]
+    fn long_branch_names_are_middle_ellipsized_in_sidebar_cards() {
+        let out = super::super::middle_ellipsize_to_cols("feat/tui-gui-chrome-mindmap-canvas", 26);
+        assert!(out.contains('…'), "{out}");
+        assert!(out.starts_with("feat/"), "{out}");
+        assert!(out.ends_with("canvas"), "{out}");
+    }
+
+    #[test]
+    fn clicking_either_row_of_two_line_card_selects_and_highlights_both_rows() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.ai_input_focused = false;
+        let now = std::time::SystemTime::now();
+        app.agents[0].last_activity_at = now - std::time::Duration::from_secs(60);
+        app.agents.push(crate::app::AgentThread::new_with_backend(
+            1,
+            "Recent Thread",
+            teshi_agent::backend::AgentBackendKind::Native,
+        ));
+        app.agents[1].last_activity_at = now;
+        app.selected_agent = 1;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let rect_of = |app: &App, agent: usize| {
+            app.clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: crate::keymap::Action::AgentSelect(index),
+                        ..
+                    } if *index == agent => Some(*rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("agent {agent} has no sidebar card"))
+        };
+        let card_0 = rect_of(&app, 0);
+        let card_1 = rect_of(&app, 1);
+        assert_eq!(card_0.height, 2);
+        assert_eq!(card_1.height, 2);
+        // Both rows of the selected card share the unified selection background.
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(card_1.x + 1, card_1.y)].bg, theme::CHAT_CHIP_BG);
+        assert_eq!(buffer[(card_1.x + 1, card_1.y + 1)].bg, theme::CHAT_CHIP_BG);
+
+        // Clicking row 2 of card 0 selects agent 0.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            card_0.x + 3,
+            card_0.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.selected_agent, 0);
+        assert!(app.ai_sidebar_focused);
+
+        // Re-drawing with sidebar focused lifts the selected 2-row card background.
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let card_0 = rect_of(&app, 0);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(card_0.x + 1, card_0.y)].bg, theme::TAB_ACTIVE_BG);
+        assert_eq!(
+            buffer[(card_0.x + 1, card_0.y + 1)].bg,
+            theme::TAB_ACTIVE_BG
+        );
+    }
+
+    #[test]
+    fn native_card_keeps_native_label_when_active_model_label_names_an_acp_agent() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        let member = project.path().join("apps").join("teshi-cli");
+        std::fs::create_dir_all(&member).unwrap();
+        app.agents[0].member_dir = Some(member);
+        app.installed_acp_agents
+            .push(crate::acp_agents::InstalledAgent {
+                id: "codex".into(),
+                name: "Codex".into(),
+                program: std::path::PathBuf::from("codex"),
+                args: Vec::new(),
+                env: Default::default(),
+                env_from: Default::default(),
+            });
+        app.active_model_label = Some("Codex".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let card = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: crate::keymap::Action::AgentSelect(0),
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("agent 0 card");
+        let bottom: String = (card.x..card.right())
+            .map(|x| terminal.backend().buffer()[(x, card.y + 1)].symbol())
+            .collect();
+        assert!(bottom.contains("apps/teshi-cli"), "{bottom}");
+        assert!(bottom.contains("Native"), "{bottom}");
+        assert!(!bottom.contains("Codex"), "{bottom}");
     }
 
     #[test]

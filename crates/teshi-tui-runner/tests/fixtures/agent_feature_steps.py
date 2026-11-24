@@ -575,7 +575,8 @@ class World:
                     self.op("key", "Escape")
                     self.input_focused = False
                 self.op("key", "Escape")
-                self.expect("│ ○ ")
+                # Cancellation returns the card to Active without a Done mark.
+                self.expect("+ New [a]")
             else:
                 self.finish(error=True)
             return

@@ -59,6 +59,9 @@ pub struct Session {
     /// and pauses further automatic refreshes while set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
+    /// Whether the user marked this conversation as Settled (archived in the sidebar).
+    #[serde(default)]
+    pub settled: bool,
 }
 
 fn completed_answers_compat<'de, D>(deserializer: D) -> Result<Vec<usize>, D::Error>
@@ -155,6 +158,7 @@ impl Session {
             generated_title: None,
             agent_title: None,
             custom_title: None,
+            settled: false,
         }
     }
 
@@ -186,6 +190,12 @@ impl Session {
         sessions
     }
 
+    /// Load a session by ID from the storage directory.
+    pub fn load_by_id(id: &str) -> Option<Self> {
+        let path = Self::storage_dir().join(format!("{id}.json"));
+        Self::load_from_file(&path).ok()
+    }
+
     /// Delete a session by its ID.
     pub fn delete(id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::storage_dir().join(format!("{id}.json"));
@@ -196,12 +206,94 @@ impl Session {
     }
 }
 
+/// Per-project persisted AI sidebar workspace state (open cards, active card, drawer flags).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SidebarWorkspaceState {
+    #[serde(default)]
+    pub open_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session_id: Option<String>,
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub settled_expanded: bool,
+}
+
+impl SidebarWorkspaceState {
+    fn project_file(project_root: &std::path::Path) -> PathBuf {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let identity = teshi_engine::ProjectIdentity::new(project_root)
+            .unwrap_or_else(|_| teshi_engine::ProjectIdentity::from_root(project_root));
+        let mut hasher = DefaultHasher::new();
+        identity.root().hash(&mut hasher);
+        Session::storage_dir()
+            .join("workspaces")
+            .join(format!("{:016x}.json", hasher.finish()))
+    }
+
+    /// Load persisted sidebar workspace state for `project_root`, if present and readable.
+    pub fn load_for_project(project_root: &std::path::Path) -> Option<Self> {
+        let json = std::fs::read_to_string(Self::project_file(project_root)).ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    /// Atomically persist sidebar workspace state for `project_root`.
+    pub fn save_for_project(project_root: &std::path::Path, state: &Self) -> anyhow::Result<()> {
+        let path = Self::project_file(project_root);
+        teshi_engine::write_atomic(&path, state)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_temp_session_dir<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var(SESSION_DIR_ENV, value) },
+                None => unsafe { std::env::remove_var(SESSION_DIR_ENV) },
+            }
+        }
+    }
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    let _restore = Restore(std::env::var_os(SESSION_DIR_ENV));
+    unsafe { std::env::set_var(SESSION_DIR_ENV, temp.path()) };
+    f(temp.path())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn sidebar_workspace_state_round_trips_per_project() {
+        super::with_temp_session_dir(|_| {
+            let proj_a = tempdir().unwrap();
+            let proj_b = tempdir().unwrap();
+            assert!(super::SidebarWorkspaceState::load_for_project(proj_a.path()).is_none());
+
+            let state_a = super::SidebarWorkspaceState {
+                open_session_ids: vec!["s1".into(), "s2".into()],
+                active_session_id: Some("s2".into()),
+                sidebar_collapsed: false,
+                settled_expanded: true,
+            };
+            super::SidebarWorkspaceState::save_for_project(proj_a.path(), &state_a).unwrap();
+
+            assert_eq!(
+                super::SidebarWorkspaceState::load_for_project(proj_a.path()),
+                Some(state_a)
+            );
+            assert!(super::SidebarWorkspaceState::load_for_project(proj_b.path()).is_none());
+        });
+    }
 
     #[test]
     fn display_title_prefers_custom_then_agent_then_generated() {
@@ -288,32 +380,16 @@ mod tests {
 
     #[test]
     fn storage_dir_uses_non_empty_environment_override() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os(super::SESSION_DIR_ENV);
-        let temp = tempdir().unwrap();
-        unsafe { std::env::set_var(super::SESSION_DIR_ENV, temp.path()) };
-
-        assert_eq!(super::Session::storage_dir(), temp.path());
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var(super::SESSION_DIR_ENV, value) },
-            None => unsafe { std::env::remove_var(super::SESSION_DIR_ENV) },
-        }
+        super::with_temp_session_dir(|dir| {
+            assert_eq!(super::Session::storage_dir(), dir);
+        });
     }
 
     #[test]
     fn storage_dir_ignores_empty_environment_override() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os(super::SESSION_DIR_ENV);
-        unsafe { std::env::set_var(super::SESSION_DIR_ENV, "   ") };
-
-        assert_ne!(super::Session::storage_dir(), PathBuf::from("   "));
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var(super::SESSION_DIR_ENV, value) },
-            None => unsafe { std::env::remove_var(super::SESSION_DIR_ENV) },
-        }
+        super::with_temp_session_dir(|_| {
+            unsafe { std::env::set_var(super::SESSION_DIR_ENV, "   ") };
+            assert_ne!(super::Session::storage_dir(), PathBuf::from("   "));
+        });
     }
 }

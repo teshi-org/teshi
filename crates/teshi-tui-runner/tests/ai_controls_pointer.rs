@@ -544,46 +544,38 @@ fn footer_and_threads(narrow: bool) {
         assert_eq!(accepted(&trace), before + 2, "expected one turn per thread");
     } else {
         fixture.click(&terminal, "New [a]", "new-first");
-        // The chat sidebar row, the composer's member/title segment and the
-        // conversation's own header line all name the open conversation.
-        assert_eq!(
-            terminal
-                .screen()
-                .unwrap()
-                .lines()
-                .filter(|line| line.contains("Agent 1"))
-                .count(),
-            3
-        );
+        terminal.expect_text("Agent 2", true, 5000).unwrap();
         terminal.write("THREAD_SECOND").unwrap();
         fixture.click(&terminal, "New [a]", "new-second");
-        terminal.expect_text("Agent 2", true, 5000).unwrap();
-        let screen = terminal.screen().unwrap();
-        let rows = screen
-            .lines()
-            .enumerate()
-            .filter_map(|(row, line)| {
-                line.find("Agent 1")
-                    .map(|column| (row + 1, line[..column].chars().count() + 1))
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            rows.len() >= 2,
-            "missing two distinct thread rows: {screen}"
-        );
-        for (index, input) in ["THREAD_ORIGINAL", "THREAD_SECOND"].into_iter().enumerate() {
-            let (row, column) = rows[index];
+        terminal.expect_text("Agent 3", true, 5000).unwrap();
+        // Click the two-line sidebar cards by title. Ignore the chat header on
+        // the right pane, which also repeats the active agent name.
+        for (index, (label, input)) in
+            [("Agent 1", "THREAD_ORIGINAL"), ("Agent 2", "THREAD_SECOND")]
+                .into_iter()
+                .enumerate()
+        {
+            let screen = terminal.screen().unwrap();
+            let (row, column) = screen
+                .lines()
+                .enumerate()
+                .find_map(|(row, line)| {
+                    let byte = line.find(label)?;
+                    let column = line[..byte].chars().count() + 1;
+                    (column < 42).then_some((row + 1, column))
+                })
+                .unwrap_or_else(|| panic!("missing sidebar card {label}: {screen}"));
             terminal
                 .write(&format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"))
                 .unwrap();
             terminal.expect_text(input, true, 5000).unwrap();
             fixture.capture(&terminal, &format!("thread-row-{index}-input"));
         }
-        fixture.click(&terminal, "Agent 2", "select-third");
+        fixture.click(&terminal, "Agent 3", "select-third");
         fixture.click(&terminal, "Close [x]", "close-third");
         terminal.expect_text("Confirm close", true, 5000).unwrap();
         fixture.click(&terminal, "Close [Enter/y]", "confirm-close-third");
-        terminal.expect_text("Agent 2", false, 5000).unwrap();
+        terminal.expect_text("Agent 3", false, 5000).unwrap();
     }
     fixture.blur_composer(&terminal, "blur");
     fixture.click_model_chip(&terminal, "model");
@@ -605,9 +597,18 @@ fn footer_and_threads(narrow: bool) {
     terminal.expect_exit(0, 10000).unwrap();
     assert_eq!(fs::read_to_string(&fixture.source).unwrap(), ORIGINAL);
     let sessions = fixture.root.path().join("TESHI_SESSION_DIR");
+    // Sidebar workspace persistence also writes a `workspaces/` directory; only
+    // read session JSON files.
     let stored = fs::read_dir(sessions)
         .unwrap()
-        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && entry.file_type().ok()?.is_file())
+            .then(|| fs::read_to_string(path).ok())
+            .flatten()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(stored.contains("THREAD_SECOND") && stored.contains("POINTER_REPLY_COMPLETE"));

@@ -566,6 +566,9 @@ Visualizes shared step prefixes as a collapsible trie, with a live scenario prev
 | `Ctrl+G` | 折叠 / 展开左侧会话列表 |
 | `[` / `]` | 切换上一个 / 下一个会话 |
 | `a` / `x` | 新建会话 / 关闭当前会话 |
+| `s` | 收尾 / 恢复当前会话 |
+| `z` | 展开 / 折叠「已收尾」分组 |
+| `/` | 搜索全局会话（在会话列表聚焦时） |
 | `m` | 打开模型配置面板 |
 
 ## 输入模式 (INPUT)
@@ -600,6 +603,9 @@ Multi-conversation AI workspace supporting Native models and ACP agents, collaps
 | `Ctrl+G` | Show / hide Chats sidebar |
 | `[` / `]` | Previous / next conversation |
 | `a` / `x` | New conversation / close current |
+| `s` | Settle / reopen conversation |
+| `z` | Expand / collapse Settled shelf |
+| `/` | Search global sessions (in Chats sidebar) |
 | `m` | Open Model Profiles |
 
 ## Input Mode

@@ -168,12 +168,16 @@ fn acp_reply_color_and_event_order_in_real_terminal() {
     let terminal = Terminal::launch(recovery_launch).unwrap();
     terminal.expect_text("Explore", true, 15000).unwrap();
     terminal.key("3").unwrap();
-    terminal
-        .expect_text("Welcome to AI Chat!", true, 15000)
-        .unwrap();
-    terminal.key("Enter").unwrap();
-    terminal.write("/resume").unwrap();
-    terminal.key("Enter").unwrap();
+    // Sidebar workspace restore reopens the unfinished conversation; fall back
+    // to /resume only when the blank welcome state is still showing.
+    if terminal
+        .expect_text("Welcome to AI Chat!", true, 3000)
+        .is_ok()
+    {
+        terminal.key("Enter").unwrap();
+        terminal.write("/resume").unwrap();
+        terminal.key("Enter").unwrap();
+    }
     terminal
         .expect_text("I will inspect the project", true, 15000)
         .unwrap();
@@ -451,8 +455,16 @@ fn interrupted_acp_task_can_continue_in_real_terminal() {
         terminal.key("ctrl+q").unwrap();
         terminal.expect_exit(0, 10000).unwrap();
         let sessions = std::fs::read_dir(root.path().join("sessions")).unwrap();
+        // Skip the `workspaces/` directory created by sidebar persistence.
         let transcript = sessions
-            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                (path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                    && entry.file_type().ok()?.is_file())
+                .then(|| std::fs::read_to_string(path).ok())
+                .flatten()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(transcript.contains("agent returned refusal"));

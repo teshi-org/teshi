@@ -556,6 +556,15 @@ fn en(key: &str) -> Option<&'static str> {
         "chat.chats.title" => " Chats ",
         "chat.new" => " New [a]",
         "chat.close" => " Close [x]",
+        "chat.settle" => " Settle",
+        "chat.settle.key" => "✓ Settle [s]",
+        "chat.reopen" => " Reopen",
+        "chat.reopen.key" => "↺ Reopen [s]",
+        "chat.sidebar.search" => "Search…",
+        "chat.sidebar.working" => "Working",
+        "chat.sidebar.settled" => "Settled",
+        "chat.sidebar.done" => "✓ Done",
+        "chat.sidebar.no_matches" => "No matching sessions",
         "chat.send" => " Send",
         "chat.send.key" => " Send [Enter]",
         "chat.focus" => " Focus",
@@ -568,7 +577,12 @@ fn en(key: &str) -> Option<&'static str> {
         "chat.chats_chip.key" => " Chats [Ctrl+g]",
         "mode.chats" => "[CHATS] ",
         "chat.hint.chats_normal" => "Esc then j/k scroll",
-        "chat.hint.chats_browse" => "j/k chat · Enter open · l back",
+        "chat.hint.chats_browse" => {
+            "j/k chat · Enter open · s settle · / search · z settled · l back"
+        }
+        "chat.hint.chats_search" => {
+            "Type to search all sessions · ↑↓ select · Enter open · Esc clear"
+        }
         "chat.hint.normal_sidebar" => {
             "h chats · j/k/l/Arrows scroll · g/G ends · Ctrl+D/U half · [/] chat"
         }
@@ -1038,6 +1052,12 @@ fn en(key: &str) -> Option<&'static str> {
             "Change Summary — {arg0} change(s). ↑↓ navigate, Enter jump, Esc close."
         }
         "status.closed" => "Closed {name}",
+        "status.agent_settled" => "Settled '{name}'",
+        "status.agent_reopened" => "Reopened '{name}'",
+        "status.cannot_settle_working" => "Wait for the active run to finish before settling",
+        "status.cannot_open_session_project" => {
+            "Cannot open session project '{path}': directory not found"
+        }
         "status.context_compacted_message_s_summary_token_window" => {
             "Context compacted: {removed_count} message(s) → summary ({arg0} token window)"
         }
@@ -1681,6 +1701,15 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "chat.chats.title" => " 会话 ",
         "chat.new" => " 新建 [a]",
         "chat.close" => " 关闭 [x]",
+        "chat.settle" => " 收尾",
+        "chat.settle.key" => "✓ 收尾 [s]",
+        "chat.reopen" => " 恢复",
+        "chat.reopen.key" => "↺ 恢复 [s]",
+        "chat.sidebar.search" => "搜索…",
+        "chat.sidebar.working" => "运行中",
+        "chat.sidebar.settled" => "已收尾",
+        "chat.sidebar.done" => "✓ 已完成",
+        "chat.sidebar.no_matches" => "无匹配会话",
         "chat.send" => " 发送",
         "chat.send.key" => " 发送 [Enter]",
         "chat.focus" => " 聚焦",
@@ -1693,7 +1722,8 @@ fn zh_cn(key: &str) -> Option<&'static str> {
         "chat.chats_chip.key" => " 会话 [Ctrl+g]",
         "mode.chats" => "[会话] ",
         "chat.hint.chats_normal" => "Esc 后 j/k 滚动",
-        "chat.hint.chats_browse" => "j/k 会话 · Enter 打开 · l 返回",
+        "chat.hint.chats_browse" => "j/k 会话 · Enter 打开 · s 收尾 · / 搜索 · z 已收尾 · l 返回",
+        "chat.hint.chats_search" => "输入搜索全局会话 · ↑↓ 选择 · Enter 打开 · Esc 清除",
         "chat.hint.normal_sidebar" => {
             "h 会话 · j/k/l/方向键 滚动 · g/G 到首尾 · Ctrl+D/U 半页 · [/] 会话"
         }
@@ -2107,6 +2137,10 @@ fn zh_cn(key: &str) -> Option<&'static str> {
             "变更摘要 — {arg0} 项变更。↑↓ 导航，Enter 跳转，Esc 关闭。"
         }
         "status.closed" => "已关闭 {name}",
+        "status.agent_settled" => "已收尾会话“{name}”",
+        "status.agent_reopened" => "已恢复会话“{name}”",
+        "status.cannot_settle_working" => "请等待当前任务运行结束后再收尾",
+        "status.cannot_open_session_project" => "无法打开会话所属项目“{path}”：目录不存在",
         "status.context_compacted_message_s_summary_token_window" => {
             "上下文已压缩：{removed_count} 条消息 → 摘要（{arg0} token 窗口）"
         }

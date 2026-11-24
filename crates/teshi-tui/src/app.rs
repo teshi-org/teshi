@@ -232,6 +232,9 @@ pub(crate) enum VerticalScrollTarget {
     MindMapPreview,
     TestPointsPane(usize),
     HelpGuideDoc,
+    AiSidebarActive,
+    AiSidebarWorking,
+    AiSidebarSettled,
 }
 
 /// Identifies a clickable item for double-click detection across tabs and modals.
@@ -338,6 +341,10 @@ pub struct AgentThread {
     /// The single in-flight automatic title completion, if any. New turns and
     /// manual renames cancel it so a stale result can never overwrite a label.
     pub(crate) title_job: Option<crate::chat_title::TitleJob>,
+    /// Whether the user marked this conversation as Settled (archived in the sidebar).
+    pub settled: bool,
+    /// Last active wall-clock timestamp used for Active/Settled ordering and relative age.
+    pub last_activity_at: SystemTime,
     saved_session: Option<crate::session::Session>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
@@ -612,10 +619,44 @@ impl AgentThread {
             agent_title: None,
             custom_title: None,
             title_job: None,
+            settled: false,
+            last_activity_at: SystemTime::now(),
             saved_session: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
         }
+    }
+
+    /// Reconstruct an `AgentThread` from a persisted `Session` without spawning its backend.
+    pub(crate) fn from_saved_session(
+        id: usize,
+        session: crate::session::Session,
+        selection_root: Option<PathBuf>,
+    ) -> Self {
+        let kind = session
+            .backend_kind
+            .unwrap_or(teshi_agent::backend::AgentBackendKind::Native);
+        let mut agent = Self::new_with_backend(id, &format!("Agent {}", id + 1), kind);
+        agent.selection_root = selection_root;
+        *agent.messages_mut() = session.messages.clone();
+        agent.selected_acp_id = session.acp_agent_id.clone();
+        // An archived worktree no longer exists; resuming there would fail to
+        // spawn the agent, so fall back to the project root.
+        agent.member_dir = session.member_dir.clone().filter(|dir| dir.is_dir());
+        agent.backend_selected = session.backend_kind.is_some();
+        agent.chat = crate::chat_state::ChatState {
+            queue: session.pending_messages.clone(),
+            ..Default::default()
+        };
+        agent.completed_answers = session.completed_answers.iter().copied().collect();
+        agent.generated_title = session.generated_title.clone();
+        agent.agent_title = session.agent_title.clone();
+        agent.custom_title = session.custom_title.clone();
+        agent.settled = session.settled;
+        agent.last_activity_at = parse_session_timestamp(&session.updated_at);
+        agent.refresh_display_title();
+        agent.saved_session = Some(session);
+        agent
     }
 }
 
@@ -683,6 +724,7 @@ impl AgentThread {
             &self.generated_title,
             &self.agent_title,
             &self.custom_title,
+            &self.settled,
         ))?;
         if snapshot == self.last_session_snapshot {
             return Ok(());
@@ -708,6 +750,7 @@ impl AgentThread {
         session.generated_title = self.generated_title.clone();
         session.agent_title = self.agent_title.clone();
         session.custom_title = self.custom_title.clone();
+        session.settled = self.settled;
         session.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -729,6 +772,16 @@ impl AgentThread {
 
     pub fn backend_kind(&self) -> teshi_agent::backend::AgentBackendKind {
         self.backend.kind()
+    }
+
+    /// Whether this conversation is currently executing or waiting on a permission prompt.
+    pub(crate) fn is_working(&self) -> bool {
+        matches!(self.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
+    }
+
+    /// Record recent activity for Active/Settled ordering and relative timestamps.
+    pub(crate) fn touch_activity(&mut self) {
+        self.last_activity_at = SystemTime::now();
     }
     /// Whether the last ACP turn ended before normal completion.
     pub fn task_interrupted(&self) -> bool {
@@ -1579,6 +1632,79 @@ fn branch_dir_name(branch: &str) -> String {
     }
 }
 
+/// Reads the checked-out branch from `.git/HEAD` (including linked worktrees) without spawning git.
+fn git_branch_from_head(dir: &Path) -> Option<String> {
+    for ancestor in dir.ancestors() {
+        let dot_git = ancestor.join(".git");
+        let head_path = if dot_git.is_dir() {
+            dot_git.join("HEAD")
+        } else if dot_git.is_file() {
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let raw = content
+                .lines()
+                .find_map(|line| line.strip_prefix("gitdir:"))?
+                .trim();
+            let gitdir = Path::new(raw);
+            let resolved = if gitdir.is_absolute() {
+                gitdir.to_path_buf()
+            } else {
+                ancestor.join(gitdir)
+            };
+            resolved.join("HEAD")
+        } else {
+            continue;
+        };
+        let head = std::fs::read_to_string(head_path).ok()?;
+        let branch = head.trim().strip_prefix("ref: refs/heads/")?.trim();
+        return (!branch.is_empty()).then(|| branch.to_string());
+    }
+    None
+}
+
+fn parse_session_timestamp(updated_at: &str) -> SystemTime {
+    updated_at
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|millis| std::time::UNIX_EPOCH + Duration::from_millis(millis))
+        .unwrap_or_else(SystemTime::now)
+}
+
+/// Agent indices grouped into lifecycle partitions for the AI sidebar.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct AgentSidebarSections {
+    pub active: Vec<usize>,
+    pub working: Vec<usize>,
+    pub settled: Vec<usize>,
+}
+
+/// Unified hit item returned by global sidebar session search.
+#[derive(Clone)]
+pub(crate) enum SidebarSearchHit {
+    OpenThread {
+        agent_idx: usize,
+        activity_at: SystemTime,
+    },
+    GlobalSession {
+        session: Box<crate::session::Session>,
+        activity_at: SystemTime,
+    },
+}
+
+impl SidebarSearchHit {
+    pub(crate) fn activity_at(&self) -> SystemTime {
+        match self {
+            Self::OpenThread { activity_at, .. } | Self::GlobalSession { activity_at, .. } => {
+                *activity_at
+            }
+        }
+    }
+}
+
+fn default_persist_sidebar_state() -> bool {
+    !cfg!(test) || std::env::var_os("TESHI_SESSION_DIR").is_some_and(|val| !val.is_empty())
+}
+
 /// Application state shared by the terminal views and input handlers.
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
@@ -1589,6 +1715,8 @@ pub struct App {
         WorkspaceContextKey,
         Option<teshi_engine::workspace::WorkspaceContext>,
     )>,
+    /// Short-lived cache of checked-out git branch names keyed by directory.
+    git_branch_cache: HashMap<PathBuf, (Instant, Option<String>)>,
     /// Optional Git status/diff projection aligned with `project.features`.
     pub git_status: teshi_core::git::FeatureGitStatusModel,
     /// Latest background Git projection result, if a refresh is in flight.
@@ -1819,6 +1947,37 @@ pub struct App {
     pub ai_sidebar_focused: bool,
     /// Whether the last frame actually drew the sidebar (width permitting).
     pub ai_sidebar_visible: bool,
+    /// First visible row offset inside the AI sidebar Active / search list.
+    pub ai_sidebar_scroll: usize,
+    /// First visible row offset inside the bottom-docked Working list.
+    pub ai_sidebar_working_scroll: usize,
+    /// First visible row offset inside the bottom-docked Settled list.
+    pub ai_sidebar_settled_scroll: usize,
+    /// Screen rectangle of the AI sidebar Active / search list from the last render frame.
+    pub ai_sidebar_rect: Option<ratatui::layout::Rect>,
+    /// Screen rectangle of the bottom-docked Working card list from the last render frame.
+    pub ai_sidebar_working_rect: Option<ratatui::layout::Rect>,
+    /// Screen rectangle of the bottom-docked Settled card list from the last render frame.
+    pub ai_sidebar_settled_rect: Option<ratatui::layout::Rect>,
+    /// Keep the selected conversation card scrolled into view until the user wheels the list.
+    pub(crate) ai_sidebar_follow_selection: bool,
+    /// Whether the Working shelf is expanded (default true).
+    pub ai_sidebar_working_expanded: bool,
+    /// Whether the Settled shelf is expanded (default false, collapsed at bottom).
+    pub ai_sidebar_settled_expanded: bool,
+    /// Whether the AI sidebar search input currently captures typing.
+    pub ai_sidebar_searching: bool,
+    /// Current query in the AI sidebar global session search bar.
+    pub ai_sidebar_query: String,
+    /// Selected index inside the sidebar search result list.
+    pub ai_sidebar_search_selection: usize,
+    /// Cached global sessions for sidebar search across all projects.
+    pub(crate) ai_sidebar_global_sessions: Vec<crate::session::Session>,
+    /// Session awaiting restoration after switching into its owning project.
+    pub(crate) pending_global_session_open: Option<crate::session::Session>,
+    /// Whether sidebar workspace state (open cards / collapsed flags) persists to disk.
+    pub(crate) persist_sidebar_state: bool,
+    last_sidebar_workspace_snapshot: String,
     pub quit_pending_confirm: bool,
     /// Which button is focused in quit confirm panel: 0 = Yes, 1 = No.
     pub quit_panel_selection: usize,
@@ -2587,6 +2746,8 @@ impl App {
             );
         }
         self.restore_generation_session_from_disk();
+        self.restore_sidebar_workspace();
+        self.apply_pending_global_session_open();
         self.show_selection_warning();
         Ok(())
     }
@@ -3191,6 +3352,7 @@ impl App {
         };
         let mut app = Self {
             workspace_context: None,
+            git_branch_cache: HashMap::new(),
             project,
             git_status,
             git_status_rx: None,
@@ -3324,6 +3486,22 @@ impl App {
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
+            ai_sidebar_scroll: 0,
+            ai_sidebar_working_scroll: 0,
+            ai_sidebar_settled_scroll: 0,
+            ai_sidebar_rect: None,
+            ai_sidebar_working_rect: None,
+            ai_sidebar_settled_rect: None,
+            ai_sidebar_follow_selection: true,
+            ai_sidebar_working_expanded: true,
+            ai_sidebar_settled_expanded: false,
+            ai_sidebar_searching: false,
+            ai_sidebar_query: String::new(),
+            ai_sidebar_search_selection: 0,
+            ai_sidebar_global_sessions: Vec::new(),
+            pending_global_session_open: None,
+            persist_sidebar_state: default_persist_sidebar_state(),
+            last_sidebar_workspace_snapshot: String::new(),
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
@@ -3362,7 +3540,14 @@ impl App {
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            installed_acp_agents: Vec::new(),
+            installed_acp_agents: if cfg!(test) {
+                Vec::new()
+            } else {
+                crate::acp_agents::store_dir()
+                    .ok()
+                    .and_then(|root| crate::acp_agents::load(&root).ok())
+                    .unwrap_or_default()
+            },
             acp_registry_agents: Vec::new(),
             acp_registry_rx: None,
             acp_install_rx: None,
@@ -3384,6 +3569,7 @@ impl App {
         };
         app.refresh_git_status();
         app.restore_generation_session_from_disk();
+        app.restore_sidebar_workspace();
         app.mindmap_index.apply_highlight_categories("root");
         let n = app.buffers.len();
         app.status = crate::i18n::fill(
@@ -3429,6 +3615,7 @@ impl App {
             .context("resolve project identity")?;
         let mut app = Self {
             workspace_context: None,
+            git_branch_cache: HashMap::new(),
             project,
             git_status,
             git_status_rx: None,
@@ -3481,6 +3668,22 @@ impl App {
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
+            ai_sidebar_scroll: 0,
+            ai_sidebar_working_scroll: 0,
+            ai_sidebar_settled_scroll: 0,
+            ai_sidebar_rect: None,
+            ai_sidebar_working_rect: None,
+            ai_sidebar_settled_rect: None,
+            ai_sidebar_follow_selection: true,
+            ai_sidebar_working_expanded: true,
+            ai_sidebar_settled_expanded: false,
+            ai_sidebar_searching: false,
+            ai_sidebar_query: String::new(),
+            ai_sidebar_search_selection: 0,
+            ai_sidebar_global_sessions: Vec::new(),
+            pending_global_session_open: None,
+            persist_sidebar_state: default_persist_sidebar_state(),
+            last_sidebar_workspace_snapshot: String::new(),
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -3602,7 +3805,14 @@ impl App {
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            installed_acp_agents: Vec::new(),
+            installed_acp_agents: if cfg!(test) {
+                Vec::new()
+            } else {
+                crate::acp_agents::store_dir()
+                    .ok()
+                    .and_then(|root| crate::acp_agents::load(&root).ok())
+                    .unwrap_or_default()
+            },
             acp_registry_agents: Vec::new(),
             acp_registry_rx: None,
             acp_install_rx: None,
@@ -3624,6 +3834,7 @@ impl App {
         };
         app.refresh_git_status();
         app.restore_generation_session_from_disk();
+        app.restore_sidebar_workspace();
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.mindmap_index.apply_highlight_categories("root");
@@ -3654,6 +3865,7 @@ impl App {
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
         let mut app = Self {
             workspace_context: None,
+            git_branch_cache: HashMap::new(),
             project,
             git_status: teshi_core::git::FeatureGitStatusModel::default(),
             git_status_rx: None,
@@ -3706,6 +3918,22 @@ impl App {
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
+            ai_sidebar_scroll: 0,
+            ai_sidebar_working_scroll: 0,
+            ai_sidebar_settled_scroll: 0,
+            ai_sidebar_rect: None,
+            ai_sidebar_working_rect: None,
+            ai_sidebar_settled_rect: None,
+            ai_sidebar_follow_selection: true,
+            ai_sidebar_working_expanded: true,
+            ai_sidebar_settled_expanded: false,
+            ai_sidebar_searching: false,
+            ai_sidebar_query: String::new(),
+            ai_sidebar_search_selection: 0,
+            ai_sidebar_global_sessions: Vec::new(),
+            pending_global_session_open: None,
+            persist_sidebar_state: default_persist_sidebar_state(),
+            last_sidebar_workspace_snapshot: String::new(),
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -4310,6 +4538,7 @@ impl App {
             self.cancel_agent_turn();
             let agent = self.agent_mut();
             agent.status = AiStatus::Idle;
+            agent.touch_activity();
             agent.partial_response_mut().clear();
             agent.tool_status = None;
             agent.messages_mut().push(AiChatMessage {
@@ -4515,6 +4744,7 @@ impl App {
     fn focus_ai_input(&mut self) {
         self.ai_input_focused = true;
         self.ai_sidebar_focused = false;
+        self.ai_sidebar_searching = false;
         self.agent_mut().backend_selected = true;
         // Focusing prepares a connection, not a turn. It must never reset an
         // active response or send an empty prompt, including on repeated clicks.
@@ -4830,6 +5060,610 @@ impl App {
         self.workspace_context
             .as_ref()
             .and_then(|(_, context)| context.as_ref())
+    }
+
+    /// Partition conversation indices into Active, Working, and Settled shelves.
+    pub(crate) fn agent_sidebar_sections(&self) -> AgentSidebarSections {
+        let mut sections = AgentSidebarSections::default();
+        for (index, agent) in self.agents.iter().enumerate() {
+            if agent.is_working() {
+                sections.working.push(index);
+            } else if agent.settled {
+                sections.settled.push(index);
+            } else {
+                sections.active.push(index);
+            }
+        }
+        sections.active.sort_by(|&a, &b| {
+            self.agents[b]
+                .last_activity_at
+                .cmp(&self.agents[a].last_activity_at)
+                .then_with(|| self.agents[b].id.cmp(&self.agents[a].id))
+        });
+        sections.working.sort_by(|&a, &b| {
+            self.agents[a]
+                .task_started
+                .cmp(&self.agents[b].task_started)
+                .then_with(|| self.agents[a].id.cmp(&self.agents[b].id))
+        });
+        sections.settled.sort_by(|&a, &b| {
+            self.agents[b]
+                .last_activity_at
+                .cmp(&self.agents[a].last_activity_at)
+                .then_with(|| self.agents[b].id.cmp(&self.agents[a].id))
+        });
+        sections
+    }
+
+    /// Visual display order of agent indices in the AI sidebar (`Active -> Working -> Settled`).
+    pub(crate) fn agent_sidebar_visual_order(&self) -> Vec<usize> {
+        let sections = self.agent_sidebar_sections();
+        let mut order = Vec::with_capacity(self.agents.len());
+        order.extend(sections.active);
+        order.extend(sections.working);
+        order.extend(sections.settled);
+        order
+    }
+
+    /// Currently expanded/visible card indices in display order (`Active -> Working? -> Settled?`).
+    pub(crate) fn agent_sidebar_visible_order(&self) -> Vec<usize> {
+        let sections = self.agent_sidebar_sections();
+        let mut order = Vec::with_capacity(self.agents.len());
+        order.extend(sections.active);
+        if self.ai_sidebar_working_expanded {
+            order.extend(sections.working);
+        }
+        if self.ai_sidebar_settled_expanded {
+            order.extend(sections.settled);
+        }
+        order
+    }
+
+    /// Enter global sidebar session search and refresh the session snapshot once.
+    pub(crate) fn begin_ai_sidebar_search(&mut self) {
+        self.ai_sidebar_focused = true;
+        self.ai_input_focused = false;
+        self.ai_sidebar_searching = true;
+        self.ai_sidebar_search_selection = 0;
+        self.ai_sidebar_scroll = 0;
+        self.ai_sidebar_global_sessions = crate::session::Session::load_all();
+    }
+
+    /// Exit global sidebar search and restore the workspace card shelves.
+    pub(crate) fn clear_ai_sidebar_search(&mut self) {
+        self.ai_sidebar_searching = false;
+        self.ai_sidebar_query.clear();
+        self.ai_sidebar_search_selection = 0;
+        self.ai_sidebar_follow_selection = true;
+    }
+
+    fn session_matches_tokens(
+        tokens: &[String],
+        title: &str,
+        project_hint: &str,
+        location_hint: &str,
+        backend_hint: &str,
+        messages: &[AiChatMessage],
+    ) -> bool {
+        if tokens.is_empty() {
+            return true;
+        }
+        tokens.iter().all(|token| {
+            title.to_lowercase().contains(token)
+                || project_hint.to_lowercase().contains(token)
+                || location_hint.to_lowercase().contains(token)
+                || backend_hint.to_lowercase().contains(token)
+                || messages
+                    .iter()
+                    .any(|msg| msg.content.to_lowercase().contains(token))
+        })
+    }
+
+    /// Matching conversations across open workspace threads and all saved global sessions.
+    pub(crate) fn ai_sidebar_search_matches(&self) -> Vec<SidebarSearchHit> {
+        let tokens: Vec<String> = self
+            .ai_sidebar_query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        let project_name = self.project_switch.active.identity.display_name();
+        let mut open_ids: HashSet<String> = HashSet::new();
+        let mut hits: Vec<SidebarSearchHit> = Vec::new();
+
+        for (agent_idx, agent) in self.agents.iter().enumerate() {
+            if let Some(id) = agent.session_id() {
+                open_ids.insert(id.to_string());
+            }
+            let location = agent
+                .member_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let backend = self
+                .agent_sidebar_backend_label(agent_idx)
+                .unwrap_or_default();
+            if Self::session_matches_tokens(
+                &tokens,
+                &agent.title,
+                &project_name,
+                &location,
+                &backend,
+                agent.messages(),
+            ) {
+                hits.push(SidebarSearchHit::OpenThread {
+                    agent_idx,
+                    activity_at: agent.last_activity_at,
+                });
+            }
+        }
+
+        for session in &self.ai_sidebar_global_sessions {
+            if open_ids.contains(&session.id) {
+                continue;
+            }
+            let title = session.display_title();
+            let project_hint = session
+                .project_root
+                .as_ref()
+                .map(|root| root.display().to_string())
+                .unwrap_or_default();
+            let location = session
+                .member_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let backend = self.global_session_backend_label(session);
+            if Self::session_matches_tokens(
+                &tokens,
+                &title,
+                &project_hint,
+                &location,
+                &backend,
+                &session.messages,
+            ) {
+                hits.push(SidebarSearchHit::GlobalSession {
+                    activity_at: parse_session_timestamp(&session.updated_at),
+                    session: Box::new(session.clone()),
+                });
+            }
+        }
+
+        hits.sort_by_key(|b| std::cmp::Reverse(b.activity_at()));
+        hits
+    }
+
+    pub(crate) fn global_session_backend_label(&self, session: &crate::session::Session) -> String {
+        if session.backend_kind == Some(teshi_agent::backend::AgentBackendKind::Acp)
+            || session.acp_agent_id.is_some()
+        {
+            session
+                .acp_agent_id
+                .as_ref()
+                .map(|id| {
+                    self.installed_acp_agents
+                        .iter()
+                        .find(|installed| &installed.id == id)
+                        .map(|installed| installed.name.clone())
+                        .unwrap_or_else(|| id.clone())
+                })
+                .unwrap_or_else(|| "ACP".to_string())
+        } else {
+            session
+                .model_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| {
+                    !label.is_empty()
+                        && !self
+                            .installed_acp_agents
+                            .iter()
+                            .any(|installed| installed.name == *label)
+                })
+                .unwrap_or("Native")
+                .to_string()
+        }
+    }
+
+    /// Handle inline typing and navigation while the AI sidebar global search bar is active.
+    pub(crate) fn handle_ai_sidebar_search_key(&mut self, event: KeyEvent) -> bool {
+        if self.active_tab != MainTab::Ai
+            || !self.ai_sidebar_focused
+            || !self.ai_sidebar_searching
+            || self.ai_input_focused
+            || self.pending_delete.is_some()
+            || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
+            || self.command_line.is_some()
+            || self.auth_panel_active
+            || self.model_panel_active
+            || self.session_panel_active
+            || self.approval_panel_active
+            || self.settings_panel_active
+            || self.help_guide.active
+            || self.agent_profile_panel_active
+            || self.has_external_change_prompt()
+            || self.has_agent_change_prompt()
+            || self.has_acp_permission_prompt()
+            || !matches!(
+                self.project_switch.overlay,
+                crate::project_context::SwitchOverlay::None
+            )
+        {
+            return false;
+        }
+        if event.modifiers.contains(KeyModifiers::CONTROL) {
+            match event.code {
+                KeyCode::Char('p') => {
+                    self.ai_sidebar_search_selection =
+                        self.ai_sidebar_search_selection.saturating_sub(1);
+                    return true;
+                }
+                KeyCode::Char('n') => {
+                    let count = self.ai_sidebar_search_matches().len();
+                    if count > 0 && self.ai_sidebar_search_selection + 1 < count {
+                        self.ai_sidebar_search_selection += 1;
+                    }
+                    return true;
+                }
+                KeyCode::Char('u') => {
+                    self.ai_sidebar_query.clear();
+                    self.ai_sidebar_search_selection = 0;
+                    return true;
+                }
+                _ => {
+                    // Let global Ctrl chords (Ctrl+G, Ctrl+W, Ctrl+Q) fall through.
+                    self.ai_sidebar_searching = false;
+                    return false;
+                }
+            }
+        }
+        match event.code {
+            KeyCode::Esc => {
+                self.clear_ai_sidebar_search();
+                true
+            }
+            KeyCode::Backspace => {
+                self.ai_sidebar_query.pop();
+                self.ai_sidebar_search_selection = 0;
+                true
+            }
+            KeyCode::Up => {
+                self.ai_sidebar_search_selection =
+                    self.ai_sidebar_search_selection.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                let count = self.ai_sidebar_search_matches().len();
+                if count > 0 && self.ai_sidebar_search_selection + 1 < count {
+                    self.ai_sidebar_search_selection += 1;
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let matches = self.ai_sidebar_search_matches();
+                if let Some(hit) = matches.get(self.ai_sidebar_search_selection).cloned() {
+                    match hit {
+                        SidebarSearchHit::OpenThread { agent_idx, .. } => {
+                            self.clear_ai_sidebar_search();
+                            let _ = self.handle_action(Action::AgentSelect(agent_idx));
+                        }
+                        SidebarSearchHit::GlobalSession { session, .. } => {
+                            let _ = self.open_global_session(&session.id);
+                        }
+                    }
+                } else if self.ai_sidebar_query.trim().is_empty() {
+                    self.ai_sidebar_searching = false;
+                }
+                true
+            }
+            KeyCode::Char(ch)
+                if matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                self.ai_sidebar_query.push(ch);
+                self.ai_sidebar_search_selection = 0;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn current_sidebar_workspace_state(&self) -> crate::session::SidebarWorkspaceState {
+        let mut seen = HashSet::new();
+        let mut open_session_ids = Vec::new();
+        for &idx in &self.agent_sidebar_visual_order() {
+            if let Some(id) = self.agents.get(idx).and_then(AgentThread::session_id)
+                && seen.insert(id.to_string())
+            {
+                open_session_ids.push(id.to_string());
+            }
+        }
+        crate::session::SidebarWorkspaceState {
+            open_session_ids,
+            active_session_id: self.agent().session_id().map(str::to_owned),
+            sidebar_collapsed: self.ai_sidebar_collapsed,
+            settled_expanded: self.ai_sidebar_settled_expanded,
+        }
+    }
+
+    /// Persist the active project's open sidebar card list and drawer flags.
+    pub(crate) fn save_sidebar_workspace(&mut self, force: bool) {
+        if !self.persist_sidebar_state {
+            return;
+        }
+        let state = self.current_sidebar_workspace_state();
+        let Ok(snapshot) = serde_json::to_string(&state) else {
+            return;
+        };
+        if !force && snapshot == self.last_sidebar_workspace_snapshot {
+            return;
+        }
+        if crate::session::SidebarWorkspaceState::save_for_project(&self.project.root_dir, &state)
+            .is_ok()
+        {
+            self.last_sidebar_workspace_snapshot = snapshot;
+        }
+    }
+
+    /// Restore open sidebar cards and drawer flags for `self.project.root_dir` on startup/switch.
+    pub(crate) fn restore_sidebar_workspace(&mut self) {
+        self.last_sidebar_workspace_snapshot.clear();
+        if !self.persist_sidebar_state {
+            return;
+        }
+        let Some(state) =
+            crate::session::SidebarWorkspaceState::load_for_project(&self.project.root_dir)
+        else {
+            return;
+        };
+        self.ai_sidebar_collapsed = state.sidebar_collapsed;
+        self.ai_sidebar_settled_expanded = false;
+
+        let active_identity = teshi_engine::ProjectIdentity::new(&self.project.root_dir).ok();
+        let selection_root = self
+            .agents
+            .first()
+            .and_then(|agent| agent.selection_root.clone())
+            .or_else(|| Some(self.project.root_dir.clone()));
+
+        let mut restored = Vec::new();
+        let mut seen = HashSet::new();
+        for (id, session_id) in state.open_session_ids.iter().enumerate() {
+            if !seen.insert(session_id.clone()) {
+                continue;
+            }
+            let Some(session) = crate::session::Session::load_by_id(session_id) else {
+                continue;
+            };
+            let owned = match (&session.project_root, &active_identity) {
+                (Some(root), Some(active)) => teshi_engine::ProjectIdentity::new(root)
+                    .ok()
+                    .is_some_and(|ident| &ident == active),
+                (None, _) => true,
+                _ => false,
+            };
+            if !owned {
+                continue;
+            }
+            restored.push(AgentThread::from_saved_session(
+                id,
+                session,
+                selection_root.clone(),
+            ));
+        }
+
+        if !restored.is_empty() {
+            self.next_agent_id = restored.len();
+            self.agents = restored;
+            let selected = state
+                .active_session_id
+                .as_deref()
+                .and_then(|active_id| {
+                    self.agents
+                        .iter()
+                        .position(|agent| agent.session_id() == Some(active_id))
+                })
+                .or_else(|| self.agent_sidebar_visible_order().into_iter().next())
+                .unwrap_or(0);
+            self.selected_agent = selected;
+            self.ai_sidebar_follow_selection = true;
+        }
+        if let Ok(snapshot) = serde_json::to_string(&self.current_sidebar_workspace_state()) {
+            self.last_sidebar_workspace_snapshot = snapshot;
+        }
+    }
+
+    fn open_session_in_workspace(&mut self, session: crate::session::Session) {
+        if let Some(existing) = self
+            .agents
+            .iter()
+            .position(|agent| agent.session_id() == Some(session.id.as_str()))
+        {
+            self.selected_agent = existing;
+            if self.agents[existing].settled {
+                self.ai_sidebar_settled_expanded = true;
+            }
+            self.ai_sidebar_follow_selection = true;
+            self.clear_ai_sidebar_search();
+            self.save_sidebar_workspace(true);
+            return;
+        }
+        let settled = session.settled;
+        let selection_root = self
+            .agents
+            .first()
+            .and_then(|agent| agent.selection_root.clone())
+            .or_else(|| Some(self.project.root_dir.clone()));
+        let replace_blank = self.agents.len() == 1
+            && self.agents[0].messages().is_empty()
+            && self.agents[0].saved_session.is_none()
+            && self.agents[0].chat.queue.is_empty()
+            && !self.agents[0].is_working();
+        if replace_blank {
+            self.agents[0] = AgentThread::from_saved_session(0, session, selection_root);
+            self.selected_agent = 0;
+        } else {
+            let id = self.next_agent_id;
+            self.next_agent_id += 1;
+            self.agents
+                .push(AgentThread::from_saved_session(id, session, selection_root));
+            self.selected_agent = self.agents.len() - 1;
+        }
+        if settled {
+            self.ai_sidebar_settled_expanded = true;
+        }
+        self.ai_sidebar_follow_selection = true;
+        self.clear_ai_sidebar_search();
+        self.status = crate::i18n::fill(
+            crate::i18n::t("status.switched_to"),
+            &[("arg0", &crate::i18n::arg(&self.agent().title))],
+        );
+        self.set_status_message(self.status.clone());
+        self.save_sidebar_workspace(true);
+    }
+
+    fn apply_pending_global_session_open(&mut self) {
+        let Some(session) = self.pending_global_session_open.take() else {
+            return;
+        };
+        let same_project = match &session.project_root {
+            Some(root) => teshi_engine::ProjectIdentity::new(root)
+                .ok()
+                .is_some_and(|ident| ident == self.project_switch.active.identity),
+            None => true,
+        };
+        if same_project {
+            self.open_session_in_workspace(session);
+        }
+    }
+
+    /// Open any saved session (including across projects) from sidebar global search.
+    pub(crate) fn open_global_session(&mut self, session_id: &str) -> Result<()> {
+        if let Some(existing) = self
+            .agents
+            .iter()
+            .position(|agent| agent.session_id() == Some(session_id))
+        {
+            self.clear_ai_sidebar_search();
+            return self.handle_action(Action::AgentSelect(existing));
+        }
+        let Some(session) = self
+            .ai_sidebar_global_sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .or_else(|| crate::session::Session::load_by_id(session_id))
+        else {
+            return Ok(());
+        };
+        if let Some(root) = session.project_root.as_ref() {
+            let target_identity = teshi_engine::ProjectIdentity::new(root).ok();
+            let differs = target_identity
+                .as_ref()
+                .is_some_and(|ident| ident != &self.project_switch.active.identity);
+            if differs {
+                if !root.is_dir() {
+                    self.status = crate::i18n::fill(
+                        crate::i18n::t("status.cannot_open_session_project"),
+                        &[("path", &crate::i18n::arg(&root.display()))],
+                    );
+                    self.set_status_message(self.status.clone());
+                    return Ok(());
+                }
+                let target_root = root.clone();
+                self.clear_ai_sidebar_search();
+                self.pending_global_session_open = Some(session);
+                self.request_project_switch(target_root)?;
+                return Ok(());
+            }
+        }
+        self.open_session_in_workspace(session);
+        Ok(())
+    }
+
+    /// Fast, cached git branch lookup from `.git/HEAD` without spawning a subprocess.
+    pub(crate) fn cached_git_branch(&mut self, dir: &Path) -> Option<String> {
+        const TTL: Duration = Duration::from_secs(2);
+        let now = Instant::now();
+        if let Some((fetched_at, cached)) = self.git_branch_cache.get(dir)
+            && now.duration_since(*fetched_at) < TTL
+        {
+            return cached.clone();
+        }
+        let branch = git_branch_from_head(dir);
+        self.git_branch_cache
+            .insert(dir.to_path_buf(), (now, branch.clone()));
+        branch
+    }
+
+    /// Left metadata label for row 2 of a conversation card (member dir or git branch).
+    pub(crate) fn agent_sidebar_location_label(&mut self, agent_idx: usize) -> Option<String> {
+        let member_dir = self.agents.get(agent_idx)?.member_dir.clone();
+        if let Some(dir) = member_dir {
+            if let Ok(rel) = dir.strip_prefix(&self.project.root_dir)
+                && !rel.as_os_str().is_empty()
+            {
+                let joined = rel
+                    .components()
+                    .filter_map(|comp| match comp {
+                        std::path::Component::Normal(part) => {
+                            Some(part.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if !joined.is_empty() {
+                    return Some(joined);
+                }
+            }
+            if let Some(branch) = self.cached_git_branch(&dir) {
+                return Some(branch);
+            }
+            return dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+        }
+        let root = self.project.root_dir.clone();
+        self.cached_git_branch(&root)
+    }
+
+    /// Right metadata label for row 2 of a conversation card (ACP agent name or Native model).
+    pub(crate) fn agent_sidebar_backend_label(&self, agent_idx: usize) -> Option<String> {
+        let agent = self.agents.get(agent_idx)?;
+        if agent.backend_kind() == teshi_agent::backend::AgentBackendKind::Acp
+            || agent.selected_acp_id.is_some()
+        {
+            let name = agent
+                .selected_acp_id
+                .as_ref()
+                .map(|id| {
+                    self.installed_acp_agents
+                        .iter()
+                        .find(|installed| &installed.id == id)
+                        .map(|installed| installed.name.clone())
+                        .unwrap_or_else(|| id.clone())
+                })
+                .unwrap_or_else(|| "ACP".to_string());
+            Some(name)
+        } else {
+            let model = agent
+                .saved_session
+                .as_ref()
+                .and_then(|session| session.model_label.as_deref())
+                .or(self.active_model_label.as_deref())
+                .map(str::trim)
+                .filter(|label| {
+                    !label.is_empty()
+                        && !self
+                            .installed_acp_agents
+                            .iter()
+                            .any(|installed| installed.name == *label)
+                });
+            Some(model.unwrap_or("Native").to_string())
+        }
     }
 
     fn insert_ai_text(&mut self, text: &str) {
@@ -5225,6 +6059,7 @@ impl App {
                             });
                         }
                         self.agents[i].status = AiStatus::Idle;
+                        self.agents[i].touch_activity();
                         // Only a normal turn leaves an answer to be read; an
                         // interrupted one is reported as a status message.
                         self.agents[i].unseen_completion = completed_normally;
@@ -5345,6 +6180,7 @@ impl App {
                             AgentBackendDecision::WaitForPermission => {
                                 self.agents[i].partial_response_mut().clear();
                                 self.agents[i].status = AiStatus::AwaitingApproval;
+                                self.agents[i].touch_activity();
                                 self.agents[i].tool_status = None;
                                 if !matches!(
                                     self.generation_stage,
@@ -5358,6 +6194,7 @@ impl App {
                             AgentBackendDecision::WaitForHumanReview => {
                                 self.agents[i].partial_response_mut().clear();
                                 self.agents[i].status = AiStatus::Idle;
+                                self.agents[i].touch_activity();
                                 self.agents[i].tool_status = None;
                                 if i == self.selected_agent {
                                     self.status = crate::i18n::t("status.review_proposed_test_points_in_test_points_tab_5_then_press").to_string();
@@ -5366,6 +6203,7 @@ impl App {
                             AgentBackendDecision::StopEmptyProject => {
                                 self.agents[i].partial_response_mut().clear();
                                 self.agents[i].status = AiStatus::Idle;
+                                self.agents[i].touch_activity();
                                 self.agents[i].tool_status = None;
                                 if i == self.selected_agent {
                                     self.status = crate::i18n::t("status.the_project_directory_has_no_feature_files_add_one_to_begin").to_string();
@@ -5373,6 +6211,7 @@ impl App {
                             }
                             AgentBackendDecision::StopAfterFailure => {
                                 self.agents[i].status = AiStatus::Error;
+                                self.agents[i].touch_activity();
                                 self.status =
                                     crate::i18n::t("status.ai_error_model_kept_calling_tools_after_final_response_limit")
                                         .to_string();
@@ -5389,10 +6228,12 @@ impl App {
                             // worker tears down the event channel. It is
                             // transport noise, not model output.
                             self.agents[i].status = AiStatus::Idle;
+                            self.agents[i].touch_activity();
                             continue;
                         }
                         self.agents[i].retain_partial_response();
                         self.agents[i].status = AiStatus::Error;
+                        self.agents[i].touch_activity();
                         if i == self.selected_agent {
                             // Same prefix as native failures so the chat row
                             // shows this text instead of the API-key hint.
@@ -5451,6 +6292,7 @@ impl App {
                             selected: 0,
                         });
                         self.agents[i].status = AiStatus::AwaitingApproval;
+                        self.agents[i].touch_activity();
                         self.agents[i].tool_status = None;
                         if i == self.selected_agent {
                             self.status = crate::i18n::t(
@@ -5471,6 +6313,7 @@ impl App {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.agents[i].retain_partial_response();
                         self.agents[i].status = AiStatus::Error;
+                        self.agents[i].touch_activity();
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
                         if i == self.selected_agent {
@@ -5564,6 +6407,7 @@ impl App {
             agent.save_session_to(&root, &project, model.clone())?;
             agent.last_session_save = Some(std::time::Instant::now());
         }
+        self.save_sidebar_workspace(force);
         Ok(())
     }
 
@@ -6092,7 +6936,9 @@ impl App {
         });
         // Until a title source exists, the first user line names the thread.
         self.agents[agent_idx].refresh_display_title();
+        self.agents[agent_idx].settled = false;
         self.agents[agent_idx].status = AiStatus::Waiting;
+        self.agents[agent_idx].touch_activity();
         self.agents[agent_idx].partial_response_mut().clear();
         self.agents[agent_idx].pending_acp_permission = None;
         self.status = crate::i18n::t("status.sending_message_to_ai").to_string();
@@ -6325,7 +7171,9 @@ impl App {
                     return Ok(());
                 }
                 if self.agents[agent_idx].backend.is_connected() {
+                    self.agents[agent_idx].settled = false;
                     self.agents[agent_idx].status = AiStatus::Waiting;
+                    self.agents[agent_idx].touch_activity();
                     self.compact_context_if_needed(agent_idx);
                     let messages = self.build_chat_messages_for_agent(agent_idx);
                     let profile = self.agent_profile(agent_idx);
@@ -6565,6 +7413,7 @@ impl App {
             .resolve_host_tool(&tool_call_id, Ok(result.clone()))
         {
             self.agents[agent_idx].status = AiStatus::Waiting;
+            self.agents[agent_idx].touch_activity();
             if self.generation_stage == teshi_agent::pipeline::GenerationStage::Confirming {
                 self.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
             }
@@ -11389,7 +12238,9 @@ impl App {
                         activity: None,
                     });
                     self.active_tab = MainTab::Ai;
+                    self.agent_mut().settled = false;
                     self.agent_mut().status = AiStatus::Waiting;
+                    self.agent_mut().touch_activity();
                     self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().scroll_offset = 0;
                     if !self.start_agent_backend(self.selected_agent) {
@@ -13265,7 +14116,9 @@ impl App {
                 self.ai_sidebar_collapsed = !self.ai_sidebar_collapsed;
                 if self.ai_sidebar_collapsed {
                     self.ai_sidebar_focused = false;
+                    self.ai_sidebar_searching = false;
                 }
+                self.save_sidebar_workspace(true);
                 self.status = if self.ai_sidebar_collapsed {
                     crate::i18n::t("status.chat_sidebar_hidden").to_string()
                 } else {
@@ -13403,13 +14256,20 @@ impl App {
                 let id = self.next_agent_id;
                 self.next_agent_id += 1;
                 let root = self.agent().selection_root.clone();
+                // Display names are 1-based so the first card stays "Agent 1"
+                // and each new card continues Agent 2, Agent 3, ...
+                let display_id = id + 1;
                 self.agents.push(AgentThread::new_with_selection(
                     id,
-                    &format!("Agent {id}"),
+                    &format!("Agent {display_id}"),
                     root,
                 ));
                 self.selected_agent = self.agents.len() - 1;
-                self.status = crate::i18n::fill(crate::i18n::t("status.created_agent"), &[("id", &crate::i18n::arg(&id))]);
+                self.ai_sidebar_follow_selection = true;
+                self.status = crate::i18n::fill(
+                    crate::i18n::t("status.created_agent"),
+                    &[("id", &crate::i18n::arg(&display_id))],
+                );
                 self.focus_ai_input();
                 self.show_selection_warning();
                 self.quit_pending_confirm = false;
@@ -13435,6 +14295,8 @@ impl App {
                     if self.selected_agent >= self.agents.len() {
                         self.selected_agent = self.agents.len().saturating_sub(1);
                     }
+                    self.ai_sidebar_follow_selection = true;
+                    self.save_sidebar_workspace(true);
                     self.status = crate::i18n::fill(crate::i18n::t("status.closed"), &[("name", &crate::i18n::arg(&name))]);
                     if self.ai_input_focused {
                         self.focus_ai_input();
@@ -13442,25 +14304,81 @@ impl App {
                 }
                 self.quit_pending_confirm = false;
             }
+            Action::AgentToggleSettle => {
+                let idx = self.selected_agent;
+                if self.agents[idx].is_working() {
+                    self.status = crate::i18n::t("status.cannot_settle_working").to_string();
+                    self.set_status_message(self.status.clone());
+                } else {
+                    let prev_visible = self.agent_sidebar_visible_order();
+                    let prev_pos = prev_visible.iter().position(|&i| i == idx).unwrap_or(0);
+                    let next_settled = !self.agents[idx].settled;
+                    self.agents[idx].settled = next_settled;
+                    if next_settled && !self.ai_sidebar_settled_expanded {
+                        let next_visible = self.agent_sidebar_visible_order();
+                        if next_visible.is_empty() {
+                            self.ai_sidebar_settled_expanded = true;
+                        } else {
+                            let target_pos = prev_pos.min(next_visible.len() - 1);
+                            self.selected_agent = next_visible[target_pos];
+                        }
+                    }
+                    self.ai_sidebar_follow_selection = true;
+                    let name = self.agents[idx].title.clone();
+                    self.status = crate::i18n::fill(
+                        crate::i18n::t(if next_settled {
+                            "status.agent_settled"
+                        } else {
+                            "status.agent_reopened"
+                        }),
+                        &[("name", &crate::i18n::arg(&name))],
+                    );
+                    self.set_status_message(self.status.clone());
+                    self.save_sidebar_workspace(true);
+                }
+                self.quit_pending_confirm = false;
+            }
             Action::AgentNext => {
                 self.clear_chat_selection();
-                if self.agents.len() > 1 {
-                    self.selected_agent = (self.selected_agent + 1) % self.agents.len();
+                let order = self.agent_sidebar_visible_order();
+                if order.len() > 1 {
+                    let pos = order
+                        .iter()
+                        .position(|&idx| idx == self.selected_agent)
+                        .unwrap_or(order.len() - 1);
+                    self.selected_agent = order[(pos + 1) % order.len()];
+                    self.ai_sidebar_follow_selection = true;
+                    self.save_sidebar_workspace(false);
                     self.status = crate::i18n::fill(crate::i18n::t("status.switched_to"), &[("arg0", &crate::i18n::arg(&self.agent().title))]);
                     if self.ai_input_focused {
                         self.focus_ai_input();
                     }
+                } else if order.len() == 1 && self.selected_agent != order[0] {
+                    self.selected_agent = order[0];
+                    self.ai_sidebar_follow_selection = true;
+                    self.save_sidebar_workspace(false);
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AgentPrev => {
                 self.clear_chat_selection();
-                if self.agents.len() > 1 {
-                    self.selected_agent = self.selected_agent.saturating_sub(1);
+                let order = self.agent_sidebar_visible_order();
+                if order.len() > 1 {
+                    let pos = order
+                        .iter()
+                        .position(|&idx| idx == self.selected_agent)
+                        .unwrap_or(0);
+                    self.selected_agent = order[(pos + order.len() - 1) % order.len()];
+                    self.ai_sidebar_follow_selection = true;
+                    self.save_sidebar_workspace(false);
                     self.status = crate::i18n::fill(crate::i18n::t("status.switched_to"), &[("arg0", &crate::i18n::arg(&self.agent().title))]);
                     if self.ai_input_focused {
                         self.focus_ai_input();
                     }
+                } else if order.len() == 1 && self.selected_agent != order[0] {
+                    self.selected_agent = order[0];
+                    self.ai_sidebar_follow_selection = true;
+                    self.save_sidebar_workspace(false);
                 }
                 self.quit_pending_confirm = false;
             }
@@ -13468,6 +14386,15 @@ impl App {
                 if index < self.agents.len() {
                     self.clear_chat_selection();
                     self.selected_agent = index;
+                    if self.active_tab == MainTab::Ai {
+                        self.agents[index].unseen_completion = false;
+                    }
+                    if self.agents[index].settled {
+                        self.ai_sidebar_settled_expanded = true;
+                    }
+                    self.ai_sidebar_searching = false;
+                    self.ai_sidebar_follow_selection = true;
+                    self.save_sidebar_workspace(false);
                     self.status = crate::i18n::fill(crate::i18n::t("status.switched_to"), &[("arg0", &crate::i18n::arg(&self.agent().title))]);
                     if self.ai_input_focused {
                         self.focus_ai_input();
@@ -13475,6 +14402,29 @@ impl App {
                         self.ai_sidebar_focused = true;
                     }
                 }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSidebarStartSearch => {
+                self.begin_ai_sidebar_search();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSidebarClearSearch => {
+                self.clear_ai_sidebar_search();
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSidebarToggleWorking => {
+                self.ai_sidebar_working_expanded = !self.ai_sidebar_working_expanded;
+                self.ai_sidebar_follow_selection = true;
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSidebarToggleSettled => {
+                self.ai_sidebar_settled_expanded = !self.ai_sidebar_settled_expanded;
+                self.ai_sidebar_follow_selection = true;
+                self.save_sidebar_workspace(true);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSidebarOpenGlobalSession(session_id) => {
+                self.open_global_session(&session_id)?;
                 self.quit_pending_confirm = false;
             }
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
@@ -14025,6 +14975,7 @@ impl App {
         self.test_points_ui.editing = false;
         self.clear_chat_selection();
         self.ai_sidebar_focused = false;
+        self.ai_sidebar_searching = false;
         if self.active_tab == MainTab::Requirements
             && self.authoring_ui.guard_unsaved(
                 crate::authoring_tab::RequirementsPendingAction::Action(Action::SelectTab(tab)),
@@ -14419,6 +15370,9 @@ impl App {
                 .copied()
                 .unwrap_or(0),
             VerticalScrollTarget::HelpGuideDoc => self.help_guide.doc_scroll,
+            VerticalScrollTarget::AiSidebarActive => self.ai_sidebar_scroll,
+            VerticalScrollTarget::AiSidebarWorking => self.ai_sidebar_working_scroll,
+            VerticalScrollTarget::AiSidebarSettled => self.ai_sidebar_settled_scroll,
         }
     }
 
@@ -14466,6 +15420,18 @@ impl App {
             }
             VerticalScrollTarget::HelpGuideDoc => {
                 self.help_guide.doc_scroll = clamped;
+            }
+            VerticalScrollTarget::AiSidebarActive => {
+                self.ai_sidebar_scroll = clamped;
+                self.ai_sidebar_follow_selection = false;
+            }
+            VerticalScrollTarget::AiSidebarWorking => {
+                self.ai_sidebar_working_scroll = clamped;
+                self.ai_sidebar_follow_selection = false;
+            }
+            VerticalScrollTarget::AiSidebarSettled => {
+                self.ai_sidebar_settled_scroll = clamped;
+                self.ai_sidebar_follow_selection = false;
             }
         }
     }
@@ -16128,6 +17094,32 @@ impl App {
                     }
                     return Ok(());
                 }
+                // AI sidebar card list scroll when pointer is over any sidebar sub-region.
+                if self.active_tab == MainTab::Ai && !self.auth_panel_active {
+                    if self
+                        .ai_sidebar_working_rect
+                        .is_some_and(|rect| rect.contains(pos))
+                    {
+                        self.ai_sidebar_working_scroll =
+                            self.ai_sidebar_working_scroll.saturating_sub(2);
+                        self.ai_sidebar_follow_selection = false;
+                        return Ok(());
+                    }
+                    if self
+                        .ai_sidebar_settled_rect
+                        .is_some_and(|rect| rect.contains(pos))
+                    {
+                        self.ai_sidebar_settled_scroll =
+                            self.ai_sidebar_settled_scroll.saturating_sub(2);
+                        self.ai_sidebar_follow_selection = false;
+                        return Ok(());
+                    }
+                    if self.ai_sidebar_rect.is_some_and(|rect| rect.contains(pos)) {
+                        self.ai_sidebar_scroll = self.ai_sidebar_scroll.saturating_sub(2);
+                        self.ai_sidebar_follow_selection = false;
+                        return Ok(());
+                    }
+                }
                 // Fall through to AI context scroll
                 let in_ai_context = self.active_tab == MainTab::Ai
                     || (self.active_tab == MainTab::MindMap
@@ -16165,6 +17157,32 @@ impl App {
                 {
                     self.preview_cursor_row = self.preview_cursor_row.saturating_add(1);
                     return Ok(());
+                }
+                // AI sidebar card list scroll when pointer is over any sidebar sub-region.
+                if self.active_tab == MainTab::Ai && !self.auth_panel_active {
+                    if self
+                        .ai_sidebar_working_rect
+                        .is_some_and(|rect| rect.contains(pos))
+                    {
+                        self.ai_sidebar_working_scroll =
+                            self.ai_sidebar_working_scroll.saturating_add(2);
+                        self.ai_sidebar_follow_selection = false;
+                        return Ok(());
+                    }
+                    if self
+                        .ai_sidebar_settled_rect
+                        .is_some_and(|rect| rect.contains(pos))
+                    {
+                        self.ai_sidebar_settled_scroll =
+                            self.ai_sidebar_settled_scroll.saturating_add(2);
+                        self.ai_sidebar_follow_selection = false;
+                        return Ok(());
+                    }
+                    if self.ai_sidebar_rect.is_some_and(|rect| rect.contains(pos)) {
+                        self.ai_sidebar_scroll = self.ai_sidebar_scroll.saturating_add(2);
+                        self.ai_sidebar_follow_selection = false;
+                        return Ok(());
+                    }
                 }
                 // Fall through to AI context scroll
                 let in_ai_context = self.active_tab == MainTab::Ai
@@ -18399,6 +19417,24 @@ impl App {
         self.save_sessions(true)?;
         let sessions = self.project_sessions();
         if let Some(s) = sessions.into_iter().next() {
+            // Sidebar workspace restore may already have this session open. Reloading
+            // it via restore_session would shut down a live ACP backend, open the
+            // session panel while waiting, and swallow transcript right-clicks.
+            if self.agent().session_id() == Some(s.id.as_str()) {
+                self.clear_chat_selection();
+                self.ai_input_focused = false;
+                self.session_panel_active = false;
+                self.pending_session_restore = None;
+                self.agent_mut().partial_response_mut().clear();
+                self.agent_mut().input.set_text(String::new());
+                self.agent_mut().status = AiStatus::Idle;
+                self.agent_mut().scroll_offset = 0;
+                self.status = crate::i18n::fill(
+                    crate::i18n::t("status.resumed_session_from_messages"),
+                    &[("arg0", &crate::i18n::arg(&self.agent().messages().len()))],
+                );
+                return Ok(());
+            }
             if !self.restore_session(s, false) {
                 return Ok(());
             }
@@ -18637,44 +19673,18 @@ impl App {
         // chat anchors.  Do not let a selection from the previous session be
         // copied against the newly loaded message list.
         self.clear_chat_selection();
-        let kind = session
-            .backend_kind
-            .unwrap_or(teshi_agent::backend::AgentBackendKind::Native);
+        let id = self.agent().id;
+        let selection_root = self.agent().selection_root.clone();
         self.active_model_label = session.model_label.clone();
-        let agent = self.agent_mut();
-        agent.backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
-            kind,
-            teshi_agent_runtime::max_agent_iterations(),
-        );
-        *agent.messages_mut() = session.messages.clone();
-        agent.selected_acp_id = session.acp_agent_id.clone();
-        // An archived worktree no longer exists; resuming there would fail to
-        // spawn the agent, so fall back to the project root.
-        agent.member_dir = session.member_dir.clone().filter(|dir| dir.is_dir());
-        agent.backend_selected = session.backend_kind.is_some();
-        agent.acp_controls_ui = Default::default();
-        agent.chat = crate::chat_state::ChatState {
-            queue: session.pending_messages.clone(),
-            ..Default::default()
-        };
-        agent.completed_answers = session.completed_answers.iter().copied().collect();
-        agent.generated_title = session.generated_title.clone();
-        agent.agent_title = session.agent_title.clone();
-        agent.custom_title = session.custom_title.clone();
-        agent.cancel_title_job();
-        agent.refresh_display_title();
-        agent.saved_session = Some(session);
-        agent.last_session_snapshot.clear();
-        agent.tool_status = None;
-        agent.pending_acp_permission = None;
-        agent.latest_visual_observation = None;
-        agent.last_finish_reason = None;
-        agent.last_stop_detail = None;
-        agent.input.set_text(String::new());
-        agent.status = AiStatus::Idle;
-        agent.scroll_offset = 0;
+        let restored = AgentThread::from_saved_session(id, session, selection_root);
+        let settled = restored.settled;
+        *self.agent_mut() = restored;
+        if settled {
+            self.ai_sidebar_settled_expanded = true;
+        }
         self.ai_input_focused = false;
         self.session_panel_active = false;
+        self.save_sidebar_workspace(true);
         self.status = if legacy {
             crate::i18n::t("status.loaded_legacy_session_history_remains_unassigned").into()
         } else {
@@ -18705,8 +19715,8 @@ mod tests {
         AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
         ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
         MindMapFocus, ModelPanelMode, RunDetailTab, RunStatus, ViewStage, attach_prompt_images,
-        completed_assistant_responses, current_step_keyword_index, interrupted_acp_message,
-        replace_step_keyword_line,
+        completed_assistant_responses, current_step_keyword_index, default_persist_sidebar_state,
+        interrupted_acp_message, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -19318,6 +20328,19 @@ mod tests {
         );
         app.handle_action(Action::DeleteCancel).unwrap();
         assert!(app.pending_delete.is_none());
+    }
+
+    #[test]
+    fn test_agent_new_uses_one_based_display_titles() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.active_tab = MainTab::Ai;
+        assert_eq!(app.agents[0].title, "Agent 1");
+        app.handle_action(Action::AgentNew).unwrap();
+        app.handle_action(Action::AgentNew).unwrap();
+        assert_eq!(app.agents[1].title, "Agent 2");
+        assert_eq!(app.agents[2].title, "Agent 3");
+        assert_eq!(app.agents[1].id, 1);
+        assert_eq!(app.agents[2].id, 2);
     }
 
     #[test]
@@ -20276,6 +21299,260 @@ mod tests {
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
         assert_eq!(terminal.backend().buffer()[corner].fg, theme::BORDER);
+    }
+
+    #[test]
+    fn sidebar_settle_visual_navigation_and_session_restore() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        let now = SystemTime::now();
+        app.agents[0].last_activity_at = now - Duration::from_secs(3600);
+        app.agents.push(AgentThread::new(1, "Newer"));
+        app.agents[1].last_activity_at = now - Duration::from_secs(60);
+        app.agents.push(AgentThread::new(2, "Running"));
+        app.agents[2].status = AiStatus::Waiting;
+        app.agents[2].task_started = Some(Instant::now() - Duration::from_secs(5));
+
+        // Visual order is Active (newest first: 1, 0) -> Working (2) -> Settled.
+        assert_eq!(app.agent_sidebar_visual_order(), vec![1, 0, 2]);
+        app.selected_agent = 1;
+        app.handle_action(Action::AgentNext).unwrap();
+        assert_eq!(app.selected_agent, 0);
+        app.handle_action(Action::AgentNext).unwrap();
+        assert_eq!(app.selected_agent, 2);
+        app.handle_action(Action::AgentPrev).unwrap();
+        assert_eq!(app.selected_agent, 0);
+
+        // Settling a working conversation is rejected.
+        app.selected_agent = 2;
+        app.handle_action(Action::AgentToggleSettle).unwrap();
+        assert!(!app.agents[2].settled);
+        assert_eq!(app.status, crate::i18n::t("status.cannot_settle_working"));
+
+        // Settling an idle conversation while Settled is collapsed moves it out of
+        // the visible list and advances selection to the next visible conversation.
+        app.selected_agent = 1;
+        app.handle_action(Action::AgentToggleSettle).unwrap();
+        assert!(app.agents[1].settled);
+        assert_eq!(app.agent_sidebar_visual_order(), vec![0, 2, 1]);
+        assert_eq!(app.selected_agent, 0);
+
+        // Expand Settled drawer, select agent 1, and reopen it.
+        app.handle_action(Action::AiSidebarToggleSettled).unwrap();
+        assert!(app.ai_sidebar_settled_expanded);
+        app.selected_agent = 1;
+        app.handle_action(Action::AgentToggleSettle).unwrap();
+        assert!(!app.agents[1].settled);
+        assert_eq!(app.agent_sidebar_visual_order(), vec![1, 0, 2]);
+
+        // Restoring a session preserves its settled flag and updated_at timestamp.
+        let mut session = crate::session::Session::from_messages(
+            vec![AiChatMessage {
+                role: AiRole::User,
+                content: "restored".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            }],
+            None,
+        );
+        session.project_root = Some(app.project.root_dir.clone());
+        session.settled = true;
+        session.updated_at = "1700000000000".into();
+        assert!(app.restore_session(session, false));
+        assert!(app.agent().settled);
+        assert_eq!(
+            app.agent().last_activity_at,
+            UNIX_EPOCH + Duration::from_millis(1_700_000_000_000)
+        );
+    }
+
+    #[test]
+    fn sidebar_workspace_persists_open_cards_across_restart_and_supports_global_search() {
+        crate::session::with_temp_session_dir(|_| {
+            let project_a = tempdir().unwrap();
+            let project_b = tempdir().unwrap();
+            let store = tempdir().unwrap();
+            teshi_engine::initialize_requirement_store(store.path()).unwrap();
+            let feat_a = project_a.path().join("a.feature");
+            let feat_b = project_b.path().join("b.feature");
+            fs::write(&feat_a, "Feature: A\n").unwrap();
+            fs::write(&feat_b, "Feature: B\n").unwrap();
+
+            // Save a closed global session belonging to project B.
+            let mut b_session = crate::session::Session::from_messages(
+                vec![AiChatMessage {
+                    role: AiRole::User,
+                    content: "Cross project global match".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: None,
+                    activity: None,
+                }],
+                None,
+            );
+            b_session.project_root = Some(project_b.path().to_path_buf());
+            b_session.custom_title = Some("Beta Global Thread".into());
+            teshi_engine::write_atomic(
+                &crate::session::Session::storage_dir().join(format!("{}.json", b_session.id)),
+                &b_session,
+            )
+            .unwrap();
+
+            // Create two threads in project A (one active, one settled), save, and drop app.
+            {
+                let mut app = App::from_file(
+                    &feat_a,
+                    crate::config::load_config().unwrap(),
+                    store.path().to_path_buf(),
+                )
+                .unwrap();
+                app.agents[0].messages_mut().push(AiChatMessage {
+                    role: AiRole::User,
+                    content: "First thread in A".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: None,
+                    activity: None,
+                });
+                app.agents[0].set_custom_title("Alpha First".into());
+                app.handle_action(Action::AgentNew).unwrap();
+                app.agents[1].messages_mut().push(AiChatMessage {
+                    role: AiRole::User,
+                    content: "Settled thread in A".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: None,
+                    activity: None,
+                });
+                app.agents[1].set_custom_title("Alpha Settled".into());
+                app.agents[1].settled = true;
+                app.selected_agent = 0;
+                app.save_sessions(true).unwrap();
+            }
+
+            // Re-open project A: both threads and the collapsed Settled drawer flag restore automatically.
+            let mut reopened = App::from_file(
+                &feat_a,
+                crate::config::load_config().unwrap(),
+                store.path().to_path_buf(),
+            )
+            .unwrap();
+            assert_eq!(reopened.agents.len(), 2);
+            assert!(
+                reopened
+                    .agents
+                    .iter()
+                    .any(|agent| agent.title == "Alpha First" && !agent.settled)
+            );
+            assert!(
+                reopened
+                    .agents
+                    .iter()
+                    .any(|agent| agent.title == "Alpha Settled" && agent.settled)
+            );
+            assert!(!reopened.ai_sidebar_settled_expanded);
+
+            // Global sidebar search finds project B's closed session and opens it by switching project.
+            reopened.active_tab = MainTab::Ai;
+            reopened.ai_input_focused = false;
+            reopened.ai_sidebar_focused = true;
+            assert!(reopened.handle_action(Action::AiSidebarStartSearch).is_ok());
+            assert!(reopened.handle_ai_sidebar_search_key(KeyEvent::new(
+                KeyCode::Char('B'),
+                KeyModifiers::SHIFT,
+            )));
+            assert!(reopened.handle_ai_sidebar_search_key(KeyEvent::new(
+                KeyCode::Char('e'),
+                KeyModifiers::NONE,
+            )));
+            assert!(reopened.handle_ai_sidebar_search_key(KeyEvent::new(
+                KeyCode::Char('t'),
+                KeyModifiers::NONE,
+            )));
+            assert!(reopened.handle_ai_sidebar_search_key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )));
+            let matches = reopened.ai_sidebar_search_matches();
+            assert_eq!(matches.len(), 1);
+            assert!(
+                reopened.handle_ai_sidebar_search_key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))
+            );
+            assert_eq!(
+                teshi_engine::ProjectIdentity::new(&reopened.project.root_dir).unwrap(),
+                teshi_engine::ProjectIdentity::new(project_b.path()).unwrap()
+            );
+            assert_eq!(reopened.agent().title, "Beta Global Thread");
+        });
+    }
+
+    #[test]
+    fn resume_of_already_open_session_skips_restore_and_keeps_chat_context() {
+        crate::session::with_temp_session_dir(|_| {
+            let (mut app, _project, _store) = slash_test_app();
+            app.active_tab = MainTab::Ai;
+            let mut session = crate::session::Session::from_messages(
+                vec![AiChatMessage {
+                    role: AiRole::Assistant,
+                    content: "SCROLL_LINE_ALREADY_OPEN".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: None,
+                    activity: None,
+                }],
+                None,
+            );
+            session.project_root = Some(app.project.root_dir.clone());
+            let session_id = session.id.clone();
+            teshi_engine::write_atomic(
+                &crate::session::Session::storage_dir().join(format!("{session_id}.json")),
+                &session,
+            )
+            .unwrap();
+            assert!(app.restore_session(session, false));
+            assert_eq!(app.agent().session_id(), Some(session_id.as_str()));
+
+            // Simulate a focused composer and a stale session-panel wait flag.
+            app.ai_input_focused = true;
+            app.session_panel_active = true;
+            app.chat_selection = Some(ChatSelection {
+                agent_id: app.selected_agent,
+                anchor: ChatAnchor {
+                    block: 0,
+                    offset: 0,
+                    fingerprint: 0,
+                },
+                focus: ChatAnchor {
+                    block: 0,
+                    offset: 1,
+                    fingerprint: 0,
+                },
+            });
+
+            app.execute_slash_command("resume").unwrap();
+
+            assert_eq!(app.agent().session_id(), Some(session_id.as_str()));
+            assert!(!app.session_panel_active);
+            assert!(app.pending_session_restore.is_none());
+            assert!(!app.ai_input_focused);
+            assert!(app.chat_selection.is_none());
+            assert!(
+                app.agent()
+                    .messages()
+                    .iter()
+                    .any(|message| message.content.contains("SCROLL_LINE_ALREADY_OPEN"))
+            );
+        });
     }
 
     #[test]
@@ -26735,6 +28012,7 @@ mod tests {
 
         let mut app = App {
             workspace_context: None,
+            git_branch_cache: HashMap::new(),
             project,
             git_status: teshi_core::git::FeatureGitStatusModel::default(),
             git_status_rx: None,
@@ -26867,6 +28145,22 @@ mod tests {
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
+            ai_sidebar_scroll: 0,
+            ai_sidebar_working_scroll: 0,
+            ai_sidebar_settled_scroll: 0,
+            ai_sidebar_rect: None,
+            ai_sidebar_working_rect: None,
+            ai_sidebar_settled_rect: None,
+            ai_sidebar_follow_selection: true,
+            ai_sidebar_working_expanded: true,
+            ai_sidebar_settled_expanded: false,
+            ai_sidebar_searching: false,
+            ai_sidebar_query: String::new(),
+            ai_sidebar_search_selection: 0,
+            ai_sidebar_global_sessions: Vec::new(),
+            pending_global_session_open: None,
+            persist_sidebar_state: default_persist_sidebar_state(),
+            last_sidebar_workspace_snapshot: String::new(),
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
@@ -26971,6 +28265,7 @@ Feature: B
 
         let mut app = App {
             workspace_context: None,
+            git_branch_cache: HashMap::new(),
             project,
             git_status: teshi_core::git::FeatureGitStatusModel::default(),
             git_status_rx: None,
@@ -27103,6 +28398,22 @@ Feature: B
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
+            ai_sidebar_scroll: 0,
+            ai_sidebar_working_scroll: 0,
+            ai_sidebar_settled_scroll: 0,
+            ai_sidebar_rect: None,
+            ai_sidebar_working_rect: None,
+            ai_sidebar_settled_rect: None,
+            ai_sidebar_follow_selection: true,
+            ai_sidebar_working_expanded: true,
+            ai_sidebar_settled_expanded: false,
+            ai_sidebar_searching: false,
+            ai_sidebar_query: String::new(),
+            ai_sidebar_search_selection: 0,
+            ai_sidebar_global_sessions: Vec::new(),
+            pending_global_session_open: None,
+            persist_sidebar_state: default_persist_sidebar_state(),
+            last_sidebar_workspace_snapshot: String::new(),
             quit_pending_confirm: false,
             command_line: None,
             quit_panel_selection: 0,
