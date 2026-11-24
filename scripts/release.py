@@ -178,14 +178,72 @@ def update_version_files(new_version: str, dry_run: bool = True) -> list[str]:
                 path.write_text(new_text, encoding="utf-8")
             updated.append(label)
     if updated and not dry_run:
-        # Regenerate Cargo.lock so it stays in sync with the bumped version.
-        # Without this, CI builds with --locked would fail.
-        subprocess.run(
-            ["cargo", "generate-lockfile"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
+        # Keep both lockfiles in sync without `cargo generate-lockfile`, which
+        # rewrites transitive crates.io pins and creates unrelated churn.
+        # The terminal runner is its own workspace; forgetting its lockfile is
+        # what failed `--locked` CI after the v0.7.12 / v0.7.13 bumps.
+        sync_workspace_lockfile_versions(new_version)
+        sync_runner_lockfile_versions(new_version)
     return updated
+
+
+def _rewrite_package_versions(lock_path: Path, package_names: set[str], new_version: str) -> bool:
+    """Rewrite ``version = "…"`` for named ``[[package]]`` blocks in a lockfile.
+
+    Returns True when the file changed.
+    """
+    if not lock_path.is_file():
+        return False
+    text = lock_path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    current: str | None = None
+    changed = False
+    for line in lines:
+        name_match = re.match(r'^name = "([^"]+)"\s*$', line)
+        if name_match:
+            current = name_match.group(1)
+            out.append(line)
+            continue
+        if current in package_names:
+            version_match = re.match(r'^version = "(\d+\.\d+\.\d+)"\s*$', line)
+            if version_match and version_match.group(1) != new_version:
+                indent = line[: line.index("version")]
+                out.append(f'{indent}version = "{new_version}"\n')
+                changed = True
+                current = None
+                continue
+        out.append(line)
+    if changed:
+        lock_path.write_text("".join(out), encoding="utf-8")
+    return changed
+
+
+def sync_workspace_lockfile_versions(new_version: str) -> None:
+    """Bump path/workspace package versions in the root ``Cargo.lock``."""
+    # Only rewrite packages that inherit ``[workspace.package] version``.
+    # Leave 0.1.0 / unpublished path crates alone.
+    packages = {
+        "teshi-agent-runtime",
+        "teshi-browser-broker",
+        "teshi-cli",
+        "teshi-core",
+        "teshi-tui",
+        "teshi-update",
+        "teshi-update-helper",
+        "teshi-update-ui",
+    }
+    if _rewrite_package_versions(REPO_ROOT / "Cargo.lock", packages, new_version):
+        print("  ✓ Cargo.lock (workspace package versions)")
+
+
+def sync_runner_lockfile_versions(new_version: str) -> None:
+    """Bump path dependency versions in ``crates/teshi-tui-runner/Cargo.lock``."""
+    lock = REPO_ROOT / "crates" / "teshi-tui-runner" / "Cargo.lock"
+    # The runner workspace only locks ``teshi-core`` at the workspace version;
+    # other path deps stay on their own package versions (e.g. 0.1.0).
+    if _rewrite_package_versions(lock, {"teshi-core"}, new_version):
+        print("  ✓ crates/teshi-tui-runner/Cargo.lock (teshi-core)")
 
 
 def validate_release_artifacts() -> bool:
@@ -237,10 +295,13 @@ def git_commit_and_tag(version: str) -> None:
     # Stage all modified version files
     files = [file_path for _, file_path, _, _ in VERSION_FILES]
     git("add", *files)
-    # Also stage Cargo.lock if it changed
-    lock = REPO_ROOT / "Cargo.lock"
-    if lock.exists():
-        git("add", str(lock))
+    # Also stage lockfiles if they changed
+    for lock in (
+        REPO_ROOT / "Cargo.lock",
+        REPO_ROOT / "crates" / "teshi-tui-runner" / "Cargo.lock",
+    ):
+        if lock.exists():
+            git("add", str(lock))
     # Stage CHANGELOG.md if it was updated
     changelog = REPO_ROOT / CHANGELOG_PATH
     if changelog.exists():
