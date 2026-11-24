@@ -19417,6 +19417,24 @@ impl App {
         self.save_sessions(true)?;
         let sessions = self.project_sessions();
         if let Some(s) = sessions.into_iter().next() {
+            // Sidebar workspace restore may already have this session open. Reloading
+            // it via restore_session would shut down a live ACP backend, open the
+            // session panel while waiting, and swallow transcript right-clicks.
+            if self.agent().session_id() == Some(s.id.as_str()) {
+                self.clear_chat_selection();
+                self.ai_input_focused = false;
+                self.session_panel_active = false;
+                self.pending_session_restore = None;
+                self.agent_mut().partial_response_mut().clear();
+                self.agent_mut().input.set_text(String::new());
+                self.agent_mut().status = AiStatus::Idle;
+                self.agent_mut().scroll_offset = 0;
+                self.status = crate::i18n::fill(
+                    crate::i18n::t("status.resumed_session_from_messages"),
+                    &[("arg0", &crate::i18n::arg(&self.agent().messages().len()))],
+                );
+                return Ok(());
+            }
             if !self.restore_session(s, false) {
                 return Ok(());
             }
@@ -21474,6 +21492,66 @@ mod tests {
                 teshi_engine::ProjectIdentity::new(project_b.path()).unwrap()
             );
             assert_eq!(reopened.agent().title, "Beta Global Thread");
+        });
+    }
+
+    #[test]
+    fn resume_of_already_open_session_skips_restore_and_keeps_chat_context() {
+        crate::session::with_temp_session_dir(|_| {
+            let (mut app, _project, _store) = slash_test_app();
+            app.active_tab = MainTab::Ai;
+            let mut session = crate::session::Session::from_messages(
+                vec![AiChatMessage {
+                    role: AiRole::Assistant,
+                    content: "SCROLL_LINE_ALREADY_OPEN".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: None,
+                    activity: None,
+                }],
+                None,
+            );
+            session.project_root = Some(app.project.root_dir.clone());
+            let session_id = session.id.clone();
+            teshi_engine::write_atomic(
+                &crate::session::Session::storage_dir().join(format!("{session_id}.json")),
+                &session,
+            )
+            .unwrap();
+            assert!(app.restore_session(session, false));
+            assert_eq!(app.agent().session_id(), Some(session_id.as_str()));
+
+            // Simulate a focused composer and a stale session-panel wait flag.
+            app.ai_input_focused = true;
+            app.session_panel_active = true;
+            app.chat_selection = Some(ChatSelection {
+                agent_id: app.selected_agent,
+                anchor: ChatAnchor {
+                    block: 0,
+                    offset: 0,
+                    fingerprint: 0,
+                },
+                focus: ChatAnchor {
+                    block: 0,
+                    offset: 1,
+                    fingerprint: 0,
+                },
+            });
+
+            app.execute_slash_command("resume").unwrap();
+
+            assert_eq!(app.agent().session_id(), Some(session_id.as_str()));
+            assert!(!app.session_panel_active);
+            assert!(app.pending_session_restore.is_none());
+            assert!(!app.ai_input_focused);
+            assert!(app.chat_selection.is_none());
+            assert!(
+                app.agent()
+                    .messages()
+                    .iter()
+                    .any(|message| message.content.contains("SCROLL_LINE_ALREADY_OPEN"))
+            );
         });
     }
 

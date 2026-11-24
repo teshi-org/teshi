@@ -1135,16 +1135,9 @@ fn chat_selection_survives_scrolling_out_of_view_and_new_session_clears_it() {
     drop(terminal);
 
     let terminal = case.launch(120, 32);
-    // Sidebar workspace restore already reopens the prior session. Calling
-    // /resume again would open the session panel and suppress chat right-click
-    // copy handling (`session_panel_active` disables chat_context).
-    if terminal.screen().unwrap().contains("Welcome to AI Chat!") {
-        command(&terminal, "/resume");
-    } else {
-        terminal.expect_text("SCROLL_LINE_79", true, 15000).unwrap();
-        // launch_agent focuses the composer; return to Normal for transcript clicks.
-        terminal.key("Escape").unwrap();
-    }
+    // Workspace restore already reopens the session; /resume must be a no-op
+    // that keeps chat_context (no ACP tear-down / session-panel wait).
+    command(&terminal, "/resume");
     terminal.expect_text("SCROLL_LINE_79", true, 5000).unwrap();
     terminal.right_click_text("SCROLL_LINE_79", 5000).unwrap();
     terminal
