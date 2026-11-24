@@ -14256,14 +14256,20 @@ impl App {
                 let id = self.next_agent_id;
                 self.next_agent_id += 1;
                 let root = self.agent().selection_root.clone();
+                // Display names are 1-based so the first card stays "Agent 1"
+                // and each new card continues Agent 2, Agent 3, ...
+                let display_id = id + 1;
                 self.agents.push(AgentThread::new_with_selection(
                     id,
-                    &format!("Agent {id}"),
+                    &format!("Agent {display_id}"),
                     root,
                 ));
                 self.selected_agent = self.agents.len() - 1;
                 self.ai_sidebar_follow_selection = true;
-                self.status = crate::i18n::fill(crate::i18n::t("status.created_agent"), &[("id", &crate::i18n::arg(&id))]);
+                self.status = crate::i18n::fill(
+                    crate::i18n::t("status.created_agent"),
+                    &[("id", &crate::i18n::arg(&display_id))],
+                );
                 self.focus_ai_input();
                 self.show_selection_warning();
                 self.quit_pending_confirm = false;
@@ -20304,6 +20310,19 @@ mod tests {
         );
         app.handle_action(Action::DeleteCancel).unwrap();
         assert!(app.pending_delete.is_none());
+    }
+
+    #[test]
+    fn test_agent_new_uses_one_based_display_titles() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.active_tab = MainTab::Ai;
+        assert_eq!(app.agents[0].title, "Agent 1");
+        app.handle_action(Action::AgentNew).unwrap();
+        app.handle_action(Action::AgentNew).unwrap();
+        assert_eq!(app.agents[1].title, "Agent 2");
+        assert_eq!(app.agents[2].title, "Agent 3");
+        assert_eq!(app.agents[1].id, 1);
+        assert_eq!(app.agents[2].id, 2);
     }
 
     #[test]

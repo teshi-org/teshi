@@ -109,7 +109,9 @@ def expect(text: str, timeout_ms: int = 15000) -> dict:
 
 
 def idle(timeout_ms: int = 15000) -> dict:
-    return action("expect_stable_text", text="│ ○ ", visible=True, timeout_ms=timeout_ms, stable_ms=150)
+    # Finished turns keep green unread completion text on the two-line card
+    # until the user selects the conversation again.
+    return action("expect_stable_text", text="✓ Done", visible=True, timeout_ms=timeout_ms, stable_ms=150)
 
 
 def key(value: str) -> dict:
@@ -527,7 +529,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
             ]
         return [
             [key("3"), expect("Welcome to AI Chat!"), key("Enter")],
-            [write("Inspect the project"), key("Enter"), expect("Inspection finished"), expect("│ ○ ")],
+            [write("Inspect the project"), key("Enter"), expect("Inspection finished"), expect("✓ Done")],
             [key("Escape"), key("ctrl+q")],
             [exit_expect(1000)],
             [launch(root, teshi, mode="exit", cols=100, rows=30), expect("Explore")],

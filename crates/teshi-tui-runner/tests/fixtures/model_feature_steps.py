@@ -149,12 +149,26 @@ class World:
         self.launch()
 
     def new(self):
-        count = sum(line.startswith(("│ ○ ", "│ ● ")) for line in self.op("screen").splitlines())
+        def card_tops(screen: str) -> int:
+            # Two-line cards put Done / relative age / working elapsed on the title row.
+            return sum(
+                1
+                for line in screen.splitlines()
+                if (
+                    "✓ Done" in line
+                    or "✓ 已完成" in line
+                    or "<1m" in line
+                    or re.search(r"\b\d+s\b", line)
+                )
+                and "Settled" not in line
+            )
+
+        count = card_tops(self.op("screen"))
         self.op("key", "Escape")
         self.op("key", "a")
         self.input = True
         deadline = time.monotonic() + 10
-        while sum(line.startswith(("│ ○ ", "│ ● ")) for line in self.op("screen").splitlines()) <= count:
+        while card_tops(self.op("screen")) <= count:
             assert time.monotonic() < deadline, "new agent did not appear in the sidebar"
             time.sleep(.05)
         self.discover()

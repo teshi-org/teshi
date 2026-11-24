@@ -309,7 +309,9 @@ class World:
             (self.project / "teshi.toml").write_text(config, encoding="utf-8")
         elif text == "项目 xxx 已有保存的项目会话":
             folder = self.root / "teshi_session_dir"
-            folder.mkdir()
+            # Explore may already have created this root via sidebar workspace
+            # persistence before the seed step runs.
+            folder.mkdir(parents=True, exist_ok=True)
             payload = dict(id="directory-saved", created_at="100", updated_at="100", model_label="DIRECTORY-SAVED-SESSION", message_count=1,
                 project_root=str(self.project), backend_kind="native", messages=[dict(role="User",content="saved directory question",tool_calls=None,tool_call_id=None,reasoning_content=None,source=None)])
             self.session_seed = folder / "directory-saved.json"
