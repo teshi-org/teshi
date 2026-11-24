@@ -246,8 +246,9 @@ jobs:
           cp build-identity.json "target/${{ matrix.target }}/release/build-identity.json"
 
       - name: Verify updater contracts and native helper transactions
-        # Nightly installer builds skip this gate; Linux CI already runs the same tests.
-        if: needs.resolve.outputs.run_scope != 'windows-installer'
+        # Nightly installer builds skip this gate. macOS skips too: force-close is
+        # Windows/Linux-pidfd only, and Ubuntu CI already covers the shared suite.
+        if: needs.resolve.outputs.run_scope != 'windows-installer' && matrix.target != 'aarch64-apple-darwin'
         run: cargo test --locked -p teshi-update -p teshi-update-helper
 
       # Windows-only: build teshi-desktop + combined MSI installer
