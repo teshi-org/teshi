@@ -550,9 +550,10 @@ fn footer_and_threads(narrow: bool) {
         terminal.expect_text("Agent 3", true, 5000).unwrap();
         // Click the two-line sidebar cards by title. Ignore the chat header on
         // the right pane, which also repeats the active agent name.
-        for (index, (label, input)) in [("Agent 1", "THREAD_ORIGINAL"), ("Agent 2", "THREAD_SECOND")]
-            .into_iter()
-            .enumerate()
+        for (index, (label, input)) in
+            [("Agent 1", "THREAD_ORIGINAL"), ("Agent 2", "THREAD_SECOND")]
+                .into_iter()
+                .enumerate()
         {
             let screen = terminal.screen().unwrap();
             let (row, column) = screen
