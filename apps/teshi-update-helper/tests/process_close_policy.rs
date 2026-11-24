@@ -292,6 +292,7 @@ fn window_less_blocker_fails_with_pid_path_and_force_help() {
 }
 
 #[test]
+#[cfg(any(windows, target_os = "linux"))]
 fn force_close_only_targets_the_verified_installation() {
     let _guard = serialize_helper_tests();
     unsafe { std::env::set_var("TESHI_UPDATE_QUIESCE_SECS", "1") };
@@ -316,4 +317,26 @@ fn force_close_only_targets_the_verified_installation() {
         "2"
     );
     let _ = other_child.0.kill();
+}
+
+#[test]
+#[cfg(not(any(windows, target_os = "linux")))]
+fn force_close_reports_unsupported_on_non_pidfd_platforms() {
+    let _guard = serialize_helper_tests();
+    unsafe { std::env::set_var("TESHI_UPDATE_QUIESCE_SECS", "1") };
+    let (_temporary, root, old, _child, _executable) = setup(BLOCKER_BODY);
+    let (preparation, new) = prepared(&root, BLOCKER_BODY, 2);
+    let result = preparation
+        .handoff_with_close(&root, &old, &new, None, true)
+        .unwrap();
+    assert_eq!(result.status, UpdateStatus::WaitingForExit);
+    let result = wait_for_result(&root);
+    assert_eq!(result.status, UpdateStatus::Errored, "{}", result.detail);
+    assert!(
+        result
+            .detail
+            .contains("Safe force close is supported on Windows and Linux"),
+        "unexpected failure detail: {}",
+        result.detail
+    );
 }
