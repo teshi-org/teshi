@@ -213,14 +213,20 @@ impl Composer {
 
     /// Removes a character range as one undo unit.
     pub fn remove_chars(&mut self, range: Range<usize>) {
+        self.replace_chars(range, "");
+    }
+
+    /// Replaces a character range with `text` as one atomic undo unit and moves
+    /// the caret to the end of the replacement.
+    pub fn replace_chars(&mut self, range: Range<usize>, text: &str) {
         let start = range.start.min(self.char_len());
         let end = range.end.min(self.char_len()).max(start);
-        if start == end {
+        if start == end && text.is_empty() {
             return;
         }
         self.record(EditUnit::Atomic);
-        self.replace_range(start..end, "");
-        self.cursor = start;
+        self.replace_range(start..end, text);
+        self.cursor = start + text.chars().count();
         self.anchor = None;
     }
 

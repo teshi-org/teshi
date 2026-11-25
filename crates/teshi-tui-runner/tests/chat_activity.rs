@@ -332,7 +332,11 @@ fn refined_dock_keeps_model_controls_metrics_and_narrow_composers_accessible() {
     let lines: Vec<_> = screen.lines().collect();
     let metadata = lines
         .iter()
-        .position(|line| line.contains("Model Fast") && line.contains("ctx unknown"))
+        .position(|line| line.contains("ctx unknown"))
+        .unwrap();
+    let toolbar = lines
+        .iter()
+        .position(|line| line.contains("Model Fast"))
         .unwrap();
     let send = lines
         .iter()
@@ -342,6 +346,11 @@ fn refined_dock_keeps_model_controls_metrics_and_narrow_composers_accessible() {
         metadata + 2,
         send,
         "metrics sit above the border, not on it: {screen}"
+    );
+    assert_eq!(
+        send + 2,
+        toolbar,
+        "model controls sit cleanly below the composer: {screen}"
     );
     assert!(!lines[send - 1].contains("ctx"), "{screen}");
     capture(&terminal, "refined-config-and-input");

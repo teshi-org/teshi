@@ -973,6 +973,193 @@ pub(super) fn render_slash_suggestions(
     );
 }
 
+/// Renders the `@` mention context popup directly above the composer meta strip.
+///
+/// Clicking any row immediately mounts the candidate (or drills into a source
+/// prefix such as `@issue:`). Uses only semantic theme tokens.
+pub(super) fn render_mention_popup(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    items: &[teshi_core::mention::MentionItem],
+) {
+    use teshi_core::mention::{MentionItem, MentionSource};
+    use unicode_width::UnicodeWidthStr;
+
+    if area.is_empty() {
+        return;
+    }
+
+    let source_color = |source: MentionSource| match source {
+        MentionSource::LastFail => theme::ERROR,
+        MentionSource::Issue => theme::INFO,
+        MentionSource::TestPoint => theme::PRIMARY,
+        MentionSource::Feature => theme::SUCCESS,
+    };
+
+    let rows = area.height.saturating_sub(1) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", crate::i18n::t("chat.mention.no_matches")),
+            Style::default().fg(theme::MUTED),
+        )));
+    } else {
+        let selected = app
+            .mention_popup
+            .selection()
+            .min(items.len().saturating_sub(1));
+        let start = selected.saturating_sub(rows.saturating_sub(1));
+        let max_width = area.width as usize;
+
+        for (index, item) in items.iter().enumerate().skip(start).take(rows) {
+            let is_selected = index == selected;
+            let row_rect = Rect::new(area.x, area.y + (index - start) as u16, area.width, 1);
+            let hovered = app
+                .mouse_position
+                .is_some_and(|(mx, my)| row_rect.contains(ratatui::layout::Position::new(mx, my)));
+            let row_bg = if is_selected {
+                Some(theme::TAB_ACTIVE_BG)
+            } else if hovered {
+                Some(theme::HOVER_BG)
+            } else {
+                None
+            };
+            let paint = |mut style: Style| {
+                if let Some(bg) = row_bg {
+                    style = style.bg(bg);
+                }
+                style
+            };
+
+            let (prefix, prefix_color, main_text, detail_text) = match item {
+                MentionItem::Category {
+                    source,
+                    count,
+                    preview,
+                } => {
+                    let count_str = count.to_string();
+                    let label = match source {
+                        MentionSource::LastFail => {
+                            crate::i18n::t("chat.mention.last_fail_empty").to_string()
+                        }
+                        MentionSource::Issue => crate::i18n::fill(
+                            crate::i18n::t("chat.mention.category.issue"),
+                            &[("count", count_str.as_str())],
+                        ),
+                        MentionSource::TestPoint => crate::i18n::fill(
+                            crate::i18n::t("chat.mention.category.tp"),
+                            &[("count", count_str.as_str())],
+                        ),
+                        MentionSource::Feature => crate::i18n::fill(
+                            crate::i18n::t("chat.mention.category.feature"),
+                            &[("count", count_str.as_str())],
+                        ),
+                    };
+                    (
+                        source.prefix().to_string(),
+                        source_color(*source),
+                        label,
+                        preview.clone(),
+                    )
+                }
+                MentionItem::Candidate(candidate) => (
+                    candidate.source.prefix().to_string(),
+                    source_color(candidate.source),
+                    candidate.label.clone(),
+                    candidate.detail.clone(),
+                ),
+            };
+
+            let prefix_col = format!(" {prefix:<10} ");
+            let used = prefix_col.width();
+            let remaining = max_width.saturating_sub(used);
+            let mut spans = vec![Span::styled(
+                prefix_col,
+                paint(
+                    Style::default()
+                        .fg(prefix_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )];
+
+            let detail_clean = detail_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty());
+            let (label_text, right_detail) = if let Some(detail) = detail_clean {
+                let detail_budget = (remaining / 3).clamp(10, 32);
+                let label_budget = remaining.saturating_sub(detail_budget + 2);
+                if label_budget >= 8 {
+                    (
+                        super::truncate_str(&main_text, label_budget),
+                        Some(super::truncate_str(detail, detail_budget)),
+                    )
+                } else {
+                    (super::truncate_str(&main_text, remaining), None)
+                }
+            } else {
+                (super::truncate_str(&main_text, remaining), None)
+            };
+
+            let main_fg = if is_selected {
+                theme::FG
+            } else if matches!(
+                item,
+                MentionItem::Category {
+                    source: MentionSource::LastFail,
+                    count: 0,
+                    ..
+                }
+            ) {
+                theme::MUTED
+            } else {
+                theme::FG
+            };
+            spans.push(Span::styled(
+                label_text,
+                paint(Style::default().fg(main_fg)),
+            ));
+            if let Some(detail) = right_detail {
+                spans.push(Span::styled(
+                    format!("  {detail}"),
+                    paint(Style::default().fg(theme::MUTED)),
+                ));
+            }
+
+            let mut line = Line::from(spans);
+            if let Some(bg) = row_bg {
+                line = line.style(Style::default().bg(bg));
+            }
+            lines.push(line);
+
+            app.clickable_regions.push(ClickableRegion::ActionButton {
+                rect: row_rect,
+                action: Action::AiMentionChoose(index),
+                modal: false,
+            });
+        }
+    }
+
+    if rows > 0 {
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)),
+            Rect::new(area.x, area.y, area.width, rows as u16),
+        );
+    }
+    super::render_action_bar(
+        frame,
+        &mut app.clickable_regions,
+        Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        "",
+        &[
+            (crate::i18n::t("action.select"), Action::AiMentionSelect),
+            (crate::i18n::t("action.dismiss"), Action::AiMentionDismiss),
+        ],
+        false,
+    );
+}
+
 /// Keep every review decision visible and isolate its pointer ownership.
 /// Draw the AI footer using the same rectangles for text and pointer actions.
 ///

@@ -7788,6 +7788,12 @@ fn render_requirements_tree(
     let (content_inner, action_area) = split_pane_action_row(inner);
     let tree_actions = [
         ActionItem::new(
+            ui.issue_filter.chip_key_label(),
+            ui.issue_filter.chip_label(),
+            Action::ReqIssueFilter,
+            theme::ActionTone::Info,
+        ),
+        ActionItem::new(
             crate::i18n::t("req.filter.key"),
             crate::i18n::t("req.filter"),
             Action::ReqFilterOverlay,
@@ -8557,8 +8563,9 @@ fn apply_char_range_highlight(
     patch: Style,
 ) -> Line<'static> {
     let body = buffer.as_string();
-    let start_lc = teshi_core::authoring::char_position_to_line_col(body.as_str(), range.start);
-    let end_lc = teshi_core::authoring::char_position_to_line_col(body.as_str(), range.end);
+    let raw_range = teshi_core::authoring::body_range_to_raw_range(body.as_str(), *range);
+    let start_lc = teshi_core::authoring::char_position_to_line_col(body.as_str(), raw_range.start);
+    let end_lc = teshi_core::authoring::char_position_to_line_col(body.as_str(), raw_range.end);
     if let (Some((start_line, start_col)), Some((end_line, end_col))) = (start_lc, end_lc) {
         if row < start_line || row > end_line {
             return line;
@@ -13530,7 +13537,7 @@ mod gui_chrome_tests {
             (MainTab::Explore, "Explore ›"),
             (MainTab::MindMap, "MindMap ›"),
             (MainTab::Ai, "AI ›"),
-            (MainTab::Requirements, "Requirements ›"),
+            (MainTab::Requirements, "Issues ›"),
             (MainTab::TestPoints, "Test Points ›"),
         ] {
             let mut app = App::from_args().expect("app init");

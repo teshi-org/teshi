@@ -53,8 +53,9 @@ pub use app_data::{
     add_recent_project, app_data_dir, ensure_migrated_from_teshi_desktop_at,
     get_recent_projects as load_recent_projects, load_recent_project_entries, load_settings,
     open_dialog_default_dir, requirements_data_dir, save_settings, validated_window_size,
-    AppSettings, RecentProjectEntry, RequirementsViewPrefs, DEFAULT_REQUIREMENTS_STORE_DIR,
-    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, TESHI_REQUIREMENTS_DIR_ENV,
+    AppSettings, RecentProjectEntry, RequirementsViewPrefs, DEFAULT_ISSUES_STORE_DIR,
+    DEFAULT_REQUIREMENTS_STORE_DIR, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    TESHI_REQUIREMENTS_DIR_ENV,
 };
 pub use authoring::{
     add_requirement_documents_tags, clear_requirement_tag_style, compute_document_revision,

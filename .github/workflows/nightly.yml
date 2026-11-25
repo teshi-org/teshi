@@ -58,6 +58,25 @@ jobs:
           subject=$(git log -1 --format=%s)
           tag="v${version}-nightly.${date}.${sha}"
 
+          if [[ ! "${tag}" =~ ^v[0-9].+-nightly\.[0-9]{8}\.[0-9a-f]{7}$ ]]; then
+            echo "Computed nightly tag has unexpected format: ${tag}" >&2
+            exit 1
+          fi
+
+          # Nightly must always target the *next* unreleased SemVer (> latest stable tag)
+          # and skip commits that already have a nightly or stable release tag.
+          version_state=$(python scripts/nightly_version_gate.py --version "${version}" --head "${full_sha}")
+          if [[ "${version_state}" == skip:* ]]; then
+            echo "${version_state#skip:}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${version_state}" != publish:* ]]; then
+            echo "Unexpected nightly version gate result: ${version_state}" >&2
+            exit 1
+          fi
+          echo "${version_state#publish:}"
+
           # Nightly is a consumer of CI, not a second CI pipeline. Only a green
           # run that verified this exact commit, or the identical source tree
           # through its merged pull request, may unlock publication, so a
@@ -77,21 +96,7 @@ jobs:
           fi
           echo "CI passed for main HEAD ${full_sha} (${ci_state#success:}); eligible for Nightly."
 
-          if [[ ! "${tag}" =~ ^v[0-9].+-nightly\.[0-9]{8}\.[0-9a-f]{7}$ ]]; then
-            echo "Computed nightly tag has unexpected format: ${tag}" >&2
-            exit 1
-          fi
-
-          # Skip when this commit already has a nightly tag. The date in the tag
-          # name is first-publish time, so a later cron must not mint a new tag
-          # for unchanged HEAD.
-          existing=$(git tag --list 'v*-nightly.*' --points-at "${full_sha}" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-          if [ -n "${existing}" ]; then
-            echo "Commit ${full_sha} already published as nightly (${existing}); skipping."
-            echo "skip=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "skip=false" >> "${GITHUB_OUTPUT}"
-          fi
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
 
           {
             echo "release_tag=${tag}"

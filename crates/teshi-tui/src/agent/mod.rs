@@ -1893,7 +1893,8 @@ fn parse_requirement_links(
             anyhow::bail!("requirement_links[].quote.quote must be non-empty");
         }
         let range = teshi_core::authoring::TextRange::new(start, end);
-        let selected_quote = teshi_core::authoring::slice_by_char_range(&document.body, range)
+        let stripped_body = teshi_core::authoring::strip_markdown_frontmatter(&document.body);
+        let selected_quote = teshi_core::authoring::slice_by_char_range(stripped_body, range)
             .with_context(|| {
                 format!(
                     "requirement link range [{start}, {end}) is outside document '{}'",
@@ -3093,6 +3094,7 @@ mod pipeline_gate_tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,

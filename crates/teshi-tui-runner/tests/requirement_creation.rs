@@ -74,7 +74,7 @@ fn new_requirement_creation_keeps_tree_and_editor_in_sync() {
     let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path())).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("4").unwrap();
-    terminal.expect_text("Requirements", true, 10000).unwrap();
+    terminal.expect_text("Issues", true, 10000).unwrap();
     terminal
         .expect_text("No requirement artifacts", true, 10000)
         .unwrap();
@@ -241,9 +241,7 @@ fn clipped_footer_blank_space_does_not_trigger_hidden_action() {
     terminal.key("4").unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("Document 1", true, 10000).unwrap();
-    terminal
-        .expect_text("Requirements › Doc", true, 10000)
-        .unwrap();
+    terminal.expect_text("Issues › Doc", true, 10000).unwrap();
     let screen = terminal.screen().unwrap();
     let footer = screen.lines().nth(15).unwrap();
     let blank = footer
@@ -292,7 +290,7 @@ fn new_requirement_creation_dirty_guard_supports_cancel_and_discard() {
     let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path())).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("4").unwrap();
-    terminal.expect_text("Requirements", true, 10000).unwrap();
+    terminal.expect_text("Issues", true, 10000).unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("# Document 1", true, 10000).unwrap();
     terminal.key("Right").unwrap();
@@ -352,7 +350,7 @@ fn requirements_tree_wheel_routes_under_pointer_and_keeps_editor_selection() {
     let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path())).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("4").unwrap();
-    terminal.expect_text("Requirements", true, 10000).unwrap();
+    terminal.expect_text("Issues", true, 10000).unwrap();
 
     for number in 1..=18 {
         terminal.key("Ctrl+n").unwrap();

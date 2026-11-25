@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, HierarchyPath, ResolutionState, ReviewState, TestPoint, TextRange,
-    parse_teshi_tp_tags, slice_by_char_range,
+    parse_teshi_tp_tags, slice_by_char_range, strip_markdown_frontmatter,
 };
 use teshi_core::gherkin::BddProject;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1889,15 +1889,15 @@ pub fn excerpts_for_test_point(
             let quote = if !link.quote.quote.trim().is_empty() {
                 link.quote.quote.clone()
             } else if let Some(d) = doc {
+                let body = strip_markdown_frontmatter(&d.body);
                 if is_doc_level {
-                    d.body
-                        .lines()
+                    body.lines()
                         .find(|l| !l.trim().is_empty())
                         .unwrap_or("")
                         .trim()
                         .to_string()
                 } else {
-                    slice_by_char_range(&d.body, link.position).unwrap_or_default()
+                    slice_by_char_range(body, link.position).unwrap_or_default()
                 }
             } else {
                 String::new()

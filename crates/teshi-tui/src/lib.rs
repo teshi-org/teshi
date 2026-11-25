@@ -2,6 +2,7 @@ mod acp_agents;
 mod acp_controls;
 mod agent;
 mod agent_selection;
+mod ai_context;
 mod app;
 mod auth;
 mod authoring_tab;
@@ -537,6 +538,7 @@ pub fn run() -> Result<()> {
                             ai_sidebar_focused: app.ai_sidebar_focused,
                             ai_sidebar_visible: app.ai_sidebar_visible,
                             slash_suggestion_active: app.slash_suggestion_active,
+                            mention_popup_active: app.mention_popup_accepts_keyboard(),
                             auth_panel_active: app.auth_panel_active,
                             model_panel_active: app.model_panel_active,
                             model_panel_adding: app.model_panel_mode == app::ModelPanelMode::Adding

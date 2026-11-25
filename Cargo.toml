@@ -62,7 +62,7 @@ members = [
 exclude = ["runner", "crates/teshi-tui-runner"]
 
 [workspace.package]
-version = "0.7.14"
+version = "0.7.15"
 
 [workspace.dependencies]
 anyhow = "1"

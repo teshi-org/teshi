@@ -104,15 +104,19 @@ fn elapsed_time_advances_through_acp_tool_activity_and_remains_after_completion(
         .expect_text("I will inspect the project", true, 15000)
         .unwrap();
     let screen = terminal.screen().unwrap();
+    let metrics = screen
+        .lines()
+        .find(|line| line.contains("ctx unknown"))
+        .unwrap_or_else(|| panic!("metrics must appear in the composer meta strip: {screen}"));
     let controls = screen
         .lines()
-        .find(|line| {
-            line.contains("ACP") && line.contains("Settings") && line.contains("ctx unknown")
-        })
-        .unwrap_or_else(|| panic!("configuration and metrics must share the dock row: {screen}"));
+        .find(|line| line.contains("ACP") && line.contains("Settings"))
+        .unwrap_or_else(|| {
+            panic!("configuration controls must appear in the composer toolbar: {screen}")
+        });
     assert!(
-        !controls.contains("thinking"),
-        "progress already has its transcript row: {controls}"
+        !metrics.contains("thinking") && !controls.contains("thinking"),
+        "progress already has its transcript row: {screen}"
     );
     let initial = timer_line(&terminal);
     capture(&terminal, "elapsed-initial");

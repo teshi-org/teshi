@@ -19,7 +19,8 @@ use teshi_engine::organization::{
 use tui_tree_widget::TreeItem;
 
 use super::{
-    AuthoringUiState, RequirementsOverlay, TREE_DOC_PREFIX, requirement_document_tree_line,
+    AuthoringUiState, IssueListFilter, RequirementsOverlay, TREE_DOC_PREFIX,
+    requirement_document_tree_line_with_kind,
 };
 use crate::theme;
 
@@ -309,6 +310,11 @@ impl AuthoringUiState {
                 crate::i18n::t("req.states.pending")
             });
         }
+        title.push_str(match self.issue_filter {
+            IssueListFilter::Open => crate::i18n::t("req.issue_filter.title.open"),
+            IssueListFilter::All => crate::i18n::t("req.issue_filter.title.all"),
+            IssueListFilter::Bug => crate::i18n::t("req.issue_filter.title.bug"),
+        });
         title
     }
 
@@ -954,12 +960,14 @@ impl AuthoringUiState {
                     let _ = shown.add_documents(folder, std::slice::from_ref(id));
                 }
                 let docs = self.project_view_documents();
+                let kinds = self.document_issue_kinds();
                 let styles = self
                     .artifacts
                     .as_ref()
                     .map(|artifacts| artifacts.index.tag_styles.clone())
                     .unwrap_or_default();
-                let (items, labels) = build_organization_tree(&docs, &shown, project, &styles);
+                let (items, labels) =
+                    build_organization_tree(&docs, &shown, project, &styles, &kinds);
                 self.tree_items = items;
                 self.tree_labels = labels;
                 self.organization = Some(org);
@@ -1003,6 +1011,7 @@ pub(super) fn build_organization_tree(
     org: &RequirementOrganization,
     project: &str,
     styles: &BTreeMap<String, RequirementTagStyle>,
+    kinds: &HashMap<String, teshi_core::authoring::IssueKind>,
 ) -> (
     Vec<TreeItem<'static, String>>,
     HashMap<String, Line<'static>>,
@@ -1012,6 +1021,7 @@ pub(super) fn build_organization_tree(
         org,
         project,
         styles,
+        kinds,
         labels: HashMap::new(),
     };
     let inbox: Vec<_> = docs
@@ -1041,6 +1051,7 @@ struct OrganizationTreeBuilder<'a> {
     org: &'a RequirementOrganization,
     project: &'a str,
     styles: &'a BTreeMap<String, RequirementTagStyle>,
+    kinds: &'a HashMap<String, teshi_core::authoring::IssueKind>,
     labels: HashMap<String, Line<'static>>,
 }
 
@@ -1054,7 +1065,8 @@ impl OrganizationTreeBuilder<'_> {
             _ => None,
         };
         let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
-        let mut line = requirement_document_tree_line(doc, self.styles);
+        let kind = self.kinds.get(&doc.id).copied().unwrap_or_default();
+        let mut line = requirement_document_tree_line_with_kind(doc, self.styles, kind);
         if let Some(marker) = marker {
             line.spans
                 .insert(0, Span::styled(marker, Style::default().fg(theme::SUCCESS)));

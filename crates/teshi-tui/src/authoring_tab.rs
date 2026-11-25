@@ -11,14 +11,15 @@ use crate::app::{App, MainTab};
 use crate::theme;
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
-    AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
-    RequirementGroupMode, RequirementIterationFilter, RequirementPriority, RequirementTagStyle,
-    ResolutionState, ReviewState, TestPoint, TextRange, UNASSIGNED_ITERATION_LABEL,
-    create_requirement_link, line_col_range_to_char_range, mark_document_links_missing,
-    re_resolve_document_links, requirement_title,
+    AuthoringArtifacts, AuthoringDiagnostic, DocumentFrontmatter, HierarchyPath, IssueKind,
+    RequirementDocumentMeta, RequirementGroupMode, RequirementIterationFilter, RequirementPriority,
+    RequirementTagStyle, ResolutionState, ReviewState, TestPoint, TextRange,
+    UNASSIGNED_ITERATION_LABEL, create_requirement_link, line_col_range_to_char_range,
+    mark_document_links_missing, parse_markdown_frontmatter, raw_range_to_body_range,
+    re_resolve_document_links, requirement_title, strip_markdown_frontmatter,
 };
 use teshi_engine::{
     compute_document_revision, delete_requirement_document, initialize_requirement_store,
@@ -179,6 +180,68 @@ pub enum RequirementsOverlay {
     },
 }
 
+/// Frontmatter-based Issues list filter cycled with `f`.
+///
+/// Defaults to [`Self::Open`] so closed (`status: done`) historical tickets stay
+/// out of the way until explicitly requested via [`Self::All`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum IssueListFilter {
+    /// Hide issues whose frontmatter sets `status: done`.
+    #[default]
+    Open,
+    /// Show every issue regardless of status or type.
+    All,
+    /// Show open bug re-test issues (`type: bug`, excluding `status: done`).
+    Bug,
+}
+
+impl IssueListFilter {
+    /// Cycles `Open` → `All` → `Bug` → `Open`.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Open => Self::All,
+            Self::All => Self::Bug,
+            Self::Bug => Self::Open,
+        }
+    }
+
+    /// Short display label used in status messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => crate::i18n::t("req.issue_filter.open"),
+            Self::All => crate::i18n::t("req.issue_filter.all"),
+            Self::Bug => crate::i18n::t("req.issue_filter.bug"),
+        }
+    }
+
+    /// Compact chip label (narrow panes without key hint).
+    pub fn chip_label(self) -> &'static str {
+        match self {
+            Self::Open => crate::i18n::t("req.issue_filter.chip.open"),
+            Self::All => crate::i18n::t("req.issue_filter.chip.all"),
+            Self::Bug => crate::i18n::t("req.issue_filter.chip.bug"),
+        }
+    }
+
+    /// Full chip label with `[f]` shortcut hint.
+    pub fn chip_key_label(self) -> &'static str {
+        match self {
+            Self::Open => crate::i18n::t("req.issue_filter.key.open"),
+            Self::All => crate::i18n::t("req.issue_filter.key.all"),
+            Self::Bug => crate::i18n::t("req.issue_filter.key.bug"),
+        }
+    }
+
+    /// Returns whether a document with `frontmatter` passes this filter.
+    pub fn matches(self, frontmatter: &DocumentFrontmatter) -> bool {
+        match self {
+            Self::Open => !frontmatter.is_done(),
+            Self::All => true,
+            Self::Bug => frontmatter.kind() == IssueKind::Bug && !frontmatter.is_done(),
+        }
+    }
+}
+
 /// Focus within the Requirements tab three-pane layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementsFocus {
@@ -307,6 +370,8 @@ pub struct AuthoringUiState {
     pub selection_anchor: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
     pub iteration_filter: RequirementIterationFilter,
+    /// Frontmatter status/type filter cycled with `f` (`Open` / `All` / `Bug`).
+    pub issue_filter: IssueListFilter,
     /// Project window, separate from the iteration filter.
     pub project_filter: teshi_core::authoring::RequirementProjectFilter,
     pub group_mode: RequirementGroupMode,
@@ -326,15 +391,51 @@ pub struct AuthoringUiState {
 }
 
 impl AuthoringUiState {
+    fn document_frontmatter(&self, doc_id: &str) -> DocumentFrontmatter {
+        self.artifacts
+            .as_ref()
+            .and_then(|a| a.documents.iter().find(|doc| doc.meta.id == doc_id))
+            .and_then(|doc| parse_markdown_frontmatter(&doc.body).frontmatter)
+            .unwrap_or_default()
+    }
+
+    pub(super) fn document_issue_kinds(&self) -> HashMap<String, IssueKind> {
+        let Some(artifacts) = self.artifacts.as_ref() else {
+            return HashMap::new();
+        };
+        artifacts
+            .documents
+            .iter()
+            .map(|doc| {
+                let kind = parse_markdown_frontmatter(&doc.body)
+                    .frontmatter
+                    .map_or(IssueKind::Feat, |fm| fm.kind());
+                (doc.meta.id.clone(), kind)
+            })
+            .collect()
+    }
+
+    fn matches_issue_filter(&self, doc_id: &str) -> bool {
+        self.issue_filter
+            .matches(&self.document_frontmatter(doc_id))
+    }
+
+    /// Cycles the frontmatter-based Issues filter (`Open` → `All` → `Bug`) and rebuilds the tree.
+    pub fn cycle_issue_filter(&mut self) -> IssueListFilter {
+        self.issue_filter = self.issue_filter.next();
+        self.rebuild_tree();
+        self.issue_filter
+    }
+
     fn project_filtered_index(&self) -> teshi_core::authoring::RequirementDocumentIndex {
         let mut index = self
             .artifacts
             .as_ref()
             .map(|a| a.index.clone())
             .unwrap_or_default();
-        index
-            .documents
-            .retain(|doc| doc.matches_project_filter(&self.project_filter));
+        index.documents.retain(|doc| {
+            doc.matches_project_filter(&self.project_filter) && self.matches_issue_filter(&doc.id)
+        });
         let query = self.applied_search_query.trim().to_lowercase();
         if !query.is_empty() {
             index
@@ -499,7 +600,7 @@ impl AuthoringUiState {
         let mut chunk = String::new();
         let mut in_fence = false;
         let mut after_image = false;
-        for line in body.lines() {
+        for line in strip_markdown_frontmatter(&body).lines() {
             let marker = line.trim_start();
             if marker.starts_with("```") || marker.starts_with("~~~") {
                 in_fence = !in_fence;
@@ -932,6 +1033,7 @@ impl AuthoringUiState {
             selection_anchor: None,
             selection_end: None,
             iteration_filter: RequirementIterationFilter::All,
+            issue_filter: IssueListFilter::Open,
             project_filter: teshi_core::authoring::RequirementProjectFilter::All,
             group_mode: RequirementGroupMode::Path,
             overlay: RequirementsOverlay::None,
@@ -1066,6 +1168,7 @@ impl AuthoringUiState {
                     doc.id == *id
                         && doc.matches_project_filter(&self.project_filter)
                         && doc.matches_iteration_filter(&self.iteration_filter)
+                        && self.matches_issue_filter(&doc.id)
                 })
             });
             if still_present {
@@ -1125,24 +1228,30 @@ impl AuthoringUiState {
                         == Some(&teshi_core::authoring::RequirementProjectStatus::Planned)
             });
         }
+        let kinds = self.document_issue_kinds();
         let searching = !self.applied_search_query.trim().is_empty();
         if searching {
             (self.tree_items, self.tree_labels) =
-                build_search_results(&index, &self.iteration_filter);
+                build_search_results(&index, &self.iteration_filter, &kinds);
         } else if let Some(project) = project {
             // Path grouping in project scope is replaced by the project's own folders.
             if self.group_mode == RequirementGroupMode::Path {
                 self.rebuild_folders_tree(&project);
             } else {
-                (self.tree_items, self.tree_labels) = build_requirement_tree(
+                (self.tree_items, self.tree_labels) = build_requirement_tree_with_kinds(
                     &index,
                     &self.iteration_filter,
                     RequirementGroupMode::Iteration,
+                    &kinds,
                 );
             }
         } else {
-            (self.tree_items, self.tree_labels) =
-                build_requirement_tree(&index, &self.iteration_filter, self.group_mode);
+            (self.tree_items, self.tree_labels) = build_requirement_tree_with_kinds(
+                &index,
+                &self.iteration_filter,
+                self.group_mode,
+                &kinds,
+            );
         }
         let visible = visible_document_ids(&index, &self.iteration_filter);
         let target = self
@@ -1918,8 +2027,9 @@ impl AuthoringUiState {
     /// Creates an immediately ready (`Approved`) test point from the current non-empty selection.
     pub fn create_test_point_from_selection(&mut self) -> Option<String> {
         let doc_meta = self.current_document_meta()?.clone();
-        let range = self.selection_char_range()?;
+        let raw_range = self.selection_char_range()?;
         let body = self.buffer.as_string();
+        let range = raw_range_to_body_range(&body, raw_range)?;
         let store_id = self.artifacts.as_ref()?.index.store_id.clone()?;
         let link = create_requirement_link(
             store_id,
@@ -2008,7 +2118,14 @@ impl AuthoringUiState {
         }
         self.draft_folder = self.selected_folder().map(|folder| (id.clone(), folder));
         let artifacts = self.artifacts.as_mut().expect("artifacts initialized");
-        let body = format!("# {}\n\n", title.trim());
+        let body = if self.issue_filter == IssueListFilter::Bug {
+            format!(
+                "---\ntype: bug\nstatus: open\n---\n\n# {}\n\n",
+                title.trim()
+            )
+        } else {
+            format!("# {}\n\n", title.trim())
+        };
         let revision = compute_document_revision(&body);
         let mut meta = RequirementDocumentMeta::new(id.clone(), relative_path, title, revision);
         if let Some(project) = project {
@@ -2119,12 +2236,15 @@ impl AuthoringUiState {
         );
         let test_points_result = save_test_points(project_root, &artifacts.test_points);
         let filing_result = self.file_saved_draft(&doc_id);
-        // The saved title must be visible even if linked test-point persistence fails.
-        self.rebuild_tree();
-        test_points_result?;
+        // Markdown is already saved on disk; clear the dirty flag before rebuilding
+        // the tree so a document hidden by the active filter (e.g. `status: done`
+        // under `Open`) yields editor selection cleanly instead of staying stuck.
         self.buffer_dirty = false;
         self.draft_document_id = None;
         self.note_store_write();
+        // The saved title must be visible even if linked test-point persistence fails.
+        self.rebuild_tree();
+        test_points_result?;
         filing_result
     }
 
@@ -2661,6 +2781,7 @@ fn requirement_matches_search(doc: &RequirementDocumentMeta, query: &str) -> boo
 fn build_search_results(
     index: &teshi_core::authoring::RequirementDocumentIndex,
     filter: &RequirementIterationFilter,
+    kinds: &HashMap<String, IssueKind>,
 ) -> (
     Vec<TreeItem<'static, String>>,
     HashMap<String, Line<'static>>,
@@ -2672,7 +2793,8 @@ fn build_search_results(
         .iter()
         .filter(|doc| doc.matches_iteration_filter(filter))
         .map(|doc| {
-            let label = requirement_document_tree_line(doc, styles);
+            let kind = kinds.get(&doc.id).copied().unwrap_or_default();
+            let label = requirement_document_tree_line_with_kind(doc, styles, kind);
             let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
             labels.insert(id.clone(), label.clone());
             TreeItem::new(id, label, Vec::new()).unwrap()
@@ -2733,6 +2855,7 @@ fn build_path_tree(
     documents: &[RequirementDocumentMeta],
     dir_prefix: &str,
     styles: &BTreeMap<String, RequirementTagStyle>,
+    kinds: &HashMap<String, IssueKind>,
     labels: &mut HashMap<String, Line<'static>>,
 ) -> Vec<TreeItem<'static, String>> {
     #[derive(Default)]
@@ -2762,6 +2885,7 @@ fn build_path_tree(
         node: &DirNode,
         dir_prefix: &str,
         styles: &BTreeMap<String, RequirementTagStyle>,
+        kinds: &HashMap<String, IssueKind>,
         labels: &mut HashMap<String, Line<'static>>,
     ) -> Vec<TreeItem<'static, String>> {
         let mut items = Vec::new();
@@ -2772,12 +2896,13 @@ fn build_path_tree(
                 format!("{path}/{name}")
             };
             let id = format!("{TREE_DIR_PREFIX}{dir_prefix}{child_path}");
-            let child_items = dir_to_items(child_path, child, dir_prefix, styles, labels);
+            let child_items = dir_to_items(child_path, child, dir_prefix, styles, kinds, labels);
             labels.insert(id.clone(), Line::from(name.clone()));
             items.push(TreeItem::new(id, name.clone(), child_items).unwrap());
         }
         for doc in &node.documents {
-            let label = requirement_document_tree_line(doc, styles);
+            let kind = kinds.get(&doc.id).copied().unwrap_or_default();
+            let label = requirement_document_tree_line_with_kind(doc, styles, kind);
             let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
             labels.insert(id.clone(), label.clone());
             items.push(TreeItem::new(id, label, Vec::new()).unwrap());
@@ -2785,17 +2910,30 @@ fn build_path_tree(
         items
     }
 
-    dir_to_items(String::new(), &root, dir_prefix, styles, labels)
+    dir_to_items(String::new(), &root, dir_prefix, styles, kinds, labels)
 }
 
 /// Builds folder/document tree items from indexed paths after applying filter/group.
 ///
 /// Also returns each node's styled label by identifier, which the renderer
 /// rewraps to the pane width.
+#[cfg(test)]
 pub fn build_requirement_tree(
     index: &teshi_core::authoring::RequirementDocumentIndex,
     filter: &RequirementIterationFilter,
     group: RequirementGroupMode,
+) -> (
+    Vec<TreeItem<'static, String>>,
+    HashMap<String, Line<'static>>,
+) {
+    build_requirement_tree_with_kinds(index, filter, group, &HashMap::new())
+}
+
+fn build_requirement_tree_with_kinds(
+    index: &teshi_core::authoring::RequirementDocumentIndex,
+    filter: &RequirementIterationFilter,
+    group: RequirementGroupMode,
+    kinds: &HashMap<String, IssueKind>,
 ) -> (
     Vec<TreeItem<'static, String>>,
     HashMap<String, Line<'static>>,
@@ -2809,7 +2947,7 @@ pub fn build_requirement_tree(
     let styles = &index.tag_styles;
     let mut labels = HashMap::new();
     let items = match group {
-        RequirementGroupMode::Path => build_path_tree(&docs, "", styles, &mut labels),
+        RequirementGroupMode::Path => build_path_tree(&docs, "", styles, kinds, &mut labels),
         RequirementGroupMode::Iteration => {
             let mut named: std::collections::BTreeMap<String, Vec<RequirementDocumentMeta>> =
                 std::collections::BTreeMap::new();
@@ -2822,13 +2960,14 @@ pub fn build_requirement_tree(
             }
             let mut items = Vec::new();
             for (name, group_docs) in named {
-                let child = build_path_tree(&group_docs, &format!("{name}/"), styles, &mut labels);
+                let child =
+                    build_path_tree(&group_docs, &format!("{name}/"), styles, kinds, &mut labels);
                 let id = format!("{TREE_ITER_PREFIX}{name}");
                 labels.insert(id.clone(), Line::from(name.clone()));
                 items.push(TreeItem::new(id, name, child).unwrap());
             }
             if !unassigned.is_empty() {
-                let child = build_path_tree(&unassigned, "unassigned/", styles, &mut labels);
+                let child = build_path_tree(&unassigned, "unassigned/", styles, kinds, &mut labels);
                 let id = format!("{TREE_ITER_PREFIX}{UNASSIGNED_ITERATION_LABEL}");
                 let label = crate::i18n::t("req.iteration.unassigned");
                 labels.insert(id.clone(), Line::from(label));
@@ -2840,14 +2979,24 @@ pub fn build_requirement_tree(
     (items, labels)
 }
 
-/// Styled tree row for a requirement document.
-///
-/// Layout: optional priority, prefix-tag chips, title, then plain `#tag`
-/// suffixes and a `+N` count of tags that did not fit. Prefix tags come first
-/// so the row limit on narrow panes truncates the title, never the badges.
+/// Styled tree row for a requirement/issue document (defaults to `[FEAT]` badge).
+#[cfg(test)]
 pub fn requirement_document_tree_line(
     doc: &RequirementDocumentMeta,
     styles: &BTreeMap<String, RequirementTagStyle>,
+) -> Line<'static> {
+    requirement_document_tree_line_with_kind(doc, styles, IssueKind::Feat)
+}
+
+/// Styled tree row for an issue document with an explicit `[FEAT]` / `[BUG]` badge.
+///
+/// Layout: `[FEAT]`/`[BUG]` badge, optional priority, prefix-tag chips, title,
+/// then plain `#tag` suffixes and a `+N` count of tags that did not fit. Badges
+/// lead the row so narrow panes truncate the title, never the badge.
+pub fn requirement_document_tree_line_with_kind(
+    doc: &RequirementDocumentMeta,
+    styles: &BTreeMap<String, RequirementTagStyle>,
+    kind: IssueKind,
 ) -> Line<'static> {
     // Two badges fit on each side of a title; the rest stay one keystroke away in Tags….
     const VISIBLE_PREFIX_TAGS: usize = 2;
@@ -2859,6 +3008,16 @@ pub fn requirement_document_tree_line(
         doc.title.as_str()
     };
     let mut spans = Vec::new();
+    let badge_style = match kind {
+        IssueKind::Feat => Style::default()
+            .fg(theme::INFO)
+            .add_modifier(Modifier::BOLD),
+        IssueKind::Bug => Style::default()
+            .fg(theme::ERROR)
+            .add_modifier(Modifier::BOLD),
+    };
+    spans.push(Span::styled(kind.badge(), badge_style));
+    spans.push(Span::raw(" "));
     if let Some(priority) = doc.priority {
         spans.push(Span::raw(format!("[{priority}] ")));
     }
@@ -3324,7 +3483,7 @@ mod tests {
         let doc = index.documents.iter().find(|d| d.id == meta.id).unwrap();
         assert_eq!(
             requirement_document_tree_label(doc, &index.tag_styles),
-            "#ui Login"
+            "[FEAT] #ui Login"
         );
     }
 
@@ -3400,8 +3559,13 @@ mod tests {
                 teshi_core::authoring::RequirementProjectStatus::Implemented,
             )),
         });
-        let (tree, labels) =
-            organize::build_organization_tree(&index.documents, &org, project, &index.tag_styles);
+        let (tree, labels) = organize::build_organization_tree(
+            &index.documents,
+            &org,
+            project,
+            &index.tag_styles,
+            &HashMap::new(),
+        );
         assert_eq!(tree.len(), 3, "Inbox, the AI folder, and Saved queries");
         assert_eq!(tree[0].identifier(), organize::TREE_INBOX_NODE);
         assert_eq!(tree[2].identifier(), organize::TREE_QUERIES_NODE);
@@ -3421,8 +3585,8 @@ mod tests {
         let query = &tree[2].children()[0];
         assert_eq!(labels[query.identifier()].to_string(), "Implemented (1)");
         assert_eq!(query.children()[0].identifier(), "req-doc:one");
-        assert_eq!(labels["req-doc:one"].to_string(), "✓ One");
-        assert_eq!(labels["req-doc:two"].to_string(), "Two");
+        assert_eq!(labels["req-doc:one"].to_string(), "✓ [FEAT] One");
+        assert_eq!(labels["req-doc:two"].to_string(), "[FEAT] Two");
     }
 
     #[test]
@@ -3444,9 +3608,14 @@ mod tests {
             ..Default::default()
         };
         let org = RequirementOrganization::default();
-        let (_, labels) =
-            organize::build_organization_tree(&index.documents, &org, project, &index.tag_styles);
-        assert_eq!(labels["req-doc:one"].to_string(), "✓✓ One");
+        let (_, labels) = organize::build_organization_tree(
+            &index.documents,
+            &org,
+            project,
+            &index.tag_styles,
+            &HashMap::new(),
+        );
+        assert_eq!(labels["req-doc:one"].to_string(), "✓✓ [FEAT] One");
     }
 
     fn tagged_doc(tags: &[&str]) -> RequirementDocumentMeta {
@@ -3483,7 +3652,7 @@ mod tests {
         let doc = tagged_doc(&["a", "b", "c"]);
         assert_eq!(
             requirement_document_tree_label(&doc, &BTreeMap::new()),
-            "[P1] Login  #a #b +1"
+            "[FEAT] [P1] Login  #a #b +1"
         );
     }
 
@@ -3496,7 +3665,7 @@ mod tests {
             ("login", Some(TagHue::Green), false),
         ]);
         let line = requirement_document_tree_line(&doc, &styles);
-        assert_eq!(line.to_string(), "[P1] #auth #ui Login  #login");
+        assert_eq!(line.to_string(), "[FEAT] [P1] #auth #ui Login  #login");
         let span = |text: &str| {
             line.spans
                 .iter()
@@ -3504,6 +3673,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing span {text}: {line:?}"))
                 .style
         };
+        assert_eq!(span("[FEAT]").fg, Some(theme::INFO), "feat badge color");
         assert_eq!(span("#ui").bg, Some(theme::ERROR), "colored prefix chip");
         assert_eq!(
             span("#auth").bg,
@@ -3524,7 +3694,7 @@ mod tests {
         let styles = tag_styles(&[("a", None, true), ("b", None, true), ("c", None, true)]);
         assert_eq!(
             requirement_document_tree_label(&doc, &styles),
-            "[P1] #a #b Login  #d +1",
+            "[FEAT] [P1] #a #b Login  #d +1",
             "the third prefix tag (sorted by name) joins the +N count"
         );
         let all_prefix = tag_styles(&[
@@ -3535,7 +3705,7 @@ mod tests {
         ]);
         assert_eq!(
             requirement_document_tree_label(&doc, &all_prefix),
-            "[P1] #a #b Login  +2"
+            "[FEAT] [P1] #a #b Login  +2"
         );
     }
 
@@ -4658,5 +4828,232 @@ mod tests {
         state.cursor_row = 0;
         assert!(state.paste_register(false));
         assert_eq!(state.buffer.as_string(), "a\nx\nx\nb");
+    }
+
+    #[test]
+    fn frontmatter_selection_is_rejected_and_body_selection_anchors_body_only() {
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        let body = "---\ntype: bug\nstatus: testing\n---\n\n# Export\n\nTimeout after 30s.\n";
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-1",
+            "doc-1.md",
+            "Export",
+            compute_document_revision(body),
+        ));
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", body).unwrap();
+
+        let mut ui = AuthoringUiState::load_from_project(project.path(), store.path());
+        ui.select_document_by_id("doc-1");
+
+        // Preview strips YAML frontmatter lines.
+        let preview_text: String = ui
+            .refresh_preview(80, 1)
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!preview_text.contains("status: testing"), "{preview_text}");
+        assert!(
+            preview_text.contains("Timeout after 30s."),
+            "{preview_text}"
+        );
+
+        // Selecting inside frontmatter must not create a test point.
+        ui.selection_anchor = Some((2, 0));
+        ui.selection_end = Some((2, 15));
+        assert!(ui.create_test_point_from_selection().is_none());
+
+        // Selecting in body produces a body-relative anchor that stays resolved after frontmatter edits.
+        ui.selection_anchor = Some((7, 0));
+        ui.selection_end = Some((7, 7));
+        let tp_id = ui
+            .create_test_point_from_selection()
+            .expect("body selection creates approved test point");
+        let tp = ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points
+            .iter()
+            .find(|tp| tp.id == tp_id)
+            .unwrap();
+        assert_eq!(tp.review_state, ReviewState::Approved);
+        assert_eq!(tp.requirement_links[0].quote.quote, "Timeout");
+        assert_eq!(
+            teshi_core::authoring::slice_by_char_range(
+                strip_markdown_frontmatter(body),
+                tp.requirement_links[0].position
+            )
+            .as_deref(),
+            Some("Timeout")
+        );
+    }
+
+    #[test]
+    fn issues_list_displays_feat_and_bug_badges_and_cycles_open_all_bug_filter() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        let project_identity = teshi_engine::ensure_requirement_project(project.path()).unwrap();
+
+        let docs = [
+            (
+                "doc-feat",
+                "feat.md",
+                "Checkout flow",
+                "# Checkout flow\n\nOpen feature.\n",
+            ),
+            (
+                "doc-bug",
+                "bug.md",
+                "Export timeout",
+                "---\ntype: bug\nstatus: testing\n---\n# Export timeout\n\nRepro steps.\n",
+            ),
+            (
+                "doc-done-feat",
+                "done-feat.md",
+                "Legacy banner",
+                "---\ntype: feat\nstatus: done\n---\n# Legacy banner\n\nClosed.\n",
+            ),
+            (
+                "doc-done-bug",
+                "done-bug.md",
+                "Old crash",
+                "---\ntype: bug\nstatus: done\n---\n# Old crash\n\nFixed.\n",
+            ),
+        ];
+        for (id, path, title, body) in docs {
+            let mut meta =
+                RequirementDocumentMeta::new(id, path, title, compute_document_revision(body));
+            meta.projects
+                .insert(project_identity.id.clone(), Default::default());
+            index.documents.push(meta);
+            save_requirement_markdown(store.path(), &mut index, path, body).unwrap();
+        }
+
+        let mut ui = AuthoringUiState::load_from_project(project.path(), store.path());
+        assert_eq!(ui.issue_filter, IssueListFilter::Open);
+
+        // Default `Open` hides `status: done` issues and shows [FEAT] / [BUG] badges.
+        assert_eq!(
+            ui.tree_labels["req-doc:doc-feat"].to_string(),
+            "[FEAT] Checkout flow"
+        );
+        assert_eq!(
+            ui.tree_labels["req-doc:doc-bug"].to_string(),
+            "[BUG] Export timeout"
+        );
+        let bug_badge = ui.tree_labels["req-doc:doc-bug"]
+            .spans
+            .iter()
+            .find(|s| s.content == "[BUG]")
+            .expect("bug badge span");
+        assert_eq!(bug_badge.style.fg, Some(theme::ERROR));
+        assert!(!ui.tree_labels.contains_key("req-doc:doc-done-feat"));
+        assert!(!ui.tree_labels.contains_key("req-doc:doc-done-bug"));
+        assert!(ui.tree_status_title().ends_with(" · Open"));
+
+        // Press `f` -> `All`: reveals `status: done` history too.
+        assert_eq!(ui.cycle_issue_filter(), IssueListFilter::All);
+        assert!(ui.tree_labels.contains_key("req-doc:doc-feat"));
+        assert!(ui.tree_labels.contains_key("req-doc:doc-bug"));
+        assert_eq!(
+            ui.tree_labels["req-doc:doc-done-feat"].to_string(),
+            "[FEAT] Legacy banner"
+        );
+        assert_eq!(
+            ui.tree_labels["req-doc:doc-done-bug"].to_string(),
+            "[BUG] Old crash"
+        );
+        assert!(ui.tree_status_title().ends_with(" · All"));
+
+        // Press `f` -> `Bug`: shows only open Bug tickets.
+        assert_eq!(ui.cycle_issue_filter(), IssueListFilter::Bug);
+        assert!(!ui.tree_labels.contains_key("req-doc:doc-feat"));
+        assert!(ui.tree_labels.contains_key("req-doc:doc-bug"));
+        assert!(!ui.tree_labels.contains_key("req-doc:doc-done-feat"));
+        assert!(!ui.tree_labels.contains_key("req-doc:doc-done-bug"));
+        assert!(ui.tree_status_title().ends_with(" · Bug"));
+
+        // Press `f` -> wraps back to `Open`.
+        assert_eq!(ui.cycle_issue_filter(), IssueListFilter::Open);
+        assert!(ui.tree_labels.contains_key("req-doc:doc-feat"));
+        assert!(ui.tree_labels.contains_key("req-doc:doc-bug"));
+        assert!(!ui.tree_labels.contains_key("req-doc:doc-done-feat"));
+    }
+
+    #[test]
+    fn create_document_under_bug_filter_seeds_bug_frontmatter_and_stays_visible() {
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let project = tempdir().unwrap();
+        let mut ui = AuthoringUiState::load_from_project(project.path(), store.path());
+
+        // Cycle Open -> All -> Bug.
+        assert_eq!(ui.cycle_issue_filter(), IssueListFilter::All);
+        assert_eq!(ui.cycle_issue_filter(), IssueListFilter::Bug);
+
+        let id = ui.create_document("crash.md", "Crash on save").unwrap();
+        let node = format!("req-doc:{id}");
+        assert!(
+            ui.tree_labels.contains_key(&node),
+            "new bug document should stay visible under Bug filter"
+        );
+        assert_eq!(ui.tree_labels[&node].to_string(), "[BUG] Crash on save");
+        assert!(ui.buffer.as_string().contains("type: bug"));
+        assert!(ui.buffer.as_string().contains("status: open"));
+        assert_eq!(ui.selected_document_id.as_deref(), Some(id.as_str()));
+
+        // Saving keeps it visible under the active Bug filter.
+        ui.save_current_document(project.path()).unwrap();
+        assert!(ui.tree_labels.contains_key(&node));
+        assert_eq!(ui.selected_document_id.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn saving_issue_as_done_under_open_filter_reselects_visible_doc_or_clears_editor() {
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let project = tempdir().unwrap();
+        let mut ui = AuthoringUiState::load_from_project(project.path(), store.path());
+
+        let first = ui.create_document("first.md", "First issue").unwrap();
+        ui.save_current_document(project.path()).unwrap();
+        let second = ui.create_document("second.md", "Second issue").unwrap();
+        ui.save_current_document(project.path()).unwrap();
+
+        assert_eq!(ui.issue_filter, IssueListFilter::Open);
+        ui.select_document_by_id(&first);
+        assert_eq!(ui.selected_document_id.as_deref(), Some(first.as_str()));
+
+        // Mark `first` as `status: done` and save -> it leaves the Open list and
+        // selection moves to the remaining visible document `second`.
+        ui.buffer = EditorBuffer::from_string(
+            "---\ntype: feat\nstatus: done\n---\n\n# First issue\n\nClosed.\n".to_string(),
+        );
+        ui.buffer_dirty = true;
+        ui.save_current_document(project.path()).unwrap();
+        assert!(!ui.buffer_dirty);
+        assert!(!ui.tree_labels.contains_key(&format!("req-doc:{first}")));
+        assert_eq!(
+            ui.selected_document_id.as_deref(),
+            Some(second.as_str()),
+            "selection should move off the newly hidden done issue"
+        );
+
+        // Now mark `second` as `status: done` as well -> no open issues remain,
+        // so the editor clears instead of staying stuck on a filtered-out doc.
+        ui.buffer = EditorBuffer::from_string(
+            "---\ntype: feat\nstatus: done\n---\n\n# Second issue\n\nClosed.\n".to_string(),
+        );
+        ui.buffer_dirty = true;
+        ui.save_current_document(project.path()).unwrap();
+        assert!(!ui.buffer_dirty);
+        assert!(!ui.tree_labels.contains_key(&format!("req-doc:{second}")));
+        assert_eq!(ui.selected_document_id, None);
     }
 }

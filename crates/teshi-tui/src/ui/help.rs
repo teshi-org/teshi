@@ -377,8 +377,8 @@ fn topic_label(index: usize, locale: EffectiveUiLocale) -> &'static str {
         (2, EffectiveUiLocale::En) => "MindMap",
         (3, EffectiveUiLocale::ZhCn) => "AI 对话",
         (3, EffectiveUiLocale::En) => "AI Chat",
-        (4, EffectiveUiLocale::ZhCn) => "需求文档",
-        (4, EffectiveUiLocale::En) => "Requirements",
+        (4, EffectiveUiLocale::ZhCn) => "Issues",
+        (4, EffectiveUiLocale::En) => "Issues",
         (5, EffectiveUiLocale::ZhCn) => "测试点",
         (5, EffectiveUiLocale::En) => "Test Points",
         (6, EffectiveUiLocale::ZhCn) => "Vim 与命令行",
@@ -399,7 +399,7 @@ Teshi 终端界面融合了 **GUI 直观点击** 与 **Vim 高效键位**。底�
 
 | 快捷键 | 作用 |
 |---|---|
-| `1` – `5` | 直接切换到 探索 / 思维导图 / AI / 需求 / 测试点 |
+| `1` – `5` | 直接切换到 探索 / 思维导图 / AI / Issues / 测试点 |
 | `gt` / `gT` | 顺序切换到下一个 / 上一个标签页 |
 | `Ctrl+W` + `h/j/k/l` 或方向键 | 在当前页可见面板间切换焦点 |
 | `Ctrl+U` / `Ctrl+D` | 向上 / 向下半页滚动（全标签页通用） |
@@ -427,7 +427,7 @@ Teshi combines **intuitive GUI mouse controls** with **fast Vim navigation**. Th
 
 | Key | Action |
 |---|---|
-| `1` – `5` | Jump directly to Explore / MindMap / AI / Requirements / Test Points |
+| `1` – `5` | Jump directly to Explore / MindMap / AI / Issues / Test Points |
 | `gt` / `gT` | Cycle to next / previous tab |
 | `Ctrl+W` + `h/j/k/l` or Arrows | Move focus across visible panes |
 | `Ctrl+U` / `Ctrl+D` | Scroll half-page up / down across all tabs |

@@ -397,7 +397,9 @@ pub fn validate_loaded_artifacts(
             if is_doc_level {
                 continue;
             }
-            let char_len = content.body.chars().count() as u32;
+            let char_len = super::frontmatter::strip_markdown_frontmatter(&content.body)
+                .chars()
+                .count() as u32;
             diagnostics.extend(validate_text_range(
                 link.position,
                 char_len,
@@ -415,12 +417,28 @@ pub fn validate_loaded_artifacts(
     diagnostics
 }
 
+/// Project-local issues directory.
+pub fn legacy_project_issues_dir(project_root: &Path) -> PathBuf {
+    project_root.join("issues")
+}
+
 /// Project-local requirements directory from older Teshi versions.
 ///
 /// Runtime loading must not use this path. Import detects it and prompts
 /// `teshi requirements import-project`.
 pub fn legacy_project_requirements_dir(project_root: &Path) -> PathBuf {
     project_root.join("requirements")
+}
+
+/// Resolves a project-local authoring directory, preferring `issues/` and
+/// falling back to `requirements/` when `issues/` does not exist.
+pub fn resolve_project_issues_dir(project_root: &Path) -> PathBuf {
+    let issues = legacy_project_issues_dir(project_root);
+    if issues.exists() {
+        issues
+    } else {
+        legacy_project_requirements_dir(project_root)
+    }
 }
 
 /// Legacy alias for [`legacy_project_requirements_dir`].
