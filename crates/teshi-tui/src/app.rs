@@ -23816,11 +23816,11 @@ mod tests {
         assert_eq!(app.agent().input.text(), draft, "opening keeps the draft");
 
         let (buffer, text) = draw(&mut app);
-        // 100x30 terminal: row 0 is the tab bar, row 1 is the active-tab
-        // underline rule, so the 27-row content area loses one row top and
-        // bottom, and every row loses three columns on each side.
+        // 100x30 terminal: row 0 is the tab bar, so the 28-row content area
+        // loses one row top and bottom for the gutter, and every row loses
+        // three columns on each side.
         assert_eq!(
-            buffer[(3, 3)].symbol(),
+            buffer[(3, 2)].symbol(),
             "╭",
             "the viewer starts after the top gutter"
         );
@@ -23838,7 +23838,7 @@ mod tests {
         assert!(text.contains("no image protocol"), "{text}");
         let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
             .expect("the close button is registered");
-        assert_eq!(close.y, 3, "the close button sits on the top border");
+        assert_eq!(close.y, 2, "the close button sits on the top border");
         assert!(text.contains("Close [Esc]"), "{text}");
 
         // Neither the composer below nor typed keys react while it is open.

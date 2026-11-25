@@ -353,42 +353,6 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
     }
 }
 
-/// Draws a full-width subtle header separator with a thick semantic underline
-/// beneath the active tab's registered click region.
-fn render_tab_underline(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.is_empty() {
-        return;
-    }
-    let rule = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(rule).style(Style::default().fg(theme::BORDER).bg(theme::SCREEN_BG)),
-        area,
-    );
-    if let Some(tab_rect) = app
-        .clickable_regions
-        .iter()
-        .find_map(|region| match region {
-            ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
-            _ => None,
-        })
-    {
-        let start = tab_rect.x.max(area.x);
-        let end = tab_rect.right().min(area.right());
-        if end > start {
-            let width = end - start;
-            let bar = "━".repeat(width as usize);
-            frame.render_widget(
-                Paragraph::new(bar).style(
-                    Style::default()
-                        .fg(theme::tab_accent(app.active_tab))
-                        .bg(theme::SCREEN_BG),
-                ),
-                Rect::new(start, area.y, width, 1),
-            );
-        }
-    }
-}
-
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // Paint the screen surface first, the way iCode's `MainScreen` paints
     // `$background`: the palette then reads the same in any terminal profile.
@@ -414,28 +378,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.ai_sidebar_working_rect = None;
     app.ai_sidebar_settled_rect = None;
 
-    let (tabs_row, tabs_rule_row, content_row, footer_row) = if frame.area().height >= 8 {
-        let [tabs_row, tabs_rule_row, content_row, footer_row] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .areas(frame.area());
-        (tabs_row, tabs_rule_row, content_row, footer_row)
-    } else {
-        let [tabs_row, content_row, footer_row] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .areas(frame.area());
-        (tabs_row, Rect::default(), content_row, footer_row)
-    };
+    let [tabs_row, content_row, footer_row] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
 
     frame.render_widget(Block::default().style(theme::topbar_style()), tabs_row);
     let active_tab_accent = theme::tab_accent(app.active_tab);
@@ -465,7 +415,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     register_tab_regions(app, tabs_row);
     render_workspace_meta(frame, app, tabs_row);
-    render_tab_underline(frame, app, tabs_rule_row);
 
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
@@ -13354,7 +13303,7 @@ mod gui_chrome_tests {
     use teshi_core::gherkin;
 
     #[test]
-    fn test_top_bar_paints_active_tab_underline_and_project_hover() {
+    fn test_top_bar_paints_active_tab_and_project_hover() {
         for tab in [
             MainTab::Explore,
             MainTab::MindMap,
@@ -13376,8 +13325,9 @@ mod gui_chrome_tests {
                 })
                 .expect("active tab region");
             let buffer = terminal.backend().buffer();
-            assert_eq!(buffer[(tab_rect.x, 1)].symbol(), "━");
-            assert_eq!(buffer[(tab_rect.x, 1)].fg, theme::tab_accent(tab));
+            assert_eq!(buffer[(tab_rect.x, tab_rect.y)].fg, theme::tab_accent(tab));
+            assert_eq!(buffer[(tab_rect.x, tab_rect.y)].bg, theme::TAB_ACTIVE_BG);
+            assert_eq!(buffer[(0, 1)].symbol(), "╭");
 
             let project_rect = app
                 .clickable_regions
