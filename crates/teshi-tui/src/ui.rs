@@ -1404,9 +1404,11 @@ fn render_explore_details_toggle_chip(
 
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.explore_edit_mode {
-        if app.explore_details_collapsed {
+        if app.explore_details_collapsed || area.width < 70 {
             render_editor_panel(frame, app, area, false);
-            render_explore_details_toggle_chip(frame, app, area, false, false);
+            if area.width >= 70 {
+                render_explore_details_toggle_chip(frame, app, area, false, false);
+            }
         } else {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)

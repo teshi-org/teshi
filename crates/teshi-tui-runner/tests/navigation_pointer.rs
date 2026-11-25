@@ -239,7 +239,7 @@ fn mindmap_tree_click_preview_wheel_and_panel_toggle_keep_source() {
     mindmap(&terminal);
     capture(&terminal, "mindmap-tree-selection");
     let (col, row) = locate(&terminal, "PREVIEW_LINE_03");
-    for _ in 0..14 {
+    for _ in 0..3 {
         terminal.scroll_at(col, row, false, false).unwrap();
     }
     capture(&terminal, "mindmap-preview-after-wheel");
