@@ -93,8 +93,15 @@ const SHUTDOWN_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_sec
 /// teardown; the next turn then reconnects and re-seeds the saved transcript.
 const CANCEL_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
+struct PromptPayload {
+    blocks: Vec<PromptBlock>,
+    /// Saved local transcript to prepend only if this worker did not restore
+    /// remote context via `session/resume` or `session/load`.
+    history_preamble: Option<String>,
+}
+
 enum WorkerCommand {
-    Prompt(Vec<PromptBlock>),
+    Prompt(PromptPayload),
     Configure {
         option: Box<teshi_acp::session_config::ConfigOption>,
         value: serde_json::Value,
@@ -338,7 +345,7 @@ impl AcpAgentBackend {
                 "ACP backend is still stopping; retry after exit"
             );
         }
-        let config = self.config.clone().ok_or_else(|| {
+        let mut config = self.config.clone().ok_or_else(|| {
             anyhow::anyhow!("ACP backend is not configured; supply an AcpAgentCommand")
         })?;
         if matches!(self.state, AgentBackendStatus::Failed)
@@ -361,9 +368,18 @@ impl AcpAgentBackend {
             );
         }
         if self.worker.is_none() {
-            // A new ACP process starts without remote history, so the next turn
-            // must carry the saved transcript even when the previous one was
-            // already submitted to an older process.
+            // If an earlier worker in this conversation established a remote
+            // session id, carry it forward so an in-place reconnect tries
+            // session/resume or session/load before falling back to session/new.
+            if let Some(live_session_id) = self.controls().session_id.filter(|id| !id.is_empty()) {
+                config.restore_session_id = Some(live_session_id.clone());
+                if let Some(stored) = self.config.as_mut() {
+                    stored.restore_session_id = Some(live_session_id);
+                }
+            }
+            // A new ACP process starts without remote history unless restore
+            // succeeds inside the worker, so allow the next turn to carry a
+            // fallback transcript preamble for the worker to decide on.
             self.submitted_prompt = false;
             self.tool_bridge = config
                 .tool_bridge
@@ -533,16 +549,12 @@ impl AcpAgentBackend {
         {
             prompt.push_str(guidance);
         }
-        // A fresh ACP process has no remote history unless session/resume or
-        // session/load already restored it. Only then fall back to re-seeding
-        // the saved transcript as a single prompt preamble.
-        let remote_restored = self
-            .controls
-            .lock()
-            .map(|state| state.remote_context_restored)
-            .unwrap_or(false);
-        if !self.submitted_prompt && !remote_restored && messages.len() > 1 {
-            let history = messages[..messages.len() - 1]
+        // A fresh ACP process may still be executing `session/resume` or
+        // `session/load` on its worker thread when the user submits the first
+        // turn. Carry the local transcript separately so the worker only
+        // prepends it after confirming remote context was NOT restored.
+        let history_preamble = (!self.submitted_prompt && messages.len() > 1).then(|| {
+            messages[..messages.len() - 1]
                 .iter()
                 .map(|message| {
                     format!(
@@ -552,16 +564,17 @@ impl AcpAgentBackend {
                     )
                 })
                 .collect::<Vec<_>>()
-                .join("\n\n");
-            prompt =
-                format!("[Restored conversation history]\n{history}\n\n[Current turn]\n{prompt}");
-        }
+                .join("\n\n")
+        });
         let mut blocks = vec![PromptBlock::Text(prompt)];
         blocks.extend(images);
         self.commands
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ACP worker is unavailable"))?
-            .send(WorkerCommand::Prompt(blocks))
+            .send(WorkerCommand::Prompt(PromptPayload {
+                blocks,
+                history_preamble,
+            }))
             .map_err(|_| anyhow::anyhow!("ACP worker exited"))?;
         self.submitted_prompt = true;
         Ok(())
@@ -1040,27 +1053,91 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     if let Some(id) = restore_session_id.filter(|id| !id.is_empty()) {
-        if initialized.supports_resume_session()
-            && let Ok(session) = client
-                .resume_session_with_mcp(id, cwd.clone(), servers.clone())
-                .await
-        {
-            return Ok((session, true));
+        if initialized.supports_resume_session() {
+            match await_while_draining_updates(
+                client.resume_session_with_mcp(id, cwd.clone(), servers.clone()),
+                updates_rx,
+            )
+            .await
+            {
+                Ok(session) => {
+                    drain_restore_replay(updates_rx).await;
+                    tracing::info!(
+                        session_id = %session.id,
+                        "ACP session restored via session/resume"
+                    );
+                    return Ok((session, true));
+                }
+                Err(error) => {
+                    drain_restore_replay(updates_rx).await;
+                    tracing::warn!(
+                        session_id = id,
+                        error = %error,
+                        "ACP session/resume failed"
+                    );
+                }
+            }
         }
-        if initialized.supports_load_session()
-            && let Ok(session) = client
-                .load_session_with_mcp(id, cwd.clone(), servers.clone())
-                .await
-        {
-            // session/load may replay history before answering. Teshi already
-            // displays its own checkpoint, so drop those updates instead of
-            // duplicating them into the UI transcript.
-            drain_restore_replay(updates_rx).await;
-            return Ok((session, true));
+        if initialized.supports_load_session() {
+            // session/load replays history through session/update before
+            // returning its RPC response. Drain updates concurrently while the
+            // request is in flight so bounded channels cannot backpressure and
+            // deadlock the JSON-RPC reader waiting for the response.
+            match await_while_draining_updates(
+                client.load_session_with_mcp(id, cwd.clone(), servers.clone()),
+                updates_rx,
+            )
+            .await
+            {
+                Ok(session) => {
+                    drain_restore_replay(updates_rx).await;
+                    tracing::info!(
+                        session_id = %session.id,
+                        "ACP session restored via session/load"
+                    );
+                    return Ok((session, true));
+                }
+                Err(error) => {
+                    drain_restore_replay(updates_rx).await;
+                    tracing::warn!(
+                        session_id = id,
+                        error = %error,
+                        "ACP session/load failed; falling back to session/new"
+                    );
+                }
+            }
+        } else if !initialized.supports_resume_session() {
+            tracing::info!(
+                session_id = id,
+                "ACP agent does not advertise session/resume or session/load; falling back to session/new"
+            );
         }
     }
     let session = client.new_session_with_mcp(cwd, servers).await?;
     Ok((session, false))
+}
+
+/// Await a restore RPC while continuously discarding incoming `session/update`
+/// replay frames so bounded event/inbound queues never stall the reader loop.
+async fn await_while_draining_updates<F, T>(
+    future: F,
+    updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut future => return result,
+            update = updates_rx.recv() => {
+                if update.is_none() {
+                    return future.await;
+                }
+            }
+        }
+    }
 }
 
 /// Drop history-replay updates that arrived while `session/load` was in flight.
@@ -1071,6 +1148,28 @@ async fn drain_restore_replay(updates_rx: &mut async_mpsc::Receiver<AcpEvent>) {
         while updates_rx.try_recv().is_ok() {}
         tokio::task::yield_now().await;
     }
+}
+
+/// Resolve a queued prompt payload into final ACP prompt blocks once the worker
+/// knows whether remote session context was restored.
+fn materialize_prompt(
+    payload: PromptPayload,
+    remote_context_restored: bool,
+    worker_submitted_prompt: &mut bool,
+) -> Vec<PromptBlock> {
+    let PromptPayload {
+        mut blocks,
+        history_preamble,
+    } = payload;
+    if !*worker_submitted_prompt
+        && !remote_context_restored
+        && let Some(history) = history_preamble
+        && let Some(PromptBlock::Text(text)) = blocks.first_mut()
+    {
+        *text = format!("[Restored conversation history]\n{history}\n\n[Current turn]\n{text}");
+    }
+    *worker_submitted_prompt = true;
+    blocks
 }
 
 async fn run_worker(
@@ -1240,6 +1339,7 @@ async fn run_worker(
         state.revision += 1;
     }
     let mut shutdown = false;
+    let mut worker_submitted_prompt = false;
     loop {
         let command = tokio::select! {
             command = commands.recv() => match command { Some(command) => command, None => break },
@@ -1323,8 +1423,12 @@ async fn run_worker(
                     break;
                 }
             }
-            WorkerCommand::Prompt(prompt) => {
-                let mut prompt = prompt;
+            WorkerCommand::Prompt(payload) => {
+                let mut prompt = materialize_prompt(
+                    payload,
+                    remote_context_restored,
+                    &mut worker_submitted_prompt,
+                );
                 // Retries spent on the current user turn, and whether any of its
                 // attempts showed output or ran tools. Once one has, a retry asks
                 // the agent to continue instead of resending the request.
@@ -1340,7 +1444,7 @@ async fn run_worker(
                         // `session/cancel` degrades to a real teardown instead of
                         // parking the worker forever.
                         let mut cancel_deadline = tokio::time::Instant::now() + CANCEL_ACK_BUDGET;
-                        let mut deferred_prompt: Option<Vec<PromptBlock>> = None;
+                        let mut deferred_prompt: Option<PromptPayload> = None;
                         let mut protocol_failed = false;
                         let mut turn_failed = false;
                         let mut attempt = TurnAttempt::default();
@@ -1473,7 +1577,11 @@ async fn run_worker(
                     }
                     match deferred_prompt {
                         Some(next) => {
-                            prompt = next;
+                            prompt = materialize_prompt(
+                                next,
+                                remote_context_restored,
+                                &mut worker_submitted_prompt,
+                            );
                             retries = 0;
                             progressed = false;
                         }
