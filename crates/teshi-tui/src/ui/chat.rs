@@ -1418,10 +1418,17 @@ fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placeme
 
     // Lines are already wrapped, so the row count is exact. `scroll_offset`
     // counts rows up from the bottom so new output stays pinned by default.
+    // Write back the clamped offset and record `max_start` so scrolling past
+    // the top (or jumping to top) never creates a downward dead zone.
     let total = projection.lines.len();
     let height = body.height as usize;
     let max_start = total.saturating_sub(height);
-    let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
+    app.chat_max_scroll = Some((app.selected_agent, max_start));
+    let clamped_offset = app.agent().scroll_offset.min(max_start);
+    if app.agent().scroll_offset != clamped_offset {
+        app.agent_mut().scroll_offset = clamped_offset;
+    }
+    let start = max_start.saturating_sub(clamped_offset);
     let mut visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
         .map(|index| projection.highlighted_line(index, selection))
         .collect();
@@ -4004,10 +4011,10 @@ mod tests {
         let card_1 = rect_of(&app, 1);
         assert_eq!(card_0.height, 2);
         assert_eq!(card_1.height, 2);
-        // Both rows of the selected card share the unified selection background.
+        // Both rows of the selected card share the unified muted selection background when unfocused.
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(card_1.x + 1, card_1.y)].bg, theme::CHAT_CHIP_BG);
-        assert_eq!(buffer[(card_1.x + 1, card_1.y + 1)].bg, theme::CHAT_CHIP_BG);
+        assert_eq!(buffer[(card_1.x + 1, card_1.y)].bg, theme::BLOCK_BG);
+        assert_eq!(buffer[(card_1.x + 1, card_1.y + 1)].bg, theme::BLOCK_BG);
 
         // Clicking row 2 of card 0 selects agent 0.
         app.handle_mouse_event(
@@ -5340,5 +5347,77 @@ mod tests {
         assert_eq!(visual_cursor_pos("abcdef", 6, 4), (1, 2));
         assert_eq!(visual_cursor_pos("ab\ncd", 4, 10), (1, 1));
         assert_eq!(visual_cursor_pos("anything", 3, 0), (0, 0));
+    }
+
+    #[test]
+    fn sidebar_focus_contrast_shows_distinct_title_marker_and_card_indicator() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.ai_sidebar_visible = true;
+        app.ai_sidebar_collapsed = false;
+        app.ai_sidebar_focused = false;
+        app.ai_input_focused = false;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 26)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let sidebar = app.ai_sidebar_rect.expect("sidebar rect");
+        let sidebar_header = |buf: &ratatui::buffer::Buffer| -> String {
+            (0..sidebar.y)
+                .map(|y| {
+                    (0..sidebar.right().saturating_add(2))
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let unfocused_header = sidebar_header(terminal.backend().buffer());
+        assert!(
+            !unfocused_header.contains("● "),
+            "unfocused sidebar header should not show active dot: {unfocused_header}"
+        );
+        let selected_card = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: crate::keymap::Action::AgentSelect(index),
+                    ..
+                } if *index == app.selected_agent => Some(*rect),
+                _ => None,
+            })
+            .expect("selected sidebar card");
+        assert_eq!(
+            terminal.backend().buffer()[(selected_card.x, selected_card.y)].symbol(),
+            "│",
+            "unfocused selected card should use muted bar indicator"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(selected_card.x + 1, selected_card.y)].bg,
+            theme::BLOCK_BG
+        );
+
+        app.ai_sidebar_focused = true;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let focused_header = sidebar_header(terminal.backend().buffer());
+        assert!(
+            focused_header.contains("● "),
+            "focused sidebar header should show active dot: {focused_header}"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(selected_card.x, selected_card.y)].symbol(),
+            "▸",
+            "focused selected card should use active arrow indicator"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(selected_card.x + 1, selected_card.y)].bg,
+            theme::TAB_ACTIVE_BG
+        );
     }
 }

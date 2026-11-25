@@ -92,17 +92,21 @@ work while the prompt is open, and a left click closes it.
 | `y` | Copy the selected Run Details path or HTTP URL |
 | `i` | Retired; it no longer opens a screenshot viewer |
 | `r` | Run the selected scenario |
+| `d` | Collapse or expand the Run Details pane (persisted per project) |
 | `p` | Toggle plaintext for redacted HTTP inspector fields |
 | `a` | Request an AI suggestion |
 | `e` | Open the selected file editor |
 | Esc | Clear the current interaction state |
 
 Features occupy the left column. In the right column, Scenarios sit above the
-bottom row, which splits into **Steps** (38 columns) and **Run Details**.
+bottom row, which splits into **Steps** (38 columns) and **Run Details** (or
+gives **Steps** the full bottom width when Run Details is collapsed).
 Tab/Shift+Tab and the pane chords follow that visual order. The Scenarios title
 carries the last run's tally on its right edge (for example
 `1/2 passed, 1 failed`), and its bottom row holds **Run**, **Detail**, and
-**Edit**.
+**Edit**. In edit mode (`e`), the editor and Run Details split 50%/50% when
+expanded, and the header chip collapses/expands Run Details to give the editor
+full width.
 
 ### Run Details
 

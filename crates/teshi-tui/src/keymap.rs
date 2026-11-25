@@ -307,6 +307,8 @@ pub enum Action {
     EnterEdit,
     /// Focus the Run Details pane without running anything.
     FocusRunDetails,
+    /// Collapse or expand the Explore Run Details pane.
+    ExploreToggleDetails,
     /// Perform the primary action of the selected Run Details item.
     ExploreDetailEnter,
     /// Expand or collapse the selected Run Details item.
@@ -437,6 +439,10 @@ pub enum Action {
     AiHalfPageUp,
     /// Scroll half a viewport down (Ctrl+D).
     AiHalfPageDown,
+    /// Scroll a full viewport up (PageUp).
+    AiPageUp,
+    /// Scroll a full viewport down (PageDown).
+    AiPageDown,
     /// Collapse or expand the AI tab conversation sidebar (b).
     AiToggleSidebar,
     /// Insert pasted text into the AI input buffer in one shot.
@@ -1396,6 +1402,8 @@ impl Action {
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::AgentToggleSettle),
                 (KeyCode::Char('/'), KeyModifiers::NONE) => Some(Self::AiSidebarStartSearch),
                 (KeyCode::Char('z'), KeyModifiers::NONE) => Some(Self::AiSidebarToggleSettled),
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageUp),
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Self::AiHalfPageDown),
                 // Raw-mode terminals deliver Ctrl+G as BEL with no modifiers.
                 (KeyCode::Char('g'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{7}'), _) => {
                     Some(Self::AiToggleSidebar)
@@ -1583,6 +1591,8 @@ impl Action {
                         (KeyCode::Down, _) => Some(Self::MoveDown),
                         (KeyCode::Home, _) => Some(Self::MoveHome),
                         (KeyCode::End, _) => Some(Self::MoveEnd),
+                        (KeyCode::PageUp, _) => Some(Self::PageUp),
+                        (KeyCode::PageDown, _) => Some(Self::PageDown),
                         (KeyCode::Enter, _) => Some(Self::Enter),
                         (KeyCode::Tab, KeyModifiers::NONE) => Some(Self::Insert('\t')),
                         (KeyCode::Backspace, _) => Some(Self::Backspace),
@@ -1614,6 +1624,14 @@ impl Action {
                         (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                             Some(Self::MoveDown)
                         }
+                        (KeyCode::PageUp, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                            Some(Self::PageUp)
+                        }
+                        (KeyCode::PageDown, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                            Some(Self::PageDown)
+                        }
+                        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(Self::HalfPageUp),
+                        (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Self::HalfPageDown),
                         (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Self::ReqVimWordForward),
                         (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqVimWordBackward),
                         (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ReqVimWordEnd),
@@ -1896,6 +1914,7 @@ impl Action {
                 (KeyCode::Enter, _) => Some(Self::ExploreDetailEnter),
                 (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ExploreDetailToggle),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RunScenario),
+                (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::ExploreToggleDetails),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ToggleInspectorPlaintext),
                 (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ExploreOpenExternal),
                 (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Self::ExploreCopyPath),
@@ -2044,10 +2063,9 @@ impl Action {
                 (KeyCode::Right, _) => Some(Self::AiCursorRight),
                 (KeyCode::Esc, _) if context.ai_status_waiting => Some(Self::AiBlurInput),
                 (KeyCode::Esc, _) => Some(Self::AiBlurInput),
-                (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                    Some(Self::AiScrollUp)
-                }
-                (KeyCode::PageDown, _) => Some(Self::AiScrollDown),
+                (KeyCode::PageUp, _) => Some(Self::AiPageUp),
+                (KeyCode::PageDown, _) => Some(Self::AiPageDown),
+                (KeyCode::Char('k'), KeyModifiers::CONTROL) => Some(Self::AiScrollUp),
                 (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                 (KeyCode::Home, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
@@ -3297,6 +3315,23 @@ mod tests {
                 context
             ),
             Some(Action::EnterEdit)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ExploreToggleDetails)
+        );
+
+        let mut edit_context = context;
+        edit_context.explore_edit_mode = true;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                edit_context
+            ),
+            Some(Action::PendingChar('d'))
         );
     }
 
@@ -4559,5 +4594,123 @@ mod tests {
             Action::from_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT), context),
             Some(Action::AiSelectDown)
         );
+    }
+
+    #[test]
+    fn ai_composer_page_keys_use_full_page_actions() {
+        let focused = chat_context(MainTab::Ai, MindMapFocus::Main, true);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), focused),
+            Some(Action::AiPageUp)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                focused
+            ),
+            Some(Action::AiPageDown)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+                focused
+            ),
+            Some(Action::AiScrollUp)
+        );
+    }
+
+    #[test]
+    fn ai_sidebar_ctrl_u_and_ctrl_d_scroll_transcript() {
+        let mut ctx = chat_context(MainTab::Ai, MindMapFocus::Main, false);
+        ctx.ai_sidebar_visible = true;
+        ctx.ai_sidebar_focused = true;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                ctx
+            ),
+            Some(Action::AiHalfPageUp)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                ctx
+            ),
+            Some(Action::AiHalfPageDown)
+        );
+    }
+
+    #[test]
+    fn requirements_editor_insert_and_visual_modes_support_page_keys() {
+        use crate::authoring_tab::RequirementsEditorMode;
+
+        let mut insert_ctx = requirements_tree_context();
+        insert_ctx.requirements_focus = RequirementsFocus::Editor;
+        insert_ctx.requirements_editor_mode = RequirementsEditorMode::Insert;
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+                insert_ctx
+            ),
+            Some(Action::PageUp)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                insert_ctx
+            ),
+            Some(Action::PageDown)
+        );
+
+        for mode in [
+            RequirementsEditorMode::VisualChar,
+            RequirementsEditorMode::VisualLine,
+        ] {
+            let mut visual_ctx = requirements_tree_context();
+            visual_ctx.requirements_focus = RequirementsFocus::Editor;
+            visual_ctx.requirements_editor_mode = mode;
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+                    visual_ctx
+                ),
+                Some(Action::PageUp)
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                    visual_ctx
+                ),
+                Some(Action::PageDown)
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                    visual_ctx
+                ),
+                Some(Action::HalfPageUp)
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                    visual_ctx
+                ),
+                Some(Action::HalfPageDown)
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                    visual_ctx
+                ),
+                Some(Action::PageUp)
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+                    visual_ctx
+                ),
+                Some(Action::PageDown)
+            );
+        }
     }
 }

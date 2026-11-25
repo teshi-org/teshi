@@ -217,6 +217,8 @@ pub struct SidebarWorkspaceState {
     pub sidebar_collapsed: bool,
     #[serde(default)]
     pub settled_expanded: bool,
+    #[serde(default)]
+    pub explore_details_collapsed: bool,
 }
 
 impl SidebarWorkspaceState {
@@ -284,6 +286,7 @@ mod tests {
                 active_session_id: Some("s2".into()),
                 sidebar_collapsed: false,
                 settled_expanded: true,
+                explore_details_collapsed: true,
             };
             super::SidebarWorkspaceState::save_for_project(proj_a.path(), &state_a).unwrap();
 
