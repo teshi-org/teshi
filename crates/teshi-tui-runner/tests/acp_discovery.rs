@@ -69,8 +69,9 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
             rows: 24,
         })
         .unwrap();
-        // Toolbars narrower than 32 cells collapse the connected Settings chip to an ellipsis.
-        let settings = if cols == 40 { "⋯" } else { "Settings" };
+        // With metrics moved above the composer, even a 40-column toolbar has 37
+        // cells (>= 32), so the connected Settings chip stays visible.
+        let settings = "Settings";
         terminal.expect_text("sample", true, 10000).unwrap();
         terminal.key("3").unwrap();
         terminal.expect_text("Not connected", true, 5000).unwrap();
@@ -87,7 +88,7 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         std::thread::sleep(Duration::from_millis(400));
         assert!(!trace.exists(), "browsing must not spawn an ACP process");
         if cols == 64 {
-            // The composer's prompt glyph; the usage text now sits on the toolbar above it.
+            // The composer's prompt glyph; the metrics sit in the meta strip above it.
             terminal.click_text("›", 2000).unwrap();
         } else {
             terminal

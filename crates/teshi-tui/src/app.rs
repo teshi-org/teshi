@@ -6315,10 +6315,17 @@ impl App {
                     Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status, .. })) => {
                         self.agents[i].chat.rate.clear();
                         self.agents[i].chat.last_activity = Some(Instant::now());
-                        self.agents[i].tool_status = Some(match status {
-                            Some(status) => format!("{title}: {status}"),
-                            None => title,
-                        });
+                        self.agents[i].tool_status = if matches!(
+                            status.as_deref(),
+                            Some("completed" | "failed" | "cancelled" | "canceled")
+                        ) {
+                            None
+                        } else {
+                            Some(match status {
+                                Some(status) => format!("{title}: {status}"),
+                                None => title,
+                            })
+                        };
                     }
                     Ok(Some(AgentBackendEvent::SessionTitle { title })) => {
                         // The agent owns its label: adopt it, and stop any
