@@ -60,7 +60,7 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
     let terminal = Terminal::launch(config.clone()).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("4").unwrap();
-    terminal.expect_text("Requirements", true, 10000).unwrap();
+    terminal.expect_text("Issues", true, 10000).unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("# Document 1", true, 10000).unwrap();
     // Ctrl+n focuses the editor below the H1 in insert mode; climb back to the

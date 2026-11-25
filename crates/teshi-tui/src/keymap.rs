@@ -23,6 +23,8 @@ pub struct KeyContext {
     /// Whether the AI tab's Chat sidebar is on screen and can take focus.
     pub ai_sidebar_visible: bool,
     pub slash_suggestion_active: bool,
+    /// Whether the `@` mention context popup is open and accepting keyboard keys.
+    pub mention_popup_active: bool,
     /// Whether the auth management panel is currently open (as an overlay).
     pub auth_panel_active: bool,
     /// Whether the model profile management panel is currently open.
@@ -143,6 +145,11 @@ pub enum Action {
     Undo,
     Redo,
     PendingChar(char),
+    // AI context capsules
+    /// Mount the pending last-focused context capsule onto the AI composer (`Tab` / click).
+    AiAttachSuggestedContext,
+    /// Detach a mounted context capsule by index from the AI composer bar (click).
+    AiRemoveAttachedContext(usize),
     // Requirements tab authoring
     ReqNewTestPoint,
     /// Enter Requirements text input.
@@ -158,6 +165,8 @@ pub enum Action {
     ReqDeleteDocument,
     /// Open the iteration filter picker (`i` on the Requirements tree).
     ReqFilterOverlay,
+    /// Cycle the Issues list filter (`Open` → `All` → `Bug`).
+    ReqIssueFilter,
     /// Cycle current project, all projects, and unassigned requirements.
     ReqProjectScope,
     /// Toggle membership of the selected document in the current project.
@@ -482,6 +491,13 @@ pub enum Action {
     AiSlashDismiss,
     /// Highlight a visible slash suggestion without executing it.
     AiSlashChoose(usize),
+    // ── `@` mention context popup ────────────────────
+    AiMentionPrev,
+    AiMentionNext,
+    AiMentionSelect,
+    AiMentionDismiss,
+    /// Click a visible `@` mention row to mount or drill into it.
+    AiMentionChoose(usize),
     // ── ACP agent permission prompt ───────────────────
     /// Move the ACP permission prompt selection up.
     AcpPermissionUp,
@@ -1369,6 +1385,9 @@ impl Action {
                 (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
                     Some(Self::AiFocusInput)
                 }
+                (KeyCode::Tab, KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AiAttachSuggestedContext)
+                }
                 (KeyCode::Right, _)
                 | (KeyCode::Char('l'), KeyModifiers::NONE)
                 | (KeyCode::Esc, _) => Some(Self::FocusNextColumn),
@@ -1436,6 +1455,9 @@ impl Action {
                 }
                 (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
                     Some(Self::AiFocusInput)
+                }
+                (KeyCode::Tab, KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AiAttachSuggestedContext)
                 }
                 (KeyCode::Char('['), KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
                     Some(Self::AgentPrev)
@@ -1522,6 +1544,7 @@ impl Action {
                         (KeyCode::Char('s'), KeyModifiers::CONTROL | KeyModifiers::NONE) => {
                             Some(Self::Save)
                         }
+                        (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::ReqIssueFilter),
                         (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
                         (KeyCode::Char('1'), KeyModifiers::NONE) => {
                             Some(Self::SelectTab(MainTab::Explore))
@@ -1713,6 +1736,7 @@ impl Action {
                     Some(Self::ReqDeleteDocument)
                 }
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
+                (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::ReqIssueFilter),
                 (KeyCode::Enter, KeyModifiers::NONE) => Some(Self::ReqTreeActivate),
                 (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ReqProjectScope),
                 (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqProjectLink),
@@ -1893,6 +1917,23 @@ impl Action {
             };
         }
 
+        // `@` mention popup active — intercept unmodified navigation/select/dismiss
+        // so chords such as Shift+Enter still fall through to newline insertion.
+        if context.mention_popup_active {
+            let action = match (event.code, event.modifiers) {
+                (KeyCode::Up, KeyModifiers::NONE) => Some(Self::AiMentionPrev),
+                (KeyCode::Down, KeyModifiers::NONE) => Some(Self::AiMentionNext),
+                (KeyCode::Enter, KeyModifiers::NONE) | (KeyCode::Tab, KeyModifiers::NONE) => {
+                    Some(Self::AiMentionSelect)
+                }
+                (KeyCode::Esc, KeyModifiers::NONE) => Some(Self::AiMentionDismiss),
+                _ => None,
+            };
+            if action.is_some() {
+                return action;
+            }
+        }
+
         // Slash suggestion popup active — intercept navigation/select/dismiss
         if context.slash_suggestion_active {
             let action = match (event.code, event.modifiers) {
@@ -1919,6 +1960,9 @@ impl Action {
                 (KeyCode::Enter, KeyModifiers::SHIFT)
                 | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Self::AiNewline),
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
+                (KeyCode::Tab, KeyModifiers::NONE) if context.active_tab == MainTab::Ai => {
+                    Some(Self::AiAttachSuggestedContext)
+                }
                 // Editing chords precede the generic Backspace/Delete/arrow
                 // arms below; terminals that send raw control bytes are
                 // accepted alongside the named chords.
@@ -2564,6 +2608,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -2883,6 +2928,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -2934,6 +2980,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -2985,6 +3032,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3075,6 +3123,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3136,6 +3185,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3197,6 +3247,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3266,6 +3317,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3317,6 +3369,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3368,6 +3421,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3443,6 +3497,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3478,6 +3533,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             ..delete_context
         };
         assert_eq!(
@@ -3513,6 +3569,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -3804,6 +3861,7 @@ mod tests {
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
             slash_suggestion_active: false,
+            mention_popup_active: false,
             auth_panel_active: false,
             model_panel_active: false,
             model_panel_adding: false,
@@ -4020,6 +4078,37 @@ mod tests {
         );
         assert_eq!(
             Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ReqIssueFilter)
+        );
+        let preview_context = KeyContext {
+            requirements_focus: RequirementsFocus::Editor,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Preview,
+            ..context
+        };
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+                preview_context
+            ),
+            Some(Action::ReqIssueFilter)
+        );
+        let insert_context = KeyContext {
+            requirements_focus: RequirementsFocus::Editor,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Insert,
+            ..context
+        };
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+                insert_context
+            ),
+            Some(Action::Insert('f'))
+        );
+        assert_eq!(
+            Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
                 context
             ),
@@ -4031,6 +4120,53 @@ mod tests {
                 context
             ),
             Some(Action::ReqEditIteration)
+        );
+    }
+
+    #[test]
+    fn test_ai_tab_attaches_suggested_context_unless_slash_popup_is_active() {
+        let mut context = KeyContext {
+            active_tab: MainTab::Ai,
+            ai_input_focused: false,
+            ai_sidebar_focused: false,
+            ai_sidebar_visible: false,
+            ..requirements_tree_context()
+        };
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::AiAttachSuggestedContext)
+        );
+        context.ai_input_focused = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::AiAttachSuggestedContext)
+        );
+        context.slash_suggestion_active = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::AiSlashSelect)
+        );
+        context.slash_suggestion_active = false;
+        context.mention_popup_active = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
+            Some(Action::AiMentionPrev)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), context),
+            Some(Action::AiMentionNext)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::AiMentionSelect)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::AiMentionSelect)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::AiMentionDismiss)
         );
     }
 
@@ -4381,6 +4517,47 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), focused),
             Some(Action::AiBlurInput)
+        );
+    }
+
+    #[test]
+    fn mention_popup_only_intercepts_unmodified_navigation_and_confirm_keys() {
+        let mut context = chat_context(MainTab::Ai, MindMapFocus::Main, true);
+        context.mention_popup_active = true;
+
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
+            Some(Action::AiMentionPrev)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), context),
+            Some(Action::AiMentionNext)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::AiMentionSelect)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::AiMentionSelect)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::AiMentionDismiss)
+        );
+
+        // Shift+Enter and Shift+Up/Down must keep their normal composer meanings.
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), context),
+            Some(Action::AiNewline)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT), context),
+            Some(Action::AiSelectUp)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT), context),
+            Some(Action::AiSelectDown)
         );
     }
 }

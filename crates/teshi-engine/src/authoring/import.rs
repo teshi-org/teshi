@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use teshi_core::authoring::{
-    legacy_project_requirements_dir, resolve_requirement_store_path, validate_requirement_path,
+    resolve_project_issues_dir, resolve_requirement_store_path, validate_requirement_path,
     DocumentRevision, RequirementDocumentIndex, RequirementDocumentMeta, RequirementStoreId,
     TestPointsFile,
 };
@@ -74,7 +74,7 @@ pub fn import_project_requirements(
     requirements_root: &Path,
     options: ImportProjectOptions,
 ) -> Result<ImportProjectPlan> {
-    let source_root = legacy_project_requirements_dir(project_root);
+    let source_root = resolve_project_issues_dir(project_root);
     if !source_root.exists() {
         bail!(
             "no legacy requirements directory at {}",
@@ -604,8 +604,8 @@ fn cleanup_copied(requirements_root: &Path, copied: &[PathBuf], previous_paths: 
 mod tests {
     use super::*;
     use teshi_core::authoring::{
-        testpoints_file, HierarchyPath, QuoteSelector, RequirementLink, ResolutionState,
-        ReviewState, TestPoint, TextRange,
+        legacy_project_issues_dir, legacy_project_requirements_dir, testpoints_file, HierarchyPath,
+        QuoteSelector, RequirementLink, ResolutionState, ReviewState, TestPoint, TextRange,
     };
 
     fn write_legacy_project(project: &Path, docs: &[(&str, &str, &str)]) {
@@ -978,5 +978,46 @@ mod tests {
         .unwrap();
         assert_eq!(index.documents.len(), 1);
         assert_eq!(index.documents[0].id, "doc-1");
+    }
+
+    #[test]
+    fn project_import_prefers_issues_directory_over_requirements_directory() {
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        write_legacy_project(project.path(), &[("doc-req", "req.md", "# From req\n")]);
+
+        let issues = legacy_project_issues_dir(project.path());
+        fs::create_dir_all(&issues).unwrap();
+        fs::write(issues.join("bug.md"), "# From issues\n").unwrap();
+        let issues_index = RequirementDocumentIndex {
+            version: 1,
+            store_id: None,
+            documents: vec![RequirementDocumentMeta::new(
+                "doc-issue",
+                "bug.md",
+                "From issues",
+                compute_document_revision("# From issues\n"),
+            )],
+            ..Default::default()
+        };
+        fs::write(
+            issues.join(REQUIREMENTS_INDEX_FILE),
+            serde_json::to_string_pretty(&issues_index).unwrap(),
+        )
+        .unwrap();
+
+        let plan = import_project_requirements(
+            project.path(),
+            store.path(),
+            ImportProjectOptions {
+                dry_run: false,
+                apply: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.mappings.len(), 1);
+        assert_eq!(plan.mappings[0].source_id, "doc-issue");
+        assert!(store.path().join("bug.md").is_file());
+        assert!(!store.path().join("req.md").exists());
     }
 }

@@ -274,6 +274,8 @@ pub struct AgentThread {
     pub input: crate::composer::Composer,
     /// Images behind the `[Image #N]` placeholders in [`Self::input`].
     pub(crate) input_images: crate::chat_images::DraftImages,
+    /// Context capsules mounted above the AI composer and prepended on send.
+    pub(crate) attached_contexts: Vec<crate::ai_context::ContextCapsule>,
     pub tool_status: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
@@ -586,6 +588,7 @@ impl AgentThread {
             status: AiStatus::Idle,
             input: Default::default(),
             input_images: Default::default(),
+            attached_contexts: Vec::new(),
             tool_status: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
@@ -1930,6 +1933,12 @@ pub struct App {
     pub help_guide: crate::ui::help::HelpGuideState,
     pub slash_suggestion_active: bool,
     pub slash_suggestion_selection: usize,
+    /// Headless `@` mention context popup state for the AI composer.
+    pub mention_popup: teshi_core::mention::MentionPopupState,
+    /// True when the last rendered AI frame had no vertical room for the open `@` mention popup.
+    pub mention_popup_clipped: bool,
+    /// Most recently failed `(feature_idx, scenario_idx)` in Explore, for `@last-fail`.
+    pub last_failed_explore_key: Option<(usize, usize)>,
     /// Project-scoped sent-prompt MRU for Up/Down and Ctrl+R.
     pub prompt_history: crate::prompt_history::PromptHistory,
     /// Open Ctrl+R history search overlay, if any.
@@ -1941,6 +1950,8 @@ pub struct App {
     /// Width in cells of the last rendered composer text area. Zero before the
     /// first frame; vertical caret movement falls back to logical lines then.
     pub composer_text_width: u16,
+    /// Last focused item captured when leaving `Explore`, `Issues`, or `Test Points`.
+    pub last_focused_context: Option<crate::ai_context::ContextCapsule>,
     /// Whether the AI tab hides its conversation sidebar so the chat owns the row.
     pub ai_sidebar_collapsed: bool,
     /// Whether the Chat sidebar is the focused pane on the AI tab.
@@ -2125,8 +2136,19 @@ fn attach_prompt_images(
     let Some(message) = messages.last_mut().filter(|message| message.role == "user") else {
         return;
     };
-    let text =
-        crate::chat_images::strip_image_mentions(message.content.text().unwrap_or_default(), base);
+    let raw = message.content.text().unwrap_or_default();
+    let text = if let Some((context_prefix, user_body)) =
+        crate::ai_context::split_attached_context_block(raw)
+    {
+        let stripped = crate::chat_images::strip_image_mentions(user_body, base);
+        if stripped.is_empty() {
+            context_prefix.to_string()
+        } else {
+            format!("{context_prefix}\n\n{stripped}")
+        }
+    } else {
+        crate::chat_images::strip_image_mentions(raw, base)
+    };
     let mut blocks: Vec<ContentBlock> = (!text.is_empty())
         .then_some(ContentBlock::Text { text })
         .into_iter()
@@ -2160,6 +2182,8 @@ pub(crate) fn is_chat_inline_control(action: &Action) -> bool {
             | Action::AiToggleTools(_)
             | Action::AiCopyCodeBlock { .. }
             | Action::OpenImageViewer(_)
+            | Action::AiAttachSuggestedContext
+            | Action::AiRemoveAttachedContext(_)
     )
 }
 
@@ -2706,6 +2730,9 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
+        self.last_focused_context = None;
+        self.last_failed_explore_key = None;
+        self.reset_mention_popup();
         self.explore_run_summary = None;
         self.explore_state = None;
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
@@ -3478,11 +3505,15 @@ impl App {
             help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            mention_popup: teshi_core::mention::MentionPopupState::new(),
+            mention_popup_clipped: false,
+            last_failed_explore_key: None,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
             history_search: None,
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -3660,11 +3691,15 @@ impl App {
             help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            mention_popup: teshi_core::mention::MentionPopupState::new(),
+            mention_popup_clipped: false,
+            last_failed_explore_key: None,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
             history_search: None,
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -3910,11 +3945,15 @@ impl App {
             help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            mention_popup: teshi_core::mention::MentionPopupState::new(),
+            mention_popup_clipped: false,
+            last_failed_explore_key: None,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
             history_search: None,
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -5476,6 +5515,7 @@ impl App {
     }
 
     fn open_session_in_workspace(&mut self, session: crate::session::Session) {
+        self.reset_mention_popup();
         if let Some(existing) = self
             .agents
             .iter()
@@ -5671,6 +5711,7 @@ impl App {
             .input
             .insert(text, crate::composer::EditUnit::Atomic);
         self.sync_composer_atoms();
+        self.sync_mention_popup();
     }
 
     /// Attaches `paths` to the draft as `[Image #N]` placeholders at the
@@ -5705,6 +5746,7 @@ impl App {
     /// Takes the selected agent's draft as message text, with each image
     /// placeholder expanded to its `@path` mention.
     fn take_ai_draft(&mut self) -> String {
+        self.reset_mention_popup();
         let agent = self.agent_mut();
         let text = agent.input.take_text();
         let images = std::mem::take(&mut agent.input_images);
@@ -5786,6 +5828,9 @@ impl App {
         agent.input.set_text(draft);
         agent.input_images = images;
         self.sync_composer_atoms_for(agent_idx);
+        if agent_idx == self.selected_agent {
+            self.sync_mention_popup();
+        }
     }
 
     /// Rebuilds the composer's atomic placeholder ranges from the attached
@@ -5811,7 +5856,7 @@ impl App {
         self.sync_composer_atoms_for(self.selected_agent);
     }
 
-    /// Keeps slash suggestions coherent after a text-changing edit.
+    /// Keeps slash and `@` mention suggestions coherent after a text-changing edit.
     fn after_composer_edit(&mut self) {
         if self.composer_editor.is_some() {
             return;
@@ -5822,6 +5867,7 @@ impl App {
                 self.slash_suggestion_active = false;
             }
         }
+        self.sync_mention_popup();
     }
 
     /// The composer that currently receives typing: the fullscreen editor when
@@ -5847,6 +5893,7 @@ impl App {
         self.agent_mut().chat.recall = None;
         self.history_search = Some(crate::prompt_history::HistorySearchState::open(saved_draft));
         self.slash_suggestion_active = false;
+        self.reset_mention_popup();
         self.status = "Prompt history · Enter select · Esc cancel".into();
     }
 
@@ -5860,6 +5907,7 @@ impl App {
             &self.agent().input,
         ));
         self.slash_suggestion_active = false;
+        self.reset_mention_popup();
         self.status = "Draft editor · Ctrl+S apply · Esc discard".into();
     }
 
@@ -5873,6 +5921,7 @@ impl App {
         let cursor = editor.draft.cursor();
         self.restore_ai_draft(agent_idx, &text);
         self.agents[agent_idx].input.set_cursor(cursor);
+        self.sync_mention_popup();
         self.focus_ai_input();
         self.status = "Draft applied from editor".into();
     }
@@ -6344,7 +6393,7 @@ impl App {
                 && !self.agents[i].shutdown_pending()
                 && let Some(message) = self.agents[i].chat.queue.front().cloned()
             {
-                match self.dispatch_user_message_for_agent(i, message, false) {
+                match self.dispatch_user_message_for_agent(i, message, Vec::new(), false) {
                     Ok(true) => {
                         self.agents[i].chat.queue.pop_front();
                     }
@@ -6863,23 +6912,45 @@ impl App {
     }
 
     fn dispatch_user_message(&mut self, user_msg: String) -> Result<()> {
-        self.dispatch_user_message_for_agent(self.selected_agent, user_msg, true)
+        self.dispatch_user_message_for_agent(self.selected_agent, user_msg, Vec::new(), true)
             .map(|_| ())
+    }
+
+    fn dispatch_user_message_with_capsules(
+        &mut self,
+        draft: String,
+        capsules: Vec<crate::ai_context::ContextCapsule>,
+    ) -> Result<bool> {
+        self.dispatch_user_message_for_agent(self.selected_agent, draft, capsules, true)
     }
 
     fn dispatch_user_message_for_agent(
         &mut self,
         agent_idx: usize,
-        user_msg: String,
+        draft: String,
+        capsules: Vec<crate::ai_context::ContextCapsule>,
         restore_draft: bool,
     ) -> Result<bool> {
+        let prompt_body = if draft.trim().is_empty() && !capsules.is_empty() {
+            crate::i18n::t("chat.context.default_prompt").to_string()
+        } else {
+            draft.clone()
+        };
+        // Inspect only the user-authored text so attached Issue/Explore bodies
+        // never falsely trigger direct review authorization, image loading, or
+        // generation-pipeline intent heuristics.
+        let user_text = if capsules.is_empty() {
+            crate::ai_context::strip_attached_context_block(&prompt_body)
+        } else {
+            prompt_body.as_str()
+        };
         // An explicit no-review authorization is honored for the current task
         // scope. Applied before the system prompt is built so Direct guidance is
         // injected on this very turn rather than after a conflicting Strict turn.
         if self.review_policy != teshi_agent::pipeline::ReviewPolicy::Direct
-            && let Some(basis) = teshi_agent::pipeline::recognize_direct_authorization(&user_msg)
+            && let Some(basis) = teshi_agent::pipeline::recognize_direct_authorization(user_text)
         {
-            self.apply_direct_authorization(basis.to_string(), user_msg.clone());
+            self.apply_direct_authorization(basis.to_string(), user_text.to_string());
         }
         self.agents[agent_idx].chat.queue_ready = false;
         if !self.start_agent_backend(agent_idx) {
@@ -6890,9 +6961,10 @@ impl App {
                 self.agents[agent_idx].status = AiStatus::Idle;
             }
             // A rejected send must not reappear in a later restored provider
-            // context. Keep it as an editable draft for an explicit retry.
+            // context. Keep the original draft and capsules intact for retry.
             if restore_draft {
-                self.restore_ai_draft(agent_idx, &user_msg);
+                self.restore_ai_draft(agent_idx, &draft);
+                self.agents[agent_idx].attached_contexts = capsules;
             }
             return Ok(false);
         }
@@ -6903,18 +6975,20 @@ impl App {
             .into();
             return Ok(false);
         }
-        let images = match self.prepare_prompt_images(agent_idx, &user_msg) {
+        let images = match self.prepare_prompt_images(agent_idx, user_text) {
             Ok(images) => images,
             Err(reason) => {
                 self.status = reason;
                 self.set_status_message(self.status.clone());
                 // A queued message stays queued and pauses the queue instead.
                 if restore_draft {
-                    self.restore_ai_draft(agent_idx, &user_msg);
+                    self.restore_ai_draft(agent_idx, &draft);
+                    self.agents[agent_idx].attached_contexts = capsules;
                 }
                 return Ok(false);
             }
         };
+        let user_msg = crate::ai_context::assemble_prompt_with_capsules(&prompt_body, &capsules);
         self.agents[agent_idx].last_finish_reason = None;
         self.agents[agent_idx].last_stop_detail = None;
         self.agents[agent_idx].chat.queue_ready = false;
@@ -6969,7 +7043,7 @@ impl App {
                 teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
             });
             let tools = Some(teshi_agent::get_tools(allowed));
-            let system = Some(self.ai_system_prompt(Some(&user_msg), agent_idx));
+            let system = Some(self.ai_system_prompt(Some(user_text), agent_idx));
             if let Err(error) = self.agents[agent_idx]
                 .backend
                 .submit_turn(system, messages, tools)
@@ -7924,6 +7998,9 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
+        self.last_focused_context = None;
+        self.last_failed_explore_key = None;
+        self.reset_mention_popup();
         self.explore_run_summary = None;
         self.external_change_prompt = None;
         self.explore_selected_feature = 0;
@@ -9303,6 +9380,7 @@ impl App {
             } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Failed);
+                    self.last_failed_explore_key = Some(key);
                     let detail = self
                         .explore_case_details
                         .entry(key)
@@ -9670,6 +9748,9 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
+        self.last_focused_context = None;
+        self.last_failed_explore_key = None;
+        self.reset_mention_popup();
         self.explore_history.clear();
         self.explore_run_summary = None;
     }
@@ -13300,6 +13381,16 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::ReqIssueFilter => {
+                if self.active_tab == MainTab::Requirements {
+                    let filter = self.authoring_ui.cycle_issue_filter();
+                    self.status = crate::i18n::fill(
+                        crate::i18n::t("status.issue_filter"),
+                        &[("arg0", &crate::i18n::arg(filter.label()))],
+                    );
+                    self.quit_pending_confirm = false;
+                }
+            }
             Action::ReqGroupToggle => {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.toggle_group_mode();
@@ -13702,6 +13793,7 @@ impl App {
                     agent.input.set_text(input);
                     agent.input.set_cursor(cursor);
                     self.sync_composer_atoms();
+                    self.sync_mention_popup();
                     self.status = crate::i18n::t("status.image_removed").to_string();
                 }
                 self.quit_pending_confirm = false;
@@ -13723,6 +13815,7 @@ impl App {
                 self.active_composer_mut().insert_char('\n');
                 if self.composer_editor.is_none() {
                     self.sync_composer_atoms();
+                    self.sync_mention_popup();
                 }
                 self.quit_pending_confirm = false;
             }
@@ -13767,6 +13860,9 @@ impl App {
                     }
                     if self.slash_suggestion_active {
                         self.slash_suggestion_selection = 0;
+                        self.reset_mention_popup();
+                    } else {
+                        self.sync_mention_popup();
                     }
                 }
                 self.quit_pending_confirm = false;
@@ -13851,8 +13947,20 @@ impl App {
             Action::AiContinueTask => {
                 self.continue_interrupted_task()?;
             }
+            Action::AiAttachSuggestedContext => {
+                if self.active_tab == MainTab::Ai {
+                    self.attach_suggested_context();
+                }
+            }
+            Action::AiRemoveAttachedContext(index) => {
+                if self.active_tab == MainTab::Ai {
+                    self.remove_attached_context(index);
+                }
+            }
             Action::AiSendMessage => {
-                if self.agent().input.trim().is_empty() {
+                let input_empty = self.agent().input.trim().is_empty();
+                let has_capsules = !self.agent().attached_contexts.is_empty();
+                if input_empty && !has_capsules {
                     self.ai_input_focused = false;
                     self.status = crate::i18n::t("status.input_deactivated").to_string();
                     return Ok(());
@@ -13865,8 +13973,16 @@ impl App {
                 ) || paused_queue)
                     && !self.agent().input.trim().starts_with('/')
                 {
-                    let message = self.take_ai_draft();
-                    self.record_prompt_history(&message);
+                    let draft = self.take_ai_draft();
+                    let capsules = std::mem::take(&mut self.agent_mut().attached_contexts);
+                    let prompt_body = if draft.trim().is_empty() && !capsules.is_empty() {
+                        crate::i18n::t("chat.context.default_prompt").to_string()
+                    } else {
+                        draft
+                    };
+                    let message =
+                        crate::ai_context::assemble_prompt_with_capsules(&prompt_body, &capsules);
+                    self.record_prompt_history(&prompt_body);
                     self.agent_mut().chat.queue.push_back(message);
                     if paused_queue {
                         // A stopped turn keeps the queue paused; a new message
@@ -13882,17 +13998,24 @@ impl App {
                     return Ok(());
                 }
 
-                let user_msg = self.take_ai_draft();
+                let draft = self.take_ai_draft();
 
-                // Intercept slash commands before sending to LLM
-                if let Some(cmd) = user_msg.strip_prefix('/') {
+                // Intercept slash commands before sending to LLM (keep mounted capsules intact).
+                if let Some(cmd) = draft.strip_prefix('/') {
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
                     return self.execute_slash_command(cmd);
                 }
 
-                self.record_prompt_history(&user_msg);
-                self.dispatch_user_message(user_msg)?;
+                let capsules = std::mem::take(&mut self.agent_mut().attached_contexts);
+                let prompt_body = if draft.trim().is_empty() && !capsules.is_empty() {
+                    crate::i18n::t("chat.context.default_prompt").to_string()
+                } else {
+                    draft.clone()
+                };
+                if self.dispatch_user_message_with_capsules(draft, capsules)? {
+                    self.record_prompt_history(&prompt_body);
+                }
             }
             Action::AiBackspace => {
                 self.active_composer_mut().backspace();
@@ -13937,6 +14060,7 @@ impl App {
             Action::AiSelectAll => {
                 self.focus_ai_input();
                 self.active_composer_mut().select_all();
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiUndo => {
@@ -13973,34 +14097,42 @@ impl App {
             }
             Action::AiCursorLeft => {
                 self.active_composer_mut().move_left(false);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorRight => {
                 self.active_composer_mut().move_right(false);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectLeft => {
                 self.active_composer_mut().move_left(true);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectRight => {
                 self.active_composer_mut().move_right(true);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorWordLeft => {
                 self.active_composer_mut().move_word_left(false);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorWordRight => {
                 self.active_composer_mut().move_word_right(false);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectWordLeft => {
                 self.active_composer_mut().move_word_left(true);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectWordRight => {
                 self.active_composer_mut().move_word_right(true);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorUp | Action::AiCursorDown => {
@@ -14014,6 +14146,7 @@ impl App {
                 if !moved && self.composer_editor.is_none() {
                     self.recall_sent_prompt(up);
                 }
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectUp | Action::AiSelectDown => {
@@ -14024,22 +14157,27 @@ impl App {
                 } else {
                     self.active_composer_mut().move_down(true, width);
                 }
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorHome => {
                 self.active_composer_mut().move_home(false);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorEnd => {
                 self.active_composer_mut().move_end(false);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectHome => {
                 self.active_composer_mut().move_home(true);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiSelectEnd => {
                 self.active_composer_mut().move_end(true);
+                self.sync_mention_popup();
                 self.quit_pending_confirm = false;
             }
             Action::AiOpenAgentSelector => self.execute_slash_command("agent")?,
@@ -14193,6 +14331,44 @@ impl App {
                 self.slash_suggestion_selection = 0;
                 self.quit_pending_confirm = false;
             }
+            Action::AiMentionPrev => {
+                let candidates = self.mention_candidates();
+                let outcome = self
+                    .mention_popup
+                    .handle_key(teshi_core::mention::MentionKey::Prev, &candidates);
+                self.apply_mention_outcome(outcome);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiMentionNext => {
+                let candidates = self.mention_candidates();
+                let outcome = self
+                    .mention_popup
+                    .handle_key(teshi_core::mention::MentionKey::Next, &candidates);
+                self.apply_mention_outcome(outcome);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiMentionSelect => {
+                let candidates = self.mention_candidates();
+                let outcome = self
+                    .mention_popup
+                    .handle_key(teshi_core::mention::MentionKey::Confirm, &candidates);
+                self.apply_mention_outcome(outcome);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiMentionChoose(index) => {
+                let candidates = self.mention_candidates();
+                let outcome = self.mention_popup.choose_index(index, &candidates);
+                self.apply_mention_outcome(outcome);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiMentionDismiss => {
+                let candidates = self.mention_candidates();
+                let outcome = self
+                    .mention_popup
+                    .handle_key(teshi_core::mention::MentionKey::Dismiss, &candidates);
+                self.apply_mention_outcome(outcome);
+                self.quit_pending_confirm = false;
+            }
             Action::AcpPermissionUp => {
                 self.move_acp_permission_selection(-1);
             }
@@ -14224,6 +14400,7 @@ impl App {
                 self.ai_input_focused = false;
                 self.slash_suggestion_active = false;
                 self.slash_suggestion_selection = 0;
+                self.reset_mention_popup();
             }
             Action::AiCancel => {
                 self.cancel_ai_turn();
@@ -14253,6 +14430,7 @@ impl App {
             }
             Action::AgentNew => {
                 self.clear_chat_selection();
+                self.reset_mention_popup();
                 let id = self.next_agent_id;
                 self.next_agent_id += 1;
                 let root = self.agent().selection_root.clone();
@@ -14276,6 +14454,7 @@ impl App {
             }
             Action::AgentClose => {
                 self.clear_chat_selection();
+                self.reset_mention_popup();
                 if self.agents.len() <= 1 {
                     self.status = crate::i18n::t("status.cannot_close_the_last_agent").to_string();
                 } else {
@@ -14321,6 +14500,7 @@ impl App {
                         } else {
                             let target_pos = prev_pos.min(next_visible.len() - 1);
                             self.selected_agent = next_visible[target_pos];
+                            self.reset_mention_popup();
                         }
                     }
                     self.ai_sidebar_follow_selection = true;
@@ -14340,6 +14520,7 @@ impl App {
             }
             Action::AgentNext => {
                 self.clear_chat_selection();
+                self.reset_mention_popup();
                 let order = self.agent_sidebar_visible_order();
                 if order.len() > 1 {
                     let pos = order
@@ -14362,6 +14543,7 @@ impl App {
             }
             Action::AgentPrev => {
                 self.clear_chat_selection();
+                self.reset_mention_popup();
                 let order = self.agent_sidebar_visible_order();
                 if order.len() > 1 {
                     let pos = order
@@ -14385,6 +14567,7 @@ impl App {
             Action::AgentSelect(index) => {
                 if index < self.agents.len() {
                     self.clear_chat_selection();
+                    self.reset_mention_popup();
                     self.selected_agent = index;
                     if self.active_tab == MainTab::Ai {
                         self.agents[index].unseen_completion = false;
@@ -14508,6 +14691,7 @@ impl App {
                     self.agent_mut().status = AiStatus::Idle;
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
+                    self.reset_mention_popup();
                 } else {
                     if self.step_input_active || self.step_keyword_picker.is_some() {
                         self.clear_step_input_state();
@@ -14959,10 +15143,397 @@ impl App {
         self.select_tab(next);
     }
 
+    /// Captures the currently focused item from `Explore`, `Issues`, or `Test Points`
+    /// into [`Self::last_focused_context`] so switching to the `AI` tab offers it as
+    /// a one-keystroke pending context capsule.
+    pub(crate) fn capture_focused_context_from_active_tab(&mut self) {
+        let captured = match self.active_tab {
+            MainTab::Explore => {
+                let feature_idx = self.explore_selected_feature;
+                let scenario_idx = self.explore_selected_scenario;
+                self.project.features.get(feature_idx).map(|feature| {
+                    let relative = feature
+                        .file_path
+                        .strip_prefix(&self.project.root_dir)
+                        .unwrap_or(&feature.file_path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let scenario = feature.scenario_at(scenario_idx);
+                    let detail = self.current_detail();
+                    crate::ai_context::capsule_from_explore(
+                        feature,
+                        &relative,
+                        scenario_idx,
+                        scenario,
+                        detail,
+                    )
+                })
+            }
+            MainTab::Requirements => {
+                let doc_id = self.authoring_ui.selected_document_id.as_deref();
+                doc_id.and_then(|id| {
+                    self.authoring_ui
+                        .artifacts
+                        .as_ref()
+                        .and_then(|a| a.documents.iter().find(|doc| doc.meta.id == id))
+                        .map(crate::ai_context::capsule_from_issue)
+                })
+            }
+            MainTab::TestPoints => {
+                let artifacts = self.authoring_ui.artifacts.as_ref();
+                self.test_points_ui
+                    .selected_test_point_id
+                    .as_deref()
+                    .and_then(|id| {
+                        artifacts
+                            .and_then(|a| a.test_points.test_points.iter().find(|tp| tp.id == id))
+                            .map(|tp| crate::ai_context::capsule_from_test_point(tp, artifacts))
+                    })
+            }
+            MainTab::MindMap | MainTab::Ai => return,
+        };
+        if captured.is_some() {
+            self.last_focused_context = captured;
+        }
+    }
+
+    /// Pending gray suggestion capsule shown in the AI capsule bar when the last
+    /// focused item is not already mounted on the active conversation.
+    pub(crate) fn pending_context_suggestion(&self) -> Option<&crate::ai_context::ContextCapsule> {
+        let candidate = self.last_focused_context.as_ref()?;
+        if self
+            .agent()
+            .attached_contexts
+            .iter()
+            .any(|mounted| mounted.id == candidate.id)
+        {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    /// Mounts one context capsule onto the active AI thread (deduplicating by id)
+    /// and focuses the composer so the user can immediately type or press Enter.
+    pub(crate) fn mount_context_capsule(
+        &mut self,
+        capsule: crate::ai_context::ContextCapsule,
+    ) -> bool {
+        let label = capsule.badge_label();
+        let attached = &mut self.agent_mut().attached_contexts;
+        if let Some(existing) = attached.iter_mut().find(|item| item.id == capsule.id) {
+            *existing = capsule;
+        } else {
+            attached.push(capsule);
+        }
+        self.ai_input_focused = true;
+        self.ai_sidebar_focused = false;
+        self.status = crate::i18n::fill(
+            crate::i18n::t("status.context_attached"),
+            &[("arg0", &crate::i18n::arg(&label))],
+        );
+        self.quit_pending_confirm = false;
+        true
+    }
+
+    /// Mounts the pending suggested context capsule onto the active AI thread
+    /// and focuses the composer so the user can immediately type or press Enter.
+    pub(crate) fn attach_suggested_context(&mut self) -> bool {
+        let Some(capsule) = self.pending_context_suggestion().cloned() else {
+            return false;
+        };
+        self.mount_context_capsule(capsule)
+    }
+
+    /// Resets the `@` mention popup and clears any layout-clipping flag.
+    pub(crate) fn reset_mention_popup(&mut self) {
+        self.mention_popup.reset();
+        self.mention_popup_clipped = false;
+    }
+
+    /// Returns whether the `@` mention popup is currently visible and able to
+    /// intercept keyboard navigation/selection keys.
+    pub(crate) fn mention_popup_accepts_keyboard(&self) -> bool {
+        self.mention_popup.accepts_keyboard() && !self.mention_popup_clipped
+    }
+
+    /// Synchronizes the headless `@` mention popup against the active AI composer.
+    pub(crate) fn sync_mention_popup(&mut self) {
+        if self.active_tab != MainTab::Ai
+            || self.composer_editor.is_some()
+            || self.slash_suggestion_active
+            || self.agent().input.selection().is_some()
+        {
+            self.reset_mention_popup();
+            return;
+        }
+        let text = self.agent().input.text().to_string();
+        let cursor = self.agent().input.cursor();
+        self.mention_popup.sync_input(&text, cursor);
+        if !self.mention_popup.is_open() {
+            self.mention_popup_clipped = false;
+        }
+    }
+
+    /// Returns the most recently failed `(feature_idx, scenario_idx)` in Explore.
+    pub(crate) fn latest_failed_explore_key(&self) -> Option<(usize, usize)> {
+        let is_valid_failed = |key: (usize, usize)| {
+            self.project.features.get(key.0).is_some()
+                && self
+                    .explore_case_details
+                    .get(&key)
+                    .is_some_and(|detail| detail.status == RunStatus::Failed)
+        };
+        if let Some(key) = self.last_failed_explore_key
+            && is_valid_failed(key)
+        {
+            return Some(key);
+        }
+        let selected = (
+            self.explore_selected_feature,
+            self.explore_selected_scenario,
+        );
+        if is_valid_failed(selected) {
+            return Some(selected);
+        }
+        self.explore_case_details
+            .iter()
+            .filter(|(key, detail)| {
+                detail.status == RunStatus::Failed && self.project.features.get(key.0).is_some()
+            })
+            .map(|(key, _)| *key)
+            .min()
+    }
+
+    /// Collects candidates for the four `@` mention sources:
+    /// `@last-fail`, `@issue`, `@tp`, and `@feature`.
+    pub(crate) fn mention_candidates(&self) -> Vec<teshi_core::mention::MentionCandidate> {
+        use teshi_core::authoring::document_issue_kind;
+        use teshi_core::mention::{MentionCandidate, MentionSource};
+
+        let mut out = Vec::new();
+
+        // 1. @last-fail (most recent failed Explore scenario)
+        if let Some((feature_idx, scenario_idx)) = self.latest_failed_explore_key()
+            && let Some(feature) = self.project.features.get(feature_idx)
+        {
+            let relative = feature
+                .file_path
+                .strip_prefix(&self.project.root_dir)
+                .unwrap_or(&feature.file_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let scenario = feature.scenario_at(scenario_idx);
+            let label = scenario
+                .map(|s| s.name.trim())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| {
+                    let name = feature.name.trim();
+                    if name.is_empty() {
+                        relative.as_str()
+                    } else {
+                        name
+                    }
+                })
+                .to_string();
+            let detail = self
+                .explore_case_details
+                .get(&(feature_idx, scenario_idx))
+                .and_then(|d| d.message.as_deref())
+                .and_then(|m| m.lines().find(|line| !line.trim().is_empty()))
+                .map(|line| line.trim().to_string())
+                .or_else(|| Some(relative.clone()));
+            out.push(MentionCandidate {
+                id: format!("last-fail:{feature_idx}:{scenario_idx}"),
+                source: MentionSource::LastFail,
+                label,
+                detail,
+                search_text: format!("{relative} {} last-fail", feature.name),
+            });
+        }
+
+        // 2. @issue (all Issue documents in the loaded authoring store)
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            for doc in &artifacts.documents {
+                let kind_badge = document_issue_kind(&doc.body).badge();
+                let label = if doc.meta.title.trim().is_empty() {
+                    doc.meta.path.clone()
+                } else {
+                    doc.meta.title.trim().to_string()
+                };
+                out.push(MentionCandidate {
+                    id: format!("issue:{}", doc.meta.id),
+                    source: MentionSource::Issue,
+                    label,
+                    detail: Some(format!("{kind_badge} {}", doc.meta.path)),
+                    search_text: format!("{} {} {}", doc.meta.id, doc.meta.path, kind_badge),
+                });
+            }
+
+            // 3. @tp (all Test Points)
+            for tp in &artifacts.test_points.test_points {
+                let label = if tp.title.trim().is_empty() {
+                    tp.id.clone()
+                } else {
+                    tp.title.trim().to_string()
+                };
+                let hierarchy = tp.hierarchy_path.segments().join(" / ");
+                let detail = if hierarchy.is_empty() {
+                    Some(tp.id.clone())
+                } else {
+                    Some(hierarchy.clone())
+                };
+                out.push(MentionCandidate {
+                    id: format!("tp:{}", tp.id),
+                    source: MentionSource::TestPoint,
+                    label,
+                    detail,
+                    search_text: format!("{} {} {}", tp.id, hierarchy, tp.objective),
+                });
+            }
+        }
+
+        // 4. @feature (all discovered .feature files)
+        for (feature_idx, feature) in self.project.features.iter().enumerate() {
+            let relative = feature
+                .file_path
+                .strip_prefix(&self.project.root_dir)
+                .unwrap_or(&feature.file_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let label = {
+                let name = feature.name.trim();
+                if name.is_empty() {
+                    relative.clone()
+                } else {
+                    name.to_string()
+                }
+            };
+            out.push(MentionCandidate {
+                id: format!("feature:{feature_idx}"),
+                source: MentionSource::Feature,
+                label,
+                detail: Some(relative.clone()),
+                search_text: format!("{relative} {}", feature.tags.join(" ")),
+            });
+        }
+
+        out
+    }
+
+    /// Resolves a confirmed [`teshi_core::mention::MentionCandidate`] into a
+    /// full [`crate::ai_context::ContextCapsule`] ready for mounting.
+    fn resolve_mention_capsule(
+        &self,
+        candidate: &teshi_core::mention::MentionCandidate,
+    ) -> Option<crate::ai_context::ContextCapsule> {
+        use teshi_core::mention::MentionSource;
+
+        match candidate.source {
+            MentionSource::LastFail => {
+                let rest = candidate.id.strip_prefix("last-fail:")?;
+                let (f_str, s_str) = rest.split_once(':')?;
+                let feature_idx: usize = f_str.parse().ok()?;
+                let scenario_idx: usize = s_str.parse().ok()?;
+                let feature = self.project.features.get(feature_idx)?;
+                let relative = feature
+                    .file_path
+                    .strip_prefix(&self.project.root_dir)
+                    .unwrap_or(&feature.file_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let scenario = feature.scenario_at(scenario_idx);
+                let detail = self.explore_case_details.get(&(feature_idx, scenario_idx));
+                Some(crate::ai_context::capsule_from_explore(
+                    feature,
+                    &relative,
+                    scenario_idx,
+                    scenario,
+                    detail,
+                ))
+            }
+            MentionSource::Issue => {
+                let doc_id = candidate.id.strip_prefix("issue:")?;
+                let artifacts = self.authoring_ui.artifacts.as_ref()?;
+                let doc = artifacts.documents.iter().find(|d| d.meta.id == doc_id)?;
+                Some(crate::ai_context::capsule_from_issue(doc))
+            }
+            MentionSource::TestPoint => {
+                let tp_id = candidate.id.strip_prefix("tp:")?;
+                let artifacts = self.authoring_ui.artifacts.as_ref()?;
+                let tp = artifacts
+                    .test_points
+                    .test_points
+                    .iter()
+                    .find(|t| t.id == tp_id)?;
+                Some(crate::ai_context::capsule_from_test_point(
+                    tp,
+                    Some(artifacts),
+                ))
+            }
+            MentionSource::Feature => {
+                let idx_str = candidate.id.strip_prefix("feature:")?;
+                let feature_idx: usize = idx_str.parse().ok()?;
+                let feature = self.project.features.get(feature_idx)?;
+                let relative = feature
+                    .file_path
+                    .strip_prefix(&self.project.root_dir)
+                    .unwrap_or(&feature.file_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some(crate::ai_context::capsule_from_feature(feature, &relative))
+            }
+        }
+    }
+
+    fn apply_mention_outcome(&mut self, outcome: teshi_core::mention::MentionOutcome) {
+        use teshi_core::mention::{MentionOutcome, MentionSource};
+
+        match outcome {
+            MentionOutcome::ExpandScope { range, replacement } => {
+                self.agent_mut().input.replace_chars(range, &replacement);
+                self.sync_composer_atoms();
+                self.sync_mention_popup();
+            }
+            MentionOutcome::Selected { range, candidate } => {
+                self.agent_mut().input.replace_chars(range, "");
+                self.sync_composer_atoms();
+                self.sync_mention_popup();
+                if let Some(capsule) = self.resolve_mention_capsule(&candidate) {
+                    self.mount_context_capsule(capsule);
+                }
+            }
+            MentionOutcome::EmptySource(source) => {
+                self.status = if source == MentionSource::LastFail {
+                    crate::i18n::t("status.mention_empty_last_fail").to_string()
+                } else {
+                    crate::i18n::fill(
+                        crate::i18n::t("status.mention_empty_source"),
+                        &[("arg0", source.prefix())],
+                    )
+                };
+            }
+            MentionOutcome::Navigated | MentionOutcome::Dismissed | MentionOutcome::Ignored => {}
+        }
+    }
+
+    /// Detaches a mounted context capsule by index from the active AI thread.
+    pub(crate) fn remove_attached_context(&mut self, index: usize) {
+        if index < self.agent().attached_contexts.len() {
+            let removed = self.agent_mut().attached_contexts.remove(index);
+            let label = removed.badge_label();
+            self.status = crate::i18n::fill(
+                crate::i18n::t("status.context_removed"),
+                &[("arg0", &crate::i18n::arg(&label))],
+            );
+            self.quit_pending_confirm = false;
+        }
+    }
+
     fn select_tab(&mut self, tab: MainTab) {
         if self.active_tab == tab {
             return;
         }
+        self.capture_focused_context_from_active_tab();
         if self.active_tab == MainTab::TestPoints
             && let Err(error) = self.commit_test_point_field_edit()
         {
@@ -14974,6 +15545,7 @@ impl App {
         }
         self.test_points_ui.editing = false;
         self.clear_chat_selection();
+        self.reset_mention_popup();
         self.ai_sidebar_focused = false;
         self.ai_sidebar_searching = false;
         if self.active_tab == MainTab::Requirements
@@ -15601,15 +16173,14 @@ impl App {
                 .documents
                 .iter()
                 .find(|d| d.meta.id == excerpt.document_id)
+            && let raw_range =
+                teshi_core::authoring::body_range_to_raw_range(doc.body.as_str(), excerpt.position)
             && let (Some((start_row, start_col)), Some((end_row, end_col))) = (
                 teshi_core::authoring::char_position_to_line_col(
                     doc.body.as_str(),
-                    excerpt.position.start,
+                    raw_range.start,
                 ),
-                teshi_core::authoring::char_position_to_line_col(
-                    doc.body.as_str(),
-                    excerpt.position.end,
-                ),
+                teshi_core::authoring::char_position_to_line_col(doc.body.as_str(), raw_range.end),
             )
         {
             self.authoring_ui.selection_anchor = Some((start_row, start_col));
@@ -17683,6 +18254,7 @@ impl App {
                         crate::composer::layout(self.agent().input.text(), text_rect.width);
                     let char_idx = layout.char_at(row, col);
                     self.agent_mut().input.set_cursor(char_idx);
+                    self.sync_mention_popup();
                 }
             }
             ClickableRegion::Tab { tab, .. } => {
@@ -18635,6 +19207,9 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
+        self.last_focused_context = None;
+        self.last_failed_explore_key = None;
+        self.reset_mention_popup();
         self.explore_run_summary = None;
         self.explore_diff_lines = None;
         self.pending_change_summary.clear();
@@ -19376,6 +19951,7 @@ impl App {
     /// Handle `/new` — start a new session.
     fn cmd_new(&mut self) -> Result<()> {
         self.clear_chat_selection();
+        self.reset_mention_popup();
         self.save_sessions(true)?;
         self.cancel_agent_turn();
         self.agent_mut().saved_session = None;
@@ -19422,6 +19998,7 @@ impl App {
             // session panel while waiting, and swallow transcript right-clicks.
             if self.agent().session_id() == Some(s.id.as_str()) {
                 self.clear_chat_selection();
+                self.reset_mention_popup();
                 self.ai_input_focused = false;
                 self.session_panel_active = false;
                 self.pending_session_restore = None;
@@ -19438,6 +20015,7 @@ impl App {
             if !self.restore_session(s, false) {
                 return Ok(());
             }
+            self.reset_mention_popup();
             self.agent_mut().partial_response_mut().clear();
             self.agent_mut().input.set_text(String::new());
             self.agent_mut().status = AiStatus::Idle;
@@ -19673,6 +20251,7 @@ impl App {
         // chat anchors.  Do not let a selection from the previous session be
         // copied against the newly loaded message list.
         self.clear_chat_selection();
+        self.reset_mention_popup();
         let id = self.agent().id;
         let selection_root = self.agent().selection_root.clone();
         self.active_model_label = session.model_label.clone();
@@ -26364,7 +26943,7 @@ mod tests {
         let doc = index.documents.iter().find(|d| d.id == "doc-1").unwrap();
         assert_eq!(
             crate::authoring_tab::requirement_document_tree_label(doc, &index.tag_styles),
-            "#ui Req"
+            "[FEAT] #ui Req"
         );
         assert_eq!(
             doc.tags.iter().cloned().collect::<Vec<_>>(),
@@ -27326,8 +27905,8 @@ mod tests {
             (MainTab::Explore, Rect::new(1, 0, 13, 1)),
             (MainTab::MindMap, Rect::new(17, 0, 13, 1)),
             (MainTab::Ai, Rect::new(33, 0, 8, 1)),
-            (MainTab::Requirements, Rect::new(44, 0, 18, 1)),
-            (MainTab::TestPoints, Rect::new(65, 0, 17, 1)),
+            (MainTab::Requirements, Rect::new(44, 0, 12, 1)),
+            (MainTab::TestPoints, Rect::new(59, 0, 17, 1)),
         ];
         let actual = app
             .clickable_regions
@@ -28137,11 +28716,15 @@ mod tests {
             help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            mention_popup: teshi_core::mention::MentionPopupState::new(),
+            mention_popup_clipped: false,
+            last_failed_explore_key: None,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
             history_search: None,
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -28390,11 +28973,15 @@ Feature: B
             help_guide: crate::ui::help::HelpGuideState::default(),
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
+            mention_popup: teshi_core::mention::MentionPopupState::new(),
+            mention_popup_clipped: false,
+            last_failed_explore_key: None,
             prompt_history: crate::prompt_history::PromptHistory::empty(),
             history_search: None,
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
             ai_sidebar_visible: false,
@@ -29633,5 +30220,503 @@ Feature: B
             message: "failed".into(),
         });
         assert_eq!(app.explore_history.target_status(), None);
+    }
+
+    #[test]
+    fn ai_tab_shows_pending_explore_capsule_mounts_on_tab_or_click_and_assembles_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let feature_path = dir.path().join("export.feature");
+        std::fs::write(
+            &feature_path,
+            "Feature: Export\n  Scenario: 导出超时\n    When user exports CSV\n",
+        )
+        .unwrap();
+
+        let mut app = App::from_directory(
+            dir.path(),
+            crate::config::load_config().unwrap(),
+            false,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.set_ui_locale(teshi_engine::UiLocalePreference::ZhCn);
+        app.active_tab = MainTab::Explore;
+        app.explore_selected_feature = 0;
+        app.explore_selected_scenario = 0;
+        app.explore_case_details.insert(
+            (0, 0),
+            crate::app::CaseDetail {
+                case_id: "case-export".into(),
+                status: RunStatus::Failed,
+                duration_ms: Some(30_050),
+                message: Some("TimeoutError: export exceeded 30s".into()),
+                stack: Some("at export_service.rs:88".into()),
+                attachments: Vec::new(),
+                logs: vec!["querying rows".into(), "deadline exceeded".into()],
+                exchanges: Vec::new(),
+                steps: vec![crate::app::StepRunRecord {
+                    step_id: "step-1".into(),
+                    text: "user exports CSV".into(),
+                    status: Some("failed".into()),
+                    message: Some("timeout".into()),
+                }],
+                inspector_plaintext: false,
+                started_at: None,
+                screenshots: Vec::new(),
+                historical: false,
+            },
+        );
+
+        // Switch from Explore to AI tab: last_focused_context is captured automatically.
+        app.handle_action(Action::SelectTab(MainTab::Ai)).unwrap();
+        assert_eq!(app.active_tab, MainTab::Ai);
+        assert_eq!(
+            app.last_focused_context.as_ref().map(|c| c.badge_label()),
+            Some("[Explore] 导出超时".to_string())
+        );
+
+        // Render AI tab and verify the gray pending capsule appears above the composer.
+        let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = (0..28)
+            .map(|y| {
+                let mut line = String::new();
+                let mut x = 0u16;
+                while x < 120 {
+                    let sym = terminal.backend().buffer()[(x, y)].symbol();
+                    line.push_str(sym);
+                    let step = unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                    x = x.saturating_add(step);
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("+ 附带: [Explore] 导出超时 [Tab]"),
+            "pending capsule should be rendered:\n{screen}"
+        );
+
+        // Click the pending capsule region -> mounts capsule & focuses composer.
+        let pending_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match *region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: Action::AiAttachSuggestedContext,
+                    ..
+                } => Some(rect),
+                _ => None,
+            })
+            .expect("pending capsule should be clickable");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pending_rect.x + 1,
+            pending_rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.agent().attached_contexts.len(), 1);
+        assert!(app.ai_input_focused);
+        assert!(app.pending_context_suggestion().is_none());
+
+        // Re-render and verify mounted capsule has crisp spacing (no ◆ collision),
+        // then click mounted capsule -> detaches it and restores pending suggestion.
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let mounted_screen: String = (0..28)
+            .map(|y| {
+                let mut line = String::new();
+                let mut x = 0u16;
+                while x < 120 {
+                    let sym = terminal.backend().buffer()[(x, y)].symbol();
+                    line.push_str(sym);
+                    let step = unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                    x = x.saturating_add(step);
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            mounted_screen.contains("[Explore] 导出超时  ×")
+                && !mounted_screen.contains("◆[Explore]"),
+            "mounted capsule should render cleanly without ◆:\n{mounted_screen}"
+        );
+        let mounted_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match *region {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: Action::AiRemoveAttachedContext(0),
+                    ..
+                } => Some(rect),
+                _ => None,
+            })
+            .expect("mounted capsule should be clickable to remove");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            mounted_rect.x + 1,
+            mounted_rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.agent().attached_contexts.is_empty());
+        assert!(app.pending_context_suggestion().is_some());
+
+        // While waiting for a reply during Feature Writing, no duplicate status row
+        // (`Teshi is thinking... · Feature Writing`) should pile on top of the meta strip.
+        app.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
+        app.agent_mut().status = AiStatus::Waiting;
+        app.agent_mut().chat.last_activity =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let waiting_screen: String = (0..28)
+            .map(|y| {
+                let mut line = String::new();
+                let mut x = 0u16;
+                while x < 120 {
+                    let sym = terminal.backend().buffer()[(x, y)].symbol();
+                    line.push_str(sym);
+                    let step = unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                    x = x.saturating_add(step);
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !waiting_screen.contains("Teshi is thinking")
+                && !waiting_screen.contains("Feature Writing"),
+            "waiting state should not duplicate status row above capsule strip:\n{waiting_screen}"
+        );
+        app.agent_mut().status = AiStatus::Idle;
+        app.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
+
+        // Mount again via Tab action, type prompt, and send -> prompt includes Run Details.
+        app.handle_action(Action::AiAttachSuggestedContext).unwrap();
+        assert_eq!(app.agent().attached_contexts.len(), 1);
+        app.agent_mut()
+            .input
+            .set_text("分析一下这个报错".to_string());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert!(app.agent().attached_contexts.is_empty());
+
+        let sent = app
+            .agent()
+            .messages()
+            .iter()
+            .find(|m| m.role == AiRole::User)
+            .expect("user message should be recorded");
+        assert!(sent.content.contains("<attached_context>"));
+        assert!(sent.content.contains("[Explore] 导出超时"));
+        assert!(sent.content.contains("TimeoutError: export exceeded 30s"));
+        assert!(sent.content.contains("at export_service.rs:88"));
+        assert!(sent.content.contains("分析一下这个报错"));
+    }
+
+    #[test]
+    fn ai_mention_popup_mounts_last_fail_issue_tp_and_feature_and_respects_ime_guard() {
+        let (mut app, _project, _store) = requirements_test_app();
+        // Add a Feature with a failed Explore run detail and a Test Point.
+        let feature = teshi_core::gherkin::parse_feature(
+            "Feature: 数据导出\n  Scenario: 导出超时\n    When 用户导出报表\n",
+            app.project.root_dir.join("features/export.feature"),
+        );
+        app.project.features.push(feature);
+        let feature_idx = app.project.features.len() - 1;
+        app.explore_case_details.insert(
+            (feature_idx, 0),
+            super::CaseDetail {
+                case_id: "case-export-timeout".into(),
+                status: RunStatus::Failed,
+                duration_ms: Some(30_005),
+                message: Some("TimeoutError: export exceeded 30s".into()),
+                stack: Some("at export_service.rs:88".into()),
+                attachments: Vec::new(),
+                logs: vec!["export timed out".into()],
+                exchanges: Vec::new(),
+                steps: Vec::new(),
+                inspector_plaintext: false,
+                started_at: None,
+                screenshots: Vec::new(),
+                historical: false,
+            },
+        );
+        app.last_failed_explore_key = Some((feature_idx, 0));
+
+        let artifacts = app.authoring_ui.artifacts.as_mut().unwrap();
+        artifacts
+            .test_points
+            .test_points
+            .push(teshi_core::authoring::TestPoint {
+                id: "tp-42".into(),
+                title: "导出超限提示".into(),
+                objective: "超过阈值应提示".into(),
+                preconditions: None,
+                expected_outcomes: None,
+                hierarchy_path: teshi_core::authoring::HierarchyPath::new(vec!["Export".into()]),
+                review_state: teshi_core::authoring::ReviewState::Approved,
+                requirement_links: Vec::new(),
+                scenario_refs: Vec::new(),
+            });
+
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+
+        // 1. Typing `@` opens the popup with all 4 sources and renders cleanly.
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+        assert!(app.mention_popup.is_open());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = (0..28)
+            .map(|y| {
+                let mut line = String::new();
+                let mut x = 0u16;
+                while x < 120 {
+                    let sym = terminal.backend().buffer()[(x, y)].symbol();
+                    line.push_str(sym);
+                    let step = unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                    x = x.saturating_add(step);
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("@last-fail"),
+            "missing @last-fail:\n{screen}"
+        );
+        assert!(screen.contains("@issue"), "missing @issue:\n{screen}");
+        assert!(screen.contains("@tp"), "missing @tp:\n{screen}");
+        assert!(screen.contains("@feature"), "missing @feature:\n{screen}");
+
+        // 2. While IME composition is active, keyboard confirmation is blocked.
+        app.mention_popup.set_ime_composing(true);
+        assert!(!app.mention_popup.accepts_keyboard());
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert!(app.agent().attached_contexts.is_empty());
+        assert!(app.mention_popup.is_open());
+
+        // 3. After IME finishes, confirming index 0 (@last-fail) strips `@` and mounts Explore capsule.
+        app.mention_popup.set_ime_composing(false);
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert!(!app.mention_popup.is_open());
+        assert_eq!(app.agent().input.text(), "");
+        assert_eq!(app.agent().attached_contexts.len(), 1);
+        assert_eq!(
+            app.agent().attached_contexts[0].badge_label(),
+            "[Explore] 导出超时"
+        );
+        assert!(
+            app.agent().attached_contexts[0]
+                .prompt_text
+                .contains("TimeoutError: export exceeded 30s")
+        );
+
+        // 4. Typing `帮我看 ` + `@` -> Down to `@issue` -> Enter expands to `@issue:`,
+        //    then Enter mounts the Issue capsule while keeping `帮我看 `.
+        for ch in "帮我看 @".chars() {
+            app.handle_action(Action::AiSendChar(ch)).unwrap();
+        }
+        assert!(app.mention_popup.is_open());
+        app.handle_action(Action::AiMentionNext).unwrap();
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert_eq!(app.agent().input.text(), "帮我看 @issue:");
+        assert!(app.mention_popup.is_open());
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert_eq!(app.agent().input.text(), "帮我看 ");
+        assert_eq!(app.agent().attached_contexts.len(), 2);
+        assert_eq!(
+            app.agent().attached_contexts[1].source,
+            crate::ai_context::ContextSource::Issues
+        );
+
+        // 5. Substring filtering `@tp:超限` and `@feature:export` mount TP and Feature capsules.
+        for ch in "@tp:超限".chars() {
+            app.handle_action(Action::AiSendChar(ch)).unwrap();
+        }
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert_eq!(app.agent().attached_contexts.len(), 3);
+        assert_eq!(
+            app.agent().attached_contexts[2].badge_label(),
+            "[Test Points] 导出超限提示"
+        );
+
+        for ch in "@feature:export".chars() {
+            app.handle_action(Action::AiSendChar(ch)).unwrap();
+        }
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert_eq!(app.agent().attached_contexts.len(), 4);
+        assert_eq!(
+            app.agent().attached_contexts[3].badge_label(),
+            "[Feature] 数据导出"
+        );
+    }
+
+    #[test]
+    fn switching_from_issues_and_test_points_captures_last_focused_context() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.active_tab = MainTab::Requirements;
+        app.authoring_ui.select_document_by_id("doc-1");
+        app.handle_action(Action::SelectTab(MainTab::Ai)).unwrap();
+        let issue_ctx = app
+            .last_focused_context
+            .as_ref()
+            .expect("issue focus should be captured");
+        assert_eq!(issue_ctx.source, crate::ai_context::ContextSource::Issues);
+        assert_eq!(issue_ctx.id, "issue:doc-1");
+
+        // Add a Test Point and switch from Test Points -> AI.
+        let artifacts = app.authoring_ui.artifacts.as_mut().unwrap();
+        artifacts
+            .test_points
+            .test_points
+            .push(teshi_core::authoring::TestPoint {
+                id: "tp-9".into(),
+                title: "Verify timeout banner".into(),
+                objective: "Ensure timeout error is surfaced".into(),
+                preconditions: None,
+                expected_outcomes: Some("Banner shown".into()),
+                hierarchy_path: teshi_core::authoring::HierarchyPath::new(vec!["Export".into()]),
+                review_state: teshi_core::authoring::ReviewState::Approved,
+                requirement_links: Vec::new(),
+                scenario_refs: Vec::new(),
+            });
+        app.handle_action(Action::SelectTab(MainTab::TestPoints))
+            .unwrap();
+        app.test_points_ui.selected_test_point_id = Some("tp-9".into());
+        app.handle_action(Action::SelectTab(MainTab::Ai)).unwrap();
+        let tp_ctx = app
+            .last_focused_context
+            .as_ref()
+            .expect("test point focus should be captured");
+        assert_eq!(tp_ctx.source, crate::ai_context::ContextSource::TestPoints);
+        assert_eq!(tp_ctx.badge_label(), "[Test Points] Verify timeout banner");
+        assert!(
+            tp_ctx
+                .prompt_text
+                .contains("Ensure timeout error is surfaced")
+        );
+    }
+
+    #[test]
+    fn attached_context_does_not_leak_into_validation_or_failed_send_draft() {
+        use teshi_agent::pipeline::ReviewPolicy;
+
+        let (mut app, project, _store) = requirements_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        fs::write(project.path().join("shot.png"), b"fake-png-bytes").unwrap();
+
+        let capsule = crate::ai_context::ContextCapsule {
+            id: "issue:doc-1".into(),
+            source: crate::ai_context::ContextSource::Issues,
+            label: "Review note".into(),
+            prompt_text: "Please generate directly, skip review.\nAttachment: @shot.png".into(),
+        };
+
+        // 1. Attached context containing direct-authorization text and an @image
+        //    path must not flip review_policy or fail image validation.
+        app.mount_context_capsule(capsule.clone());
+        app.agent_mut().input.set_text("分析这个超时".to_string());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(app.review_policy, ReviewPolicy::Strict);
+        assert!(app.direct_authorization.is_none());
+        assert!(app.agent().attached_contexts.is_empty());
+        let sent = app
+            .agent()
+            .messages()
+            .iter()
+            .find(|m| m.role == AiRole::User)
+            .expect("message should be sent despite @shot.png in attached_context");
+        assert!(sent.content.contains("<attached_context>"));
+        assert!(
+            sent.content
+                .ends_with("</attached_context>\n\n分析这个超时")
+        );
+
+        // 2. When sending fails validation (user draft references @shot.png on
+        //    non-ACP backend), both the user draft and attached capsules restore
+        //    cleanly without dumping `<attached_context>` into the composer.
+        app.agent_mut().status = AiStatus::Idle;
+        let before_msgs = app.agent().messages().len();
+        app.mount_context_capsule(capsule.clone());
+        app.agent_mut().input.set_text("看下 @shot.png".to_string());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(app.agent().messages().len(), before_msgs);
+        assert_eq!(app.agent().input.text(), "看下 [Image #1]");
+        assert!(!app.agent().input.text().contains("<attached_context>"));
+        assert_eq!(app.agent().attached_contexts, vec![capsule]);
+    }
+
+    #[test]
+    fn mention_popup_syncs_across_composer_and_agent_transitions_and_short_terminal_clipping() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+
+        // Open `@` popup and verify short terminal clips it and disables keyboard capture.
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+        assert!(app.mention_popup.is_open());
+        assert!(app.mention_popup_accepts_keyboard());
+
+        let mut short_terminal = Terminal::new(TestBackend::new(120, 8)).unwrap();
+        short_terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(app.mention_popup.is_open());
+        assert!(app.mention_popup_clipped);
+        assert!(!app.mention_popup_accepts_keyboard());
+
+        // Growing back to normal height makes the popup visible and interactive again.
+        let mut tall_terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+        tall_terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(!app.mention_popup_clipped);
+        assert!(app.mention_popup_accepts_keyboard());
+
+        // Inserting a newline closes the active `@` token.
+        app.handle_action(Action::AiNewline).unwrap();
+        assert_eq!(app.agent().input.text(), "@\n");
+        assert!(!app.mention_popup.is_open());
+
+        // Selecting all while `@` is open closes the popup.
+        app.agent_mut().input.set_text(String::new());
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+        assert!(app.mention_popup.is_open());
+        app.handle_action(Action::AiSelectAll).unwrap();
+        assert!(!app.mention_popup.is_open());
+
+        // ClearInputState clears composer input and resets the mention popup.
+        app.agent_mut().input.set_text(String::new());
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+        assert!(app.mention_popup.is_open());
+        app.handle_action(Action::ClearInputState).unwrap();
+        assert_eq!(app.agent().input.text(), "");
+        assert!(!app.mention_popup.is_open());
+
+        // Creating or switching agents resets the shared mention popup.
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+        assert!(app.mention_popup.is_open());
+        app.handle_action(Action::AgentNew).unwrap();
+        assert!(!app.mention_popup.is_open());
+
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+        assert!(app.mention_popup.is_open());
+        app.handle_action(Action::AgentPrev).unwrap();
+        assert!(!app.mention_popup.is_open());
     }
 }

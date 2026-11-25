@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use teshi_core::authoring::{
-    legacy_project_requirements_dir, mark_document_links_missing, re_resolve_document_links,
-    requirement_title, resolve_requirement_store_path, validate_loaded_artifacts,
-    validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity,
-    DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
+    mark_document_links_missing, re_resolve_document_links, requirement_title,
+    resolve_project_issues_dir, resolve_requirement_store_path, strip_markdown_frontmatter,
+    validate_loaded_artifacts, validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic,
+    AuthoringSeverity, DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex,
+    TestPointsFile,
 };
 
 use crate::fs_util::{with_exclusive_lock, write_atomic, write_json_unlocked};
@@ -330,10 +331,13 @@ fn upsert_saved_document(
     Ok(merged)
 }
 
-/// Computes a stable revision token from Markdown body content.
+/// Computes a stable revision token from stripped Markdown body content.
+///
+/// Any leading YAML frontmatter is excluded so editing metadata fields such as
+/// `status` does not churn the revision or invalidate test-point anchors.
 pub fn compute_document_revision(body: &str) -> DocumentRevision {
     let mut hasher = DefaultHasher::new();
-    body.hash(&mut hasher);
+    strip_markdown_frontmatter(body).hash(&mut hasher);
     DocumentRevision::new(format!("{:016x}", hasher.finish()))
 }
 
@@ -360,15 +364,21 @@ pub(crate) fn is_requirement_store_lock_artifact(name: &str) -> bool {
 }
 
 fn migration_diagnostic(project_root: &Path) -> Option<AuthoringDiagnostic> {
-    let legacy = legacy_project_requirements_dir(project_root);
+    let legacy = resolve_project_issues_dir(project_root);
     if !legacy.exists() {
         return None;
     }
+    let dir_name = legacy
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(DEFAULT_REQUIREMENTS_DIR);
     Some(AuthoringDiagnostic {
         severity: AuthoringSeverity::Warning,
-        location: "requirements/".into(),
+        location: format!("{dir_name}/"),
         record_id: None,
-        message: "This project still has a local requirements/ directory. It is not loaded at runtime. Run `teshi requirements import-project` to copy documents into the user-level requirement library.".into(),
+        message: format!(
+            "This project still has a local {dir_name}/ directory. It is not loaded at runtime. Run `teshi requirements import-project` to copy documents into the user-level library."
+        ),
     })
 }
 
@@ -451,7 +461,7 @@ pub fn load_authoring_artifacts(
     let has_index = index_file.is_file();
     let has_testpoints = testpoints_path.is_file();
     let store_dir_exists = requirements_root.is_dir();
-    let legacy_dir_exists = legacy_project_requirements_dir(project_root).exists();
+    let legacy_dir_exists = resolve_project_issues_dir(project_root).exists();
 
     let mut diagnostics = Vec::new();
     if let Some(diag) = migration_diagnostic(project_root) {
@@ -1363,5 +1373,93 @@ mod tests {
                 index_bytes
             );
         }
+    }
+
+    #[test]
+    fn editing_frontmatter_keeps_approved_test_point_resolved_without_needs_review() {
+        use teshi_core::authoring::{
+            create_requirement_link, HierarchyPath, RequirementDocumentMeta, ResolutionState,
+            ReviewState, TestPoint, TextRange,
+        };
+
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        let store_id = index.store_id.clone().unwrap();
+
+        let plain_body = "# Checkout timeout\n\nExport completes within 30 seconds.\n";
+        let rev = compute_document_revision(plain_body);
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-1",
+            "doc-1.md",
+            "Checkout timeout",
+            rev.clone(),
+        ));
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", plain_body).unwrap();
+
+        let start = plain_body.find("Export completes").unwrap() as u32;
+        let end = start + "Export completes".chars().count() as u32;
+        let link = create_requirement_link(
+            store_id,
+            "doc-1",
+            rev.as_str(),
+            plain_body,
+            TextRange::new(start, end),
+        )
+        .unwrap();
+
+        let mut test_points = TestPointsFile::default();
+        test_points.test_points.push(TestPoint {
+            id: "tp-1".into(),
+            title: "Export timeout".into(),
+            objective: "Verify export completes within 30 seconds".into(),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: HierarchyPath::new(vec!["Export".into()]),
+            review_state: ReviewState::Approved,
+            requirement_links: vec![link.clone()],
+            scenario_refs: Vec::new(),
+        });
+        save_test_points(project.path(), &test_points).unwrap();
+
+        // Manually prepend YAML frontmatter with `status: testing` to the Markdown file.
+        let with_testing = format!("---\nstatus: testing\n---\n\n{plain_body}");
+        assert_eq!(compute_document_revision(&with_testing), rev);
+        fs::write(store.path().join("doc-1.md"), &with_testing).unwrap();
+
+        let loaded = load_authoring_artifacts(project.path(), store.path())
+            .unwrap()
+            .artifacts
+            .unwrap();
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        let tp = &loaded.test_points.test_points[0];
+        assert_eq!(tp.review_state, ReviewState::Approved);
+        assert_eq!(
+            tp.requirement_links[0].resolution,
+            ResolutionState::Resolved
+        );
+        assert_eq!(tp.requirement_links[0].position, link.position);
+
+        // Mutate frontmatter fields and persist via save_requirement_markdown.
+        let updated_fm = format!("---\ntype: bug\nstatus: done\nref: GH-42\n---\n{plain_body}");
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", &updated_fm).unwrap();
+        assert_eq!(index.documents[0].revision, rev);
+
+        let reloaded = load_authoring_artifacts(project.path(), store.path())
+            .unwrap()
+            .artifacts
+            .unwrap();
+        assert!(
+            reloaded.diagnostics.is_empty(),
+            "{:?}",
+            reloaded.diagnostics
+        );
+        let tp = &reloaded.test_points.test_points[0];
+        assert_eq!(tp.review_state, ReviewState::Approved);
+        assert_eq!(
+            tp.requirement_links[0].resolution,
+            ResolutionState::Resolved
+        );
+        assert_eq!(tp.requirement_links[0].position, link.position);
     }
 }

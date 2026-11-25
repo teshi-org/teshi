@@ -931,31 +931,56 @@ impl App {
 }
 
 fn chip(frame: &mut Frame<'_>, area: Rect, label: String, target: Target, ui: &mut ControlsUi) {
+    let is_agent = matches!(target, Target::Agent);
+    let is_settings = matches!(target, Target::Settings);
     let content = if let Some((name, value)) = label.split_once(": ") {
-        Line::from(vec![
-            Span::styled(
-                format!(" {name} "),
-                Style::default().fg(theme::MUTED).bg(theme::BLOCK_BG),
-            ),
-            Span::styled(
-                value.to_owned(),
-                Style::default().fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG),
-            ),
-            Span::raw(" "),
-        ])
+        let (val_text, has_chevron) = match value.strip_suffix(" ▾") {
+            Some(v) => (v, true),
+            None => (value, false),
+        };
+        let mut spans = vec![
+            Span::styled(format!(" {name} "), Style::default().fg(theme::MUTED)),
+            Span::styled(val_text.to_owned(), Style::default().fg(theme::FG)),
+        ];
+        if has_chevron {
+            spans.push(Span::styled(" ▾ ", Style::default().fg(theme::MUTED)));
+        } else {
+            spans.push(Span::raw(" "));
+        }
+        Line::from(spans)
+    } else if is_agent {
+        let (name_text, has_chevron) = match label.strip_suffix(" ▾") {
+            Some(v) => (v, true),
+            None => (label.as_str(), false),
+        };
+        let padded = label.width().saturating_add(2) <= usize::from(area.width);
+        let mut spans = Vec::new();
+        if padded {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            name_text.to_owned(),
+            Style::default()
+                .fg(theme::PRIMARY)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ));
+        if has_chevron {
+            spans.push(Span::styled(" ▾", Style::default().fg(theme::MUTED)));
+        }
+        if padded {
+            spans.push(Span::raw(" "));
+        }
+        Line::from(spans)
     } else {
-        Line::from(
-            if label.width().saturating_add(2) <= usize::from(area.width) {
-                format!(" {label} ")
-            } else {
-                label
-            },
-        )
+        let text = if label.width().saturating_add(2) <= usize::from(area.width) {
+            format!(" {label} ")
+        } else {
+            label
+        };
+        let color = if is_settings { theme::MUTED } else { theme::FG };
+        Line::from(Span::styled(text, Style::default().fg(color)))
     };
-    frame.render_widget(
-        Paragraph::new(content).style(Style::default().fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(content), area);
     ui.regions.push((area, target));
 }
 
@@ -1048,6 +1073,7 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             )
         }),
     );
+    let mut rendered_any = false;
     for (mut label, target) in controls {
         let mut width = label.width().saturating_add(2).min(u16::MAX as usize) as u16;
         if matches!(&target, Target::Agent) && x.saturating_add(width) > end {
@@ -1066,11 +1092,20 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 width = available;
             }
         }
-        if x.saturating_add(width) > end {
+        let sep_width = u16::from(rendered_any);
+        if x.saturating_add(sep_width + width) > end {
             continue;
         }
+        if rendered_any {
+            frame.render_widget(
+                Paragraph::new("·").style(Style::default().fg(theme::BORDER)),
+                Rect::new(x, area.y, 1, 1),
+            );
+            x = x.saturating_add(1);
+        }
         chip(frame, Rect::new(x, area.y, width, 1), label, target, ui);
-        x = x.saturating_add(width + 1);
+        x = x.saturating_add(width);
+        rendered_any = true;
     }
     if let Some((x, y)) = app.mouse_position {
         for (rect, _) in &app.agent().acp_controls_ui.regions {

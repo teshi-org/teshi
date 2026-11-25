@@ -14,6 +14,7 @@ pub mod http_exchange;
 pub mod llm;
 pub mod locator;
 pub mod markdown;
+pub mod mention;
 pub mod mindmap;
 pub mod project_settings;
 pub mod render;

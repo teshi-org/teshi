@@ -23,7 +23,10 @@ const APP_DATA_DIR_NAME: &str = "teshi";
 /// Environment variable that overrides the requirement store root.
 pub const TESHI_REQUIREMENTS_DIR_ENV: &str = "TESHI_REQUIREMENTS_DIR";
 
-/// Directory name under app data used as the default requirement store.
+/// Directory name under app data preferred for the issues/requirements store.
+pub const DEFAULT_ISSUES_STORE_DIR: &str = "issues";
+
+/// Legacy directory name under app data used as fallback when `issues/` does not exist.
 pub const DEFAULT_REQUIREMENTS_STORE_DIR: &str = "requirements";
 
 /// Minimum window width for desktop shells.
@@ -160,12 +163,13 @@ fn resolve_app_data_dir() -> Result<(PathBuf, bool)> {
     Ok((default_app_data_dir()?, true))
 }
 
-/// Resolves the user-level requirement store root.
+/// Resolves the user-level issues/requirements store root.
 ///
 /// Priority:
 /// 1. `cli_override` when present and non-empty
 /// 2. Non-empty `TESHI_REQUIREMENTS_DIR`
-/// 3. `app_data_dir()/requirements`
+/// 3. `app_data_dir()/issues` when that directory exists
+/// 4. `app_data_dir()/requirements` as fallback
 ///
 /// The returned path is absolute when the current directory can be resolved.
 /// This function does not create the directory or initialize a store index.
@@ -196,7 +200,12 @@ fn resolve_requirements_data_dir(
             return Ok(PathBuf::from(trimmed));
         }
     }
-    Ok(app_data_dir()?.join(DEFAULT_REQUIREMENTS_STORE_DIR))
+    let app_data = app_data_dir()?;
+    let issues_dir = app_data.join(DEFAULT_ISSUES_STORE_DIR);
+    if issues_dir.exists() {
+        return Ok(issues_dir);
+    }
+    Ok(app_data.join(DEFAULT_REQUIREMENTS_STORE_DIR))
 }
 
 fn absolute_path(path: &Path) -> PathBuf {
@@ -752,6 +761,35 @@ mod tests {
             }
             let resolved = requirements_data_dir(None).unwrap();
             assert_eq!(resolved, app.join(DEFAULT_REQUIREMENTS_STORE_DIR));
+        });
+    }
+
+    #[test]
+    fn issues_dir_takes_priority_and_falls_back_to_requirements_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        with_isolated_env(|| {
+            let app = tmp.path().join("app");
+            let req_dir = app.join(DEFAULT_REQUIREMENTS_STORE_DIR);
+            let issues_dir = app.join(DEFAULT_ISSUES_STORE_DIR);
+            fs::create_dir_all(&req_dir).unwrap();
+            unsafe {
+                std::env::set_var("TESHI_APP_DATA_DIR", &app);
+                std::env::remove_var(TESHI_REQUIREMENTS_DIR_ENV);
+            }
+
+            // Without issues/, fall back to requirements/.
+            assert_eq!(requirements_data_dir(None).unwrap(), req_dir);
+
+            // Once issues/ exists, it takes precedence over requirements/.
+            fs::create_dir_all(&issues_dir).unwrap();
+            assert_eq!(requirements_data_dir(None).unwrap(), issues_dir);
+
+            // Explicit overrides still beat app_data/issues.
+            let custom = tmp.path().join("explicit-store");
+            unsafe {
+                std::env::set_var(TESHI_REQUIREMENTS_DIR_ENV, &custom);
+            }
+            assert_eq!(requirements_data_dir(None).unwrap(), custom);
         });
     }
 

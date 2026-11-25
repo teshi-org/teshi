@@ -297,7 +297,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
         ("1", "Explore [1]", "Scenario"),
         ("2", "MindMap [2]", "Preview"),
         ("3", "AI [3]", "AI Chat"),
-        ("4", "Requirements [4]", "body 01"),
+        ("4", "Issues [4]", "body 01"),
         ("5", "Test Points [5]", "Inspector"),
     ] {
         terminal.resize(150, 30).unwrap();
@@ -311,7 +311,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
             "1" => "Explore [1]",
             "2" => "Map [2]",
             "3" => "AI [3]",
-            "4" => "Req [4]",
+            "4" => "Iss [4]",
             _ => "Points [5]",
         };
         terminal.click_text(compact_label, 10000).unwrap();
@@ -342,7 +342,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     terminal.scroll_at(2, 6, false, false).unwrap();
     terminal.expect_text("Open path", true, 1000).unwrap();
     // Clicking outside the non-destructive picker dismisses it without switching tabs.
-    terminal.click_text("Requirements [4]", 10000).unwrap();
+    terminal.click_text("Issues [4]", 10000).unwrap();
     capture(&terminal, "project-modal-pointer-owned");
     terminal.expect_text("Open path", false, 10000).unwrap();
     terminal.expect_text("Scenario", true, 1000).unwrap();

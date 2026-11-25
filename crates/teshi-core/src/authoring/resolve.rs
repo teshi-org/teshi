@@ -1,5 +1,6 @@
 //! Anchor creation and deterministic re-resolution for requirement links.
 
+use crate::authoring::frontmatter::strip_markdown_frontmatter;
 use crate::authoring::positions::{document_char_len, slice_by_char_range};
 use crate::authoring::testpoints::TestPoint;
 use crate::authoring::{
@@ -9,11 +10,12 @@ use crate::authoring::{
 /// Maximum prefix/suffix context length stored with each anchor.
 pub const ANCHOR_CONTEXT_CHARS: usize = 32;
 
-/// Creates a requirement link from a non-empty scalar range in `text`.
+/// Creates a requirement link from a non-empty scalar range in the stripped
+/// Markdown body of `text` (any leading YAML frontmatter is ignored).
 ///
 /// # Errors
 ///
-/// Returns `None` when the range is empty or invalid for `text`.
+/// Returns `None` when the range is empty or invalid for the stripped body.
 pub fn create_requirement_link(
     store_id: RequirementStoreId,
     document_id: impl Into<String>,
@@ -21,13 +23,14 @@ pub fn create_requirement_link(
     text: &str,
     range: TextRange,
 ) -> Option<RequirementLink> {
-    let quote = slice_by_char_range(text, range)?;
+    let body = strip_markdown_frontmatter(text);
+    let quote = slice_by_char_range(body, range)?;
     if quote.trim().is_empty() {
         return None;
     }
 
-    let prefix = context_before(text, range.start, ANCHOR_CONTEXT_CHARS);
-    let suffix = context_after(text, range.end, ANCHOR_CONTEXT_CHARS);
+    let prefix = context_before(body, range.start, ANCHOR_CONTEXT_CHARS);
+    let suffix = context_after(body, range.end, ANCHOR_CONTEXT_CHARS);
 
     Some(RequirementLink {
         store_id: Some(store_id),
@@ -43,7 +46,10 @@ pub fn create_requirement_link(
     })
 }
 
-/// Re-resolves a link against the current document body and revision.
+/// Re-resolves a link against the current stripped document body and revision.
+///
+/// Any leading YAML frontmatter in `text` is stripped before comparing
+/// positions or searching quotes so metadata edits never invalidate anchors.
 ///
 /// Resolution order:
 /// 1. Missing or mismatched `store_id` → stale (never search another store)
@@ -57,6 +63,7 @@ pub fn resolve_requirement_link(
     current_store_id: Option<&RequirementStoreId>,
     link: &RequirementLink,
 ) -> RequirementLink {
+    let body = strip_markdown_frontmatter(text);
     let mut resolved = link.clone();
 
     let store_matches = match (link.store_id.as_ref(), current_store_id) {
@@ -69,17 +76,17 @@ pub fn resolve_requirement_link(
     }
 
     if link.document_revision == current_revision
-        && position_matches_quote(text, link.position, &link.quote.quote)
+        && position_matches_quote(body, link.position, &link.quote.quote)
     {
         resolved.resolution = ResolutionState::Resolved;
         return resolved;
     }
 
-    let matches = find_quote_matches(text, &link.quote.quote);
+    let matches = find_quote_matches(body, &link.quote.quote);
     let unique = match matches.len() {
         0 => None,
         1 => Some(matches[0]),
-        _ => disambiguate_matches(text, &matches, &link.quote),
+        _ => disambiguate_matches(body, &matches, &link.quote),
     };
 
     if let Some(range) = unique {
@@ -362,6 +369,45 @@ mod tests {
             tp.requirement_links[0].resolution,
             ResolutionState::Resolved
         );
+    }
+
+    #[test]
+    fn adding_or_editing_frontmatter_keeps_anchor_resolved_and_position_stable() {
+        let plain = "# Login\n\nUser enters credentials and signs in.\n";
+        let start = plain.find("credentials").unwrap() as u32;
+        let end = start + "credentials".chars().count() as u32;
+        let original = create_requirement_link(
+            test_store(),
+            "doc-1",
+            "rev-body",
+            plain,
+            TextRange::new(start, end),
+        )
+        .unwrap();
+
+        let with_fm = format!("---\nstatus: testing\n---\n\n{plain}");
+        let resolved_first =
+            resolve_requirement_link(&with_fm, "rev-body", Some(&test_store()), &original);
+        assert_eq!(resolved_first.resolution, ResolutionState::Resolved);
+        assert_eq!(resolved_first.position, original.position);
+        assert_eq!(resolved_first.quote, original.quote);
+
+        let edited_fm = format!("---\ntype: bug\nstatus: done\nref: GH-99\n---\n{plain}");
+        let resolved_second =
+            resolve_requirement_link(&edited_fm, "rev-body", Some(&test_store()), &resolved_first);
+        assert_eq!(resolved_second.resolution, ResolutionState::Resolved);
+        assert_eq!(resolved_second.position, original.position);
+
+        let created_with_fm = create_requirement_link(
+            test_store(),
+            "doc-1",
+            "rev-body",
+            &edited_fm,
+            TextRange::new(start, end),
+        )
+        .unwrap();
+        assert_eq!(created_with_fm.position, original.position);
+        assert_eq!(created_with_fm.quote, original.quote);
     }
 
     #[test]

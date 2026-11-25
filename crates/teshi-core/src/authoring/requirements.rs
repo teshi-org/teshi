@@ -37,17 +37,25 @@ impl fmt::Display for InvalidRequirementTitle {
 
 impl std::error::Error for InvalidRequirementTitle {}
 
-/// Extracts the display title from the first line's `# Title` heading.
+/// Extracts the display title from optional YAML frontmatter (`title`) or the
+/// first line's `# Title` heading after stripping any leading frontmatter.
 ///
 /// Surrounding title whitespace is ignored without rewriting the Markdown.
 /// Later headings never supply the document title.
 ///
 /// # Errors
 ///
-/// Returns [`InvalidRequirementTitle`] when the first line lacks an H1 or its
-/// title is empty.
+/// Returns [`InvalidRequirementTitle`] when neither frontmatter `title` nor a
+/// non-empty first-line H1 heading is present.
 pub fn requirement_title(body: &str) -> Result<&str, InvalidRequirementTitle> {
-    let first_line = body.lines().next().unwrap_or_default();
+    if let Some(title) = super::frontmatter::frontmatter_title_slice(body) {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+    let stripped = super::frontmatter::strip_markdown_frontmatter(body);
+    let first_line = stripped.lines().next().unwrap_or_default();
     let heading = first_line
         .strip_prefix('#')
         .ok_or(InvalidRequirementTitle::MissingH1)?;
@@ -791,6 +799,27 @@ mod tests {
             ("# Login\n\nBody\n# Another title", "Login"),
             ("#    用户登录需求    \r\n\r\nBody", "用户登录需求"),
             ("#\tTabbed title\t\n", "Tabbed title"),
+        ] {
+            assert_eq!(requirement_title(body), Ok(expected), "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn frontmatter_title_and_stripped_h1_both_supply_document_title() {
+        for (body, expected) in [
+            ("---\nstatus: testing\n---\n# Login\n\nBody", "Login"),
+            (
+                "---\nstatus: testing\n---\n\n# Login after blank line\n\nBody",
+                "Login after blank line",
+            ),
+            (
+                "---\ntype: bug\nstatus: open\ntitle: \"Export timeout\"\nref: BUG-12\n---\nSteps...",
+                "Export timeout",
+            ),
+            (
+                "---\ntitle: Frontmatter wins\n---\n# Heading\n",
+                "Frontmatter wins",
+            ),
         ] {
             assert_eq!(requirement_title(body), Ok(expected), "body: {body:?}");
         }

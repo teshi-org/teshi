@@ -72,7 +72,7 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
     let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path()))?;
     terminal.expect_text("sample", true, 10000)?;
     terminal.key("4")?;
-    terminal.expect_text("Requirements", true, 10000)?;
+    terminal.expect_text("Issues", true, 10000)?;
 
     for number in 1..=3 {
         terminal.key("Ctrl+n")?;

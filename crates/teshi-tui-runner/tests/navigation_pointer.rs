@@ -340,7 +340,7 @@ fn session_modal_blocks_background_pointer_and_selects_target_history() {
     terminal.expect_text("Load [Enter]", true, 1000).unwrap();
     terminal.expect_text("HISTORY_LINE_64", true, 1000).unwrap();
     // Clicking the tab bar outside the card dismisses the modal without switching tabs.
-    terminal.click_text("Requirements [4]", 5000).unwrap();
+    terminal.click_text("Issues [4]", 5000).unwrap();
     capture(&terminal, "session-modal-background-pointer");
     terminal.expect_text("Load [Enter]", false, 5000).unwrap();
     capture(&terminal, "session-modal-after-close");
@@ -448,7 +448,7 @@ fn approval_modal_owns_background_pointer_and_its_option_rows() {
     terminal.scroll_at(120, 4, false, false).unwrap();
     terminal.expect_text("Approval Mode", true, 1000).unwrap();
     // Clicking the tab bar outside the card dismisses the modal without switching tabs.
-    terminal.click_text("Requirements [4]", 5000).unwrap();
+    terminal.click_text("Issues [4]", 5000).unwrap();
     capture(&terminal, "approval-modal-background-pointer");
     terminal.expect_text("Approval Mode", false, 5000).unwrap();
     capture(&terminal, "approval-modal-after-close");

@@ -634,10 +634,10 @@ fn tool_spinner_frame() -> &'static str {
     FRAMES[frame_index(120, FRAMES.len())]
 }
 
-/// Three-dot pulse shown while the model is thinking.
+/// Compact 1-cell Braille spinner shown while the model is thinking.
 fn thinking_pulse_frame() -> &'static str {
-    const FRAMES: [&str; 4] = ["●∙∙", "∙●∙", "∙∙●", "∙●∙"];
-    FRAMES[frame_index(160, FRAMES.len())]
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[frame_index(100, FRAMES.len())]
 }
 
 fn shrink_left(area: Rect, cols: u16) -> Rect {
@@ -662,6 +662,9 @@ pub(super) fn render_chat_panel(
     placement: ChatPlacement,
 ) {
     if area.width < 10 || area.height < 3 {
+        if placement == ChatPlacement::Tab {
+            app.mention_popup_clipped = app.mention_popup.is_open();
+        }
         return;
     }
 
@@ -675,12 +678,25 @@ pub(super) fn render_chat_panel(
     render_approval_badge(frame, app, area);
     render_chats_chip(frame, app, area, placement);
     if inner.width == 0 || inner.height == 0 {
+        if placement == ChatPlacement::Tab {
+            app.mention_popup_clipped = app.mention_popup.is_open();
+        }
         return;
     }
 
     let input_active = focused && app.ai_input_focused;
-    let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 7);
-    let alert_height = u16::from(needs_chat_status(app) && inner.height >= 6);
+    let has_status = needs_chat_status(app) && inner.height >= 6;
+    let has_context_bar = placement == ChatPlacement::Tab
+        && (!app.agent().attached_contexts.is_empty()
+            || app.pending_context_suggestion().is_some())
+        && inner.height >= 7;
+    // When both a status line and a context capsule are active, status sits on
+    // its own quiet row above the capsule+metrics strip; otherwise status shares
+    // the single meta strip directly above the composer.
+    let status_above_height = u16::from(has_status && has_context_bar && inner.height >= 8);
+    let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 8);
+    let meta_height = 1u16;
+    let toolbar_height = u16::from(inner.height >= 5);
     // The draft already shows `[Image #N]`. Polling here still starts the
     // header read and compression while the user is editing, without a
     // second filename row between the toolbar and the composer.
@@ -691,7 +707,7 @@ pub(super) fn render_chat_panel(
     ) {
         let _ = app.chat_attachments.info(&mention.path);
     }
-    let dock_height = 1 + queue_height + alert_height;
+    let dock_height = status_above_height + queue_height + meta_height + toolbar_height;
     let input_width = composer_text_width(inner.width);
     let input_rows =
         visual_line_count_for_width(&app.agent().input, input_width).min((inner.height / 3).max(3));
@@ -705,9 +721,30 @@ pub(super) fn render_chat_panel(
     } else {
         0
     };
+    let mention_items =
+        if placement == ChatPlacement::Tab && suggestion_height == 0 && app.mention_popup.is_open()
+        {
+            let candidates = app.mention_candidates();
+            Some(app.mention_popup.visible_items(&candidates))
+        } else {
+            None
+        };
+    let mention_height = mention_items.as_ref().map_or(0, |items| {
+        let available = inner.height.saturating_sub(dock_height + input_height + 1);
+        if available < 2 {
+            0
+        } else {
+            let rows = items.len().clamp(1, 8) as u16;
+            (rows + 1).min(available)
+        }
+    });
+    if placement == ChatPlacement::Tab {
+        app.mention_popup_clipped =
+            app.mention_popup.is_open() && (mention_items.is_none() || mention_height < 2);
+    }
     let chat_height = inner
         .height
-        .saturating_sub(dock_height + suggestion_height + input_height);
+        .saturating_sub(dock_height + suggestion_height + mention_height + input_height);
     render_chat_history(
         frame,
         app,
@@ -715,7 +752,7 @@ pub(super) fn render_chat_panel(
         placement,
     );
     let mut dock_y = inner.y + chat_height;
-    if alert_height > 0 {
+    if status_above_height > 0 {
         render_chat_status(
             frame,
             app,
@@ -754,12 +791,6 @@ pub(super) fn render_chat_panel(
         );
         dock_y += 1;
     }
-    render_chat_toolbar(
-        frame,
-        app,
-        shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
-    );
-    dock_y += 1;
     if let Some(filter) = filter.as_deref()
         && suggestion_height > 0
     {
@@ -769,18 +800,241 @@ pub(super) fn render_chat_panel(
             Rect::new(inner.x, dock_y, inner.width, suggestion_height),
             filter,
         );
+        dock_y += suggestion_height;
+    } else if let Some(items) = mention_items.as_deref()
+        && mention_height > 0
+    {
+        super::pointer_controls::render_mention_popup(
+            frame,
+            app,
+            Rect::new(inner.x, dock_y, inner.width, mention_height),
+            items,
+        );
+        dock_y += mention_height;
     }
+    render_composer_meta_strip(
+        frame,
+        app,
+        shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
+        has_context_bar,
+        has_status && status_above_height == 0,
+    );
+    dock_y += 1;
     render_chat_input(
         frame,
         app,
-        Rect::new(
-            inner.x,
-            dock_y + suggestion_height,
-            inner.width,
-            input_height,
-        ),
+        Rect::new(inner.x, dock_y, inner.width, input_height),
         input_active,
     );
+    dock_y += input_height;
+    if toolbar_height > 0 {
+        render_chat_toolbar(
+            frame,
+            app,
+            shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
+        );
+    }
+}
+
+/// Renders the single airy strip directly above the composer border:
+/// context capsules (or status when no capsules are active) on the left,
+/// and quiet runtime/context metrics right-aligned.
+fn render_composer_meta_strip(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    show_capsules: bool,
+    show_status: bool,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let min_left = if show_capsules || show_status {
+        if area.width >= 72 { 32 } else { 16 }
+    } else {
+        0
+    };
+    let metrics = chat_metrics(app, area.width.saturating_sub(min_left + 1) as usize);
+    let metrics_width = metrics.width() as u16;
+    let left_width = area
+        .width
+        .saturating_sub(metrics_width + u16::from(metrics_width > 0));
+    let left_area = Rect::new(area.x, area.y, left_width, 1);
+
+    if show_capsules {
+        render_context_capsule_bar(frame, app, left_area);
+    } else if show_status {
+        render_chat_status(frame, app, left_area);
+    }
+
+    if metrics_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(metrics, muted())).alignment(Alignment::Right),
+            Rect::new(
+                area.right().saturating_sub(metrics_width),
+                area.y,
+                metrics_width,
+                1,
+            ),
+        );
+    }
+}
+
+/// Accent color for each context capsule origin so `Explore`, `Issues`, and
+/// `Test Points` remain scannable without heavy opaque slabs.
+fn context_source_color(source: crate::ai_context::ContextSource) -> ratatui::style::Color {
+    match source {
+        crate::ai_context::ContextSource::Issues => theme::INFO,
+        crate::ai_context::ContextSource::Explore => theme::WARNING,
+        crate::ai_context::ContextSource::TestPoints => theme::PRIMARY,
+        crate::ai_context::ContextSource::Feature => theme::SUCCESS,
+    }
+}
+
+/// Renders mounted context capsules and the lightweight pending suggestion
+/// directly above the AI composer. Clicking a pending suggestion mounts it;
+/// clicking a mounted capsule detaches it.
+fn render_context_capsule_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mounted: Vec<(crate::ai_context::ContextSource, String)> = app
+        .agent()
+        .attached_contexts
+        .iter()
+        .map(|capsule| (capsule.source, capsule.label.clone()))
+        .collect();
+    let pending: Option<(crate::ai_context::ContextSource, String)> = app
+        .pending_context_suggestion()
+        .map(|capsule| (capsule.source, capsule.label.clone()));
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut x = area.x;
+    let right = area.right();
+
+    for (index, (source, label)) in mounted.iter().enumerate() {
+        let remaining = right.saturating_sub(x) as usize;
+        if remaining < 8 {
+            break;
+        }
+        let tag = format!("[{}]", source.tag());
+        let overhead = 1 + tag.width() + 1 + 4; // " " + tag + " " + "  × "
+        let max_label = remaining.saturating_sub(overhead);
+        let short_label = super::truncate_str(label, max_label);
+        let pill_width = (overhead + short_label.width()).min(remaining) as u16;
+        let rect = Rect::new(x, area.y, pill_width, 1);
+        let hovered = app
+            .mouse_position
+            .is_some_and(|(mx, my)| rect.contains(ratatui::layout::Position::new(mx, my)));
+        let bg = if hovered {
+            theme::hover_fill(theme::ACTION_CHIP_PRIMARY_BG)
+        } else {
+            theme::ACTION_CHIP_PRIMARY_BG
+        };
+        let src_color = context_source_color(*source);
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect,
+            action: crate::keymap::Action::AiRemoveAttachedContext(index),
+            modal: false,
+        });
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.push(Span::styled(
+            tag,
+            Style::default()
+                .fg(src_color)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {short_label}"),
+            Style::default().fg(theme::FG).bg(bg),
+        ));
+        spans.push(Span::styled(
+            "  × ",
+            Style::default()
+                .fg(if hovered { theme::ERROR } else { theme::MUTED })
+                .bg(bg),
+        ));
+        x = x.saturating_add(pill_width);
+        if x < right {
+            spans.push(Span::raw(" "));
+            x = x.saturating_add(1);
+        }
+    }
+
+    if let Some((source, label)) = pending {
+        let remaining = right.saturating_sub(x) as usize;
+        if remaining >= 10 {
+            let lead = "↳ ";
+            let prefix = crate::i18n::t("chat.context.attach_prefix");
+            let tag = format!("[{}]", source.tag());
+            let suffix = " [Tab]";
+            let fixed = lead.width() + prefix.width() + tag.width() + 1 + suffix.width();
+            let short_label = if remaining > fixed {
+                super::truncate_str(&label, remaining - fixed)
+            } else {
+                String::new()
+            };
+            let used_width = if short_label.is_empty() {
+                let compact = format!("{lead}{prefix}{tag}{suffix}");
+                super::truncate_str(&compact, remaining).width()
+            } else {
+                fixed + short_label.width()
+            };
+            let width = (used_width as u16).min(right.saturating_sub(x));
+            let rect = Rect::new(x, area.y, width, 1);
+            let hovered = app
+                .mouse_position
+                .is_some_and(|(mx, my)| rect.contains(ratatui::layout::Position::new(mx, my)));
+            let src_color = context_source_color(source);
+            let apply_hover = |style: Style| {
+                if hovered {
+                    style.bg(theme::HOVER_BG)
+                } else {
+                    style
+                }
+            };
+            app.clickable_regions.push(ClickableRegion::ActionButton {
+                rect,
+                action: crate::keymap::Action::AiAttachSuggestedContext,
+                modal: false,
+            });
+            if short_label.is_empty() {
+                let compact = format!("{lead}{prefix}{tag}{suffix}");
+                spans.push(Span::styled(
+                    super::truncate_str(&compact, remaining),
+                    apply_hover(Style::default().fg(theme::MUTED)),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    lead,
+                    apply_hover(Style::default().fg(theme::PRIMARY_MUTED)),
+                ));
+                spans.push(Span::styled(
+                    prefix,
+                    apply_hover(Style::default().fg(theme::MUTED)),
+                ));
+                spans.push(Span::styled(
+                    tag,
+                    apply_hover(Style::default().fg(src_color)),
+                ));
+                spans.push(Span::styled(
+                    format!(" {short_label}"),
+                    apply_hover(Style::default().fg(if hovered {
+                        theme::FG
+                    } else {
+                        theme::MUTED
+                    })),
+                ));
+                spans.push(Span::styled(
+                    suffix,
+                    apply_hover(Style::default().fg(theme::MUTED)),
+                ));
+            }
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Builds the top-border title and registers the session ID as a copy target.
@@ -875,11 +1129,7 @@ fn needs_chat_status(app: &App) -> bool {
         app.agent().status,
         AiStatus::AwaitingApproval | AiStatus::Error
     ) || app.agent().task_interrupted()
-        || !app.agent().backend.is_connected()
-        || !matches!(
-            app.generation_stage,
-            GenerationStage::Idle | GenerationStage::Complete
-        )
+        || (app.agent().status == AiStatus::Idle && !app.agent().backend.is_connected())
 }
 
 /// Pick complete metric fields rather than clipping context counts or a warning marker.
@@ -940,31 +1190,16 @@ fn chat_metrics(app: &App, width: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Place selectable configuration chips beside a separate right-aligned metrics area.
+/// Quiet agent/model/mode controls bar rendered cleanly beneath the composer.
 fn render_chat_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.is_empty() {
         return;
     }
-    let min_controls = if area.width >= 75 { 36 } else { 18 };
-    let metrics = chat_metrics(app, area.width.saturating_sub(min_controls + 1) as usize);
-    let metrics_width = metrics.width() as u16;
-    let controls_width = area
-        .width
-        .saturating_sub(metrics_width + u16::from(metrics_width > 0));
     if app.agent().backend.acp_controls().is_some() {
-        crate::acp_controls::render_bar(frame, app, Rect::new(area.x, area.y, controls_width, 1));
+        crate::acp_controls::render_bar(frame, app, area);
     } else {
-        render_native_controls(frame, app, Rect::new(area.x, area.y, controls_width, 1));
+        render_native_controls(frame, app, area);
     }
-    frame.render_widget(
-        Paragraph::new(Line::styled(metrics, muted())).alignment(Alignment::Right),
-        Rect::new(
-            area.right().saturating_sub(metrics_width),
-            area.y,
-            metrics_width,
-            1,
-        ),
-    );
 }
 
 fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -982,37 +1217,62 @@ fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
             .to_string(),
             crate::keymap::Action::AiOpenAgentSelector,
-            theme::ActionTone::Info,
+            theme::PRIMARY,
+            true,
         ),
         (
             crate::i18n::fill(crate::i18n::t("chat.model"), &[("model", &model)]),
             crate::keymap::Action::ModelPanelOpen,
-            theme::ActionTone::Primary,
+            theme::FG,
+            false,
         ),
     ];
     let mut x = area.x;
-    for (label, action, tone) in controls {
-        let width = label.width() as u16;
-        if x.saturating_add(width) > area.right() {
+    for (idx, (label, action, color, bold)) in controls.into_iter().enumerate() {
+        let trimmed = label.trim();
+        let display = format!(" {trimmed} ");
+        let width = display.width() as u16;
+        let sep_width = if idx > 0 { 1 } else { 0 };
+        if x.saturating_add(sep_width + width) > area.right() {
             continue;
         }
+        if idx > 0 {
+            frame.render_widget(
+                Paragraph::new("·").style(fg(theme::BORDER)),
+                Rect::new(x, area.y, 1, 1),
+            );
+            x += 1;
+        }
         let rect = Rect::new(x, area.y, width, 1);
-        let (_, chip_style) = theme::action_chip_styles(tone);
-        frame.render_widget(Paragraph::new(label).style(chip_style), rect);
+        let hovered = app
+            .mouse_position
+            .is_some_and(|(mx, my)| rect.contains(ratatui::layout::Position::new(mx, my)));
+        let mut style = fg(color);
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if hovered {
+            style = style.bg(theme::HOVER_BG);
+        }
+        frame.render_widget(Paragraph::new(display).style(style), rect);
         app.clickable_regions.push(ClickableRegion::ActionButton {
             rect,
             action,
             modal: false,
         });
-        x += width + 1;
+        x += width;
     }
     if app.agent().backend.is_connected()
         && app.agent().status == AiStatus::Idle
-        && x + 5 <= area.right()
+        && x + 7 <= area.right()
     {
         frame.render_widget(
-            Paragraph::new(crate::i18n::t("chat.ready")).style(muted()),
-            Rect::new(x, area.y, 5, 1),
+            Paragraph::new("·").style(fg(theme::BORDER)),
+            Rect::new(x, area.y, 1, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(format!(" {}", crate::i18n::t("chat.ready"))).style(muted()),
+            Rect::new(x + 1, area.y, 6, 1),
         );
     }
 }
@@ -1650,6 +1910,9 @@ fn build_chat_projection(
             std::rc::Rc::make_mut(row).action =
                 Some(crate::keymap::Action::AiToggleThought(usize::MAX));
         }
+        if agent.partial_response().is_empty() {
+            append_blank(&mut out);
+        }
     }
 
     if !agent.partial_response().is_empty() {
@@ -1701,23 +1964,33 @@ fn build_chat_projection(
                     Some("in_progress" | "pending")
                 )
         });
+    let custom_tool_status = agent
+        .tool_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "Teshi is thinking...");
     if agent.status == AiStatus::Waiting
         && agent.partial_response().is_empty()
         && !shows_thought
         && !shows_tool
-        && agent
-            .chat
-            .last_activity
-            .is_some_and(|time| time.elapsed() >= std::time::Duration::from_millis(350))
+        && (custom_tool_status.is_some()
+            || agent
+                .chat
+                .last_activity
+                .is_some_and(|time| time.elapsed() >= std::time::Duration::from_millis(350)))
     {
+        let label = custom_tool_status
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::i18n::t("chat.waiting").to_string());
         append_unselectable(
             &mut out,
             vec![Line::from(vec![
                 Span::styled(QUIET_RAIL, fg(theme::BORDER)),
-                Span::styled(format!("{} ", thinking_pulse_frame()), fg(theme::ACCENT)),
-                Span::styled(crate::i18n::t("chat.waiting"), muted()),
+                Span::styled(format!("{} ", thinking_pulse_frame()), fg(theme::PRIMARY)),
+                Span::styled(label, muted()),
             ])],
         );
+        append_blank(&mut out);
     }
     let mut permission = Vec::new();
     push_acp_permission_prompt(&mut permission, app, width);
@@ -2571,17 +2844,18 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
     if button_width > 0 {
         let busy = matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval);
         let label = if busy { " Queue ↵ " } else { " Send ↵  " };
-        let action = if agent.input.is_empty() {
-            crate::keymap::Action::AiFocusInput
-        } else {
+        let has_payload = !agent.input.is_empty() || !agent.attached_contexts.is_empty();
+        let action = if has_payload {
             crate::keymap::Action::AiSendMessage
+        } else {
+            crate::keymap::Action::AiFocusInput
         };
         let tone = if busy {
             theme::ActionTone::Warning
-        } else if agent.input.is_empty() {
-            theme::ActionTone::Primary
-        } else {
+        } else if has_payload {
             theme::ActionTone::Success
+        } else {
+            theme::ActionTone::Primary
         };
         let (_, button_style) = theme::action_chip_styles(tone);
         let button = Rect::new(
