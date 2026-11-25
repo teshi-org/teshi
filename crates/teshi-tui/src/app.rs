@@ -1784,6 +1784,8 @@ pub struct App {
     pub chat_history_rect: Option<ratatui::layout::Rect>,
     /// Chat scrollbar from the last frame; `None` when the history fits.
     pub(crate) chat_scrollbar: Option<ScrollbarBar>,
+    /// Last rendered `(agent_id, max_scroll_offset)` for the active chat history.
+    pub(crate) chat_max_scroll: Option<(usize, usize)>,
     /// Pointer offset below the thumb top while the scrollbar is being dragged.
     pub(crate) chat_scrollbar_grab: Option<u16>,
     /// Vertical scrollbars registered during the last render pass across Explore, MindMap, and Test Points.
@@ -1900,6 +1902,8 @@ pub struct App {
     pub explore_details_reveal: bool,
     /// Exchange ids whose folded HTTP bodies are rendered.
     pub explore_details_expanded: HashSet<String>,
+    /// Whether the Explore Run Details pane is collapsed.
+    pub explore_details_collapsed: bool,
     pub explore_run_summary: Option<RunSummary>,
     // ── MindMap AI panel state ────────────────────────────────────────
     pub mindmap_focus: MindMapFocus,
@@ -2706,6 +2710,7 @@ impl App {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
         self.explore_case_details.clear();
+        self.explore_details_collapsed = false;
         self.explore_run_summary = None;
         self.explore_state = None;
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
@@ -3399,6 +3404,7 @@ impl App {
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_scrollbar: None,
+            chat_max_scroll: None,
             chat_scrollbar_grab: None,
             vertical_scrollbars: Vec::new(),
             vertical_scrollbar_grab: None,
@@ -3460,6 +3466,7 @@ impl App {
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
+            explore_details_collapsed: false,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -3698,6 +3705,7 @@ impl App {
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_scrollbar: None,
+            chat_max_scroll: None,
             chat_scrollbar_grab: None,
             vertical_scrollbars: Vec::new(),
             vertical_scrollbar_grab: None,
@@ -3759,6 +3767,7 @@ impl App {
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
+            explore_details_collapsed: false,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -3948,6 +3957,7 @@ impl App {
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_scrollbar: None,
+            chat_max_scroll: None,
             chat_scrollbar_grab: None,
             vertical_scrollbars: Vec::new(),
             vertical_scrollbar_grab: None,
@@ -4009,6 +4019,7 @@ impl App {
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
+            explore_details_collapsed: false,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -5385,6 +5396,7 @@ impl App {
             active_session_id: self.agent().session_id().map(str::to_owned),
             sidebar_collapsed: self.ai_sidebar_collapsed,
             settled_expanded: self.ai_sidebar_settled_expanded,
+            explore_details_collapsed: self.explore_details_collapsed,
         }
     }
 
@@ -5420,6 +5432,7 @@ impl App {
         };
         self.ai_sidebar_collapsed = state.sidebar_collapsed;
         self.ai_sidebar_settled_expanded = false;
+        self.explore_details_collapsed = state.explore_details_collapsed;
 
         let active_identity = teshi_engine::ProjectIdentity::new(&self.project.root_dir).ok();
         let selection_root = self
@@ -9761,10 +9774,14 @@ impl App {
         cases
     }
 
-    /// Moves keyboard focus to the Run Details pane.
+    /// Moves keyboard focus to the Run Details pane, expanding it if collapsed.
     pub(crate) fn focus_run_details(&mut self) {
         if self.active_tab != MainTab::Explore || self.explore_edit_mode {
             return;
+        }
+        if self.explore_details_collapsed {
+            self.explore_details_collapsed = false;
+            self.save_sidebar_workspace(true);
         }
         self.explore_focus = ColumnFocus::Details;
         self.explore_details_selection = 0;
@@ -10727,7 +10744,13 @@ impl App {
         self.explore_focus = match self.explore_focus {
             ColumnFocus::Feature => ColumnFocus::Scenario,
             ColumnFocus::Scenario => ColumnFocus::Step,
-            ColumnFocus::Step => ColumnFocus::Details,
+            ColumnFocus::Step => {
+                if self.explore_details_collapsed {
+                    ColumnFocus::Step
+                } else {
+                    ColumnFocus::Details
+                }
+            }
             ColumnFocus::Details => ColumnFocus::Details,
         };
         if self.explore_focus == ColumnFocus::Details {
@@ -12686,6 +12709,26 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::ExploreToggleDetails => {
+                if self.active_tab == MainTab::Explore {
+                    self.explore_details_collapsed = !self.explore_details_collapsed;
+                    if self.explore_details_collapsed {
+                        if self.explore_focus == ColumnFocus::Details {
+                            self.explore_focus = ColumnFocus::Step;
+                        }
+                        self.explore_history.close_menu();
+                    } else {
+                        self.ensure_explore_detail();
+                    }
+                    self.save_sidebar_workspace(true);
+                    self.status = if self.explore_details_collapsed {
+                        crate::i18n::t("status.explore_details_hidden").to_string()
+                    } else {
+                        crate::i18n::t("status.explore_details_shown").to_string()
+                    };
+                    self.quit_pending_confirm = false;
+                }
+            }
             Action::ExploreDetailEnter => {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_detail_primary();
@@ -12703,9 +12746,8 @@ impl App {
                     && !self.explore_edit_mode
                     && self.explore_focus == ColumnFocus::Details
                 {
-                    self.explore_details_scroll = self.explore_details_scroll.saturating_sub(10);
-                    self.explore_details_reveal = false;
-                    self.quit_pending_confirm = false;
+                    let rows = page_scroll_step(self.explore_details_viewport_height());
+                    self.scroll_explore_details(false, rows);
                 }
             }
             Action::ExploreDetailScrollDown => {
@@ -12713,9 +12755,8 @@ impl App {
                     && !self.explore_edit_mode
                     && self.explore_focus == ColumnFocus::Details
                 {
-                    self.explore_details_scroll = self.explore_details_scroll.saturating_add(10);
-                    self.explore_details_reveal = false;
-                    self.quit_pending_confirm = false;
+                    let rows = page_scroll_step(self.explore_details_viewport_height());
+                    self.scroll_explore_details(true, rows);
                 }
             }
             Action::ExploreRunOlder => {
@@ -14090,12 +14131,8 @@ impl App {
                     }
                 }
             }
-            Action::AiScrollUp => {
-                self.agent_mut().scroll_offset = self.agent().scroll_offset.saturating_add(5);
-            }
-            Action::AiScrollDown => {
-                self.agent_mut().scroll_offset = self.agent().scroll_offset.saturating_sub(5);
-            }
+            Action::AiScrollUp => self.scroll_chat_up(5),
+            Action::AiScrollDown => self.scroll_chat_down(5),
             Action::AiScrollLeft => {
                 self.agent_mut().horizontal_scroll =
                     self.agent().horizontal_scroll.saturating_sub(5);
@@ -14105,13 +14142,15 @@ impl App {
                     self.agent().horizontal_scroll.saturating_add(5);
             }
             Action::AiScrollTop => {
-                self.agent_mut().scroll_offset = usize::MAX;
+                self.agent_mut().scroll_offset = self.chat_max_scroll().unwrap_or(usize::MAX);
             }
             Action::AiScrollBottom => {
                 self.agent_mut().scroll_offset = 0;
             }
             Action::AiHalfPageUp => self.scroll_chat_half_page(true),
             Action::AiHalfPageDown => self.scroll_chat_half_page(false),
+            Action::AiPageUp => self.scroll_chat_page(true),
+            Action::AiPageDown => self.scroll_chat_page(false),
             Action::AiToggleSidebar => {
                 self.ai_sidebar_collapsed = !self.ai_sidebar_collapsed;
                 if self.ai_sidebar_collapsed {
@@ -15156,6 +15195,11 @@ impl App {
         }
     }
 
+    fn requirements_editor_viewport_height(&self) -> usize {
+        let height = self.authoring_ui.pane_areas[1].height.saturating_sub(2);
+        if height == 0 { 20 } else { usize::from(height) }
+    }
+
     fn navigate_half_page(&mut self, down: bool) -> Result<()> {
         if self.chat_browse_active() {
             self.handle_action(if down {
@@ -15163,6 +15207,24 @@ impl App {
             } else {
                 Action::AiHalfPageUp
             })?;
+        } else if self.active_tab == MainTab::Explore
+            && !self.explore_edit_mode
+            && self.explore_focus == ColumnFocus::Details
+        {
+            let rows = half_page_scroll_step(self.explore_details_viewport_height());
+            self.scroll_explore_details(down, rows);
+        } else if self.active_tab == MainTab::Requirements
+            && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
+        {
+            let rows = half_page_scroll_step(self.requirements_editor_viewport_height()) as isize;
+            let delta = if down { rows } else { -rows };
+            if self.authoring_ui.is_previewing() {
+                self.authoring_ui.scroll_preview(delta);
+            } else {
+                self.authoring_ui.move_cursor_vertical(delta);
+                self.authoring_ui.extend_visual_selection();
+            }
+            self.quit_pending_confirm = false;
         } else if self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::Main {
             for _ in 0..5 {
                 if down {
@@ -15201,10 +15263,28 @@ impl App {
     fn navigate_page(&mut self, down: bool) -> Result<()> {
         if self.chat_browse_active() {
             self.handle_action(if down {
-                Action::AiScrollDown
+                Action::AiPageDown
             } else {
-                Action::AiScrollUp
+                Action::AiPageUp
             })?;
+        } else if self.active_tab == MainTab::Explore
+            && !self.explore_edit_mode
+            && self.explore_focus == ColumnFocus::Details
+        {
+            let rows = page_scroll_step(self.explore_details_viewport_height());
+            self.scroll_explore_details(down, rows);
+        } else if self.active_tab == MainTab::Requirements
+            && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
+        {
+            let rows = page_scroll_step(self.requirements_editor_viewport_height()) as isize;
+            let delta = if down { rows } else { -rows };
+            if self.authoring_ui.is_previewing() {
+                self.authoring_ui.scroll_preview(delta);
+            } else {
+                self.authoring_ui.move_cursor_vertical(delta);
+                self.authoring_ui.extend_visual_selection();
+            }
+            self.quit_pending_confirm = false;
         } else if self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::Main {
             for _ in 0..10 {
                 if down {
@@ -15455,17 +15535,153 @@ impl App {
             })
     }
 
+    fn chat_max_scroll(&self) -> Option<usize> {
+        self.chat_max_scroll.and_then(|(agent_id, max_start)| {
+            (agent_id == self.selected_agent).then_some(max_start)
+        })
+    }
+
+    fn chat_viewport_height(&self) -> usize {
+        self.chat_history_rect
+            .map_or(20, |rect| usize::from(rect.height).max(1))
+    }
+
+    fn scroll_chat_up(&mut self, rows: usize) {
+        let mut next = self.agent().scroll_offset.saturating_add(rows);
+        if let Some(max_start) = self.chat_max_scroll() {
+            next = next.min(max_start);
+        }
+        self.agent_mut().scroll_offset = next;
+    }
+
+    fn scroll_chat_down(&mut self, rows: usize) {
+        let mut current = self.agent().scroll_offset;
+        if let Some(max_start) = self.chat_max_scroll() {
+            current = current.min(max_start);
+        }
+        self.agent_mut().scroll_offset = current.saturating_sub(rows);
+    }
+
     /// Move the chat by half of the last rendered viewport, mirroring Ctrl+D/U.
     fn scroll_chat_half_page(&mut self, up: bool) {
-        let rows = self
-            .chat_history_rect
-            .map_or(10, |rect| (rect.height as usize / 2).max(1));
-        let offset = self.agent().scroll_offset;
-        self.agent_mut().scroll_offset = if up {
-            offset.saturating_add(rows)
+        let rows = half_page_scroll_step(self.chat_viewport_height());
+        if up {
+            self.scroll_chat_up(rows);
         } else {
-            offset.saturating_sub(rows)
+            self.scroll_chat_down(rows);
+        }
+    }
+
+    /// Move the chat by a full rendered viewport minus context lines (PageUp/PageDown).
+    fn scroll_chat_page(&mut self, up: bool) {
+        let rows = page_scroll_step(self.chat_viewport_height());
+        if up {
+            self.scroll_chat_up(rows);
+        } else {
+            self.scroll_chat_down(rows);
+        }
+    }
+
+    fn scroll_chat_wheel(&mut self, kind: MouseEventKind, modifiers: KeyModifiers) {
+        let horizontal = modifiers.contains(KeyModifiers::SHIFT)
+            || matches!(
+                kind,
+                MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+            );
+        if horizontal {
+            if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) {
+                self.agent_mut().horizontal_scroll =
+                    self.agent().horizontal_scroll.saturating_sub(4);
+            } else {
+                self.agent_mut().horizontal_scroll =
+                    self.agent().horizontal_scroll.saturating_add(4);
+            }
+            return;
+        }
+        let step = content_wheel_step(self.chat_viewport_height());
+        match kind {
+            MouseEventKind::ScrollUp => self.scroll_chat_up(step),
+            MouseEventKind::ScrollDown => self.scroll_chat_down(step),
+            _ => {}
+        }
+    }
+
+    fn explore_details_viewport_height(&self) -> usize {
+        self.clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ExploreDetailPane { rect } => {
+                    Some(usize::from(rect.height.saturating_sub(2)).max(1))
+                }
+                _ => None,
+            })
+            .unwrap_or(20)
+    }
+
+    fn explore_details_max_scroll(&self) -> Option<usize> {
+        self.vertical_scrollbars
+            .iter()
+            .rev()
+            .find_map(|(target, bar)| {
+                (*target == VerticalScrollTarget::ExploreDetails).then(|| bar.max_start())
+            })
+    }
+
+    fn scroll_explore_details(&mut self, down: bool, rows: usize) {
+        if down {
+            let mut next = self.explore_details_scroll.saturating_add(rows);
+            if let Some(max_start) = self.explore_details_max_scroll() {
+                next = next.min(max_start);
+            }
+            self.explore_details_scroll = next;
+        } else {
+            let mut current = self.explore_details_scroll;
+            if let Some(max_start) = self.explore_details_max_scroll() {
+                current = current.min(max_start);
+            }
+            self.explore_details_scroll = current.saturating_sub(rows);
+        }
+        self.explore_details_reveal = false;
+        self.quit_pending_confirm = false;
+    }
+
+    fn scroll_feature_editor_wheel(&mut self, down: bool, rect: ratatui::layout::Rect) {
+        let visible = self.visible_editor_rows();
+        if visible.is_empty() {
+            return;
+        }
+        let visible_lines = usize::from(rect.height).max(1);
+        let step = content_wheel_step(visible_lines);
+        let current_idx = visible
+            .iter()
+            .position(|&row| row == self.scroll_row)
+            .or_else(|| visible.iter().position(|&row| row >= self.scroll_row))
+            .unwrap_or(0);
+        let max_scroll_idx = visible.len().saturating_sub(visible_lines);
+        let next_idx = if down {
+            current_idx.saturating_add(step).min(max_scroll_idx)
+        } else {
+            current_idx.saturating_sub(step)
         };
+        if next_idx != current_idx {
+            self.scroll_row = visible[next_idx];
+            // Keep cursor_row inside the scrolled viewport so the next render
+            // frame does not snap scroll_row back to cursor_row.
+            let cursor_idx = visible
+                .iter()
+                .position(|&row| row == self.cursor_row)
+                .or_else(|| visible.iter().rposition(|&row| row <= self.cursor_row))
+                .unwrap_or(0);
+            let max_visible_idx = next_idx
+                .saturating_add(visible_lines.saturating_sub(1))
+                .min(visible.len().saturating_sub(1));
+            if cursor_idx < next_idx {
+                self.cursor_row = visible[next_idx];
+            } else if cursor_idx > max_visible_idx {
+                self.cursor_row = visible[max_visible_idx];
+            }
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn navigate_boundary(&mut self, end: bool) -> Result<()> {
@@ -16533,8 +16749,11 @@ impl App {
                 }
                 if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                     let down = kind == MouseEventKind::ScrollDown;
-                    if self.help_guide.doc_rect.is_some_and(|r| r.contains(pos)) {
-                        self.help_guide.scroll_doc(if down { 3 } else { -3 });
+                    if let Some(doc_rect) = self.help_guide.doc_rect
+                        && doc_rect.contains(pos)
+                    {
+                        let step = content_wheel_step(usize::from(doc_rect.height)) as isize;
+                        self.help_guide.scroll_doc(if down { step } else { -step });
                         return Ok(());
                     }
                     if self.help_guide.tree_rect.is_some_and(|r| r.contains(pos)) {
@@ -16565,6 +16784,35 @@ impl App {
                         })
             {
                 self.handle_action(action)?;
+                return Ok(());
+            }
+            let has_blocking_panel = self.pending_delete.is_some()
+                || self.model_panel_active
+                || self.session_panel_active
+                || self.auth_panel_active
+                || self.approval_panel_active
+                || self.settings_panel_active
+                || self.help_guide.active
+                || self.agent_profile_panel_active
+                || self.change_summary_visible
+                || self.scenario_dropdown_open
+                || self.step_keyword_picker.is_some()
+                || self.history_search.is_some();
+            if !has_blocking_panel
+                && matches!(
+                    kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                )
+                && (self.active_tab == MainTab::Ai
+                    || (self.active_tab == MainTab::MindMap && self.mindmap_ai_panel_visible))
+                && self.chat_history_rect.is_some_and(|r| r.contains(pos))
+                && !self.modal_card_rect.is_some_and(|card| card.contains(pos))
+            {
+                self.scroll_chat_wheel(kind, modifiers);
+                return Ok(());
             }
             if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(region) = self.hit_test(&pos).cloned()
@@ -16631,13 +16879,8 @@ impl App {
                 })
             && rect.contains(pos)
         {
-            if kind == MouseEventKind::ScrollUp {
-                self.explore_details_scroll = self.explore_details_scroll.saturating_sub(3);
-            } else {
-                self.explore_details_scroll = self.explore_details_scroll.saturating_add(3);
-            }
-            self.explore_details_reveal = false;
-            self.quit_pending_confirm = false;
+            let step = content_wheel_step(usize::from(rect.height.saturating_sub(2)));
+            self.scroll_explore_details(kind == MouseEventKind::ScrollDown, step);
             return Ok(());
         }
         if self.active_tab == MainTab::Explore
@@ -16759,12 +17002,17 @@ impl App {
                                 MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
                             ),
                     );
+                    let step = if pane == 1 && axis == 1 {
+                        content_wheel_step(usize::from(ui.pane_areas[1].height.saturating_sub(2)))
+                    } else {
+                        3
+                    };
                     let old = ui.pane_scroll(pane, axis);
                     let value =
                         if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) {
-                            old.saturating_sub(3)
+                            old.saturating_sub(step)
                         } else {
-                            old.saturating_add(3)
+                            old.saturating_add(step)
                         };
                     ui.set_pane_scroll(pane, axis, value);
                     return Ok(());
@@ -16864,6 +17112,15 @@ impl App {
         }
         if chat_context && (in_chat_history || self.chat_selection_dragging) {
             match kind {
+                MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+                    if in_chat_history =>
+                {
+                    self.scroll_chat_wheel(kind, modifiers);
+                    return Ok(());
+                }
                 MouseEventKind::Down(MouseButton::Left) if in_chat_history => {
                     if let Some(ClickableRegion::ActionButton { action, .. }) =
                         self.hit_test(&pos).cloned()
@@ -17079,19 +17336,15 @@ impl App {
                 if let Some(rect) = self.editor_panel_rect
                     && rect.contains(pos)
                 {
-                    if self.scroll_row > 0 {
-                        self.scroll_row = self.scroll_row.saturating_sub(1);
-                        self.quit_pending_confirm = false;
-                    }
+                    self.scroll_feature_editor_wheel(false, rect);
                     return Ok(());
                 }
                 // Preview panel scroll
                 if let Some(rect) = self.preview_panel_rect
                     && rect.contains(pos)
                 {
-                    if self.preview_cursor_row > 0 {
-                        self.preview_cursor_row = self.preview_cursor_row.saturating_sub(1);
-                    }
+                    let step = content_wheel_step(usize::from(rect.height));
+                    self.preview_cursor_row = self.preview_cursor_row.saturating_sub(step);
                     return Ok(());
                 }
                 // AI sidebar card list scroll when pointer is over any sidebar sub-region.
@@ -17125,12 +17378,7 @@ impl App {
                     || (self.active_tab == MainTab::MindMap
                         && self.mindmap_focus == MindMapFocus::AiPanel);
                 if in_ai_context && !self.auth_panel_active {
-                    if modifiers.contains(KeyModifiers::SHIFT) {
-                        self.agent_mut().horizontal_scroll =
-                            self.agent().horizontal_scroll.saturating_sub(3);
-                    } else {
-                        self.handle_action(Action::AiScrollUp)?;
-                    }
+                    self.scroll_chat_wheel(kind, modifiers);
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -17146,16 +17394,22 @@ impl App {
                 if let Some(rect) = self.editor_panel_rect
                     && rect.contains(pos)
                 {
-                    let max_scroll = self.buffer.line_count().saturating_sub(1);
-                    self.scroll_row = self.scroll_row.saturating_add(1).min(max_scroll);
-                    self.quit_pending_confirm = false;
+                    self.scroll_feature_editor_wheel(true, rect);
                     return Ok(());
                 }
                 // Preview panel scroll
                 if let Some(rect) = self.preview_panel_rect
                     && rect.contains(pos)
                 {
-                    self.preview_cursor_row = self.preview_cursor_row.saturating_add(1);
+                    let step = content_wheel_step(usize::from(rect.height));
+                    let max_row = self
+                        .preview_buffer
+                        .as_ref()
+                        .unwrap_or(&self.buffer)
+                        .line_count()
+                        .saturating_sub(1);
+                    self.preview_cursor_row =
+                        self.preview_cursor_row.saturating_add(step).min(max_row);
                     return Ok(());
                 }
                 // AI sidebar card list scroll when pointer is over any sidebar sub-region.
@@ -17189,12 +17443,15 @@ impl App {
                     || (self.active_tab == MainTab::MindMap
                         && self.mindmap_focus == MindMapFocus::AiPanel);
                 if in_ai_context && !self.auth_panel_active {
-                    if modifiers.contains(KeyModifiers::SHIFT) {
-                        self.agent_mut().horizontal_scroll =
-                            self.agent().horizontal_scroll.saturating_add(3);
-                    } else {
-                        self.handle_action(Action::AiScrollDown)?;
-                    }
+                    self.scroll_chat_wheel(kind, modifiers);
+                }
+            }
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                let in_ai_context = self.active_tab == MainTab::Ai
+                    || (self.active_tab == MainTab::MindMap
+                        && self.mindmap_focus == MindMapFocus::AiPanel);
+                if in_ai_context && !self.auth_panel_active {
+                    self.scroll_chat_wheel(kind, modifiers);
                 }
             }
             _ => {}
@@ -18352,6 +18609,22 @@ impl App {
         }
         self.quit_pending_confirm = false;
     }
+}
+
+/// Unified mouse wheel step for long-form content views (AI Chat,
+/// Requirements detail/editor, Explore details, Feature editor, MindMap preview).
+pub(crate) fn content_wheel_step(viewport_height: usize) -> usize {
+    (viewport_height / 4).clamp(6, 12)
+}
+
+/// Full-page keyboard scroll step (`PageUp` / `PageDown`) keeping two lines of context.
+pub(crate) fn page_scroll_step(viewport_height: usize) -> usize {
+    viewport_height.saturating_sub(2).max(1)
+}
+
+/// Half-page keyboard scroll step (`Ctrl+U` / `Ctrl+D`).
+pub(crate) fn half_page_scroll_step(viewport_height: usize) -> usize {
+    (viewport_height / 2).max(1)
 }
 
 fn apply_list_navigation(selection: &mut usize, count: usize, action: &Action) {
@@ -19714,9 +19987,10 @@ mod tests {
     use super::{
         AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
         ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
-        MindMapFocus, ModelPanelMode, RunDetailTab, RunStatus, ViewStage, attach_prompt_images,
-        completed_assistant_responses, current_step_keyword_index, default_persist_sidebar_state,
-        interrupted_acp_message, replace_step_keyword_line,
+        MindMapFocus, ModelPanelMode, RunDetailTab, RunStatus, ScrollbarBar, VerticalScrollTarget,
+        ViewStage, attach_prompt_images, completed_assistant_responses, content_wheel_step,
+        current_step_keyword_index, default_persist_sidebar_state, half_page_scroll_step,
+        interrupted_acp_message, page_scroll_step, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -20198,7 +20472,8 @@ mod tests {
             KeyModifiers::NONE,
         )
         .unwrap();
-        assert_eq!(app.authoring_ui.preview_scroll, 3);
+        let expected = content_wheel_step(usize::from(pane.height.saturating_sub(2)));
+        assert_eq!(app.authoring_ui.preview_scroll, expected);
         app.handle_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             pane.x + 2,
@@ -23816,11 +24091,11 @@ mod tests {
         assert_eq!(app.agent().input.text(), draft, "opening keeps the draft");
 
         let (buffer, text) = draw(&mut app);
-        // 100x30 terminal: row 0 is the tab bar, row 1 is the active-tab
-        // underline rule, so the 27-row content area loses one row top and
-        // bottom, and every row loses three columns on each side.
+        // 100x30 terminal: row 0 is the tab bar, so the 28-row content area
+        // loses one row top and bottom for the gutter, and every row loses
+        // three columns on each side.
         assert_eq!(
-            buffer[(3, 3)].symbol(),
+            buffer[(3, 2)].symbol(),
             "╭",
             "the viewer starts after the top gutter"
         );
@@ -23838,7 +24113,7 @@ mod tests {
         assert!(text.contains("no image protocol"), "{text}");
         let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
             .expect("the close button is registered");
-        assert_eq!(close.y, 3, "the close button sits on the top border");
+        assert_eq!(close.y, 2, "the close button sits on the top border");
         assert!(text.contains("Close [Esc]"), "{text}");
 
         // Neither the composer below nor typed keys react while it is open.
@@ -26670,7 +26945,8 @@ mod tests {
             KeyModifiers::NONE,
         )
         .unwrap();
-        assert_eq!(app.authoring_ui.scroll_row, 3);
+        let expected = content_wheel_step(usize::from(pane.height.saturating_sub(2)));
+        assert_eq!(app.authoring_ui.scroll_row, expected);
         assert_eq!(app.authoring_ui.buffer.as_string(), original);
     }
 
@@ -27575,8 +27851,12 @@ mod tests {
         )
         .expect("editor scroll down should succeed");
 
-        assert_eq!(app.scroll_row, 1);
+        let expected = content_wheel_step(usize::from(editor_rect.height));
+        assert_eq!(app.scroll_row, expected);
         assert_eq!(app.tree_state.get_offset(), 0);
+        // Re-rendering must not snap scroll_row back to the previous cursor_row.
+        render_test_app(&mut app, 100);
+        assert_eq!(app.scroll_row, expected);
 
         fs::remove_file(path).expect("feature fixture should be removed");
     }
@@ -27679,6 +27959,47 @@ mod tests {
         assert_eq!(app.explore_focus, ColumnFocus::Scenario);
         app.handle_action(Action::FocusPrevColumn).unwrap();
         assert_eq!(app.explore_focus, ColumnFocus::Feature);
+    }
+
+    #[test]
+    fn explore_toggle_details_collapses_focus_and_persists_per_project() {
+        crate::session::with_temp_session_dir(|_| {
+            let project_dir = tempfile::tempdir().unwrap();
+            let mut app = App::from_args().expect("app init");
+            app.project.root_dir = project_dir.path().to_path_buf();
+            app.persist_sidebar_state = true;
+            app.active_tab = MainTab::Explore;
+            app.explore_focus = ColumnFocus::Details;
+
+            // Collapsing from Details falls back to Step and stops column advance at Step.
+            app.handle_action(Action::ExploreToggleDetails).unwrap();
+            assert!(app.explore_details_collapsed);
+            assert_eq!(app.explore_focus, ColumnFocus::Step);
+            app.handle_action(Action::ExploreRight).unwrap();
+            assert_eq!(app.explore_focus, ColumnFocus::Step);
+            app.handle_action(Action::FocusNextColumn).unwrap();
+            assert_eq!(app.explore_focus, ColumnFocus::Step);
+
+            // Reopening an app for the same project remembers the collapsed state.
+            let mut reopened = App::from_args().expect("reopened app init");
+            reopened.project.root_dir = project_dir.path().to_path_buf();
+            reopened.persist_sidebar_state = true;
+            reopened.restore_sidebar_workspace();
+            assert!(reopened.explore_details_collapsed);
+
+            // Focusing Run Details explicitly expands it again and persists.
+            reopened.active_tab = MainTab::Explore;
+            reopened.explore_focus = ColumnFocus::Step;
+            reopened.handle_action(Action::FocusRunDetails).unwrap();
+            assert!(!reopened.explore_details_collapsed);
+            assert_eq!(reopened.explore_focus, ColumnFocus::Details);
+
+            let mut reopened_again = App::from_args().expect("reopened again app init");
+            reopened_again.project.root_dir = project_dir.path().to_path_buf();
+            reopened_again.persist_sidebar_state = true;
+            reopened_again.restore_sidebar_workspace();
+            assert!(!reopened_again.explore_details_collapsed);
+        });
     }
 
     #[test]
@@ -28058,6 +28379,7 @@ mod tests {
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_scrollbar: None,
+            chat_max_scroll: None,
             chat_scrollbar_grab: None,
             vertical_scrollbars: Vec::new(),
             vertical_scrollbar_grab: None,
@@ -28119,6 +28441,7 @@ mod tests {
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
+            explore_details_collapsed: false,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -28311,6 +28634,7 @@ Feature: B
             chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_scrollbar: None,
+            chat_max_scroll: None,
             chat_scrollbar_grab: None,
             vertical_scrollbars: Vec::new(),
             vertical_scrollbar_grab: None,
@@ -28372,6 +28696,7 @@ Feature: B
             explore_details_scroll: 0,
             explore_details_reveal: false,
             explore_details_expanded: HashSet::new(),
+            explore_details_collapsed: false,
             explore_run_summary: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
@@ -29633,5 +29958,286 @@ Feature: B
             message: "failed".into(),
         });
         assert_eq!(app.explore_history.target_status(), None);
+    }
+
+    #[test]
+    fn ai_chat_wheel_has_no_dead_zone_after_scrolling_past_top_or_jumping_top() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = false;
+        let long_body = (0..80)
+            .map(|i| format!("transcript line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.agent_mut().messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: long_body,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        render_test_app(&mut app, 100);
+        let rect = app.chat_history_rect.expect("chat history rect");
+        let max_start = app
+            .chat_max_scroll()
+            .expect("chat max scroll should be recorded");
+        assert!(max_start > 20, "expected overflowing chat history");
+
+        // Scroll up repeatedly past the top boundary.
+        for _ in 0..40 {
+            app.handle_mouse_event(
+                MouseEventKind::ScrollUp,
+                rect.x + 2,
+                rect.y + 2,
+                KeyModifiers::NONE,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            app.agent().scroll_offset,
+            max_start,
+            "wheel scroll up must clamp to max_start instead of accumulating a dead zone"
+        );
+
+        // One single wheel down must move immediately.
+        let step = content_wheel_step(usize::from(rect.height));
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            rect.x + 2,
+            rect.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.agent().scroll_offset, max_start.saturating_sub(step));
+
+        // Jump to top via keyboard (`gg`) then wheel down once: still no dead zone.
+        app.handle_action(Action::AiScrollTop).unwrap();
+        assert_eq!(app.agent().scroll_offset, max_start);
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            rect.x + 2,
+            rect.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.agent().scroll_offset, max_start.saturating_sub(step));
+    }
+
+    #[test]
+    fn mindmap_ai_panel_wheel_scrolls_while_tree_has_focus() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::MindMap;
+        app.mindmap_ai_panel_visible = true;
+        app.mindmap_focus = MindMapFocus::Main;
+        app.ai_input_focused = false;
+        let long_body = (0..80)
+            .map(|i| format!("mindmap chat line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.agent_mut().messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: long_body,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        render_test_app(&mut app, 120);
+        let rect = app
+            .chat_history_rect
+            .expect("mindmap AI chat history rect should be rendered");
+        let step = content_wheel_step(usize::from(rect.height));
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollUp,
+            rect.x + 2,
+            rect.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.agent().scroll_offset,
+            step,
+            "hovering wheel over MindMap AI chat should scroll even when tree has focus"
+        );
+    }
+
+    #[test]
+    fn ai_chat_wheel_stays_responsive_during_quit_confirm() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = false;
+        let long_body = (0..80)
+            .map(|i| format!("chat prompt line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.agent_mut().messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: long_body,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        render_test_app(&mut app, 120);
+        let rect = app.chat_history_rect.expect("chat history rect");
+        app.quit_pending_confirm = true;
+        // Position outside modal card (top-left of chat history).
+        app.modal_card_rect = Some(Rect::new(rect.x + 20, rect.y + 8, 30, 5));
+        let step = content_wheel_step(usize::from(rect.height));
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollUp,
+            rect.x + 1,
+            rect.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.agent().scroll_offset, step);
+    }
+
+    #[test]
+    fn ai_chat_page_up_and_page_down_scroll_full_viewport() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = false;
+        let long_body = (0..120)
+            .map(|i| format!("paged chat line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.agent_mut().messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: long_body,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+            activity: None,
+        });
+        render_test_app(&mut app, 100);
+        let rect = app.chat_history_rect.expect("chat history rect");
+        let full_page = page_scroll_step(usize::from(rect.height));
+
+        // Blurred chat: global PageUp / PageDown must scroll a full page, not 5 lines.
+        app.handle_action(Action::PageUp).unwrap();
+        assert_eq!(app.agent().scroll_offset, full_page);
+        app.handle_action(Action::PageDown).unwrap();
+        assert_eq!(app.agent().scroll_offset, 0);
+
+        // Focused composer: AiPageUp / AiPageDown also scroll a full page.
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiPageUp).unwrap();
+        assert_eq!(app.agent().scroll_offset, full_page);
+        app.handle_action(Action::AiPageDown).unwrap();
+        assert_eq!(app.agent().scroll_offset, 0);
+    }
+
+    #[test]
+    fn explore_details_page_keys_scroll_detail_pane_without_changing_selection() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Explore;
+        app.explore_edit_mode = false;
+        app.explore_focus = ColumnFocus::Details;
+        app.clickable_regions
+            .push(ClickableRegion::ExploreDetailPane {
+                rect: Rect::new(0, 0, 80, 22),
+            });
+        app.vertical_scrollbars.push((
+            VerticalScrollTarget::ExploreDetails,
+            ScrollbarBar {
+                rect: Rect::new(79, 1, 1, 20),
+                axis: crate::theme::ScrollAxis::Vertical,
+                total: 100,
+            },
+        ));
+        let initial_selection = app.explore_details_selection;
+
+        app.handle_action(Action::PageDown).unwrap();
+        assert_eq!(app.explore_details_scroll, page_scroll_step(20));
+        assert_eq!(app.explore_details_selection, initial_selection);
+
+        app.handle_action(Action::HalfPageUp).unwrap();
+        assert_eq!(
+            app.explore_details_scroll,
+            page_scroll_step(20) - half_page_scroll_step(20)
+        );
+        assert_eq!(app.explore_details_selection, initial_selection);
+    }
+
+    #[test]
+    fn requirements_editor_page_keys_use_viewport_height_in_preview_and_edit_modes() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.authoring_ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            std::iter::once("# Req".to_string())
+                .chain((0..100).map(|row| format!("- item {row}")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        // Preview mode
+        app.authoring_ui.enter_preview();
+        render_test_app(&mut app, 120);
+        let viewport_h = usize::from(app.authoring_ui.pane_areas[1].height.saturating_sub(2));
+        app.handle_action(Action::PageDown).unwrap();
+        assert_eq!(
+            app.authoring_ui.preview_scroll,
+            page_scroll_step(viewport_h)
+        );
+        app.handle_action(Action::HalfPageUp).unwrap();
+        assert_eq!(
+            app.authoring_ui.preview_scroll,
+            page_scroll_step(viewport_h) - half_page_scroll_step(viewport_h)
+        );
+
+        // Source edit mode
+        app.authoring_ui.enter_edit_view();
+        app.authoring_ui.cursor_row = 0;
+        render_test_app(&mut app, 120);
+        let edit_h = usize::from(app.authoring_ui.pane_areas[1].height.saturating_sub(2));
+        app.handle_action(Action::PageDown).unwrap();
+        assert_eq!(app.authoring_ui.cursor_row, page_scroll_step(edit_h));
+        app.handle_action(Action::HalfPageUp).unwrap();
+        assert_eq!(
+            app.authoring_ui.cursor_row,
+            page_scroll_step(edit_h) - half_page_scroll_step(edit_h)
+        );
+    }
+
+    #[test]
+    fn mindmap_preview_wheel_uses_content_step_and_clamps_to_buffer_end() {
+        let steps = (0..10)
+            .map(|index| format!("    Given preview step {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("Feature: Preview\n  Scenario: Short\n{steps}\n");
+        let (mut app, path) = feature_file_app("mindmap-preview-wheel-clamp", &content);
+        app.active_tab = MainTab::MindMap;
+        app.preview_panel_rect = Some(Rect::new(40, 2, 60, 20));
+        app.preview_cursor_row = 0;
+        let max_row = app.buffer.line_count().saturating_sub(1);
+        let step = content_wheel_step(20);
+
+        app.handle_mouse_event(MouseEventKind::ScrollDown, 45, 5, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(app.preview_cursor_row, step.min(max_row));
+
+        for _ in 0..10 {
+            app.handle_mouse_event(MouseEventKind::ScrollDown, 45, 5, KeyModifiers::NONE)
+                .unwrap();
+        }
+        assert_eq!(
+            app.preview_cursor_row, max_row,
+            "preview_cursor_row must clamp to last line of buffer"
+        );
+
+        app.handle_mouse_event(MouseEventKind::ScrollUp, 45, 5, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(app.preview_cursor_row, max_row.saturating_sub(step));
+
+        fs::remove_file(path).expect("feature fixture should be removed");
     }
 }

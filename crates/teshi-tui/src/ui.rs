@@ -353,42 +353,6 @@ fn render_workspace_meta(frame: &mut Frame<'_>, app: &mut App, row: Rect) {
     }
 }
 
-/// Draws a full-width subtle header separator with a thick semantic underline
-/// beneath the active tab's registered click region.
-fn render_tab_underline(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.is_empty() {
-        return;
-    }
-    let rule = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(rule).style(Style::default().fg(theme::BORDER).bg(theme::SCREEN_BG)),
-        area,
-    );
-    if let Some(tab_rect) = app
-        .clickable_regions
-        .iter()
-        .find_map(|region| match region {
-            ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
-            _ => None,
-        })
-    {
-        let start = tab_rect.x.max(area.x);
-        let end = tab_rect.right().min(area.right());
-        if end > start {
-            let width = end - start;
-            let bar = "━".repeat(width as usize);
-            frame.render_widget(
-                Paragraph::new(bar).style(
-                    Style::default()
-                        .fg(theme::tab_accent(app.active_tab))
-                        .bg(theme::SCREEN_BG),
-                ),
-                Rect::new(start, area.y, width, 1),
-            );
-        }
-    }
-}
-
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // Paint the screen surface first, the way iCode's `MainScreen` paints
     // `$background`: the palette then reads the same in any terminal profile.
@@ -414,28 +378,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.ai_sidebar_working_rect = None;
     app.ai_sidebar_settled_rect = None;
 
-    let (tabs_row, tabs_rule_row, content_row, footer_row) = if frame.area().height >= 8 {
-        let [tabs_row, tabs_rule_row, content_row, footer_row] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .areas(frame.area());
-        (tabs_row, tabs_rule_row, content_row, footer_row)
-    } else {
-        let [tabs_row, content_row, footer_row] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .areas(frame.area());
-        (tabs_row, Rect::default(), content_row, footer_row)
-    };
+    let [tabs_row, content_row, footer_row] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
 
     frame.render_widget(Block::default().style(theme::topbar_style()), tabs_row);
     let active_tab_accent = theme::tab_accent(app.active_tab);
@@ -465,7 +415,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     register_tab_regions(app, tabs_row);
     render_workspace_meta(frame, app, tabs_row);
-    render_tab_underline(frame, app, tabs_rule_row);
 
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
@@ -1371,7 +1320,17 @@ fn compact_panes(area: Rect, focus: usize) -> [Rect; 3] {
 /// Explore keeps the Feature column on the shared left-pane band, gives the
 /// Scenario list only the rows it needs (capped at 40%), and splits the rest
 /// into Steps and Run Details. Tiny terminals still show only the focused pane.
+#[cfg_attr(not(test), allow(dead_code))]
 fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 4] {
+    explore_panes_with_details(area, focus, scenario_rows, false)
+}
+
+fn explore_panes_with_details(
+    area: Rect,
+    focus: usize,
+    scenario_rows: usize,
+    details_collapsed: bool,
+) -> [Rect; 4] {
     if area.width < 70 || area.height < 12 {
         let mut panes = [Rect::default(); 4];
         panes[focus.min(3)] = area;
@@ -1391,6 +1350,9 @@ fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 4] {
     let scenario_height = desired.min(right.height.saturating_sub(3).max(3));
     let [scenario, bottom] =
         Layout::vertical([Constraint::Length(scenario_height), Constraint::Min(3)]).areas(right);
+    if details_collapsed {
+        return [left, scenario, bottom, Rect::default()];
+    }
     let min_details = 24.min(bottom.width / 2);
     let steps_width = 38
         .min(bottom.width.saturating_sub(min_details))
@@ -1400,29 +1362,87 @@ fn explore_panes(area: Rect, focus: usize, scenario_rows: usize) -> [Rect; 4] {
     [left, scenario, steps, details]
 }
 
+fn render_explore_details_toggle_chip(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    expanded: bool,
+    show_key_hint: bool,
+) {
+    if area.width < 4 || area.height == 0 {
+        return;
+    }
+    let label = match (expanded, show_key_hint) {
+        (true, true) => crate::i18n::t("explore.details.hide.key"),
+        (true, false) => crate::i18n::t("explore.details.hide"),
+        (false, true) => crate::i18n::t("explore.details.show.key"),
+        (false, false) => crate::i18n::t("explore.details.show"),
+    };
+    let width = label.width() as u16;
+    if width == 0 {
+        return;
+    }
+    let chip_x = area.right().saturating_sub(width + 1);
+    if chip_x <= area.x + 1 {
+        return;
+    }
+    let rect = Rect::new(chip_x, area.y, width, 1);
+    app.clickable_regions.push(ClickableRegion::ActionButton {
+        rect,
+        action: Action::ExploreToggleDetails,
+        modal: false,
+    });
+    let mut style = Style::default().fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG);
+    if app
+        .mouse_position
+        .is_some_and(|(x, y)| rect.contains(ratatui::layout::Position::new(x, y)))
+    {
+        style = style.bg(theme::HOVER_BG);
+    }
+    frame.render_widget(Paragraph::new(Line::styled(label, style)), rect);
+}
+
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.explore_edit_mode {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(area);
-        render_editor_panel(frame, app, cols[0], false);
-        render_run_details(frame, app, cols[1], false);
+        if app.explore_details_collapsed || area.width < 70 {
+            render_editor_panel(frame, app, area, false);
+            if area.width >= 70 {
+                render_explore_details_toggle_chip(frame, app, area, false, false);
+            }
+        } else {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            render_editor_panel(frame, app, cols[0], false);
+            render_run_details(frame, app, cols[1], false);
+        }
         return;
     }
     let scenario_rows = explore_scenario_count(app);
-    let cols = explore_panes(area, app.explore_focus.index(), scenario_rows);
-    app.ensure_detail_shots();
+    let cols = explore_panes_with_details(
+        area,
+        app.explore_focus.index(),
+        scenario_rows,
+        app.explore_details_collapsed,
+    );
+    if !app.explore_details_collapsed {
+        app.ensure_detail_shots();
+    }
 
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
     render_explore_steps(frame, app, cols[2]);
-    render_run_details(
-        frame,
-        app,
-        cols[3],
-        app.explore_focus == ColumnFocus::Details,
-    );
+    if app.explore_details_collapsed {
+        render_explore_details_toggle_chip(frame, app, cols[2], false, true);
+    } else {
+        render_run_details(
+            frame,
+            app,
+            cols[3],
+            app.explore_focus == ColumnFocus::Details,
+        );
+    }
     // Scenario/step bindings still use logical rows. Feature bindings are
     // emitted directly for the viewport and already have screen coordinates.
     let views = app.explore_viewports;
@@ -4668,6 +4688,7 @@ fn render_run_details(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused:
         app.clickable_regions
             .push(ClickableRegion::ExploreDetailPane { rect: area });
     }
+    render_explore_details_toggle_chip(frame, app, area, true, !app.explore_edit_mode);
 
     let detail = app.current_detail().cloned();
     let status = app.detail_selection_status();
@@ -10323,8 +10344,8 @@ mod truncate_tests {
     use std::path::PathBuf;
 
     use super::{
-        Line, Span, explore_panes, explore_run_summary_label, explore_scenarios_title,
-        push_exchange_rows, render, truncate_line_to_cols,
+        Line, Span, explore_panes, explore_panes_with_details, explore_run_summary_label,
+        explore_scenarios_title, push_exchange_rows, render, truncate_line_to_cols,
     };
     use crate::app::{App, CaseDetail, ClickableRegion, ColumnFocus, RunStatus};
     use crate::keymap::Action;
@@ -10361,6 +10382,12 @@ mod truncate_tests {
         assert_eq!(scenario.height, 12, "the scenario pane caps at 40%");
         assert_eq!(steps.height, 18);
         assert_eq!(details.height, 18);
+
+        let [left, _, collapsed_steps, collapsed_details] =
+            explore_panes_with_details(area, 0, 1, true);
+        assert_eq!(collapsed_details, ratatui::layout::Rect::default());
+        assert_eq!(collapsed_steps.x, left.right());
+        assert_eq!(collapsed_steps.right(), area.right());
     }
 
     #[test]
@@ -11292,7 +11319,8 @@ mod truncate_tests {
             KeyModifiers::NONE,
         )
         .expect("wheel down");
-        assert_eq!(app.explore_details_scroll, 3);
+        let expected = crate::app::content_wheel_step(usize::from(pane.height.saturating_sub(2)));
+        assert_eq!(app.explore_details_scroll, expected);
         assert!(!app.explore_details_reveal);
         assert_eq!(app.explore_selected_step, step);
 
@@ -11383,6 +11411,103 @@ mod truncate_tests {
                 | ClickableRegion::ExploreDetailTab { .. }
                 | ClickableRegion::ExploreDetailItem { .. }
         )));
+    }
+
+    #[test]
+    fn explore_run_details_toggle_chip_works_in_browse_and_edit_50_50() {
+        let root = std::env::temp_dir().join("teshi-run-details-toggle-chip");
+        let mut app = clickable_detail_app(&root);
+        app.explore_focus = ColumnFocus::Details;
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).expect("terminal");
+        let toggle_chip_rect = |app: &App| {
+            app.clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        action: Action::ExploreToggleDetails,
+                        rect,
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .expect("ExploreToggleDetails chip")
+        };
+
+        // Browse expanded: Hide [d] chip collapses Run Details and returns focus to Step.
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render browse expanded");
+        let hide_chip = toggle_chip_rect(&app);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            hide_chip.x + 1,
+            hide_chip.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click Hide [d]");
+        assert!(app.explore_details_collapsed);
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
+
+        // Browse collapsed: no Run Details pane targets remain; Details [d] chip re-expands.
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render browse collapsed");
+        assert!(
+            !app.clickable_regions
+                .iter()
+                .any(|region| matches!(region, ClickableRegion::ExploreDetailPane { .. }))
+        );
+        let show_chip = toggle_chip_rect(&app);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            show_chip.x + 1,
+            show_chip.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click Details [d]");
+        assert!(!app.explore_details_collapsed);
+
+        // Edit mode: 50%/50% split when expanded, 100% editor width when collapsed.
+        app.explore_edit_mode = true;
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render edit 50/50");
+        let split_editor_rect = app.editor_panel_rect.expect("editor rect in 50/50");
+        assert!(
+            (74..=82).contains(&split_editor_rect.width),
+            "expected ~50% editor width on 160-col terminal, got {}",
+            split_editor_rect.width
+        );
+
+        let edit_hide_chip = toggle_chip_rect(&app);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            edit_hide_chip.x + 1,
+            edit_hide_chip.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click edit Hide");
+        assert!(app.explore_details_collapsed);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render edit collapsed");
+        let full_editor_rect = app.editor_panel_rect.expect("editor rect when collapsed");
+        assert!(
+            full_editor_rect.width >= 150,
+            "expected full-width editor when collapsed, got {}",
+            full_editor_rect.width
+        );
+
+        let edit_show_chip = toggle_chip_rect(&app);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            edit_show_chip.x + 1,
+            edit_show_chip.y,
+            KeyModifiers::NONE,
+        )
+        .expect("click edit Details");
+        assert!(!app.explore_details_collapsed);
     }
 
     #[test]
@@ -13354,7 +13479,7 @@ mod gui_chrome_tests {
     use teshi_core::gherkin;
 
     #[test]
-    fn test_top_bar_paints_active_tab_underline_and_project_hover() {
+    fn test_top_bar_paints_active_tab_and_project_hover() {
         for tab in [
             MainTab::Explore,
             MainTab::MindMap,
@@ -13376,8 +13501,9 @@ mod gui_chrome_tests {
                 })
                 .expect("active tab region");
             let buffer = terminal.backend().buffer();
-            assert_eq!(buffer[(tab_rect.x, 1)].symbol(), "━");
-            assert_eq!(buffer[(tab_rect.x, 1)].fg, theme::tab_accent(tab));
+            assert_eq!(buffer[(tab_rect.x, tab_rect.y)].fg, theme::tab_accent(tab));
+            assert_eq!(buffer[(tab_rect.x, tab_rect.y)].bg, theme::TAB_ACTIVE_BG);
+            assert_eq!(buffer[(0, 1)].symbol(), "╭");
 
             let project_rect = app
                 .clickable_regions

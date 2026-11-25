@@ -462,11 +462,11 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
         !tree_contains(&dragged, "Req 01"),
         "scrollbar drag did not leave the top: {dragged}"
     );
-    terminal.expect_text("body 04", true, 1000).unwrap();
+    terminal.expect_text("body 06", true, 1000).unwrap();
     terminal.resize(55, 16).unwrap();
     capture(&terminal, "requirements-after-resize");
     prefix(&terminal, "Right");
-    terminal.expect_text("body 04", true, 3000).unwrap();
+    terminal.expect_text("body 06", true, 3000).unwrap();
     terminal.write("\x1b[<0;20;5M\x1b[<0;20;5m").unwrap();
     terminal.key("i").unwrap();
     terminal.expect_text("[INSERT]", true, 1000).unwrap();

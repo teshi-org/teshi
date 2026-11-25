@@ -245,11 +245,12 @@ fn sidebar_card_bg(app: &App, selected: bool) -> Style {
     let bg = if app.ai_sidebar_focused {
         theme::TAB_ACTIVE_BG
     } else {
-        theme::CHAT_CHIP_BG
+        theme::BLOCK_BG
     };
     Style::default().bg(bg)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_top_line_parts(
     row_bg: Style,
     title: &str,
@@ -257,6 +258,7 @@ fn render_top_line_parts(
     badge_style: Style,
     settled: bool,
     selected: bool,
+    sidebar_focused: bool,
     width: u16,
 ) -> Line<'static> {
     let content_w = width.saturating_sub(2) as usize;
@@ -267,14 +269,23 @@ fn render_top_line_parts(
     let title_budget = content_w.saturating_sub(right_w + 1);
     let title_text = super::ellipsize_to_cols(title, title_budget as u16);
     let gap = content_w.saturating_sub(title_text.width() + right_w);
+    let (prefix, prefix_style) = if selected && sidebar_focused {
+        ("▸", row_bg.fg(theme::PRIMARY).add_modifier(Modifier::BOLD))
+    } else if selected {
+        ("│", row_bg.fg(theme::MUTED))
+    } else {
+        (" ", row_bg)
+    };
     let title_style = if settled && !selected {
         row_bg.fg(theme::MUTED)
+    } else if selected && !sidebar_focused {
+        row_bg.fg(theme::TAB_INACTIVE)
     } else {
         row_bg.fg(theme::FG).add_modifier(Modifier::BOLD)
     };
 
     Line::from(vec![
-        Span::styled(" ", row_bg),
+        Span::styled(prefix, prefix_style),
         Span::styled(title_text, title_style),
         Span::styled(" ".repeat(gap), row_bg),
         Span::styled(badge, badge_style),
@@ -291,6 +302,7 @@ fn sidebar_card_top_line(
     width: u16,
 ) -> Line<'static> {
     let row_bg = sidebar_card_bg(app, selected);
+    let sidebar_focused = app.ai_sidebar_focused;
     match target {
         CardTarget::OpenAgent(agent_idx) => {
             let Some(agent) = app.agents.get(*agent_idx) else {
@@ -339,6 +351,7 @@ fn sidebar_card_top_line(
                 badge_style,
                 settled,
                 selected,
+                sidebar_focused,
                 width,
             )
         }
@@ -352,6 +365,7 @@ fn sidebar_card_top_line(
                 badge_style,
                 settled,
                 selected,
+                sidebar_focused,
                 width,
             )
         }
@@ -669,8 +683,12 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     if area.width < 5 || area.height < 3 {
         return;
     }
-    let block = theme::panel_block(crate::i18n::t("chat.chats.title"), app.ai_sidebar_focused)
-        .title_style(theme::muted());
+    let raw_title = crate::i18n::t("chat.chats.title");
+    let block = if app.ai_sidebar_focused {
+        theme::panel_block(format!(" ● {} ", raw_title.trim()), true)
+    } else {
+        theme::panel_block(raw_title, false).title_style(theme::muted())
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {

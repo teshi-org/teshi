@@ -11,7 +11,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Chat conversation rows use the quieter CHAT_CHIP_BG/FG fill. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
 6. Footer action labels use PRIMARY bold on a full-width FOOTER_BG strip; status text uses FOOTER_DESC. The global footer advertises chords only on **Settings [F10]** and **Exit [Ctrl+Q]**; other pane action strips keep action names without chords. Pane action strips (bottom row inside a panel) reuse the same PRIMARY bold labels on FOOTER_BG for the reserved row only.
-7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
+7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG, bold text, and their semantic tab_accent foreground.
 8. Use the documented glyph vocabulary below; document additions before use.
 9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Vertical scrollbars are a solid bar of filled cells: track SCROLL_TRACK_BG, thumb SCROLL_THUMB, thumb SCROLL_THUMB_HOVER under the pointer, thumb SCROLL_THUMB_ACTIVE while dragged. Horizontal scrollbars use a `▄` half-block foreground on one row with the same track/thumb colours, keeping the bar visually thin while preserving the full-row pointer target. Never draw a bar with `─`, `━`, `│`, or `┃`.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips. Confirmation dialogs (`Dialog`) and option pickers (`ListDialog`) instead use `ui/dialog.rs`, modeled on iCode's `ConfirmDialog`: a veiled backdrop, a DIALOG_BG card with a BORDER outline (WARNING for destructive decisions), two-cell horizontal padding, width tiers of 43/64/80/100 columns capped at 90% of the screen, and a centered row of solid buttons. Confirmations center their message; pickers list full-width selectable rows that scroll with the selection, with muted notes below; forms (`FormDialog`) align labeled one-row input bars, scroll long text to keep the caret visible, and put live feedback and help below. Buttons rest at their muted fill and use the full semantic color when Enter or the arrow selection activates them; Primary confirms, Warning cancels, Danger destroys, and Neutral edits without closing. Up to three buttons are tall half-block pills; more share one compact row. Cards that are not dialogs resolve their bounds through `ui/overlay.rs` (see [Overlay sizing](#overlay-sizing)).
@@ -137,7 +137,6 @@ stay next to their anchor instead of centering.
 | Current menu item | `◦` |
 | Checkboxes | `[*] [ ]` |
 | Dialog button edges | Top `▄`, bottom `▀`, in the button fill color; hover lifts the glyph color |
-| Tab rule | `─`, active `━` |
 | Image | Attachment, inline image, or missing image `▣` |
 
 Existing literal text and punctuation remain unchanged during migration.
@@ -147,13 +146,13 @@ Existing literal text and punctuation remain unchanged during migration.
 Do use `theme::panel_block(" Features ", focused)` and apply
 `theme::selected_row(focused)` across the full row. Do use
 `theme::chip("[INSERT]", theme::ACCENT)` and `theme::key_hint("s", "save")`.
-Do not construct raw colors in pages, use foreground-only selection, paint
-whole panels, or calculate tab underline widths independently of click regions.
+Do not construct raw colors in pages, use foreground-only selection, or paint
+whole panels.
 
 ## Per-phase migration checklist
 
 - Phase 0: guide, Cursor rule, shared tokens/helpers, helper tests, baseline caps.
-- Phase 1: tabs/underline, footers, popups, tab click/render test; lower ui cap.
+- Phase 1: tabs, footers, popups, tab click/render test; lower ui cap.
 - Phase 2: Explore panels, status/diffs, scrollbars, editor, shared Gherkin mapping; highlight cap zero; lower ui cap.
 - Phase 3: MindMap panels, category mapping, preview; mindmap cap zero; lower ui cap.
 - Phase 4: Requirements/Test Points panels, footer and chips; all page caps zero.
@@ -167,15 +166,13 @@ acceptance separately; text tests alone do not prove visual acceptance.
 ## Reviewed tab samples
 
 These compact text samples show the preserved structure of real PTY captures.
-The screen surface owns the background; footer strips span the full width. Active
-tab underlines follow registered click regions, including clipped tab widths.
-When a local version label would overlap the active underline, keep the complete
-registered underline and clip the version's right-aligned viewport to the space
-remaining after it. Do not shrink or move the active tab's click region.
+The screen surface owns the background; footer strips span the full width.
+When a local version label would collide with the tab row, clip the right-aligned
+meta area to the remaining width after the tabs without shrinking or moving any
+tab's click region.
 
 ```text
 Explore [1]
-━━━━━━━━━━━━━
 ╭Features────╮╭Scenarios (1)──────────────╮╭Steps────────────────────────╮
 │ sample     ││● Show the shared palette││Given a feature is selected  │
 ╰────────────╯╰─────────────────────────╯╰─────────────────────────────╯
@@ -184,7 +181,6 @@ sample  Show the shared palette                                0/1 通过
 
 ```text
 MindMap [2]
-━━━━━━━━━━━━━
 ╭MindMap────────────────────╮╭Scenario: Show the shared palette╮
 │▼ project                  ││Given a feature is selected      │
 │  ▸ a feature is selected   │╰─────────────────────────────────╯
@@ -195,7 +191,6 @@ MindMap [2]
 
 ```text
 AI [3]
-━━━━━━━━
 ╭ Chats ──────────╮╭ AI Chat ────────────────────────── Manual ─╮
 │○ Agent 1        ││ ▌ You                                     │
 │                 ││ ▌ Inspect requirement navigation           │
@@ -225,7 +220,6 @@ Command line prompt
 
 ```text
 Requirements [4]
-━━━━━━━━━━━━━━━━━━
 ╭Requirements · All──────╮╭Shared visual language──╮╭Linked test points╮
 │Shared visual language ││# Shared visual language││                  │
 │ Filter  New  Actions  ││ Edit  Point  New       ││                  │
@@ -235,7 +229,6 @@ Requirements [4]
 
 ```text
 Test Points [5]
-━━━━━━━━━━━━━━━━━
 ╭Test Points────────╮╭Details───────────────────╮╭Requirement excerpts╮
 │Visual style       ││Focus is visible          ││                    │
 │ Approve Reject Filter││Verify panel focus     ││                    │
