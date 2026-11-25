@@ -11,6 +11,7 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "nightly.yml").read_text(encoding="
 RELEASE = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 GATE = (ROOT / "scripts" / "nightly_ci_gate.py").read_text(encoding="utf-8")
+VERSION_GATE = (ROOT / "scripts" / "nightly_version_gate.py").read_text(encoding="utf-8")
 
 
 def require(needle: str, label: str, text: str = WORKFLOW) -> None:
@@ -18,13 +19,23 @@ def require(needle: str, label: str, text: str = WORKFLOW) -> None:
         raise SystemExit(f"missing {label}: {needle}")
 
 
-def nightly_decision(ci_state: str, nightly_tags: list[str], trigger: str = "schedule") -> str:
+def nightly_decision(
+    ci_state: str,
+    nightly_tags: list[str],
+    trigger: str = "schedule",
+    *,
+    stable_tags_at_head: list[str] | None = None,
+    workspace_version: tuple[int, int, int] = (0, 7, 15),
+    latest_stable: tuple[int, int, int] = (0, 7, 14),
+) -> str:
     """Mirror the workflow gate for table-driven, offline contract tests."""
     if trigger not in {"schedule", "workflow_dispatch"}:
         return "skip"
-    if not ci_state.startswith("success:"):
+    if nightly_tags or stable_tags_at_head:
         return "skip"
-    if nightly_tags:
+    if workspace_version <= latest_stable:
+        return "error"
+    if not ci_state.startswith("success:"):
         return "skip"
     return "publish"
 
@@ -37,6 +48,12 @@ def main() -> int:
         raise SystemExit("Nightly must not have a push trigger")
     require("actions: read", "CI status permission")
     require("pull-requests: read", "merged pull request lookup permission")
+    require(
+        'python scripts/nightly_version_gate.py --version "${version}" --head "${full_sha}"',
+        "nightly version gate invocation",
+    )
+    require('[[ "${version_state}" == skip:* ]]', "version gate skip branch")
+    require('[[ "${version_state}" != publish:* ]]', "version gate fail-closed branch")
     require('python scripts/nightly_ci_gate.py --repo "${GITHUB_REPOSITORY}" --sha "${full_sha}" --tree "${tree}"', "CI gate invocation")
     require('tree=$(git rev-parse "${full_sha}^{tree}")', "published tree identity")
     require('[[ "${ci_state}" != success:* ]]', "success-only gate")
@@ -51,7 +68,9 @@ def main() -> int:
     require("CI is not green", "pending/failure diagnostic")
     require("cancel-in-progress: false", "non-cancelling publication concurrency")
     require("source_ref: ${{ needs.prepare.outputs.source_ref }}", "immutable release source")
-    require("git tag --list 'v*-nightly.*' --points-at", "duplicate SHA tag guard")
+    require("NIGHTLY_TAG_RE", "duplicate SHA nightly tag guard", VERSION_GATE)
+    require("parsed_workspace <= latest_ver", "strictly-greater-than-stable guard", VERSION_GATE)
+    require("Commit already published as stable release", "stable release commit skip guard", VERSION_GATE)
     if "target_commitish: ${{ needs.resolve.outputs.source_ref }}" not in RELEASE:
         raise SystemExit("release workflow must anchor the GitHub tag to source_ref")
     require("python scripts/update_manifest.py identity", "compiled release identity", RELEASE)
@@ -59,18 +78,23 @@ def main() -> int:
     require("Nightly #{1}", "numbered release title", RELEASE)
 
     cases = [
-        ("success:push", [], "schedule", "publish"),
-        ("success:pull-request #36 run 1", [], "workflow_dispatch", "publish"),
-        ("not-green:completed/failure", [], "schedule", "skip"),
-        ("not-green:in_progress/None", [], "schedule", "skip"),
-        ("missing", [], "workflow_dispatch", "skip"),
-        ("success:push", ["v0.7.10-nightly.20260916.aaaaaaa"], "schedule", "skip"),
-        ("success:push", [], "push", "skip"),
+        ("success:push", [], "schedule", {}, "publish"),
+        ("success:pull-request #36 run 1", [], "workflow_dispatch", {}, "publish"),
+        ("not-green:completed/failure", [], "schedule", {}, "skip"),
+        ("not-green:in_progress/None", [], "schedule", {}, "skip"),
+        ("missing", [], "workflow_dispatch", {}, "skip"),
+        ("success:push", ["v0.7.15-nightly.20261125.aaaaaaa"], "schedule", {}, "skip"),
+        ("success:push", [], "schedule", {"stable_tags_at_head": ["v0.7.14"], "workspace_version": (0, 7, 14)}, "skip"),
+        ("success:push", [], "schedule", {"workspace_version": (0, 7, 14), "latest_stable": (0, 7, 14)}, "error"),
+        ("success:push", [], "schedule", {"workspace_version": (0, 7, 13), "latest_stable": (0, 7, 14)}, "error"),
+        ("success:push", [], "push", {}, "skip"),
     ]
-    for ci_state, tags, trigger, expected in cases:
-        actual = nightly_decision(ci_state, tags, trigger)
+    for ci_state, tags, trigger, extra, expected in cases:
+        actual = nightly_decision(ci_state, tags, trigger, **extra)
         if actual != expected:
-            raise SystemExit(f"Nightly gate case {ci_state!r} expected {expected}, got {actual}")
+            raise SystemExit(
+                f"Nightly gate case {(ci_state, tags, trigger, extra)!r} expected {expected}, got {actual}"
+            )
 
     print("nightly workflow contract passed")
     return 0

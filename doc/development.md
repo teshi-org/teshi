@@ -277,10 +277,11 @@ python scripts/release.py --apply
 python scripts/release.py --tag
 ```
 
-Then push to trigger the CI release workflow:
+Then push to trigger the CI release workflow, and advance `main` to the next development version so subsequent Nightly builds target `vX.Y.(Z+1)-nightly.*`:
 
 ```bash
 git push origin main && git push origin vX.Y.Z
+python scripts/release.py --bump-next --apply
 ```
 
 ### Manual release
@@ -315,12 +316,12 @@ Nightly builds publish the Windows per-user **setup.exe** from `main` as GitHub 
 
 | Trigger | Workflow |
 |---------|----------|
-| Daily 06:00 UTC | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml). Catch-up only: skipped when `main` HEAD already has a nightly tag or CI has not verified it. |
+| Daily 06:00 UTC | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml). Catch-up only: skipped when `main` HEAD already has a nightly or stable tag, or CI has not verified it. |
 | Manual | `gh workflow run nightly.yml` |
 
 CI has verified `main` HEAD when either the push CI run for that exact commit is green, or the merged pull request has a green CI run whose checkout had the same Git tree (`git rev-parse HEAD^{tree}`). Pull request CI runs on the merge with `main`, so a manual Nightly can be dispatched right after merging without waiting for the push run on `main`. A pull request tested against an older `main` has a different tree and still requires the push run. The gate lives in [`scripts/nightly_ci_gate.py`](../scripts/nightly_ci_gate.py).
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `main` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects its build identity without writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.15-nightly.20261125.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. Because Nightly builds are SemVer pre-releases of the **next** stable version (`0.7.14 < 0.7.15-nightly.* < 0.7.15`), [`scripts/nightly_version_gate.py`](../scripts/nightly_version_gate.py) requires `[workspace.package] version` to be strictly greater than the latest stable `vX.Y.Z` tag and fails closed if `main` has new commits without advancing the version (run `python scripts/release.py --bump-next --apply` after each stable release). The workflow skips when `HEAD` already has a `v*-nightly.*` or stable `vX.Y.Z` tag, so an unchanged `main` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects its build identity without writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
 
 New Nightly builds also show a workflow run number, for example `0.7.10-nightly.101 (2026.09.07, cb4361a)`, in `teshi -V` and the TUI. The GitHub release title includes the same number. Numbers increase with Nightly workflow runs and can have gaps when a run is skipped or fails; reruns retain their number. The tag retains its existing format so already-installed updaters can validate and install the release. The update manifest retains its separate globally ordered build sequence. Stable version bumps remain independent.
 

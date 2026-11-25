@@ -6,9 +6,11 @@ Analyzes commits since the last tag, suggests the next version,
 and updates version fields across all component files.
 
 Usage:
-    python scripts/release.py            # dry-run (show what would happen)
-    python scripts/release.py --apply    # actually bump files
-    python scripts/release.py --tag      # bump + commit + tag
+    python scripts/release.py                   # dry-run (show what would happen)
+    python scripts/release.py --apply           # actually bump files for release
+    python scripts/release.py --tag             # bump + commit + tag
+    python scripts/release.py --bump-next       # dry-run post-release dev bump
+    python scripts/release.py --bump-next --apply  # bump to next dev version for Nightly
 
 Requirements: Python 3.8+, git available on PATH.
 """
@@ -143,8 +145,14 @@ def recommend_bump(analysis: dict) -> str:
     return "none"
 
 
+def parse_version(version: str) -> tuple[int, int, int]:
+    """Parse a strict ``X.Y.Z`` SemVer string into a comparable tuple."""
+    major, minor, patch = map(int, version.lstrip("v").split("."))
+    return (major, minor, patch)
+
+
 def bump_version(version: str, bump: str) -> str:
-    major, minor, patch = map(int, version.split("."))
+    major, minor, patch = parse_version(version)
     # HARD RULE: version stays locked in ALLOWED_MAJOR.ALLOWED_MINOR.x
     if bump == "major" or bump == "minor":
         print(f"  ⛔ {bump} bump blocked by {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x lock — forcing patch bump instead.")
@@ -156,6 +164,43 @@ def bump_version(version: str, bump: str) -> str:
     if bump == "patch":
         return f"{major}.{minor}.{patch + 1}"
     return version
+
+
+def determine_release_version(last_tag: str, current: str, bump: str) -> str:
+    """Choose the next stable release version without double-bumping.
+
+    When ``main`` has already been bumped ahead of ``last_tag`` (for example
+    ``0.7.15`` after ``v0.7.14`` so Nightly publishes ``v0.7.15-nightly.*``),
+    the upcoming stable release uses ``current`` directly instead of skipping
+    a version number.
+    """
+    if bump == "none":
+        return current
+    last_version = last_tag.lstrip("v")
+    current_tuple = parse_version(current)
+    last_tuple = parse_version(last_version)
+    if (
+        current_tuple > last_tuple
+        and current_tuple[0] == ALLOWED_MAJOR
+        and current_tuple[1] == ALLOWED_MINOR
+    ):
+        return current
+    return bump_version(last_version, bump)
+
+
+def next_dev_version(last_tag: str | None, current: str) -> tuple[str, bool]:
+    """Return ``(version, needs_bump)`` for advancing ``main`` past ``last_tag``.
+
+    Nightly builds require ``Cargo.toml`` to be strictly greater than the
+    latest stable release tag. When ``current`` is already ahead of
+    ``last_tag``, no further bump is needed.
+    """
+    if last_tag is not None:
+        last_version = last_tag.lstrip("v")
+        if parse_version(current) > parse_version(last_version):
+            return (current, False)
+        return (bump_version(last_version, "patch"), True)
+    return (bump_version(current, "patch"), True)
 
 
 def get_current_versions() -> dict[str, str]:
@@ -253,16 +298,22 @@ def validate_release_artifacts() -> bool:
     """
     ok = True
 
-    # 1. Validate release.yml YAML syntax.
-    workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
-    if _yaml is not None and workflow.is_file():
-        try:
-            _yaml.safe_load(workflow.read_text(encoding="utf-8"))
-        except _yaml.YAMLError as e:
-            print(f"  ❌ {workflow.name} has invalid YAML:\n     {e}")
-            ok = False
-    elif _yaml is None and workflow.is_file():
-        print("  ⚠  PyYAML not installed — skipping release.yml syntax check.")
+    # 1. Validate release.yml and nightly.yml YAML syntax.
+    workflows = [
+        REPO_ROOT / ".github" / "workflows" / "release.yml",
+        REPO_ROOT / ".github" / "workflows" / "nightly.yml",
+    ]
+    if _yaml is not None:
+        for workflow in workflows:
+            if not workflow.is_file():
+                continue
+            try:
+                _yaml.safe_load(workflow.read_text(encoding="utf-8"))
+            except _yaml.YAMLError as e:
+                print(f"  ❌ {workflow.name} has invalid YAML:\n     {e}")
+                ok = False
+    elif any(workflow.is_file() for workflow in workflows):
+        print("  ⚠  PyYAML not installed — skipping workflow YAML syntax check.")
 
     # 2. Verify Cargo.lock is parseable (minimal check).
     lock = REPO_ROOT / "Cargo.lock"
@@ -307,10 +358,13 @@ def git_commit_and_tag(version: str) -> None:
     if changelog.exists():
         git("add", str(changelog))
 
-    git("commit", "-m", f"chore: bump version to v{version}")
+    diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=REPO_ROOT)
+    if diff.returncode != 0:
+        git("commit", "-m", f"chore: release v{version}")
     git("tag", f"v{version}")
-    print(f"  ✓ Committed and tagged v{version}")
+    print(f"  ✓ Tagged v{version}")
     print(f"  → To push: git push origin main && git push origin v{version}")
+    print("  → After releasing, advance main for Nightly: python scripts/release.py --bump-next --apply")
 
 
 def update_changelog(version: str, last_tag: str) -> bool:
@@ -366,13 +420,62 @@ def update_changelog(version: str, last_tag: str) -> bool:
     return True
 
 
+def _resolve_current_version() -> str:
+    versions = get_current_versions()
+    unique_versions = set(v for v in versions.values() if v != "???")
+    if len(unique_versions) > 1:
+        print("⚠  Version mismatch across files!")
+        for label, ver in versions.items():
+            print(f"   {label}: {ver}")
+        print()
+        root_ver = versions.get("Cargo.toml (root)", "")
+        if not root_ver or root_ver == "???":
+            print("!  Cannot determine authoritative version.")
+            sys.exit(1)
+        print(f"   Using Cargo.toml version: {root_ver}")
+        return root_ver
+    return next(v for v in unique_versions)
+
+
+def _verify_applied_versions() -> None:
+    versions = get_current_versions()
+    for label, ver in versions.items():
+        if ver == "???":
+            continue
+        parts = ver.split(".")
+        if int(parts[0]) != ALLOWED_MAJOR or int(parts[1]) != ALLOWED_MINOR:
+            print(f"\n  ❌ {label} version {ver} violates {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x lock!")
+            print("     Reverting changes.")
+            subprocess.run(
+                ["git", "checkout", "--"]
+                + [REPO_ROOT / f[1] for f in VERSION_FILES]
+                + ([REPO_ROOT / CHANGELOG_PATH] if (REPO_ROOT / CHANGELOG_PATH).exists() else []),
+                cwd=REPO_ROOT,
+            )
+            sys.exit(1)
+    print(f"\n  ✅ All files locked to {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x — good.")
+
+    print("\n── Pre-flight CI validation ──")
+    if not validate_release_artifacts():
+        print("\n  ❌ Pre-flight checks failed. Aborting.")
+        print("     Fix the issues above and re-run.")
+        sys.exit(1)
+    print("  ✅ Pre-flight checks passed.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare a new release")
     parser.add_argument("--apply", action="store_true",
                         help="Apply version bumps (default: dry-run)")
     parser.add_argument("--tag", action="store_true",
                         help="Apply bumps, commit, and tag (implies --apply)")
+    parser.add_argument("--bump-next", action="store_true",
+                        help="Advance workspace version past the latest stable tag for Nightly builds")
     args = parser.parse_args()
+
+    if args.bump_next and args.tag:
+        print("!  --bump-next cannot be combined with --tag.")
+        sys.exit(1)
 
     apply = args.apply or args.tag
 
@@ -383,6 +486,29 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Last tag:  {last_tag}")
+    current = _resolve_current_version()
+
+    if args.bump_next:
+        next_ver, needs_bump = next_dev_version(last_tag, current)
+        print(f"Current version:  {current}")
+        if not needs_bump:
+            print(f"✓ Workspace version {current} is already ahead of {last_tag}; no bump needed.")
+            return
+        print(f"Next dev version: {next_ver}")
+        print("\n── Version file updates ──")
+        updated = update_version_files(next_ver, dry_run=not apply)
+        for f in updated:
+            print(f"  {'✓' if apply else '·'} {f}")
+        if apply:
+            _verify_applied_versions()
+            print()
+            print("  Files updated for next Nightly cycle. Review with 'git diff', then commit:")
+            print(f"  git commit -m 'chore: bump dev version to {next_ver}'")
+        else:
+            print()
+            print("Dry-run. Run with --bump-next --apply to write changes.")
+        return
+
     commits = get_commits_since(last_tag)
 
     if not commits:
@@ -392,25 +518,8 @@ def main() -> None:
     analysis = analyze_commits(commits)
     bump = recommend_bump(analysis)
 
-    # Phase 2: Determine current & next versions
-    versions = get_current_versions()
-    unique_versions = set(v for v in versions.values() if v != "???")
-    if len(unique_versions) > 1:
-        print("⚠  Version mismatch across files!")
-        for label, ver in versions.items():
-            print(f"   {label}: {ver}")
-        print()
-        # Use the root Cargo.toml version as authoritative
-        root_ver = versions.get("Cargo.toml (root)", "")
-        if not root_ver or root_ver == "???":
-            print("!  Cannot determine authoritative version.")
-            sys.exit(1)
-        print(f"   Using Cargo.toml version: {root_ver}")
-        current = root_ver
-    else:
-        current = next(v for v in unique_versions)
-
-    new_version = bump_version(current, bump)
+    # Phase 2: Determine next release version (without double-bumping pre-bumped dev versions)
+    new_version = determine_release_version(last_tag, current, bump)
 
     # Phase 3: Summary
     print()
@@ -451,37 +560,11 @@ def main() -> None:
         print(f"  {'✓' if apply else '·'} {f}")
 
     if apply:
-        # Post-update validation: enforce 0.7.x across all files
-        versions = get_current_versions()
-        for label, ver in versions.items():
-            if ver == "???":
-                continue
-            parts = ver.split(".")
-            if int(parts[0]) != ALLOWED_MAJOR or int(parts[1]) != ALLOWED_MINOR:
-                print(f"\n  ❌ {label} version {ver} violates {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x lock!")
-                print(f"     Reverting changes.")
-                # Revert by restoring from git
-                subprocess.run(
-                    ["git", "checkout", "--"]
-                    + [REPO_ROOT / f[1] for f in VERSION_FILES]
-                    + ([REPO_ROOT / CHANGELOG_PATH] if (REPO_ROOT / CHANGELOG_PATH).exists() else []),
-                    cwd=REPO_ROOT,
-                )
-                sys.exit(1)
-        print(f"\n  ✅ All files locked to {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x — good.")
-
-        # Pre-flight CI validation — catch workflow YAML / Cargo.lock issues
-        # before the tag push triggers a failing CI run.
-        print("\n── Pre-flight CI validation ──")
-        if not validate_release_artifacts():
-            print(f"\n  ❌ Pre-flight checks failed. Aborting.")
-            print(f"     Fix the issues above and re-run.")
-            sys.exit(1)
-        print(f"  ✅ Pre-flight checks passed.")
+        _verify_applied_versions()
 
     if not apply:
         print()
-        print(f"Dry-run. Run with --apply to write changes, or --tag to also commit+tag.")
+        print("Dry-run. Run with --apply to write changes, or --tag to also commit+tag.")
         return
 
     if args.tag:
@@ -497,8 +580,10 @@ def main() -> None:
     else:
         print()
         print("  Files updated. Review with 'git diff', then commit & tag:")
-        print(f"  git add -A && git commit -m 'chore: bump version to v{new_version}'")
+        print(f"  git add -A && git commit -m 'chore: release v{new_version}'")
         print(f"  git tag v{new_version}")
+        print("  # After releasing, advance main for Nightly:")
+        print("  python scripts/release.py --bump-next --apply")
 
 
 if __name__ == "__main__":
