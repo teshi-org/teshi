@@ -2383,10 +2383,13 @@ impl AuthoringUiState {
                         .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
                         .sum()
                 });
+            let step = delta.unsigned_abs();
             let target = if delta < 0 {
-                current.saturating_sub(1)
+                current.saturating_sub(step)
             } else {
-                (current + 1).min(self.editor_display_rows.len() - 1)
+                current
+                    .saturating_add(step)
+                    .min(self.editor_display_rows.len().saturating_sub(1))
             };
             let (row, start, end) = self.editor_display_rows[target];
             let mut column = start;
@@ -2405,11 +2408,12 @@ impl AuthoringUiState {
             self.vertical_motion = Some((row, self.cursor_col, self.editor_wrap_width, cells));
             return;
         }
+        let step = delta.unsigned_abs();
         let target = if delta < 0 {
-            self.cursor_row.saturating_sub(1)
+            self.cursor_row.saturating_sub(step)
         } else {
             self.cursor_row
-                .saturating_add(1)
+                .saturating_add(step)
                 .min(self.buffer.line_count().saturating_sub(1))
         };
         self.cursor_row = target;

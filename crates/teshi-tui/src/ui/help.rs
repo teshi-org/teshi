@@ -459,6 +459,7 @@ Teshi combines **intuitive GUI mouse controls** with **fast Vim navigation**. Th
 | `h/l` 或 `←/→` | 展开/折叠目录，或在各栏之间移动焦点 |
 | `/` | 搜索功能名称与路径（支持点 `✓` 确认 / `✗` 清除） |
 | `r` | 运行当前选中场景（也可点击 `▸ 运行 [r]`） |
+| `d` | 收起 / 展开运行详情面板（按项目记忆；编辑态点击右上角芯片切换） |
 | `e` | 进入当前 Feature 源码编辑器（也可双击场景行） |
 | `Enter` | 切换目录 / 运行详情主操作（全屏看图、展开接口） |
 | `Space` | 展开/收起 HTTP 请求体与响应体 |
@@ -491,6 +492,7 @@ Four-pane BDD Feature browser and runner: **Features** on the left, **Scenarios*
 | `h/l` or `←/→` | Expand/collapse directories or move focus across panes |
 | `/` | Search features by title or path (click `✓` to commit, `✗` to clear) |
 | `r` | Run selected scenario (or click `Run [r]`) |
+| `d` | Collapse/expand Run Details (persisted per project; use header chip in editor) |
 | `e` | Open Feature source editor (or double-click a scenario) |
 | `Enter` | Toggle directory / Run Details primary action (fullscreen shot, open artifact) |
 | `Space` | Expand/collapse HTTP exchange body |
