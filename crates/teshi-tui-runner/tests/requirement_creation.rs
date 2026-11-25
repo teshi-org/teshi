@@ -241,9 +241,7 @@ fn clipped_footer_blank_space_does_not_trigger_hidden_action() {
     terminal.key("4").unwrap();
     terminal.key("Ctrl+n").unwrap();
     terminal.expect_text("Document 1", true, 10000).unwrap();
-    terminal
-        .expect_text("Issues › Doc", true, 10000)
-        .unwrap();
+    terminal.expect_text("Issues › Doc", true, 10000).unwrap();
     let screen = terminal.screen().unwrap();
     let footer = screen.lines().nth(15).unwrap();
     let blank = footer
