@@ -77,6 +77,13 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlashCommandSuggestion {
+    pub name: String,
+    pub description: String,
+    pub input_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
     Explore,
@@ -289,6 +296,8 @@ pub struct AgentThread {
     retiring_backends: Vec<teshi_agent_runtime::backend::AgentBackendRuntime>,
     /// Conversation-local ACP picker and hit regions.
     pub(crate) acp_controls_ui: crate::acp_controls::ControlsUi,
+    /// Dynamic slash commands advertised by the active ACP session.
+    pub(crate) acp_commands: Vec<teshi_agent::backend::AcpSlashCommand>,
     /// Cumulative input tokens across all requests for this agent.
     pub total_input_tokens: u64,
     /// Cumulative output tokens across all requests for this agent.
@@ -356,6 +365,7 @@ pub struct AgentThread {
 
 impl AgentThread {
     fn replace_backend(&mut self, kind: teshi_agent::backend::AgentBackendKind) {
+        self.acp_commands.clear();
         let mut previous = std::mem::replace(
             &mut self.backend,
             teshi_agent_runtime::backend::AgentBackendRuntime::new(
@@ -614,6 +624,7 @@ impl AgentThread {
             selection_root: None,
             selection_warning: None,
             acp_controls_ui: Default::default(),
+            acp_commands: Vec::new(),
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
@@ -1602,6 +1613,26 @@ fn agent_busy(agent: &AgentThread) -> bool {
         )
 }
 
+/// Choose the ACP connection pooling strategy for a given provider profile id.
+///
+/// Only providers verified to isolate concurrent `session/prompt` turns across
+/// sessions within a single process opt into [`teshi_acp::AcpPoolMode::Shared`].
+/// Providers known to stall concurrent prompts on one process while benefiting
+/// from a warm standby (`codebuddy-code`, `codex-acp`) get exclusive per-session
+/// connections with idle reuse and a background warm standby. Other installed
+/// profiles and raw `TESHI_ACP_PROGRAM` overrides run standalone (`None`) so
+/// `/new` and `/resume` preserve a fresh per-session process lifecycle without
+/// unsolicited background pre-warming or idle reuse.
+pub(crate) fn acp_pool_mode_for_provider(
+    provider_id: Option<&str>,
+) -> Option<teshi_acp::AcpPoolMode> {
+    match provider_id {
+        Some("antigravity-acp") => Some(teshi_acp::AcpPoolMode::Shared),
+        Some("codebuddy-code" | "codex-acp") => Some(teshi_acp::AcpPoolMode::exclusive_warm()),
+        Some(_) | None => None,
+    }
+}
+
 /// Default location for a worktree made by `/worktree`.
 ///
 /// Siblings the repository into `<repo>-worktrees/<branch>` so the checkout does
@@ -1709,6 +1740,17 @@ impl SidebarSearchHit {
 
 fn default_persist_sidebar_state() -> bool {
     !cfg!(test) || std::env::var_os("TESHI_SESSION_DIR").is_some_and(|val| !val.is_empty())
+}
+
+/// In-flight remote ACP `session/delete` request tracked so concurrent deletions
+/// never overwrite one another and failed RPCs can roll back optimistic UI removal.
+struct PendingRemoteSessionDelete {
+    session_id: String,
+    remote_session_id: Option<String>,
+    is_remote_only: bool,
+    rollback_session: Option<crate::session::Session>,
+    rollback_index: usize,
+    rx: Receiver<Result<String, String>>,
 }
 
 /// Application state shared by the terminal views and input handlers.
@@ -1924,6 +1966,12 @@ pub struct App {
     /// Backends of closed conversations that are still releasing workers or
     /// processes. They stay project-owned until the shutdown polls reap them.
     closed_agent_backends: Vec<teshi_agent_runtime::backend::AgentBackendRuntime>,
+    /// Shared ACP process pool keyed by workspace, provider, and auth method.
+    pub(crate) acp_pool: std::sync::Arc<teshi_acp::AcpConnectionPool>,
+    /// Pending non-blocking `session/list` response for the session browser.
+    remote_sessions_rx: Option<Receiver<Vec<crate::session::Session>>>,
+    /// Pending non-blocking `session/delete` operations for remote ACP sessions.
+    remote_session_deletes: Vec<PendingRemoteSessionDelete>,
     /// Active exploration session state (None = not exploring).
     pub explore_state: Option<ExploreState>,
     /// Approval mode for agent tool calls (Manual / Auto / Bypass).
@@ -2308,7 +2356,7 @@ fn latest_answer_index(messages: &[AiChatMessage]) -> Option<usize> {
         message.role == AiRole::Assistant
             && !matches!(
                 message.source.as_deref(),
-                Some("agent_progress" | "acp_activity" | "acp_reasoning")
+                Some("agent_progress" | "acp_activity" | "acp_reasoning" | "acp_plan")
             )
             && !message.content.trim().is_empty()
             && message
@@ -2324,9 +2372,10 @@ fn completed_assistant_responses(messages: &[AiChatMessage], limit: usize) -> Ve
         .rev()
         .filter(|message| {
             message.role == AiRole::Assistant
-                && message.source.as_deref() != Some("agent_progress")
-                && message.source.as_deref() != Some("acp_activity")
-                && message.source.as_deref() != Some("acp_reasoning")
+                && !matches!(
+                    message.source.as_deref(),
+                    Some("agent_progress" | "acp_activity" | "acp_reasoning" | "acp_plan")
+                )
                 && !message.content.trim().is_empty()
                 && message
                     .tool_calls
@@ -2611,6 +2660,7 @@ impl App {
             || self.generation_stage != teshi_agent::pipeline::GenerationStage::Idle
             || self.agents.iter().any(agent_busy)
             || !self.closed_agent_backends.is_empty()
+            || self.acp_pool.shutdown_pending()
     }
 
     /// Reaps closed conversations' backends that have exited; never blocks.
@@ -2619,6 +2669,7 @@ impl App {
             backend.poll_shutdown();
             backend.shutdown_pending()
         });
+        self.acp_pool.poll_shutdown();
     }
 
     /// Start a safe project switch. Preparation is detached from the active
@@ -2715,6 +2766,8 @@ impl App {
             agent.backend.request_shutdown();
             agent.backend.poll_shutdown();
         }
+        self.acp_pool.request_shutdown();
+        self.acp_pool.poll_shutdown();
         if self.project_tasks_busy() {
             self.project_switch.overlay = crate::project_context::SwitchOverlay::Busy { target };
             self.project_switch
@@ -2848,6 +2901,8 @@ impl App {
         self.session_panel_legacy = false;
         self.session_panel_active = false;
         self.pending_session_restore = None;
+        self.remote_sessions_rx = None;
+        self.remote_session_deletes.clear();
         self.session_list = self.project_sessions();
         self.session_panel_selection = 0;
         self.clear_chat_selection();
@@ -3129,6 +3184,7 @@ impl App {
             agent.tool_status = None;
             agent.pending_acp_permission = None;
         }
+        self.acp_pool.request_shutdown();
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
         self.explore_state = None;
         // Stopping work does not accept or discard an unapplied proposal. The
@@ -3592,6 +3648,9 @@ impl App {
             selected_agent: 0,
             next_agent_id: 1,
             closed_agent_backends: Vec::new(),
+            acp_pool: std::sync::Arc::new(teshi_acp::AcpConnectionPool::new()),
+            remote_sessions_rx: None,
+            remote_session_deletes: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -3779,6 +3838,9 @@ impl App {
             selected_agent: 0,
             next_agent_id: 1,
             closed_agent_backends: Vec::new(),
+            acp_pool: std::sync::Arc::new(teshi_acp::AcpConnectionPool::new()),
+            remote_sessions_rx: None,
+            remote_session_deletes: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -4036,6 +4098,9 @@ impl App {
             selected_agent: 0,
             next_agent_id: 1,
             closed_agent_backends: Vec::new(),
+            acp_pool: std::sync::Arc::new(teshi_acp::AcpConnectionPool::new()),
+            remote_sessions_rx: None,
+            remote_session_deletes: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -4812,6 +4877,11 @@ impl App {
             });
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
+                config.provider_id = self.agents[agent_idx].selected_acp_id.clone();
+                if let Some(pool_mode) = acp_pool_mode_for_provider(config.provider_id.as_deref()) {
+                    config.connection_pool = Some(std::sync::Arc::clone(&self.acp_pool));
+                    config.pool_mode = pool_mode;
+                }
                 config.inject_prompt_sections = self.inject_prompt_sections;
                 config.tool_bridge = Some(teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
                     executable: std::env::current_exe()?,
@@ -6626,6 +6696,13 @@ impl App {
                             })
                         };
                     }
+                    Ok(Some(AgentBackendEvent::AvailableCommands { commands })) => {
+                        self.agents[i].acp_commands = commands;
+                    }
+                    Ok(Some(AgentBackendEvent::PlanUpdate { .. })) => {
+                        self.agents[i].chat.revision += 1;
+                        self.agents[i].touch_activity();
+                    }
                     Ok(Some(AgentBackendEvent::SessionTitle { title })) => {
                         // The agent owns its label: adopt it, and stop any
                         // automatic refresh so the two never fight.
@@ -6677,6 +6754,92 @@ impl App {
                                     .to_string();
                         }
                         break;
+                    }
+                }
+            }
+        }
+        if let Some(rx) = self.remote_sessions_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(remote_sessions) => {
+                    if self.session_panel_active && !self.session_panel_legacy {
+                        for remote in remote_sessions {
+                            let pending_delete =
+                                self.remote_session_deletes.iter().any(|pending| {
+                                    pending.session_id == remote.id
+                                        || (remote.acp_session_id.is_some()
+                                            && pending.remote_session_id == remote.acp_session_id)
+                                });
+                            let already_present = self.session_list.iter().any(|existing| {
+                                existing.id == remote.id
+                                    || (remote.acp_session_id.is_some()
+                                        && existing.acp_session_id == remote.acp_session_id)
+                            });
+                            if !pending_delete && !already_present {
+                                self.session_list.push(remote);
+                            }
+                        }
+                    }
+                    self.remote_sessions_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.remote_sessions_rx = None;
+                }
+            }
+        }
+        let mut delete_idx = 0;
+        while delete_idx < self.remote_session_deletes.len() {
+            match self.remote_session_deletes[delete_idx].rx.try_recv() {
+                Ok(Ok(deleted_id)) => {
+                    let pending = self.remote_session_deletes.remove(delete_idx);
+                    if pending.is_remote_only {
+                        self.status = crate::i18n::fill(
+                            crate::i18n::t("status.deleted_session"),
+                            &[("id", &crate::i18n::arg(&deleted_id))],
+                        );
+                        self.set_status_message(self.status.clone());
+                    }
+                }
+                Ok(Err(error)) => {
+                    let pending = self.remote_session_deletes.remove(delete_idx);
+                    if self.session_panel_active
+                        && !self.session_panel_legacy
+                        && let Some(session) = pending.rollback_session
+                        && !self.session_list.iter().any(|existing| {
+                            existing.id == session.id
+                                || (session.acp_session_id.is_some()
+                                    && existing.acp_session_id == session.acp_session_id)
+                        })
+                    {
+                        let insert_at = pending.rollback_index.min(self.session_list.len());
+                        self.session_list.insert(insert_at, session);
+                    }
+                    self.status = error;
+                    self.set_status_message(self.status.clone());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    delete_idx += 1;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let pending = self.remote_session_deletes.remove(delete_idx);
+                    if self.session_panel_active
+                        && !self.session_panel_legacy
+                        && let Some(session) = pending.rollback_session
+                        && !self.session_list.iter().any(|existing| {
+                            existing.id == session.id
+                                || (session.acp_session_id.is_some()
+                                    && existing.acp_session_id == session.acp_session_id)
+                        })
+                    {
+                        let insert_at = pending.rollback_index.min(self.session_list.len());
+                        self.session_list.insert(insert_at, session);
+                    }
+                    if pending.is_remote_only {
+                        self.status = format!(
+                            "Failed to delete remote ACP session {}: background task ended unexpectedly",
+                            pending.session_id
+                        );
+                        self.set_status_message(self.status.clone());
                     }
                 }
             }
@@ -6778,12 +6941,14 @@ impl App {
                 backend.request_shutdown();
             }
         }
+        self.acp_pool.request_shutdown();
     }
 
     /// Whether any agent backend still owns resources after a shutdown request.
     pub fn agent_shutdown_pending(&self) -> bool {
         self.agents.iter().any(AgentThread::shutdown_pending)
             || !self.closed_agent_backends.is_empty()
+            || self.acp_pool.shutdown_pending()
     }
 
     /// Reaps agent resources that already exited; never blocks on live work.
@@ -7019,7 +7184,10 @@ impl App {
 
         // Original 1:1 mapping
         for (message_idx, m) in self.agents[agent_idx].messages().iter().enumerate() {
-            if matches!(m.source.as_deref(), Some("acp_activity" | "acp_reasoning")) {
+            if matches!(
+                m.source.as_deref(),
+                Some("acp_activity" | "acp_reasoning" | "acp_plan")
+            ) {
                 continue;
             }
             let content = if Some(message_idx) == latest_visual_message {
@@ -13018,6 +13186,7 @@ impl App {
             Action::SessionPanelClose => {
                 self.session_panel_active = false;
                 self.pending_session_restore = None;
+                self.remote_sessions_rx = None;
                 self.quit_pending_confirm = false;
             }
             Action::SessionPanelUp => {
@@ -13046,23 +13215,151 @@ impl App {
                 if let Some(session) = self.session_list.get(self.session_panel_selection).cloned()
                 {
                     let id = session.id.clone();
-                    if let Err(e) = crate::session::Session::delete(&id) {
-                        self.status = crate::i18n::fill(crate::i18n::t("status.failed_to_delete_session"), &[("e", &crate::i18n::arg(&e))]);
+                    let is_remote_only = id.starts_with("remote-acp:");
+                    let remote_delete_target = session
+                        .acp_session_id
+                        .clone()
+                        .zip(
+                            session
+                                .acp_agent_id
+                                .clone()
+                                .or_else(|| std::env::var("TESHI_ACP_PROGRAM").ok()),
+                        )
+                        .and_then(|(remote_id, provider_id)| {
+                            let mut candidate_cwds = Vec::new();
+                            if let Some(dir) = &session.member_dir {
+                                candidate_cwds.push(dir.clone());
+                            }
+                            if let Some(root) = &session.project_root {
+                                candidate_cwds.push(root.clone());
+                            }
+                            candidate_cwds.push(self.project.root_dir.clone());
+                            let lease = candidate_cwds.into_iter().find_map(|cwd| {
+                                self.acp_pool
+                                    .find_live_by_cwd_and_provider(&cwd, &provider_id)
+                            })?;
+                            if !lease.initialized().supports_delete_session() {
+                                return None;
+                            }
+                            let handle = self.acp_pool.runtime_handle().ok()?;
+                            Some((remote_id, lease, handle))
+                        });
+                    let delete_result: Result<(), String> = if is_remote_only {
+                        if remote_delete_target.is_some() {
+                            Ok(())
+                        } else {
+                            Err("Cannot delete remote ACP session: agent does not support session deletion or is disconnected".to_string())
+                        }
+                    } else {
+                        crate::session::Session::delete(&id).map_err(|e| e.to_string())
+                    };
+                    if let Err(e) = delete_result {
+                        self.status = crate::i18n::fill(
+                            crate::i18n::t("status.failed_to_delete_session"),
+                            &[("e", &crate::i18n::arg(&e))],
+                        );
+                        self.set_status_message(self.status.clone());
                         if let Some(mut request) = delete_request {
                             request.error = Some(e.to_string());
                             self.pending_delete = Some(request);
                         }
                     } else {
-                        self.session_list = if self.session_panel_legacy {
-                            self.legacy_sessions()
+                        let rollback_index = self.session_panel_selection;
+                        if let Some((remote_id, lease, handle)) = remote_delete_target {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let deleted_id = id.clone();
+                            let remote_id_for_task = remote_id.clone();
+                            handle.spawn(async move {
+                                let _lease = lease;
+                                let outcome = _lease
+                                    .client()
+                                    .delete_session(&remote_id_for_task)
+                                    .await
+                                    .map(|()| deleted_id)
+                                    .map_err(|err| {
+                                        format!(
+                                            "Failed to delete remote ACP session {remote_id_for_task}: {err}"
+                                        )
+                                    });
+                                let _ = tx.send(outcome);
+                            });
+                            let rollback_session = if is_remote_only {
+                                Some(session.clone())
+                            } else {
+                                Some(crate::session::Session {
+                                    id: format!("remote-acp:{remote_id}"),
+                                    created_at: session.created_at.clone(),
+                                    updated_at: session.updated_at.clone(),
+                                    model_label: None,
+                                    message_count: 0,
+                                    messages: Vec::new(),
+                                    project_root: session.project_root.clone(),
+                                    backend_kind: Some(teshi_agent::backend::AgentBackendKind::Acp),
+                                    acp_agent_id: session.acp_agent_id.clone(),
+                                    acp_session_id: Some(remote_id.clone()),
+                                    member_dir: session.member_dir.clone(),
+                                    pending_messages: Default::default(),
+                                    completed_answers: Vec::new(),
+                                    generated_title: None,
+                                    agent_title: session
+                                        .agent_title
+                                        .clone()
+                                        .or_else(|| session.custom_title.clone())
+                                        .or_else(|| session.generated_title.clone()),
+                                    custom_title: None,
+                                    settled: false,
+                                })
+                            };
+                            self.remote_session_deletes.push(PendingRemoteSessionDelete {
+                                session_id: id.clone(),
+                                remote_session_id: Some(remote_id),
+                                is_remote_only,
+                                rollback_session,
+                                rollback_index,
+                                rx,
+                            });
+                        }
+                        if is_remote_only {
+                            self.session_list.retain(|s| s.id != id);
                         } else {
-                            self.project_sessions()
-                        };
+                            let mut updated = if self.session_panel_legacy {
+                                self.legacy_sessions()
+                            } else {
+                                self.project_sessions()
+                            };
+                            for existing in self.session_list.drain(..) {
+                                let pending_delete =
+                                    self.remote_session_deletes.iter().any(|pending| {
+                                        pending.session_id == existing.id
+                                            || (existing.acp_session_id.is_some()
+                                                && pending.remote_session_id
+                                                    == existing.acp_session_id)
+                                    });
+                                if existing.id.starts_with("remote-acp:")
+                                    && existing.id != id
+                                    && !pending_delete
+                                    && !updated.iter().any(|s| {
+                                        existing.acp_session_id.is_some()
+                                            && s.acp_session_id == existing.acp_session_id
+                                    })
+                                {
+                                    updated.push(existing);
+                                }
+                            }
+                            self.session_list = updated;
+                        }
                         if self.session_panel_selection >= self.session_list.len() {
                             self.session_panel_selection =
                                 self.session_list.len().saturating_sub(1);
                         }
-                        self.status = crate::i18n::fill(crate::i18n::t("status.deleted_session"), &[("id", &crate::i18n::arg(&id))]);
+                        self.status = if is_remote_only {
+                            format!("Deleting remote ACP session {id}...")
+                        } else {
+                            crate::i18n::fill(
+                                crate::i18n::t("status.deleted_session"),
+                                &[("id", &crate::i18n::arg(&id))],
+                            )
+                        };
                     }
                 }
                 self.quit_pending_confirm = false;
@@ -14647,17 +14944,20 @@ impl App {
                     .input
                     .strip_prefix('/')
                     .unwrap_or("")
-                    .to_lowercase();
-                let count = SLASH_COMMANDS
-                    .iter()
-                    .filter(|(name, _)| filter.is_empty() || name.starts_with(&filter))
-                    .count();
+                    .to_string();
+                let count = self.matching_slash_commands(&filter).len();
                 if index < count {
                     self.slash_suggestion_selection = index;
                 }
             }
             Action::AiSlashNext => {
-                let max = crate::app::SLASH_COMMANDS.len().saturating_sub(1);
+                let filter = self
+                    .agent()
+                    .input
+                    .strip_prefix('/')
+                    .unwrap_or("")
+                    .to_string();
+                let max = self.matching_slash_commands(&filter).len().saturating_sub(1);
                 if self.slash_suggestion_selection < max {
                     self.slash_suggestion_selection += 1;
                 }
@@ -14671,23 +14971,19 @@ impl App {
                     .input
                     .strip_prefix('/')
                     .unwrap_or("")
-                    .to_lowercase();
-                let filtered: Vec<&(&str, &str)> = crate::app::SLASH_COMMANDS
-                    .iter()
-                    .filter(|(name, _)| filter.is_empty() || name.starts_with(&filter))
-                    .collect();
-                if self.slash_suggestion_selection < filtered.len() {
-                    let (name, _) = filtered[self.slash_suggestion_selection];
+                    .to_string();
+                let filtered = self.matching_slash_commands(&filter);
+                if let Some(cmd) = filtered.get(self.slash_suggestion_selection).cloned() {
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
-                    // Clear the input (cmd is about to execute); "copy" will override below
+                    // Clear the input (cmd is about to execute); commands with args override below
                     self.clear_ai_draft();
                     // Execute the command through the same dispatcher as submitted commands.
-                    return if *name == "copy" {
-                        self.agent_mut().input.set_text("/copy ".to_string());
+                    return if cmd.name == "copy" || cmd.input_hint.is_some() {
+                        self.agent_mut().input.set_text(format!("/{} ", cmd.name));
                         Ok(())
                     } else {
-                        self.execute_slash_command(name)
+                        self.execute_slash_command(&cmd.name)
                     };
                 }
                 // No suggestion matched the typed text (an argument-bearing or
@@ -15686,6 +15982,27 @@ impl App {
         use teshi_core::mention::{MentionCandidate, MentionSource};
 
         let mut out = Vec::new();
+        let current_issue_id = self
+            .authoring_ui
+            .selected_document_id
+            .as_deref()
+            .or_else(|| {
+                self.last_focused_context
+                    .as_ref()
+                    .and_then(|c| c.id.strip_prefix("issue:"))
+            });
+        let current_tp_id = self
+            .test_points_ui
+            .selected_test_point_id
+            .as_deref()
+            .or_else(|| {
+                self.last_focused_context
+                    .as_ref()
+                    .and_then(|c| c.id.strip_prefix("tp:"))
+            });
+        let current_feature_idx = (self.explore_selected_deleted_feature.is_none()
+            && self.explore_selected_feature < self.project.features.len())
+        .then_some(self.explore_selected_feature);
 
         // 1. @last-fail (most recent failed Explore scenario)
         if let Some((feature_idx, scenario_idx)) = self.latest_failed_explore_key()
@@ -15723,6 +16040,7 @@ impl App {
                 label,
                 detail,
                 search_text: format!("{relative} {} last-fail", feature.name),
+                is_current: false,
             });
         }
 
@@ -15741,6 +16059,7 @@ impl App {
                     label,
                     detail: Some(format!("{kind_badge} {}", doc.meta.path)),
                     search_text: format!("{} {} {}", doc.meta.id, doc.meta.path, kind_badge),
+                    is_current: current_issue_id == Some(doc.meta.id.as_str()),
                 });
             }
 
@@ -15763,6 +16082,7 @@ impl App {
                     label,
                     detail,
                     search_text: format!("{} {} {}", tp.id, hierarchy, tp.objective),
+                    is_current: current_tp_id == Some(tp.id.as_str()),
                 });
             }
         }
@@ -15789,6 +16109,7 @@ impl App {
                 label,
                 detail: Some(relative.clone()),
                 search_text: format!("{relative} {}", feature.tags.join(" ")),
+                is_current: current_feature_idx == Some(feature_idx),
             });
         }
 
@@ -20263,6 +20584,43 @@ impl App {
         Ok(())
     }
 
+    /// Combined built-in and active-ACP slash commands filtered by `filter`.
+    pub(crate) fn matching_slash_commands(&self, filter: &str) -> Vec<SlashCommandSuggestion> {
+        let filter = filter.to_lowercase();
+        let mut results: Vec<SlashCommandSuggestion> = SLASH_COMMANDS
+            .iter()
+            .filter(|(name, _)| filter.is_empty() || name.starts_with(&filter))
+            .map(|(name, fallback)| SlashCommandSuggestion {
+                name: (*name).to_string(),
+                description: crate::i18n::slash_description(name)
+                    .unwrap_or(fallback)
+                    .to_string(),
+                input_hint: None,
+            })
+            .collect();
+        for cmd in &self.agent().acp_commands {
+            let trimmed = cmd.name.trim().trim_start_matches('/');
+            if trimmed.is_empty()
+                || SLASH_COMMANDS
+                    .iter()
+                    .any(|(builtin, _)| builtin.eq_ignore_ascii_case(trimmed))
+                || results
+                    .iter()
+                    .any(|existing| existing.name.eq_ignore_ascii_case(trimmed))
+            {
+                continue;
+            }
+            if filter.is_empty() || trimmed.to_lowercase().starts_with(&filter) {
+                results.push(SlashCommandSuggestion {
+                    name: trimmed.to_string(),
+                    description: cmd.description.clone(),
+                    input_hint: cmd.input_hint.clone(),
+                });
+            }
+        }
+        results
+    }
+
     /// Execute a slash command from either submitted input or the suggestion menu.
     ///
     /// The suggestion menu clears the input before calling this method, so all
@@ -20341,6 +20699,16 @@ impl App {
         }
         if command == "settings" {
             self.open_acp_controls(None);
+            return Ok(());
+        }
+        if command == "auth"
+            && self
+                .agent()
+                .backend
+                .acp_controls()
+                .is_some_and(|s| s.auth_required && !s.auth_methods.is_empty())
+        {
+            self.open_acp_auth();
             return Ok(());
         }
         if command == "auth" || command.starts_with("auth ") {
@@ -20535,6 +20903,42 @@ impl App {
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
+        if self.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Acp
+            && let Some(cmd_name) = command.split_whitespace().next()
+            && self.agent().acp_commands.iter().any(|cmd| {
+                cmd.name
+                    .trim()
+                    .trim_start_matches('/')
+                    .eq_ignore_ascii_case(cmd_name)
+            })
+        {
+            let prompt_text = format!("/{command}");
+            let paused_queue =
+                !self.agent().chat.queue.is_empty() && !self.agent().chat.queue_ready;
+            if matches!(
+                self.agent().status,
+                AiStatus::Waiting | AiStatus::AwaitingApproval
+            ) || paused_queue
+            {
+                let capsules = std::mem::take(&mut self.agent_mut().attached_contexts);
+                let message =
+                    crate::ai_context::assemble_prompt_with_capsules(&prompt_text, &capsules);
+                self.record_prompt_history(&prompt_text);
+                self.agent_mut().chat.queue.push_back(message);
+                if paused_queue {
+                    self.agent_mut().chat.queue_ready = true;
+                    if self.agent().status == AiStatus::Error {
+                        self.agent_mut().status = AiStatus::Idle;
+                    }
+                }
+                self.status = crate::i18n::fill(
+                    crate::i18n::t("status.message_queued_unqueue_to_edit"),
+                    &[("arg0", &crate::i18n::arg(&self.agent().chat.queue.len()))],
+                );
+                return Ok(());
+            }
+            return self.dispatch_user_message(prompt_text);
+        }
         self.status =
             crate::i18n::t("status.unknown_slash_command_try_new_exit_resume_retry_copy_copy_co")
                 .to_string();
@@ -20583,7 +20987,11 @@ impl App {
         // A new session starts unnamed: the previous title described a
         // conversation this one does not continue.
         self.agent_mut().cancel_title_job();
-        *self.agent_mut() = AgentThread::new_with_selection(id, &format!("Agent {}", id + 1), root);
+        let old = std::mem::replace(
+            self.agent_mut(),
+            AgentThread::new_with_selection(id, &format!("Agent {}", id + 1), root),
+        );
+        self.closed_agent_backends.extend(old.into_live_backends());
         self.agent_mut().profile_id = profile_id;
         self.agent_mut().member_dir = member_dir;
         self.status = crate::i18n::t("status.new_session_started").to_string();
@@ -20698,7 +21106,10 @@ impl App {
             .rev()
             .find(|message| {
                 message.role == AiRole::Assistant
-                    && message.source.as_deref() != Some("agent_progress")
+                    && !matches!(
+                        message.source.as_deref(),
+                        Some("agent_progress" | "acp_activity" | "acp_reasoning" | "acp_plan")
+                    )
             })
             .map(|message| message.content.clone());
         let Some(content) = content else {
@@ -20755,6 +21166,7 @@ impl App {
     /// Handle `/sessions` — open the session browser panel.
     fn cmd_sessions(&mut self, legacy: bool) -> Result<()> {
         self.pending_session_restore = None;
+        self.remote_sessions_rx = None;
         self.session_panel_active = true;
         self.session_panel_legacy = legacy;
         self.session_panel_selection = 0;
@@ -20763,6 +21175,62 @@ impl App {
         } else {
             self.project_sessions()
         };
+        if !legacy && self.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Acp {
+            let selected_acp_id = self.agent().selected_acp_id.clone();
+            if let Some(provider_id) = selected_acp_id
+                .clone()
+                .or_else(|| std::env::var("TESHI_ACP_PROGRAM").ok())
+            {
+                let cwd = self.agent_dir(self.selected_agent).to_path_buf();
+                let lease = self
+                    .acp_pool
+                    .find_live_by_cwd_and_provider(&cwd, &provider_id)
+                    .or_else(|| {
+                        self.acp_pool
+                            .find_live_by_cwd_and_provider(&self.project.root_dir, &provider_id)
+                    });
+                if let Some(lease) = lease
+                    && lease.initialized().supports_list_sessions()
+                    && let Ok(handle) = self.acp_pool.runtime_handle()
+                {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.remote_sessions_rx = Some(rx);
+                    let project_root = self.project.root_dir.clone();
+                    let member_dir = self.agent().member_dir.clone();
+                    let query_cwd = lease.key().cwd.clone();
+                    handle.spawn(async move {
+                        let _lease = lease;
+                        if let Ok(remote_sessions) =
+                            _lease.client().list_sessions_for_cwd(Some(query_cwd)).await
+                        {
+                            let mapped: Vec<crate::session::Session> = remote_sessions
+                                .into_iter()
+                                .map(|remote| crate::session::Session {
+                                    id: format!("remote-acp:{}", remote.session_id),
+                                    created_at: remote.updated_at.clone().unwrap_or_default(),
+                                    updated_at: remote.updated_at.unwrap_or_default(),
+                                    model_label: None,
+                                    message_count: 0,
+                                    messages: Vec::new(),
+                                    project_root: Some(project_root.clone()),
+                                    backend_kind: Some(teshi_agent::backend::AgentBackendKind::Acp),
+                                    acp_agent_id: selected_acp_id.clone(),
+                                    acp_session_id: Some(remote.session_id),
+                                    member_dir: member_dir.clone(),
+                                    pending_messages: Default::default(),
+                                    completed_answers: Vec::new(),
+                                    generated_title: None,
+                                    agent_title: remote.title,
+                                    custom_title: None,
+                                    settled: false,
+                                })
+                                .collect();
+                            let _ = tx.send(mapped);
+                        }
+                    });
+                }
+            }
+        }
         self.status = if legacy {
             crate::i18n::t("status.legacy_unassigned_loading_keeps_history_unassigned_enter_loa")
                 .to_string()
@@ -20794,7 +21262,7 @@ impl App {
             .collect()
     }
 
-    fn restore_session(&mut self, session: crate::session::Session, legacy: bool) -> bool {
+    fn restore_session(&mut self, mut session: crate::session::Session, legacy: bool) -> bool {
         self.pending_session_restore = None;
         if session.project_root.is_none() && !legacy {
             self.status = crate::i18n::t(
@@ -20857,6 +21325,18 @@ impl App {
             .into();
             self.set_status_message(self.status.clone());
             return false;
+        }
+        if session.id.starts_with("remote-acp:") {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            session.id = format!("{:x}", now.as_nanos());
+            if session.created_at.is_empty() {
+                session.created_at = now.as_millis().to_string();
+            }
+            if session.updated_at.is_empty() {
+                session.updated_at = now.as_millis().to_string();
+            }
         }
         // A restored session replaces the source blocks behind any rendered
         // chat anchors.  Do not let a selection from the previous session be
@@ -24078,6 +24558,39 @@ mod tests {
         assert_eq!(app.agent().input.text(), "XYZ");
         app.handle_action(Action::AiUndo).unwrap();
         assert_eq!(app.agent().input.text(), "abcdef");
+    }
+
+    #[test]
+    fn deleting_remote_only_session_without_live_lease_keeps_entry_and_reports_error() {
+        let (mut app, _project, _store) = slash_test_app();
+        let mut remote = crate::session::Session::from_messages(Vec::new(), Some("acp".into()));
+        remote.id = "remote-acp:s-42".into();
+        remote.acp_session_id = Some("s-42".into());
+        remote.acp_agent_id = Some("codex-acp".into());
+        app.session_list = vec![remote];
+        app.session_panel_active = true;
+        app.session_panel_selection = 0;
+
+        app.handle_action(Action::SessionPanelDelete).unwrap();
+        assert!(app.pending_delete.is_some());
+        app.handle_action(Action::DeleteConfirm).unwrap();
+
+        assert_eq!(
+            app.session_list.len(),
+            1,
+            "remote-only session must not be removed locally when no delete-capable ACP lease exists"
+        );
+        assert!(
+            app.status.contains("Cannot delete remote ACP session"),
+            "unexpected status: {}",
+            app.status
+        );
+        assert!(
+            app.pending_delete
+                .as_ref()
+                .and_then(|req| req.error.as_deref())
+                .is_some_and(|err| err.contains("Cannot delete remote ACP session"))
+        );
     }
 
     #[test]
@@ -29753,6 +30266,9 @@ mod tests {
             selected_agent: 0,
             next_agent_id: 1,
             closed_agent_backends: Vec::new(),
+            acp_pool: std::sync::Arc::new(teshi_acp::AcpConnectionPool::new()),
+            remote_sessions_rx: None,
+            remote_session_deletes: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -30013,6 +30529,9 @@ Feature: B
             selected_agent: 0,
             next_agent_id: 1,
             closed_agent_backends: Vec::new(),
+            acp_pool: std::sync::Arc::new(teshi_acp::AcpConnectionPool::new()),
+            remote_sessions_rx: None,
+            remote_session_deletes: Vec::new(),
             explore_state: None,
             approval_mode: teshi_agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
@@ -31616,6 +32135,92 @@ Feature: B
     }
 
     #[test]
+    fn mention_popup_omits_category_preview_and_prioritizes_currently_viewed_item() {
+        let (mut app, _project, _store) = requirements_test_app();
+        // Add a second and third Issue so the currently viewed one is NOT first in store order.
+        app.authoring_ui
+            .create_document("second-issue.md", "Second Issue Title")
+            .unwrap();
+        app.authoring_ui
+            .save_current_document(_project.path())
+            .unwrap();
+        let third_id = app
+            .authoring_ui
+            .create_document("third-issue.md", "Currently Viewed Issue")
+            .unwrap();
+        app.authoring_ui
+            .save_current_document(_project.path())
+            .unwrap();
+        app.authoring_ui.select_document_by_id(&third_id);
+
+        // Switch to AI tab (captures Currently Viewed Issue) and open `@`.
+        app.handle_action(Action::SelectTab(MainTab::Ai)).unwrap();
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiSendChar('@')).unwrap();
+
+        let render_screen = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::render(frame, app))
+                .unwrap();
+            (0..28)
+                .map(|y| {
+                    let mut line = String::new();
+                    let mut x = 0u16;
+                    while x < 120 {
+                        let sym = terminal.backend().buffer()[(x, y)].symbol();
+                        line.push_str(sym);
+                        let step = unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                        x = x.saturating_add(step);
+                    }
+                    line
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let root_screen = render_screen(&mut app);
+        let issue_row = root_screen
+            .lines()
+            .find(|line| line.contains("@issue"))
+            .expect("missing @issue row");
+        assert!(
+            !issue_row.contains("Req") && !issue_row.contains("Second Issue Title"),
+            "category row should not display first item title:\n{issue_row}"
+        );
+
+        // Press Enter on @issue to drill into `@issue:`.
+        app.handle_action(Action::AiMentionNext).unwrap();
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert_eq!(app.agent().input.text(), "@issue:");
+
+        let scoped_screen = render_screen(&mut app);
+        let candidate_lines: Vec<&str> = scoped_screen
+            .lines()
+            .filter(|line| line.contains(" @issue ") && !line.contains("@issue:"))
+            .collect();
+        assert_eq!(
+            candidate_lines.len(),
+            3,
+            "unexpected candidate rows in:\n{scoped_screen}"
+        );
+        assert!(
+            candidate_lines[0].contains("Currently Viewed Issue")
+                && (candidate_lines[0].contains("[正在查看]")
+                    || candidate_lines[0].contains("[Viewing]")),
+            "expected currently viewed issue first with badge, got:\n{}",
+            candidate_lines.join("\n")
+        );
+
+        // Pressing Enter immediately mounts the currently viewed issue.
+        app.handle_action(Action::AiMentionSelect).unwrap();
+        assert_eq!(
+            app.agent().attached_contexts[0].badge_label(),
+            "[Issues] Currently Viewed Issue"
+        );
+    }
+
+    #[test]
     fn switching_from_issues_and_test_points_captures_last_focused_context() {
         let (mut app, _project, _store) = requirements_test_app();
         app.active_tab = MainTab::Requirements;
@@ -32049,5 +32654,521 @@ Feature: B
         assert_eq!(app.preview_cursor_row, max_row.saturating_sub(step));
 
         fs::remove_file(path).expect("feature fixture should be removed");
+    }
+
+    #[test]
+    fn dynamic_acp_slash_commands_and_plan_excluded_from_llm_history() {
+        let (mut app, _project, _store) = slash_test_app();
+        configure_acp_fixture(&mut app, "commands_and_plan");
+        app.active_tab = MainTab::Ai;
+        app.agent_mut().input.set_text("plan please".to_string());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        wait_mcp_fixture(&mut app, |app| app.agent().status == AiStatus::Idle);
+
+        assert_eq!(app.agent().acp_commands.len(), 2);
+        let rev_matches = app.matching_slash_commands("rev");
+        assert_eq!(rev_matches.len(), 1);
+        assert_eq!(rev_matches[0].name, "review");
+        assert_eq!(rev_matches[0].input_hint.as_deref(), Some("path"));
+
+        // Selecting a dynamic command with input_hint stages `/review ` for args.
+        app.slash_suggestion_active = true;
+        app.slash_suggestion_selection = 0;
+        app.agent_mut().input.set_text("/rev".to_string());
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        assert_eq!(app.agent().input.text(), "/review ");
+
+        // Plan message is excluded from completion markers, copy list, and LLM projection.
+        assert!(
+            app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.source.as_deref() == Some("acp_plan"))
+        );
+        let answer_idx = super::latest_answer_index(app.agent().messages()).unwrap();
+        assert_eq!(app.agent().messages()[answer_idx].content, "planned");
+        assert_eq!(
+            super::completed_assistant_responses(app.agent().messages(), 5),
+            vec!["planned"]
+        );
+        let projected = app.build_chat_messages_for_agent(0);
+        assert!(
+            projected.iter().all(|m| {
+                let text = match &m.content {
+                    teshi_core::llm::MessageContent::Text(s) => s.as_str(),
+                    _ => "",
+                };
+                !text.contains("Read feature files")
+            }),
+            "acp_plan must not leak into build_chat_messages_for_agent"
+        );
+
+        // Selecting a parameterless dynamic ACP command executes and forwards `/compact`.
+        app.slash_suggestion_active = true;
+        app.slash_suggestion_selection = 0;
+        app.agent_mut().input.set_text("/comp".to_string());
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agent().status == AiStatus::Idle
+                && app
+                    .agent()
+                    .messages()
+                    .iter()
+                    .any(|m| m.content.starts_with("echo:") && m.content.contains("/compact"))
+        });
+    }
+
+    #[test]
+    fn dynamic_acp_slash_command_queues_when_busy_or_queue_paused() {
+        let (mut app, _project, _store) = slash_test_app();
+        configure_acp_fixture(&mut app, "commands_and_plan");
+        app.active_tab = MainTab::Ai;
+        app.agent_mut().acp_commands = vec![
+            teshi_agent::backend::AcpSlashCommand {
+                name: "compact".into(),
+                description: "Compact context".into(),
+                input_hint: None,
+            },
+            teshi_agent::backend::AcpSlashCommand {
+                name: "review".into(),
+                description: "Review changes".into(),
+                input_hint: Some("path".into()),
+            },
+        ];
+
+        // While Waiting, submitting a dynamic slash command must queue it instead of failing.
+        app.agent_mut().status = AiStatus::Waiting;
+        app.agent_mut().input.set_text("/review src/lib.rs".into());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(app.agent().chat.queue.len(), 1);
+        assert_eq!(
+            app.agent().chat.queue.back().map(String::as_str),
+            Some("/review src/lib.rs")
+        );
+
+        // While AwaitingApproval, selecting a dynamic command must also queue it.
+        app.agent_mut().status = AiStatus::AwaitingApproval;
+        app.slash_suggestion_active = true;
+        app.slash_suggestion_selection = 0;
+        app.agent_mut().input.set_text("/comp".into());
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        assert_eq!(app.agent().chat.queue.len(), 2);
+        assert_eq!(
+            app.agent().chat.queue.back().map(String::as_str),
+            Some("/compact")
+        );
+
+        // When queue is paused (even on Error), queuing a dynamic command preserves order and readies the queue.
+        app.agent_mut().status = AiStatus::Error;
+        app.agent_mut().chat.queue_ready = false;
+        app.agent_mut().input.set_text("/compact".into());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert!(app.agent().chat.queue_ready);
+        assert_eq!(app.agent().status, AiStatus::Idle);
+        assert_eq!(app.agent().chat.queue.len(), 3);
+    }
+
+    #[test]
+    fn pooled_acp_sessions_share_connection_and_close_list_delete() {
+        use teshi_agent::backend::AgentBackendKind;
+        use teshi_agent_runtime::backend::AcpBackendConfig;
+
+        let (mut app, _project, _store) = slash_test_app();
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+        let make_config = |app: &App| {
+            let mut config = AcpBackendConfig::new(teshi_acp::AcpAgentCommand {
+                program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+                args: vec![script.display().to_string(), "pooled_reuse".into()],
+                cwd: app.project.root_dir.clone(),
+                env: std::collections::HashMap::new(),
+            });
+            config.connection_pool = Some(std::sync::Arc::clone(&app.acp_pool));
+            config.provider_id = Some("pooled-test".into());
+            config.client.shutdown_timeout = Duration::from_millis(200);
+            config
+        };
+
+        // Agent 0
+        app.agents[0].selected_acp_id = Some("pooled-test".into());
+        app.agents[0].backend_selected = true;
+        app.agents[0].backend =
+            teshi_agent_runtime::backend::AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+        let cfg0 = make_config(&app);
+        app.agents[0].backend.configure_acp(cfg0).unwrap();
+
+        // Agent 1 sharing the exact same App-owned acp_pool
+        let mut second = AgentThread::new(1, "Agent 2");
+        second.selected_acp_id = Some("pooled-test".into());
+        second.backend_selected = true;
+        second.backend =
+            teshi_agent_runtime::backend::AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+        second.backend.configure_acp(make_config(&app)).unwrap();
+        app.agents.push(second);
+
+        app.active_tab = MainTab::Ai;
+        app.selected_agent = 0;
+        app.agent_mut().input.set_text("hello one".into());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[0].status == AiStatus::Idle
+                && app.agents[0]
+                    .messages()
+                    .iter()
+                    .any(|m| m.role == AiRole::Assistant && m.content.contains("hello one"))
+        });
+
+        app.selected_agent = 1;
+        app.agent_mut().input.set_text("hello two".into());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[1].status == AiStatus::Idle
+                && app.agents[1]
+                    .messages()
+                    .iter()
+                    .any(|m| m.role == AiRole::Assistant && m.content.contains("hello two"))
+        });
+
+        assert_eq!(app.acp_pool.active_connection_count(), 1);
+        let reply0 = app.agents[0]
+            .messages()
+            .iter()
+            .rfind(|m| m.role == AiRole::Assistant && m.source.is_none())
+            .unwrap()
+            .content
+            .clone();
+        let reply1 = app.agents[1]
+            .messages()
+            .iter()
+            .rfind(|m| m.role == AiRole::Assistant && m.source.is_none())
+            .unwrap()
+            .content
+            .clone();
+        let pid0 = reply0.split(';').next().unwrap();
+        let pid1 = reply1.split(';').next().unwrap();
+        assert_eq!(pid0, pid1, "both sessions must reuse the same child pid");
+        let sid0 = app.agents[0]
+            .backend
+            .acp_controls()
+            .unwrap()
+            .session_id
+            .unwrap();
+        let sid1 = app.agents[1]
+            .backend
+            .acp_controls()
+            .unwrap()
+            .session_id
+            .unwrap();
+        assert_ne!(sid0, sid1);
+
+        // /sessions populates remote ACP sessions via non-blocking session/list.
+        app.execute_slash_command("sessions").unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.session_list
+                .iter()
+                .any(|s| s.acp_session_id.as_deref() == Some(sid0.as_str()))
+                && app
+                    .session_list
+                    .iter()
+                    .any(|s| s.acp_session_id.as_deref() == Some(sid1.as_str()))
+        });
+
+        // Deleting a remote-only entry sends session/delete and removes it from session_list.
+        let pos1 = app
+            .session_list
+            .iter()
+            .position(|s| s.acp_session_id.as_deref() == Some(sid1.as_str()))
+            .unwrap();
+        app.session_panel_selection = pos1;
+        app.handle_action(Action::SessionPanelDelete).unwrap();
+        assert!(app.pending_delete.is_some());
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        assert!(
+            app.session_list
+                .iter()
+                .all(|s| s.acp_session_id.as_deref() != Some(sid1.as_str()))
+        );
+        app.handle_action(Action::SessionPanelClose).unwrap();
+
+        // Closing Agent 1 must NOT kill the shared pooled connection for Agent 0.
+        app.selected_agent = 1;
+        app.handle_action(Action::AgentClose).unwrap();
+        assert!(app.pending_delete.is_some());
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        assert_eq!(app.agents.len(), 1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.closed_agent_backends.is_empty() {
+            assert!(Instant::now() < deadline);
+            app.poll_llm_events();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.acp_pool.active_connection_count(), 1);
+
+        app.selected_agent = 0;
+        app.agent_mut().input.set_text("after sibling close".into());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[0].status == AiStatus::Idle
+                && app.agents[0].messages().iter().any(|m| {
+                    m.role == AiRole::Assistant && m.content.contains("after sibling close")
+                })
+        });
+
+        app.request_agent_shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.agent_shutdown_pending() {
+            assert!(Instant::now() < deadline);
+            app.poll_agent_shutdown();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.acp_pool.active_connection_count(), 0);
+    }
+
+    #[test]
+    fn acp_pool_mode_isolates_codebuddy_and_shares_antigravity() {
+        assert_eq!(
+            super::acp_pool_mode_for_provider(Some("antigravity-acp")),
+            Some(teshi_acp::AcpPoolMode::Shared)
+        );
+        assert_eq!(
+            super::acp_pool_mode_for_provider(Some("codebuddy-code")),
+            Some(teshi_acp::AcpPoolMode::exclusive_warm())
+        );
+        assert_eq!(
+            super::acp_pool_mode_for_provider(Some("codex-acp")),
+            Some(teshi_acp::AcpPoolMode::exclusive_warm())
+        );
+        assert_eq!(super::acp_pool_mode_for_provider(Some("fixture")), None);
+        assert_eq!(super::acp_pool_mode_for_provider(None), None);
+    }
+
+    #[test]
+    fn cmd_sessions_skips_remote_acp_for_native_and_preserves_env_program_on_restore() {
+        use teshi_agent::backend::AgentBackendKind;
+        use teshi_agent_runtime::backend::AcpBackendConfig;
+
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: serialized by ENV_LOCK, which outlives this guard.
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("TESHI_ACP_PROGRAM", value) },
+                    None => unsafe { std::env::remove_var("TESHI_ACP_PROGRAM") },
+                }
+            }
+        }
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = Restore(std::env::var_os("TESHI_ACP_PROGRAM"));
+        // SAFETY: serialized by ENV_LOCK; restored by `_restore`.
+        unsafe { std::env::set_var("TESHI_ACP_PROGRAM", "/custom/bin/fake-acp") };
+
+        let (mut app, _project, _store) = slash_test_app();
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+        let mut config = AcpBackendConfig::new(teshi_acp::AcpAgentCommand {
+            program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+            args: vec![script.display().to_string(), "pooled_reuse".into()],
+            cwd: app.project.root_dir.clone(),
+            env: std::collections::HashMap::new(),
+        });
+        config.connection_pool = Some(std::sync::Arc::clone(&app.acp_pool));
+        config.provider_id = Some("/custom/bin/fake-acp".into());
+        config.client.shutdown_timeout = Duration::from_millis(200);
+
+        // Agent 0 starts on Native; Agent 1 establishes a live pooled connection for the env provider.
+        let mut acp_agent = AgentThread::new(1, "Agent 2");
+        acp_agent.selected_acp_id = None;
+        acp_agent.backend_selected = true;
+        acp_agent.backend =
+            teshi_agent_runtime::backend::AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+        acp_agent.backend.configure_acp(config).unwrap();
+        app.agents.push(acp_agent);
+
+        app.active_tab = MainTab::Ai;
+        app.selected_agent = 1;
+        app.agent_mut().input.set_text("seed remote session".into());
+        app.handle_action(Action::AiSendMessage).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[1].status == AiStatus::Idle
+                && app.agents[1].messages().iter().any(|m| {
+                    m.role == AiRole::Assistant && m.content.contains("seed remote session")
+                })
+        });
+        let sid = app.agents[1]
+            .backend
+            .acp_controls()
+            .unwrap()
+            .session_id
+            .unwrap();
+
+        // While active agent is Native, /sessions must NOT query remote ACP sessions.
+        app.selected_agent = 0;
+        assert_eq!(app.agent().backend_kind(), AgentBackendKind::Native);
+        app.execute_slash_command("sessions").unwrap();
+        assert!(
+            app.remote_sessions_rx.is_none(),
+            "Native backend must not query remote ACP sessions via TESHI_ACP_PROGRAM"
+        );
+        app.handle_action(Action::SessionPanelClose).unwrap();
+
+        // On the ACP agent with selected_acp_id == None (TESHI_ACP_PROGRAM mode), /sessions
+        // queries the pool by env provider_id but leaves Session.acp_agent_id as None.
+        app.selected_agent = 1;
+        app.execute_slash_command("sessions").unwrap();
+        assert!(app.remote_sessions_rx.is_some());
+        wait_mcp_fixture(&mut app, |app| {
+            app.session_list
+                .iter()
+                .any(|s| s.acp_session_id.as_deref() == Some(sid.as_str()))
+        });
+        let remote = app
+            .session_list
+            .iter()
+            .find(|s| s.acp_session_id.as_deref() == Some(sid.as_str()))
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            remote.acp_agent_id, None,
+            "TESHI_ACP_PROGRAM path must not be written into Session.acp_agent_id"
+        );
+
+        app.request_agent_shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.agent_shutdown_pending() {
+            assert!(Instant::now() < deadline);
+            app.poll_agent_shutdown();
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn slash_select_with_trailing_space_does_not_execute_new_or_reinsert_command() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.agent_mut().messages_mut().push(AiChatMessage {
+            role: AiRole::User,
+            content: "keep existing conversation".into(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            source: None,
+            activity: None,
+        });
+
+        assert!(
+            app.matching_slash_commands(" ").is_empty(),
+            "whitespace filter must not match every slash command"
+        );
+        assert!(
+            app.matching_slash_commands("copy ").is_empty(),
+            "command with trailing space must not keep matching suggestion popup"
+        );
+
+        // "/ " + Enter must not fall through to selecting /new and wiping the chat.
+        app.slash_suggestion_active = true;
+        app.slash_suggestion_selection = 0;
+        app.agent_mut().input.set_text("/ ".into());
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        assert!(
+            app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.content == "keep existing conversation"),
+            "submitting '/ ' must not wipe existing chat messages"
+        );
+
+        // "/copy " + Enter must execute instead of re-inserting "/copy " forever.
+        app.slash_suggestion_active = true;
+        app.slash_suggestion_selection = 0;
+        app.agent_mut().input.set_text("/copy ".into());
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        assert!(
+            app.agent().input.text().is_empty(),
+            "submitting '/copy ' must execute and clear input, got {:?}",
+            app.agent().input.text()
+        );
+        assert!(!app.slash_suggestion_active);
+    }
+
+    #[test]
+    fn concurrent_remote_session_deletes_track_all_results_and_rollback_failed_rpc() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.session_panel_active = true;
+
+        let make_remote = |sid: &str| crate::session::Session {
+            id: format!("remote-acp:{sid}"),
+            created_at: String::new(),
+            updated_at: String::new(),
+            model_label: None,
+            message_count: 0,
+            messages: Vec::new(),
+            project_root: Some(app.project.root_dir.clone()),
+            backend_kind: Some(teshi_agent::backend::AgentBackendKind::Acp),
+            acp_agent_id: Some("pooled-test".into()),
+            acp_session_id: Some(sid.into()),
+            member_dir: None,
+            pending_messages: Default::default(),
+            completed_answers: Vec::new(),
+            generated_title: None,
+            agent_title: Some(format!("Title {sid}")),
+            custom_title: None,
+            settled: false,
+        };
+        let s1 = make_remote("s1");
+        let s2 = make_remote("s2");
+
+        let (tx1, rx1) = std::sync::mpsc::channel();
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        app.remote_session_deletes
+            .push(super::PendingRemoteSessionDelete {
+                session_id: s1.id.clone(),
+                remote_session_id: s1.acp_session_id.clone(),
+                is_remote_only: true,
+                rollback_session: Some(s1.clone()),
+                rollback_index: 0,
+                rx: rx1,
+            });
+        app.remote_session_deletes
+            .push(super::PendingRemoteSessionDelete {
+                session_id: s2.id.clone(),
+                remote_session_id: s2.acp_session_id.clone(),
+                is_remote_only: true,
+                rollback_session: Some(s2.clone()),
+                rollback_index: 1,
+                rx: rx2,
+            });
+
+        // While both RPCs are pending, an incoming remote_sessions_rx list must not re-add either.
+        let (list_tx, list_rx) = std::sync::mpsc::channel();
+        list_tx.send(vec![s1.clone(), s2.clone()]).unwrap();
+        app.remote_sessions_rx = Some(list_rx);
+        app.poll_llm_events();
+        assert!(
+            app.session_list.is_empty(),
+            "in-flight deleted sessions must stay filtered while RPCs are pending"
+        );
+        assert_eq!(app.remote_session_deletes.len(), 2);
+
+        // Now s1 fails and s2 succeeds concurrently.
+        tx1.send(Err(
+            "Failed to delete remote ACP session s1: rpc denied".into()
+        ))
+        .unwrap();
+        tx2.send(Ok(s2.id.clone())).unwrap();
+        app.poll_llm_events();
+
+        assert!(app.remote_session_deletes.is_empty());
+        assert!(
+            app.session_list.iter().any(|s| s.id == "remote-acp:s1"),
+            "failed remote delete must roll back into session_list: {:?}",
+            app.session_list
+        );
+        assert!(
+            app.session_list.iter().all(|s| s.id != "remote-acp:s2"),
+            "succeeded remote delete must stay removed"
+        );
     }
 }

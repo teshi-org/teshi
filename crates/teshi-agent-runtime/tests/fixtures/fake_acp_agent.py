@@ -120,6 +120,88 @@ if mode in ("cancel_keeps_session", "cancel_then_permission"):
     sys.exit(0)
 
 
+def log_pool_event(entry):
+    log_path = os.environ.get("TESHI_POOL_LOG")
+    if log_path:
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+
+
+def run_pooled_reuse_mode():
+    pid = os.getpid()
+    next_session = 0
+    active_sessions = {}
+    for line in sys.stdin:
+        message = json.loads(line)
+        method = message.get("method")
+        if method == "initialize":
+            log_pool_event({"method": "initialize", "pid": pid})
+            send({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "fake-pooled-agent"},
+                    "agentCapabilities": {
+                        "sessionCapabilities": {
+                            "close": {},
+                            "list": {},
+                            "delete": {},
+                        }
+                    },
+                },
+            })
+        elif method == "session/new":
+            next_session += 1
+            sid = f"pool-{pid}-{next_session}"
+            active_sessions[sid] = message["params"].get("cwd", "")
+            log_pool_event({"method": "session/new", "pid": pid, "sessionId": sid})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": sid}})
+        elif method == "session/close":
+            sid = message["params"]["sessionId"]
+            active_sessions.pop(sid, None)
+            log_pool_event({"method": "session/close", "pid": pid, "sessionId": sid})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif method == "session/delete":
+            sid = message["params"]["sessionId"]
+            active_sessions.pop(sid, None)
+            log_pool_event({"method": "session/delete", "pid": pid, "sessionId": sid})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif method == "session/list":
+            cwd = message.get("params", {}).get("cwd")
+            sessions = [
+                {"sessionId": sid, "cwd": scwd, "title": f"Remote {sid}"}
+                for sid, scwd in active_sessions.items()
+                if cwd is None or scwd == cwd
+            ]
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessions": sessions}})
+        elif method == "session/prompt":
+            params = message["params"]
+            sid = params["sessionId"]
+            prompt = params["prompt"][0]["text"]
+            if "crash-now" in prompt:
+                sys.exit(13)
+            if sid not in active_sessions:
+                send({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32000, "message": f"session {sid} is closed"},
+                })
+                continue
+            send_update(sid, {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"pid={pid};sid={sid};prompt={prompt}"},
+            })
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+
+
+if mode == "pooled_reuse":
+    run_pooled_reuse_mode()
+    sys.exit(0)
+
+
+authenticated = mode not in ("auth_required", "auth_required_exit")
+
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
@@ -135,9 +217,21 @@ for line in sys.stdin:
                 capabilities["sessionCapabilities"] = {"resume": {}}
             if mode in ("load_session", "load_then_prompt", "load_missing"):
                 capabilities["loadSession"] = True
+            if mode in ("auth_required", "auth_required_exit"):
+                result["authMethods"] = [
+                    {"id": "oauth", "name": "OAuth", "description": "Browser login"},
+                    {"id": "token", "name": "API Token"},
+                ]
             if capabilities:
                 result["agentCapabilities"] = capabilities
             send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+    elif method == "authenticate":
+        method_id = message.get("params", {}).get("methodId")
+        if mode == "auth_required" and method_id == "oauth":
+            authenticated = True
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        else:
+            send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32000, "message": f"unsupported auth method: {method_id}"}})
     elif method == "session/resume":
         assert mode in ("resume_session", "resume_then_prompt"), mode
         params = message["params"]
@@ -161,6 +255,12 @@ for line in sys.stdin:
             "content": {"type": "text", "text": "replayed agent"}})
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "saved-session"}})
     elif method == "session/new":
+        if mode in ("auth_required", "auth_required_exit") and not authenticated:
+            send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32000, "message": "Authentication required"}})
+            if mode == "auth_required_exit":
+                time.sleep(0.1)
+                sys.exit(0)
+            continue
         if mode.startswith("mcp_"):
             mcp_server = message["params"]["mcpServers"][0]
             assert mcp_server["name"] == "teshi-authoring"
@@ -179,6 +279,14 @@ for line in sys.stdin:
                     {"id": "ask", "name": "Ask before changes"},
                     {"id": "auto", "name": "Auto approve changes"}]}
             send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+            if mode == "commands_and_plan":
+                send_update("fake-session", {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        {"name": "review", "description": "Review changes", "input": {"hint": "path"}},
+                        {"name": "compact", "description": "Compact context"},
+                    ],
+                })
             if mode == "stalled_stdin":
                 # A wedged agent: alive, but never reads Teshi's next write.
                 time.sleep(600)
@@ -387,23 +495,24 @@ for line in sys.stdin:
                 assert "[Restored conversation history]" not in prompt
         if mode == "crash":
             sys.exit(13)
-        if mode == "crash_once":
+        if mode in ("crash_once", "crash_once_then_permission"):
             state = Path(os.environ["TESHI_CRASH_STATE"])
             if not state.exists():
                 state.write_text("crashed", encoding="utf-8")
                 sys.exit(13)
-            prompt = message["params"]["prompt"][0]["text"]
-            assert "[Restored conversation history]" in prompt, (
-                "a reconnected process lost the saved transcript")
-            send({"jsonrpc": "2.0", "method": "session/update", "params": {
-                "sessionId": "fake-session", "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": "restored-ok"}}}})
-            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
-            continue
+            if mode == "crash_once":
+                prompt = message["params"]["prompt"][0]["text"]
+                assert "[Restored conversation history]" in prompt, (
+                    "a reconnected process lost the saved transcript")
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "fake-session", "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "restored-ok"}}}})
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+                continue
         if mode == "prompt_failed":
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "prompt rejected"}})
-        elif mode == "permission_then_exit":
+        elif mode in ("permission_then_exit", "crash_once_then_permission"):
             send({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "fake-session", "update": {
                     "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hello"}}}})
@@ -431,6 +540,38 @@ for line in sys.stdin:
             if response is None or response.get("error") or response.get("result", {}).get("outcome", {}).get("outcome") == "cancelled":
                 sys.exit(7)
             send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+        elif mode == "commands_and_plan":
+            prompt = message["params"]["prompt"][0]["text"]
+            if prompt_count == 1:
+                send_update("fake-session", {
+                    "sessionUpdate": "plan",
+                    "entries": [
+                        {"content": "Read feature files", "priority": "high", "status": "completed"},
+                        {"content": "Verify scenario steps", "priority": "medium", "status": "in_progress"},
+                    ],
+                })
+                send_update("fake-session", {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "planned"},
+                })
+            else:
+                send_update("fake-session", {"sessionUpdate": "plan_removed"})
+                send_update("fake-session", {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": f"echo:{prompt}"},
+                })
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+        elif mode == "auth_required":
+            assert authenticated, "session/prompt before authentication"
+            prompt = message["params"]["prompt"][0]["text"]
+            if "fail-prompt" in prompt:
+                send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "prompt rejected"}})
+            else:
+                send_update("fake-session", {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "authed-ok"},
+                })
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
         else:
             if mode == "activity":
                 for update in [

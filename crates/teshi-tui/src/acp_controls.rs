@@ -481,6 +481,137 @@ mod tests {
         app.handle_acp_controls_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.agent().acp_controls_ui.picker.is_none());
     }
+
+    #[test]
+    fn auth_required_chip_and_picker_authenticate_and_recover_idle() {
+        let (mut app, _project, _store) = configured_mode(false, "auth_required");
+        app.agent_mut().backend.connect_acp().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app
+            .agent()
+            .backend
+            .acp_controls()
+            .is_some_and(|s| s.auth_required)
+        {
+            assert!(Instant::now() < deadline);
+            app.poll_llm_events();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render_bar(frame, &mut app, Rect::new(0, 22, 100, 1)))
+            .unwrap();
+        let bar_text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(bar_text.contains("Auth required"), "{bar_text}");
+        assert!(
+            app.agent()
+                .acp_controls_ui
+                .regions
+                .iter()
+                .any(|(_, t)| matches!(t, Target::Auth)),
+            "Auth required chip must register Target::Auth"
+        );
+
+        app.execute_slash_command("auth").unwrap();
+        assert!(!app.auth_panel_active);
+        let picker = app
+            .agent()
+            .acp_controls_ui
+            .picker
+            .as_ref()
+            .expect("auth picker should open");
+        assert!(matches!(picker.scope, PickerScope::Auth));
+
+        terminal
+            .draw(|frame| render_picker(frame, &mut app))
+            .unwrap();
+        let picker_text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(picker_text.contains("ACP authentication"), "{picker_text}");
+        assert!(picker_text.contains("OAuth"), "{picker_text}");
+        assert!(picker_text.contains("API Token"), "{picker_text}");
+        assert!(picker_text.contains("Browser login"), "{picker_text}");
+
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll_llm_events();
+            let state = app.agent().backend.acp_controls().unwrap();
+            if state.ready && !state.auth_required {
+                break;
+            }
+            assert!(Instant::now() < deadline, "auth recovery timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.agent().status, crate::app::AiStatus::Idle);
+    }
+
+    #[test]
+    fn refresh_acp_controls_preserves_error_status_when_not_recovering_from_auth() {
+        let (mut app, _project, _store) = configured_app(true);
+        app.agent_mut().status = crate::app::AiStatus::Error;
+        app.status = "Turn failed: backend error".into();
+
+        app.refresh_acp_controls();
+
+        assert_eq!(
+            app.agent().status,
+            crate::app::AiStatus::Error,
+            "normal turn errors must not be cleared as if auth just recovered"
+        );
+        assert_eq!(app.status, "Turn failed: backend error");
+    }
+
+    #[test]
+    fn open_acp_approvals_keeps_auth_scope_while_auth_required() {
+        let (mut app, _project, _store) = configured_mode(false, "auth_required");
+        app.open_acp_controls(None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll_llm_events();
+            if app
+                .agent()
+                .backend
+                .acp_controls()
+                .is_some_and(|s| s.auth_required)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "auth_required timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        app.open_acp_approvals();
+        assert!(
+            matches!(
+                app.agent()
+                    .acp_controls_ui
+                    .picker
+                    .as_ref()
+                    .map(|p| &p.scope),
+                Some(PickerScope::Auth)
+            ),
+            "approvals picker must stay on Auth scope while authentication is required"
+        );
+
+        app.handle_acp_controls_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(
+            app.agent().acp_controls_ui.picker.is_none(),
+            "Left in Auth picker should close instead of reopening settings"
+        );
+    }
 }
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -499,16 +630,19 @@ use crate::{app::App, theme};
 #[derive(Debug, Clone)]
 enum Target {
     Settings,
+    Auth,
     Option(String),
     Agent,
     Row(usize),
     Back,
+    Close,
 }
 
 #[derive(Debug, Clone)]
 enum PickerScope {
     Settings,
     Approvals,
+    Auth,
 }
 
 impl PickerScope {
@@ -516,6 +650,7 @@ impl PickerScope {
         match self {
             Self::Settings => config.options.iter().collect(),
             Self::Approvals => config.approval_options(),
+            Self::Auth => Vec::new(),
         }
     }
 }
@@ -537,6 +672,7 @@ pub(crate) struct ControlsUi {
     discovery_started: bool,
     animation_started: Option<std::time::Instant>,
     discovery_error: Option<String>,
+    awaiting_auth_recovery: bool,
 }
 
 impl ControlsUi {
@@ -545,6 +681,7 @@ impl ControlsUi {
         self.discovery_started = true;
         self.animation_started = Some(std::time::Instant::now());
         self.discovery_error = None;
+        self.awaiting_auth_recovery = false;
     }
 
     /// Whether settings own text/paste input ahead of the underlying chat.
@@ -567,6 +704,31 @@ impl App {
     }
 
     pub(crate) fn refresh_acp_controls(&mut self) {
+        // Track whether this thread entered an auth-required gate so only real
+        // auth recovery clears AiStatus::Error and sets the auth-ready banner.
+        if let Some(state) = self.agent().backend.acp_controls() {
+            if state.auth_required {
+                self.agent_mut().acp_controls_ui.awaiting_auth_recovery = true;
+            } else if state.ready && state.error.is_none() {
+                if self.agent().acp_controls_ui.awaiting_auth_recovery {
+                    self.agent_mut().acp_controls_ui.awaiting_auth_recovery = false;
+                    if self.agent().status == crate::app::AiStatus::Error {
+                        self.agent_mut().status = crate::app::AiStatus::Idle;
+                        self.agent_mut().acp_controls_ui.discovery_error = None;
+                        self.status = "ACP agent authenticated and ready".into();
+                    }
+                }
+                if self
+                    .agent()
+                    .acp_controls_ui
+                    .picker
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.scope, PickerScope::Auth))
+                {
+                    self.agent_mut().acp_controls_ui.picker = None;
+                }
+            }
+        }
         // Polling updates an existing picker; displaying chat never connects it.
         self.refresh_acp_approval_picker();
     }
@@ -662,6 +824,10 @@ impl App {
         let Some(state) = self.agent().backend.acp_controls() else {
             return;
         };
+        if id.is_none() && state.auth_required && !state.auth_methods.is_empty() {
+            self.open_acp_auth();
+            return;
+        }
         let option = id.and_then(|id| state.config.options.iter().find(|o| o.id == id).cloned());
         let selected = option
             .as_ref()
@@ -676,10 +842,34 @@ impl App {
         });
     }
 
+    /// Open the interactive `authMethods` picker for an ACP session awaiting authentication.
+    pub(crate) fn open_acp_auth(&mut self) {
+        let Some(state) = self.agent().backend.acp_controls() else {
+            self.status = "Select an ACP agent with /agent first".into();
+            return;
+        };
+        if state.auth_methods.is_empty() {
+            self.open_acp_controls(None);
+            return;
+        }
+        if state.auth_required {
+            self.agent_mut().acp_controls_ui.awaiting_auth_recovery = true;
+        }
+        self.agent_mut().acp_controls_ui.picker = Some(Picker {
+            scope: PickerScope::Auth,
+            option: None,
+            revision: state.revision,
+            selected: 0,
+            error: None,
+        });
+    }
+
     /// Open the current ACP session's advertised approval settings.
     pub(crate) fn open_acp_approvals(&mut self) {
         self.open_acp_controls(None);
-        if let Some(picker) = &mut self.agent_mut().acp_controls_ui.picker {
+        if let Some(picker) = &mut self.agent_mut().acp_controls_ui.picker
+            && !matches!(picker.scope, PickerScope::Auth)
+        {
             picker.scope = PickerScope::Approvals;
         }
         self.refresh_acp_approval_picker();
@@ -750,6 +940,10 @@ impl App {
     fn activate_control(&mut self, target: Target) {
         match target {
             Target::Settings | Target::Back => self.open_acp_controls(None),
+            Target::Close => {
+                self.agent_mut().acp_controls_ui.picker = None;
+            }
+            Target::Auth => self.open_acp_auth(),
             Target::Option(id) => self.open_acp_controls(Some(id)),
             Target::Agent => {
                 self.agent_mut().acp_controls_ui.picker = None;
@@ -759,6 +953,30 @@ impl App {
                 let Some(picker) = self.agent().acp_controls_ui.picker.clone() else {
                     return;
                 };
+                if matches!(picker.scope, PickerScope::Auth) {
+                    let Some(method) = self
+                        .agent()
+                        .backend
+                        .acp_controls()
+                        .and_then(|s| s.auth_methods.get(index).cloned())
+                    else {
+                        return;
+                    };
+                    match self.agent_mut().backend.authenticate_acp(method.id.clone()) {
+                        Ok(()) => {
+                            self.agent_mut().acp_controls_ui.awaiting_auth_recovery = true;
+                            self.agent_mut().acp_controls_ui.picker = None;
+                            self.status = format!("Authenticating with {}...", method.name);
+                        }
+                        Err(error) => {
+                            self.status = error.to_string();
+                            if let Some(picker) = &mut self.agent_mut().acp_controls_ui.picker {
+                                picker.error = Some(error.to_string());
+                            }
+                        }
+                    }
+                    return;
+                }
                 if let Some(option) = picker.option {
                     let Some(choice) = option.choices.get(index) else {
                         return;
@@ -807,6 +1025,8 @@ impl App {
             || self.approval_panel_active
             || self.settings_panel_active
             || self.help_guide.active
+            || self.composer_editor.is_some()
+            || self.history_search.is_some()
         {
             return false;
         }
@@ -820,15 +1040,19 @@ impl App {
         let Some(picker) = self.agent().acp_controls_ui.picker.as_ref() else {
             return false;
         };
+        let is_auth_scope = matches!(picker.scope, PickerScope::Auth);
         let count = picker
             .option
             .as_ref()
             .map(|o| o.choices.len())
             .unwrap_or_else(|| {
-                self.agent()
-                    .backend
-                    .acp_controls()
-                    .map_or(0, |s| picker.scope.options(&s.config).len())
+                self.agent().backend.acp_controls().map_or(0, |s| {
+                    if is_auth_scope {
+                        s.auth_methods.len()
+                    } else {
+                        picker.scope.options(&s.config).len()
+                    }
+                })
             });
         let selected = picker.selected;
         let top = event.code == KeyCode::Home
@@ -862,7 +1086,13 @@ impl App {
             KeyCode::Esc => {
                 self.agent_mut().acp_controls_ui.picker = None;
             }
-            KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => self.open_acp_controls(None),
+            KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => {
+                if is_auth_scope {
+                    self.agent_mut().acp_controls_ui.picker = None;
+                } else {
+                    self.open_acp_controls(None);
+                }
+            }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 self.activate_control(Target::Row(selected))
             }
@@ -900,6 +1130,8 @@ impl App {
             || self.session_panel_active
             || self.quit_pending_confirm
             || self.ai_interrupt_confirm
+            || self.composer_editor.is_some()
+            || self.history_search.is_some()
         {
             return false;
         }
@@ -933,6 +1165,7 @@ impl App {
 fn chip(frame: &mut Frame<'_>, area: Rect, label: String, target: Target, ui: &mut ControlsUi) {
     let is_agent = matches!(target, Target::Agent);
     let is_settings = matches!(target, Target::Settings);
+    let is_auth = matches!(target, Target::Auth);
     let content = if let Some((name, value)) = label.split_once(": ") {
         let (val_text, has_chevron) = match value.strip_suffix(" ▾") {
             Some(v) => (v, true),
@@ -977,7 +1210,13 @@ fn chip(frame: &mut Frame<'_>, area: Rect, label: String, target: Target, ui: &m
         } else {
             label
         };
-        let color = if is_settings { theme::MUTED } else { theme::FG };
+        let color = if is_auth {
+            theme::WARNING
+        } else if is_settings {
+            theme::MUTED
+        } else {
+            theme::FG
+        };
         Line::from(Span::styled(text, Style::default().fg(color)))
     };
     frame.render_widget(Paragraph::new(content), area);
@@ -1008,6 +1247,8 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .map_or(std::time::Duration::ZERO, |start| start.elapsed());
     let status = if state.pending {
         format!("{} Applying", loading_frame(elapsed))
+    } else if state.auth_required {
+        "Auth required".into()
     } else if state.error.is_some() || app.agent().acp_controls_ui.discovery_error.is_some() {
         "Error".into()
     } else if !state.ready && app.agent().acp_controls_ui.discovery_started {
@@ -1031,9 +1272,15 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     });
     let activity_on_left = state.pending
         || (!state.ready
+            && !state.auth_required
             && state.error.is_none()
             && app.agent().acp_controls_ui.discovery_error.is_none()
             && app.agent().acp_controls_ui.discovery_started);
+    let more_target = if state.auth_required && !state.auth_methods.is_empty() {
+        Target::Auth
+    } else {
+        Target::Settings
+    };
     let ui = &mut app.agent_mut().acp_controls_ui;
     ui.regions.clear();
     if area.height == 0 || area.width == 0 {
@@ -1052,7 +1299,7 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             1,
         ),
         more,
-        Target::Settings,
+        more_target,
         ui,
     );
     let mut x = if activity_on_left {
@@ -1145,7 +1392,13 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
     };
     let screen = frame.area();
     let count = picker.option.as_ref().map_or_else(
-        || picker.scope.options(&state.config).len(),
+        || {
+            if matches!(picker.scope, PickerScope::Auth) {
+                state.auth_methods.len()
+            } else {
+                picker.scope.options(&state.config).len()
+            }
+        },
         |o| o.choices.len(),
     );
     let width = screen.width.min(60);
@@ -1160,6 +1413,7 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         height,
     );
     let title = match (&picker.scope, &picker.option) {
+        (PickerScope::Auth, _) => "ACP authentication".into(),
         (PickerScope::Approvals, Some(o)) => format!("ACP approvals: {}", o.name),
         (PickerScope::Approvals, None) => "ACP approvals".into(),
         (PickerScope::Settings, Some(o)) => o.name.clone(),
@@ -1169,7 +1423,9 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    let rows: Vec<String> = if let Some(option) = &picker.option {
+    let rows: Vec<String> = if matches!(picker.scope, PickerScope::Auth) {
+        state.auth_methods.iter().map(|m| m.name.clone()).collect()
+    } else if let Some(option) = &picker.option {
         option
             .choices
             .iter()
@@ -1229,37 +1485,57 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(Paragraph::new(text.clone()).style(style), rect);
         ui.regions.push((rect, Target::Row(index)));
     }
-    let description = picker.option.as_ref().and_then(|o| {
-        o.choices
+    let description = if matches!(picker.scope, PickerScope::Auth) {
+        state
+            .auth_methods
             .get(selected)
-            .and_then(|c| c.description.as_deref())
-            .or(o.description.as_deref())
-    });
+            .and_then(|m| m.description.as_deref())
+    } else {
+        picker.option.as_ref().and_then(|o| {
+            o.choices
+                .get(selected)
+                .and_then(|c| c.description.as_deref())
+                .or(o.description.as_deref())
+        })
+    };
     let elapsed = ui
         .animation_started
         .map_or(std::time::Duration::ZERO, |start| start.elapsed());
     let fallback = if state.pending {
         format!("{} Applying setting...", loading_frame(elapsed))
-    } else if !state.ready {
+    } else if !state.ready && !state.auth_required {
         format!("{} Loading agent settings...", loading_frame(elapsed))
     } else if rows.is_empty() {
         if picker.option.is_some() {
             "This agent setting uses an unsupported type".into()
+        } else if matches!(picker.scope, PickerScope::Auth) {
+            "This ACP agent did not advertise authentication methods".into()
         } else if matches!(picker.scope, PickerScope::Approvals) {
             "This ACP agent does not advertise approval settings or modes".into()
         } else {
             "No editable settings advertised by this agent".into()
         }
+    } else if matches!(picker.scope, PickerScope::Auth) {
+        "↑/↓ select · Enter authenticate · Esc close".into()
     } else {
         "↑/↓ select · Enter apply · ← settings · Esc close".into()
     };
-    let message = picker
-        .error
-        .as_deref()
-        .or(state.error.as_deref())
-        .or(ui.discovery_error.as_deref())
-        .or(description)
-        .unwrap_or(&fallback);
+    let message = if matches!(picker.scope, PickerScope::Auth) {
+        picker
+            .error
+            .as_deref()
+            .or(description)
+            .or(ui.discovery_error.as_deref())
+            .unwrap_or(&fallback)
+    } else {
+        picker
+            .error
+            .as_deref()
+            .or(state.error.as_deref())
+            .or(ui.discovery_error.as_deref())
+            .or(description)
+            .unwrap_or(&fallback)
+    };
     frame.render_widget(
         Paragraph::new(message)
             .style(Style::default().fg(theme::FG))
@@ -1267,8 +1543,19 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         Rect::new(inner.x, inner.bottom().saturating_sub(3), inner.width, 2),
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    frame.render_widget(Paragraph::new(Line::from("[Back]  [Agent]")), footer);
-    for (offset, width, target) in [(0, 6, Target::Back), (8, 7, Target::Agent)] {
+    let (footer_text, buttons) = if matches!(picker.scope, PickerScope::Auth) {
+        (
+            "[Close]  [Agent]",
+            [(0, 7, Target::Close), (9, 7, Target::Agent)],
+        )
+    } else {
+        (
+            "[Back]  [Agent]",
+            [(0, 6, Target::Back), (8, 7, Target::Agent)],
+        )
+    };
+    frame.render_widget(Paragraph::new(Line::from(footer_text)), footer);
+    for (offset, width, target) in buttons {
         if offset + width <= inner.width {
             ui.regions
                 .push((Rect::new(inner.x + offset, footer.y, width, 1), target));

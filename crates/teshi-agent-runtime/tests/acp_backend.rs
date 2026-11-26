@@ -1389,3 +1389,761 @@ fn manual_permission_with_host_rejection_fails_turn() {
     );
     assert_eq!(backend.status(), AgentBackendStatus::Failed);
 }
+
+#[test]
+fn connection_pool_reuses_process_closes_sessions_and_evicts_crashed_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let log_path = temp.path().join("pool.jsonl");
+    let mut env = HashMap::new();
+    env.insert("TESHI_POOL_LOG".into(), log_path.display().to_string());
+    let pool = std::sync::Arc::new(teshi_acp::AcpConnectionPool::new());
+
+    let make_backend = |pool: &std::sync::Arc<teshi_acp::AcpConnectionPool>,
+                        env: &HashMap<String, String>| {
+        let mut config = fixture_config("pooled_reuse", Vec::new(), env.clone());
+        config.provider_id = Some("fake-pooled".into());
+        config.connection_pool = Some(std::sync::Arc::clone(pool));
+        let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+        backend.configure_acp(config).unwrap();
+        backend
+    };
+
+    let mut first = make_backend(&pool, &env);
+    let mut second = make_backend(&pool, &env);
+    first.connect_acp().unwrap();
+    let c1 = wait_controls(&first, |s| s.ready);
+    assert!(c1.supports_list_sessions);
+    assert!(c1.supports_delete_session);
+    let sid1 = c1.session_id.expect("first session id");
+
+    second.connect_acp().unwrap();
+    let c2 = wait_controls(&second, |s| s.ready);
+    let sid2 = c2.session_id.expect("second session id");
+    assert_ne!(sid1, sid2, "pooled sessions must have distinct session ids");
+
+    first.start().unwrap();
+    first
+        .submit_turn(None, vec![ChatMessage::text("user", "one")], None)
+        .unwrap();
+    let e1 = events_until_terminal(&mut first);
+    let reply1 = e1
+        .iter()
+        .find_map(|e| match e {
+            AgentBackendEvent::MessageChunk { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("first reply");
+
+    second.start().unwrap();
+    second
+        .submit_turn(None, vec![ChatMessage::text("user", "two")], None)
+        .unwrap();
+    let e2 = events_until_terminal(&mut second);
+    let reply2 = e2
+        .iter()
+        .find_map(|e| match e {
+            AgentBackendEvent::MessageChunk { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("second reply");
+
+    let pid1 = reply1
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("pid=")
+        .unwrap()
+        .to_string();
+    let pid2 = reply2
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("pid=")
+        .unwrap()
+        .to_string();
+    assert_eq!(pid1, pid2, "second session must reuse the first process");
+    assert!(
+        reply1.contains(&format!("sid={sid1};prompt=")) && reply1.contains("one"),
+        "{reply1}"
+    );
+    assert!(
+        reply2.contains(&format!("sid={sid2};prompt=")) && reply2.contains("two"),
+        "{reply2}"
+    );
+
+    // Closing session 1 must send session/close without killing session 2.
+    drop(first);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let log_now = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if log_now.contains("\"session/close\"") && log_now.contains(&sid1) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let log_text = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log_text.contains("\"session/close\"") && log_text.contains(&sid1),
+        "{log_text}"
+    );
+
+    second.start().unwrap();
+    second
+        .submit_turn(None, vec![ChatMessage::text("user", "still-alive")], None)
+        .unwrap();
+    let e2_after = events_until_terminal(&mut second);
+    assert!(e2_after.iter().any(|e| matches!(
+        e,
+        AgentBackendEvent::MessageChunk { content }
+            if content.contains(&format!("pid={pid1};sid={sid2};prompt="))
+                && content.contains("still-alive")
+    )));
+
+    // Crashing the pooled process must evict it so a third session spawns a fresh PID.
+    second.start().unwrap();
+    second
+        .submit_turn(None, vec![ChatMessage::text("user", "crash-now")], None)
+        .unwrap();
+    let crashed = events_until_terminal(&mut second);
+    assert!(
+        matches!(crashed.last(), Some(AgentBackendEvent::Failed(_))),
+        "{crashed:?}"
+    );
+    drop(second);
+
+    let mut third = make_backend(&pool, &env);
+    third.connect_acp().unwrap();
+    let _c3 = wait_controls(&third, |s| s.ready);
+    third.start().unwrap();
+    third
+        .submit_turn(None, vec![ChatMessage::text("user", "after-crash")], None)
+        .unwrap();
+    let e3 = events_until_terminal(&mut third);
+    let reply3 = e3
+        .iter()
+        .find_map(|e| match e {
+            AgentBackendEvent::MessageChunk { content } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("third reply");
+    let pid3 = reply3
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("pid=")
+        .unwrap()
+        .to_string();
+    assert_ne!(pid3, pid1, "crashed pooled process must be evicted");
+
+    drop(third);
+    pool.block_on(pool.shutdown_all());
+    assert!(!pool.shutdown_pending());
+}
+
+#[test]
+fn connection_pool_exclusive_mode_isolates_backends_and_reuses_idle() {
+    let pool = std::sync::Arc::new(teshi_acp::AcpConnectionPool::new());
+    let make_backend = |pool: &std::sync::Arc<teshi_acp::AcpConnectionPool>| {
+        let mut config = fixture_config("pooled_reuse", Vec::new(), HashMap::new());
+        config.provider_id = Some("exclusive-agent".into());
+        config.connection_pool = Some(std::sync::Arc::clone(pool));
+        config.pool_mode = teshi_acp::AcpPoolMode::Exclusive {
+            prewarm_standby: 0,
+            max_idle: 2,
+        };
+        let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+        backend.configure_acp(config).unwrap();
+        backend
+    };
+
+    let mut first = make_backend(&pool);
+    let mut second = make_backend(&pool);
+    first.connect_acp().unwrap();
+    second.connect_acp().unwrap();
+    let _c1 = wait_controls(&first, |s| s.ready);
+    let _c2 = wait_controls(&second, |s| s.ready);
+
+    // Both backends run concurrently on separate OS processes.
+    first.start().unwrap();
+    second.start().unwrap();
+    first
+        .submit_turn(None, vec![ChatMessage::text("user", "alpha")], None)
+        .unwrap();
+    second
+        .submit_turn(None, vec![ChatMessage::text("user", "beta")], None)
+        .unwrap();
+
+    let e1 = events_until_terminal(&mut first);
+    let e2 = events_until_terminal(&mut second);
+    let pid_of = |events: &[AgentBackendEvent]| {
+        events
+            .iter()
+            .find_map(|e| match e {
+                AgentBackendEvent::MessageChunk { content } => content
+                    .split(';')
+                    .next()
+                    .and_then(|s| s.strip_prefix("pid="))
+                    .map(str::to_string),
+                _ => None,
+            })
+            .expect("pid in reply")
+    };
+    let pid1 = pid_of(&e1);
+    let pid2 = pid_of(&e2);
+    assert_ne!(
+        pid1, pid2,
+        "concurrent exclusive backends must run on distinct processes"
+    );
+
+    // Dropping the first backend returns its live process to the idle cache.
+    drop(first);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pool.idle_connection_count() < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "dropped lease should become idle"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut third = make_backend(&pool);
+    third.connect_acp().unwrap();
+    let _c3 = wait_controls(&third, |s| s.ready);
+    third.start().unwrap();
+    third
+        .submit_turn(None, vec![ChatMessage::text("user", "gamma")], None)
+        .unwrap();
+    let e3 = events_until_terminal(&mut third);
+    let pid3 = pid_of(&e3);
+    assert_eq!(
+        pid3, pid1,
+        "new exclusive backend should reuse the returned idle process"
+    );
+
+    drop(second);
+    drop(third);
+    pool.block_on(pool.shutdown_all());
+    assert_eq!(pool.active_connection_count(), 0);
+    assert!(!pool.shutdown_pending());
+}
+
+#[test]
+fn available_commands_and_plan_updates_are_consumed_and_cleared() {
+    let mut backend = backend("commands_and_plan");
+    backend.connect_acp().unwrap();
+    wait_controls(&backend, |s| s.ready);
+
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "plan please")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    let cmds = events
+        .iter()
+        .find_map(|e| match e {
+            AgentBackendEvent::AvailableCommands { commands } => Some(commands.clone()),
+            _ => None,
+        })
+        .expect("AvailableCommands event");
+    assert_eq!(cmds.len(), 2, "{cmds:?}");
+    assert_eq!(cmds[0].name, "review");
+    assert_eq!(cmds[0].input_hint.as_deref(), Some("path"));
+    assert_eq!(cmds[1].name, "compact");
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::PlanUpdate { entries } if entries.len() == 2
+        )),
+        "{events:?}"
+    );
+    let plan_msg = backend
+        .messages()
+        .iter()
+        .find(|m| m.source.as_deref() == Some("acp_plan"))
+        .expect("acp_plan message recorded");
+    assert!(
+        plan_msg.content.contains("Read feature files"),
+        "{}",
+        plan_msg.content
+    );
+    assert!(
+        plan_msg.content.contains("Verify scenario steps"),
+        "{}",
+        plan_msg.content
+    );
+
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "done")], None)
+        .unwrap();
+    let events2 = events_until_terminal(&mut backend);
+    assert!(
+        events2.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::PlanUpdate { entries } if entries.is_empty()
+        )),
+        "{events2:?}"
+    );
+    assert!(
+        backend
+            .messages()
+            .iter()
+            .all(|m| m.source.as_deref() != Some("acp_plan")),
+        "plan_removed must clear acp_plan message"
+    );
+}
+
+#[test]
+fn interactive_authentication_required_recovers_after_authenticate_acp() {
+    let mut backend = backend("auth_required");
+    backend.connect_acp().unwrap();
+    let auth_state = wait_controls(&backend, |s| s.auth_required);
+    assert!(!auth_state.ready);
+    assert_eq!(auth_state.auth_methods.len(), 2);
+    assert_eq!(auth_state.auth_methods[0].id, "oauth");
+    let failed_events = events_until_terminal(&mut backend);
+    assert!(
+        matches!(failed_events.last(), Some(AgentBackendEvent::Failed(_))),
+        "{failed_events:?}"
+    );
+
+    backend.authenticate_acp("oauth".into()).unwrap();
+    let ready_state = wait_controls(&backend, |s| s.ready && !s.auth_required);
+    assert!(ready_state.error.is_none(), "{:?}", ready_state.error);
+
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "hi")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::MessageChunk { content } if content == "authed-ok"
+        )),
+        "{events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentBackendEvent::Completed { .. })
+    ));
+}
+
+#[test]
+fn failed_turn_on_ready_session_resets_worker_on_next_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pid.txt");
+    let mut backend = backend_with(
+        "prompt_failed",
+        vec![marker.display().to_string()],
+        HashMap::new(),
+        None,
+    );
+    backend.connect_acp().unwrap();
+    let initial = wait_controls(&backend, |s| s.ready);
+    assert!(initial.ready);
+    let first_pid = std::fs::read_to_string(&marker).unwrap();
+
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "boom")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(matches!(events.last(), Some(AgentBackendEvent::Failed(_))));
+    assert_eq!(backend.status(), AgentBackendStatus::Failed);
+    // Worker must spontaneously clear ready and exit after turn failure.
+    let stopped = wait_controls(&backend, |s| !s.ready);
+    assert!(!stopped.ready);
+
+    // Give the detached worker thread a brief moment to finish process teardown, then
+    // verify the first reconnect attempt succeeds without failing with "still stopping".
+    thread::sleep(Duration::from_millis(150));
+    backend
+        .connect_acp()
+        .expect("first connect_acp after failed turn should succeed cleanly");
+    wait_controls(&backend, |s| s.ready);
+    let second_pid = std::fs::read_to_string(&marker).unwrap();
+    assert_ne!(
+        first_pid, second_pid,
+        "connect_acp after a Failed turn must spawn a fresh worker process"
+    );
+}
+
+#[test]
+fn process_exit_during_auth_required_clears_auth_required_flag() {
+    let mut backend = backend("auth_required_exit");
+    backend.connect_acp().unwrap();
+    let _ = wait_controls(&backend, |s| s.auth_required);
+    let cleared = wait_controls(&backend, |s| !s.auth_required && s.error.is_some());
+    assert!(!cleared.auth_required);
+    assert!(!cleared.pending);
+    assert!(
+        cleared
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("exited before authentication")),
+        "{:?}",
+        cleared.error
+    );
+}
+
+#[test]
+fn manual_permission_host_is_restored_across_reconnect_after_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let crash_state = dir.path().join("crashed.flag");
+    let mut env = HashMap::new();
+    env.insert(
+        "TESHI_CRASH_STATE".into(),
+        crash_state.display().to_string(),
+    );
+    let mut config = fixture_config("crash_once_then_permission", Vec::new(), env);
+    config.permission_policy = teshi_acp::PermissionPolicy::Manual;
+    config.permission_host = Some(teshi_agent_runtime::ChannelPermissionHost::new());
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    backend.configure_acp(config).unwrap();
+
+    // First turn crashes the agent process.
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "first")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(matches!(events.last(), Some(AgentBackendEvent::Failed(_))));
+    assert_eq!(backend.status(), AgentBackendStatus::Failed);
+
+    // Reconnect and submit a second turn that requires Manual permission approval.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        backend.poll_shutdown();
+        match backend.connect_acp() {
+            Ok(()) => break,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Err(err) => panic!("reconnect failed: {err}"),
+        }
+    }
+    wait_controls(&backend, |s| s.ready);
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "second")], None)
+        .unwrap();
+
+    let wait_perm = Instant::now() + Duration::from_secs(5);
+    let mut request_id = None;
+    let mut saw_completed = false;
+    while Instant::now() < wait_perm {
+        match backend.try_next_event() {
+            Ok(Some(AgentBackendEvent::PermissionRequest {
+                request_id: id,
+                options,
+            })) => {
+                assert!(!options.is_empty());
+                request_id = Some(id);
+                assert!(
+                    backend.respond_permission(id, Some("allow_once".into())),
+                    "permission_host must be restored after reconnect"
+                );
+            }
+            Ok(Some(AgentBackendEvent::Completed { .. })) => {
+                saw_completed = true;
+                break;
+            }
+            Ok(Some(AgentBackendEvent::Failed(err))) => panic!("unexpected failure: {err}"),
+            Ok(_) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    assert!(
+        request_id.is_some(),
+        "reconnected backend must surface PermissionRequest"
+    );
+    assert!(
+        saw_completed,
+        "reconnected backend must complete after permission response"
+    );
+}
+
+#[test]
+fn authenticate_without_draining_failed_event_does_not_reset_authenticated_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pid.txt");
+    let mut backend = backend_with(
+        "auth_required",
+        vec![marker.display().to_string()],
+        HashMap::new(),
+        None,
+    );
+    backend.connect_acp().unwrap();
+    let auth_state = wait_controls(&backend, |s| s.auth_required);
+    assert!(auth_state.auth_required);
+
+    // Intentionally do NOT drain the AuthenticationRequired `Failed` event before authenticating.
+    backend.authenticate_acp("oauth".into()).unwrap();
+    let ready_state = wait_controls(&backend, |s| s.ready && !s.auth_required);
+    assert_eq!(ready_state.confirmed_auth_method.as_deref(), Some("oauth"));
+    let pid_before = std::fs::read_to_string(&marker).unwrap();
+
+    // Polling events after authenticating must ignore the stale pre-auth Failed event.
+    while let Ok(Some(ev)) = backend.try_next_event() {
+        assert!(
+            !matches!(ev, AgentBackendEvent::Failed(_)),
+            "stale pre-auth Failed event leaked after authenticate_acp: {ev:?}"
+        );
+    }
+    assert_ne!(backend.status(), AgentBackendStatus::Failed);
+
+    backend.start().unwrap();
+    let pid_after_start = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(
+        pid_before, pid_after_start,
+        "start() must keep the freshly authenticated worker instead of resetting it"
+    );
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "hi")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(matches!(
+        events.last(),
+        Some(AgentBackendEvent::Completed { .. })
+    ));
+}
+
+#[test]
+fn failed_authenticate_does_not_persist_rejected_auth_method_across_reconnect() {
+    let mut backend = backend("auth_required");
+    backend.connect_acp().unwrap();
+    let _ = wait_controls(&backend, |s| s.auth_required);
+    let _ = events_until_terminal(&mut backend);
+
+    // Try a rejected auth method first ("token" fails in fake_acp_agent.py).
+    backend.authenticate_acp("token".into()).unwrap();
+    let rejected = events_until_terminal(&mut backend);
+    assert!(matches!(
+        rejected.last(),
+        Some(AgentBackendEvent::Failed(_))
+    ));
+    assert!(
+        backend
+            .acp_controls()
+            .unwrap()
+            .confirmed_auth_method
+            .is_none(),
+        "rejected auth method must not be marked confirmed"
+    );
+
+    // Force a fresh worker reconnect after failed auth; the rejected method must NOT be replayed automatically.
+    backend.request_shutdown();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        backend.poll_shutdown();
+        match backend.connect_acp() {
+            Ok(()) => break,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Err(err) => panic!("reconnect failed: {err}"),
+        }
+    }
+    let re_auth = wait_controls(&backend, |s| s.auth_required);
+    assert!(
+        re_auth.auth_required,
+        "fresh worker must prompt for interactive auth instead of failing with rejected method: {re_auth:?}"
+    );
+    let _ = events_until_terminal(&mut backend);
+
+    // Now succeed with the valid method ("oauth") and verify reconnect carries the confirmed method cleanly.
+    backend.authenticate_acp("oauth".into()).unwrap();
+    let ready = wait_controls(&backend, |s| s.ready && !s.auth_required);
+    assert_eq!(ready.confirmed_auth_method.as_deref(), Some("oauth"));
+
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "fail-prompt")], None)
+        .unwrap();
+    let prompt_fail = events_until_terminal(&mut backend);
+    assert!(matches!(
+        prompt_fail.last(),
+        Some(AgentBackendEvent::Failed(_))
+    ));
+    let _ = wait_controls(&backend, |s| !s.ready);
+    thread::sleep(Duration::from_millis(150));
+
+    backend.connect_acp().unwrap();
+    let recovered = wait_controls(&backend, |s| s.ready);
+    assert!(recovered.ready);
+    assert!(!recovered.auth_required);
+    assert!(recovered.error.is_none(), "{:?}", recovered.error);
+}
+
+#[test]
+fn auth_required_controls_are_visible_before_failed_event_is_polled() {
+    let mut backend = backend("auth_required");
+    backend.connect_acp().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match backend.try_next_event() {
+            Ok(Some(AgentBackendEvent::Failed(_))) => {
+                let controls = backend.acp_controls().unwrap();
+                assert!(
+                    controls.auth_required,
+                    "auth_required must already be true when Failed event is observed: {controls:?}"
+                );
+                assert!(!controls.pending);
+                assert!(!controls.auth_methods.is_empty());
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for auth_required Failed event"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => panic!("event channel disconnected: {err}"),
+        }
+    }
+}
+
+#[test]
+fn pooled_load_session_drains_large_history_replay_without_leaking_into_live_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("large_replay_acp.py");
+    std::fs::write(
+        &script,
+        r#"import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    req_id = msg.get("id")
+    if method == "initialize":
+        send({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": 1,
+                "agentInfo": {"name": "replay-agent", "version": "1.0"},
+                "agentCapabilities": {"loadSession": True},
+            },
+        })
+    elif method == "session/load":
+        sid = msg["params"]["sessionId"]
+        for i in range(600):
+            send({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": f"replay-{i}"},
+                    },
+                },
+            })
+        send({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        {"name": "summary", "description": "Summarize history"}
+                    ],
+                },
+            },
+        })
+        send({"jsonrpc": "2.0", "id": req_id, "result": {"sessionId": sid}})
+    elif method == "session/prompt":
+        sid = msg["params"]["sessionId"]
+        send({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "live-answer"},
+                },
+            },
+        })
+        send({"jsonrpc": "2.0", "id": req_id, "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+
+    let pool = std::sync::Arc::new(teshi_acp::AcpConnectionPool::new());
+    let mut config = AcpBackendConfig::new(AcpAgentCommand {
+        program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+        args: vec![script.display().to_string()],
+        cwd: dir.path().to_path_buf(),
+        env: HashMap::new(),
+    });
+    config.connection_pool = Some(std::sync::Arc::clone(&pool));
+    config.pool_mode = teshi_acp::AcpPoolMode::Shared;
+    config.provider_id = Some("large-replay-test".into());
+    config.restore_session_id = Some("saved-large-session".into());
+    config.client.initialize_timeout = Duration::from_secs(5);
+    config.client.request_timeout = Duration::from_secs(5);
+    config.client.shutdown_timeout = Duration::from_secs(2);
+
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    backend.configure_acp(config).unwrap();
+    backend.connect_acp().unwrap();
+    let controls = wait_controls(&backend, |s| s.ready);
+    assert!(controls.remote_context_restored);
+    assert_eq!(controls.session_id.as_deref(), Some("saved-large-session"));
+
+    let mut pre_turn_events = Vec::new();
+    while let Ok(Some(ev)) = backend.try_next_event() {
+        pre_turn_events.push(ev);
+    }
+    assert!(
+        !pre_turn_events
+            .iter()
+            .any(|e| matches!(e, AgentBackendEvent::MessageChunk { .. })),
+        "none of the 600 replay chunks may leak into live events: {pre_turn_events:?}"
+    );
+    assert!(
+        pre_turn_events.iter().any(|e| matches!(
+            e,
+            AgentBackendEvent::AvailableCommands { commands }
+                if commands.iter().any(|c| c.name == "summary")
+        )),
+        "trailing available_commands_update from replay must be preserved: {pre_turn_events:?}"
+    );
+
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "next question")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    let chunks: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentBackendEvent::MessageChunk { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        chunks,
+        vec!["live-answer"],
+        "live turn must contain only live-answer without replay leftovers"
+    );
+
+    backend.request_shutdown();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while backend.shutdown_pending() {
+        backend.poll_shutdown();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    pool.runtime_handle().unwrap().block_on(pool.shutdown_all());
+}

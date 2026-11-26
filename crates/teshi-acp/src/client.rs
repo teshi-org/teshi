@@ -1,15 +1,16 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use agent_client_protocol::schema::v1::{
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, ResumeSessionRequest,
+    CloseSessionRequest, DeleteSessionRequest, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, ResumeSessionRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -23,12 +24,28 @@ use tokio::{
 use crate::{
     command::AcpAgentCommand,
     error::{AcpError, AcpResult},
-    jsonrpc::{self, JsonRpcMessage, JsonRpcPeer},
+    jsonrpc::{self, InboundMessage, JsonRpcMessage, JsonRpcPeer},
     permission::{PermissionDecision, PermissionHost, PermissionOption, PermissionPolicy},
 };
 
 /// Longest wait for `session/cancel` to reach an agent that may not be reading.
 const CANCEL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Per-route outbound event buffer capacity so one slow consumer cannot stall
+/// the shared JSON-RPC dispatcher or reader loop.
+const ROUTE_EVENT_BUFFER: usize = 4096;
+
+/// Bounded wait when flushing `AcpEvent::Completed` through a route forwarder so
+/// callers that drain a small bounded `events` receiver after `prompt` returns
+/// cannot deadlock on a full channel.
+const ROUTE_FLUSH_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Bounded wait for the dispatcher fence so trailing notifications arrive before
+/// `AcpEvent::Completed`.
+const DISPATCHER_FENCE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Upper bound on `session/list` pagination pages to guard against faulty servers.
+const MAX_LIST_SESSIONS_PAGES: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpLifecycle {
@@ -57,6 +74,24 @@ impl Default for ClientInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteSessionInfo {
+    pub session_id: String,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
     #[serde(default)]
@@ -65,6 +100,8 @@ pub struct InitializeResult {
     pub agent_info: Value,
     #[serde(default)]
     pub auth_methods: Vec<String>,
+    #[serde(default)]
+    pub auth_method_details: Vec<AuthMethodInfo>,
     #[serde(default)]
     pub capabilities: Value,
     #[serde(default)]
@@ -95,6 +132,27 @@ impl InitializeResult {
     pub fn supports_resume_session(&self) -> bool {
         self.capabilities
             .pointer("/sessionCapabilities/resume")
+            .is_some_and(Value::is_object)
+    }
+
+    /// Whether the agent advertises `sessionCapabilities.list` for `session/list`.
+    pub fn supports_list_sessions(&self) -> bool {
+        self.capabilities
+            .pointer("/sessionCapabilities/list")
+            .is_some_and(Value::is_object)
+    }
+
+    /// Whether the agent advertises `sessionCapabilities.close` for `session/close`.
+    pub fn supports_close_session(&self) -> bool {
+        self.capabilities
+            .pointer("/sessionCapabilities/close")
+            .is_some_and(Value::is_object)
+    }
+
+    /// Whether the agent advertises `sessionCapabilities.delete` for `session/delete`.
+    pub fn supports_delete_session(&self) -> bool {
+        self.capabilities
+            .pointer("/sessionCapabilities/delete")
             .is_some_and(Value::is_object)
     }
 }
@@ -168,21 +226,168 @@ impl Default for AcpClientConfig {
     }
 }
 
-pub struct AcpClient<W> {
-    peer: JsonRpcPeer<W>,
-    inbound: Option<mpsc::Receiver<JsonRpcMessage>>,
-    events: mpsc::Sender<AcpEvent>,
-    lifecycle: Arc<Mutex<AcpLifecycle>>,
-    config: AcpClientConfig,
+struct RouteEventEnvelope {
+    event: Option<AcpEvent>,
+    ack: Option<oneshot::Sender<()>>,
+}
+
+struct SessionRoute {
+    events: mpsc::Sender<RouteEventEnvelope>,
     permission_policy: Arc<Mutex<PermissionPolicy>>,
     permission_host: Option<Arc<dyn PermissionHost>>,
-    initialized: Arc<Mutex<Option<InitializeResult>>>,
     prompt_running: Arc<AtomicBool>,
-    pending_permissions: Arc<Mutex<HashMap<jsonrpc::JsonRpcId, oneshot::Sender<()>>>>,
+    pending_permissions: Arc<StdMutex<HashMap<jsonrpc::JsonRpcId, oneshot::Sender<()>>>>,
+}
+
+impl SessionRoute {
+    fn new(
+        caller_events: mpsc::Sender<AcpEvent>,
+        permission_policy: PermissionPolicy,
+        permission_host: Option<Arc<dyn PermissionHost>>,
+    ) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::channel::<RouteEventEnvelope>(ROUTE_EVENT_BUFFER);
+        tokio::spawn(async move {
+            while let Some(envelope) = rx.recv().await {
+                let delivered = match envelope.event {
+                    Some(event) => caller_events.send(event).await.is_ok(),
+                    None => !caller_events.is_closed(),
+                };
+                if let Some(ack) = envelope.ack {
+                    let _ = ack.send(());
+                }
+                if !delivered {
+                    break;
+                }
+            }
+        });
+        Arc::new(Self {
+            events: tx,
+            permission_policy: Arc::new(Mutex::new(permission_policy)),
+            permission_host,
+            prompt_running: Arc::new(AtomicBool::new(false)),
+            pending_permissions: Arc::new(StdMutex::new(HashMap::new())),
+        })
+    }
+
+    fn send_nonblocking(&self, event: AcpEvent) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.events.try_send(RouteEventEnvelope {
+            event: Some(event),
+            ack: None,
+        }) {
+            tracing::warn!(
+                target: "teshi_acp::client",
+                "dropping ACP event for slow session consumer to prevent dispatcher deadlock"
+            );
+        }
+    }
+
+    async fn send_and_flush(&self, event: AcpEvent) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = tokio::time::timeout(ROUTE_FLUSH_TIMEOUT, async {
+            if self
+                .events
+                .send(RouteEventEnvelope {
+                    event: Some(event),
+                    ack: Some(ack_tx),
+                })
+                .await
+                .is_ok()
+            {
+                let _ = ack_rx.await;
+            }
+        })
+        .await;
+    }
+
+    async fn flush_barrier(&self, timeout: Duration) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = tokio::time::timeout(timeout, async {
+            if self
+                .events
+                .send(RouteEventEnvelope {
+                    event: None,
+                    ack: Some(ack_tx),
+                })
+                .await
+                .is_ok()
+            {
+                let _ = ack_rx.await;
+            }
+        })
+        .await;
+    }
+}
+
+#[derive(Default)]
+struct RouteTable {
+    routes: HashMap<String, Arc<SessionRoute>>,
+    pending: Option<Arc<SessionRoute>>,
+    routed_mode: bool,
+    unregistered_sessions: HashSet<String>,
+}
+
+struct PendingRouteGuard {
+    route_table: Arc<StdMutex<RouteTable>>,
+    armed: bool,
+}
+
+impl PendingRouteGuard {
+    fn install(route_table: &Arc<StdMutex<RouteTable>>, route: Arc<SessionRoute>) -> Self {
+        {
+            let mut guard = route_table.lock().unwrap_or_else(|e| e.into_inner());
+            guard.routed_mode = true;
+            guard.pending = Some(route);
+        }
+        Self {
+            route_table: Arc::clone(route_table),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRouteGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let pending = {
+                let mut guard = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+                guard.pending.take()
+            };
+            if let Some(route) = pending {
+                cancel_pending_permissions(&route.pending_permissions);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClientRuntime {
     reader_task: Option<JoinHandle<()>>,
+    dispatcher_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     child: Option<Child>,
     process_tree: Option<crate::process_tree::ProcessTree>,
+}
+
+pub struct AcpClient<W> {
+    peer: JsonRpcPeer<W>,
+    inbound_tx: mpsc::Sender<InboundMessage>,
+    inbound: Mutex<Option<mpsc::Receiver<InboundMessage>>>,
+    default_route: Arc<SessionRoute>,
+    route_table: Arc<StdMutex<RouteTable>>,
+    session_create_lock: Arc<Mutex<()>>,
+    active_prompts: Arc<AtomicUsize>,
+    lifecycle: Arc<Mutex<AcpLifecycle>>,
+    config: AcpClientConfig,
+    initialized: Arc<Mutex<Option<InitializeResult>>>,
+    alive: Arc<AtomicBool>,
+    shutting_down: Arc<AtomicBool>,
+    exit_tx: watch::Sender<bool>,
+    child_pid: Option<u32>,
+    runtime: Mutex<ClientRuntime>,
 }
 
 impl AcpClient<tokio::process::ChildStdin> {
@@ -212,6 +417,7 @@ impl AcpClient<tokio::process::ChildStdin> {
                 });
             }
         };
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or_else(|| AcpError::SpawnFailed {
             program: command.program.display().to_string(),
             source: std::io::Error::other("missing stdin"),
@@ -229,10 +435,12 @@ impl AcpClient<tokio::process::ChildStdin> {
             permission_policy,
             permission_host,
         );
-        client.child = Some(child);
-        client.process_tree = Some(process_tree);
+        client.child_pid = pid;
+        let runtime = client.runtime.get_mut();
+        runtime.child = Some(child);
+        runtime.process_tree = Some(process_tree);
         if let Some(stderr) = stderr {
-            client.stderr_task = Some(tokio::spawn(async move {
+            runtime.stderr_task = Some(tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -255,36 +463,175 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     ) -> Self {
         let peer = JsonRpcPeer::new(writer);
         let (tx, rx) = mpsc::channel(128);
-        let reader_task = tokio::spawn(jsonrpc::reader_loop(reader, peer.clone(), tx));
+        let alive = Arc::new(AtomicBool::new(true));
+        let (exit_tx, _) = watch::channel(false);
+        let reader_task = tokio::spawn(jsonrpc::reader_loop_with_liveness(
+            reader,
+            peer.clone(),
+            tx.clone(),
+            Some((Arc::clone(&alive), exit_tx.clone())),
+        ));
         Self {
             peer,
-            inbound: Some(rx),
-            events,
+            inbound_tx: tx,
+            inbound: Mutex::new(Some(rx)),
+            default_route: SessionRoute::new(events, permission_policy, permission_host),
+            route_table: Arc::new(StdMutex::new(RouteTable::default())),
+            session_create_lock: Arc::new(Mutex::new(())),
+            active_prompts: Arc::new(AtomicUsize::new(0)),
             lifecycle: Arc::new(Mutex::new(AcpLifecycle::Created)),
             config,
-            permission_policy: Arc::new(Mutex::new(permission_policy)),
-            permission_host,
             initialized: Arc::new(Mutex::new(None)),
-            prompt_running: Arc::new(AtomicBool::new(false)),
-            pending_permissions: Arc::new(Mutex::new(HashMap::new())),
-            reader_task: Some(reader_task),
-            stderr_task: None,
-            child: None,
-            process_tree: None,
+            alive,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            exit_tx,
+            child_pid: None,
+            runtime: Mutex::new(ClientRuntime {
+                reader_task: Some(reader_task),
+                dispatcher_task: None,
+                stderr_task: None,
+                child: None,
+                process_tree: None,
+            }),
         }
+    }
+
+    /// OS process id of the spawned ACP child, when backed by an external process.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child_pid
+    }
+
+    /// Whether the underlying transport/process is still believed alive.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst) && !self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// Whether the client has no registered session routes, no in-flight session
+    /// creation, and no running prompt turn.
+    pub fn is_idle_clean(&self) -> bool {
+        let table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+        table.routes.is_empty()
+            && table.pending.is_none()
+            && self.active_prompts.load(Ordering::SeqCst) == 0
+    }
+
+    /// Check liveness, including non-blocking child exit status when backed by a child process.
+    pub async fn check_alive(&self) -> bool {
+        if !self.is_alive() {
+            return false;
+        }
+        let exited = {
+            let mut runtime = self.runtime.lock().await;
+            runtime
+                .child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)) | Err(_)))
+        };
+        if exited {
+            self.alive.store(false, Ordering::SeqCst);
+            let _ = self.exit_tx.send(true);
+            return false;
+        }
+        true
+    }
+
+    /// Subscribe to transport/process exit notifications (`true` once exited).
+    pub fn subscribe_exit(&self) -> watch::Receiver<bool> {
+        self.exit_tx.subscribe()
+    }
+
+    /// Cached initialization payload after [`Self::initialize`].
+    pub async fn initialized_result(&self) -> Option<InitializeResult> {
+        self.initialized.lock().await.clone()
+    }
+
+    /// Register a per-session route for `session/update` and `session/request_permission`.
+    pub async fn register_session(
+        &self,
+        session_id: impl Into<String>,
+        events: mpsc::Sender<AcpEvent>,
+        permission_policy: PermissionPolicy,
+        permission_host: Option<Arc<dyn PermissionHost>>,
+    ) {
+        let session_id = session_id.into();
+        let route = SessionRoute::new(events, permission_policy, permission_host);
+        let replaced = {
+            let mut table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+            table.routed_mode = true;
+            table.unregistered_sessions.remove(&session_id);
+            table.routes.insert(session_id, route)
+        };
+        if let Some(old_route) = replaced {
+            cancel_pending_permissions(&old_route.pending_permissions);
+        }
+    }
+
+    /// Remove a previously registered session route and cancel any pending permissions on it.
+    pub async fn unregister_session(&self, session_id: &str) {
+        let removed = {
+            let mut table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+            let removed = table.routes.remove(session_id);
+            if removed.is_some() || table.routed_mode {
+                table.unregistered_sessions.insert(session_id.to_string());
+            }
+            removed
+        };
+        if let Some(route) = removed {
+            cancel_pending_permissions(&route.pending_permissions);
+        }
+    }
+
+    /// Update the permission policy for a registered session (or the default route if unregistered).
+    pub async fn set_session_permission_policy(&self, session_id: &str, policy: PermissionPolicy) {
+        let route = self.route_for(session_id);
+        *route.permission_policy.lock().await = policy;
     }
 
     pub async fn lifecycle(&self) -> AcpLifecycle {
         *self.lifecycle.lock().await
     }
 
-    /// Set the policy for future permission requests; pending requests keep their decision path.
+    /// Set the policy for future permission requests on the default route; pending requests keep their decision path.
     pub async fn set_permission_policy(&self, policy: PermissionPolicy) {
-        *self.permission_policy.lock().await = policy;
+        *self.default_route.permission_policy.lock().await = policy;
+    }
+
+    fn route_for(&self, session_id: &str) -> Arc<SessionRoute> {
+        let table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+        table
+            .routes
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.default_route))
     }
 
     async fn set_state(&self, to: AcpLifecycle) {
         *self.lifecycle.lock().await = to;
+    }
+
+    async fn set_state_if_active(&self, to: AcpLifecycle) {
+        let mut state = self.lifecycle.lock().await;
+        if !matches!(*state, AcpLifecycle::ShuttingDown | AcpLifecycle::Exited) {
+            *state = to;
+        }
+    }
+
+    async fn transition_state(
+        &self,
+        allowed: &[AcpLifecycle],
+        to: AcpLifecycle,
+        action: &'static str,
+    ) -> AcpResult<()> {
+        let mut state = self.lifecycle.lock().await;
+        if allowed.contains(&*state) {
+            *state = to;
+            Ok(())
+        } else {
+            Err(AcpError::InvalidState {
+                from: *state,
+                to: action,
+            })
+        }
     }
 
     async fn ensure_state(&self, allowed: &[AcpLifecycle], to: &'static str) -> AcpResult<()> {
@@ -297,19 +644,33 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     }
 
     pub async fn initialize(&mut self) -> AcpResult<InitializeResult> {
-        self.ensure_state(&[AcpLifecycle::Created], "initialize")
-            .await?;
-        self.set_state(AcpLifecycle::Starting).await;
-        self.start_dispatcher();
+        self.initialize_shared().await
+    }
+
+    /// Initialize an `Arc`-shared client without requiring `&mut self`.
+    pub async fn initialize_shared(&self) -> AcpResult<InitializeResult> {
+        self.transition_state(
+            &[AcpLifecycle::Created],
+            AcpLifecycle::Starting,
+            "initialize",
+        )
+        .await?;
+        self.start_dispatcher().await;
         let params = json!({
             "protocolVersion": self.config.protocol_version,
             "clientCapabilities": { "filesystem": false, "terminal": false },
             "clientInfo": { "name": self.config.client_info.name, "version": self.config.client_info.version }
         });
-        let result = self
+        let result = match self
             .request_with_timeout("initialize", params, self.config.initialize_timeout)
             .await
-            .map_err(|e| AcpError::InitializeFailed(e.to_string()))?;
+        {
+            Ok(result) => result,
+            Err(e) => {
+                self.set_state_if_active(AcpLifecycle::Failed).await;
+                return Err(AcpError::InitializeFailed(e.to_string()));
+            }
+        };
         let protocol_version = result
             .get("protocolVersion")
             .and_then(Value::as_u64)
@@ -317,27 +678,48 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         if let Some(v) = protocol_version
             && v != self.config.protocol_version
         {
-            self.set_state(AcpLifecycle::Failed).await;
+            self.set_state_if_active(AcpLifecycle::Failed).await;
             return Err(AcpError::UnsupportedProtocolVersion(v));
         }
-        let auth_methods = result
+        let auth_method_details = result
             .get("authMethods")
             .or_else(|| result.pointer("/authentication/methods"))
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
                     .filter_map(|v| {
-                        v.as_str()
-                            .or_else(|| v.get("id").and_then(Value::as_str))
-                            .map(str::to_string)
+                        if let Some(id) = v.as_str() {
+                            Some(AuthMethodInfo {
+                                id: id.to_string(),
+                                name: id.to_string(),
+                                description: None,
+                            })
+                        } else {
+                            let id = v.get("id").and_then(Value::as_str)?;
+                            let name = v.get("name").and_then(Value::as_str).unwrap_or(id);
+                            let description = v
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            Some(AuthMethodInfo {
+                                id: id.to_string(),
+                                name: name.to_string(),
+                                description,
+                            })
+                        }
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let auth_methods = auth_method_details
+            .iter()
+            .map(|method| method.id.clone())
+            .collect();
         let initialized = InitializeResult {
             protocol_version,
             agent_info: result.get("agentInfo").cloned().unwrap_or(Value::Null),
             auth_methods,
+            auth_method_details,
             capabilities: result
                 .get("agentCapabilities")
                 .or_else(|| result.get("capabilities"))
@@ -346,13 +728,20 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             raw: result,
         };
         *self.initialized.lock().await = Some(initialized.clone());
-        self.set_state(AcpLifecycle::Initialized).await;
+        self.set_state_if_active(AcpLifecycle::Initialized).await;
         Ok(initialized)
     }
 
     pub async fn authenticate(&self, method_id: &str) -> AcpResult<()> {
-        self.ensure_state(&[AcpLifecycle::Initialized], "authenticate")
-            .await?;
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "authenticate",
+        )
+        .await?;
         let init = self
             .initialized
             .lock()
@@ -370,9 +759,18 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .await
         {
             Ok(_) => {
-                self.set_state(AcpLifecycle::Authenticated).await;
+                let mut state = self.lifecycle.lock().await;
+                if *state == AcpLifecycle::Initialized {
+                    *state = AcpLifecycle::Authenticated;
+                }
                 Ok(())
             }
+            Err(
+                err @ (AcpError::Timeout(_)
+                | AcpError::ProcessExited
+                | AcpError::Cancelled
+                | AcpError::Shutdown(_)),
+            ) => Err(err),
             Err(e) => Err(AcpError::AuthenticationFailed(e.to_string())),
         }
     }
@@ -394,6 +792,32 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         cwd: PathBuf,
         servers: Vec<crate::McpServer>,
     ) -> AcpResult<AcpSession> {
+        self.new_session_with_mcp_inner(cwd, servers, None).await
+    }
+
+    /// Create a session and atomically register its dedicated event/permission route.
+    ///
+    /// # Errors
+    /// Returns lifecycle, serialization, transport, or remote session errors.
+    pub async fn new_session_with_mcp_routed(
+        &self,
+        cwd: PathBuf,
+        servers: Vec<crate::McpServer>,
+        events: mpsc::Sender<AcpEvent>,
+        permission_policy: PermissionPolicy,
+        permission_host: Option<Arc<dyn PermissionHost>>,
+    ) -> AcpResult<AcpSession> {
+        let route = SessionRoute::new(events, permission_policy, permission_host);
+        self.new_session_with_mcp_inner(cwd, servers, Some(route))
+            .await
+    }
+
+    async fn new_session_with_mcp_inner(
+        &self,
+        cwd: PathBuf,
+        servers: Vec<crate::McpServer>,
+        route: Option<Arc<SessionRoute>>,
+    ) -> AcpResult<AcpSession> {
         self.ensure_state(
             &[
                 AcpLifecycle::Initialized,
@@ -404,6 +828,10 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         )
         .await?;
         let params = serialize_params(NewSessionRequest::new(cwd.clone()).mcp_servers(servers))?;
+        let _create_guard = self.session_create_lock.lock().await;
+        let mut pending_guard = route
+            .as_ref()
+            .map(|r| PendingRouteGuard::install(&self.route_table, Arc::clone(r)));
         let result = self
             .request_with_timeout("session/new", params, self.config.request_timeout)
             .await?;
@@ -413,7 +841,25 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .and_then(Value::as_str)
             .ok_or_else(|| AcpError::SessionFailed("session/new missing sessionId".into()))?
             .to_string();
-        self.set_state(AcpLifecycle::Ready).await;
+        let replaced = {
+            let mut table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+            let replaced = if let Some(route) = route {
+                table.routed_mode = true;
+                table.unregistered_sessions.remove(&id);
+                table.routes.insert(id.clone(), route)
+            } else {
+                None
+            };
+            table.pending = None;
+            replaced
+        };
+        if let Some(old_route) = replaced {
+            cancel_pending_permissions(&old_route.pending_permissions);
+        }
+        if let Some(guard) = pending_guard.as_mut() {
+            guard.disarm();
+        }
+        self.set_state_if_active(AcpLifecycle::Ready).await;
         Ok(AcpSession {
             id,
             cwd,
@@ -422,17 +868,22 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     }
 
     pub async fn list_sessions(&self) -> AcpResult<Value> {
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "session/list",
+        )
+        .await?;
         let init = self
             .initialized
             .lock()
             .await
             .clone()
             .ok_or_else(|| AcpError::InitializeFailed("missing initialize result".into()))?;
-        if !init
-            .capabilities
-            .pointer("/sessionCapabilities/list")
-            .is_some_and(Value::is_object)
-        {
+        if !init.supports_list_sessions() {
             return Err(AcpError::CapabilityUnsupported("session/list"));
         }
         self.request_with_timeout(
@@ -441,6 +892,143 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             self.config.request_timeout,
         )
         .await
+    }
+
+    /// List remote ACP sessions, optionally filtered to a working directory.
+    ///
+    /// Follows `nextCursor` pagination across pages up to a safe bound.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, transport, or remote protocol errors.
+    pub async fn list_sessions_for_cwd(
+        &self,
+        cwd: Option<PathBuf>,
+    ) -> AcpResult<Vec<RemoteSessionInfo>> {
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "session/list",
+        )
+        .await?;
+        let init = self
+            .initialized
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| AcpError::InitializeFailed("missing initialize result".into()))?;
+        if !init.supports_list_sessions() {
+            return Err(AcpError::CapabilityUnsupported("session/list"));
+        }
+        let mut sessions = Vec::new();
+        let mut seen_cursors = HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_LIST_SESSIONS_PAGES {
+            let params = serialize_params(
+                ListSessionsRequest::new()
+                    .cwd(cwd.clone())
+                    .cursor(cursor.clone()),
+            )?;
+            let response = self
+                .request_with_timeout("session/list", params, self.config.request_timeout)
+                .await?;
+            sessions.extend(parse_remote_sessions(&response));
+            let next_cursor = response
+                .get("nextCursor")
+                .or_else(|| response.get("next_cursor"))
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+            match next_cursor {
+                Some(next) if seen_cursors.insert(next.clone()) => {
+                    cursor = Some(next);
+                }
+                _ => break,
+            }
+        }
+        Ok(sessions)
+    }
+
+    /// Close a remote ACP session and unregister its local route.
+    ///
+    /// Requires `agentCapabilities.sessionCapabilities.close`.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, transport, or remote session errors.
+    pub async fn close_session(&self, id: &str) -> AcpResult<()> {
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "session/close",
+        )
+        .await?;
+        let init = self
+            .initialized
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| AcpError::InitializeFailed("missing initialize result".into()))?;
+        if !init.supports_close_session() {
+            return Err(AcpError::CapabilityUnsupported("session/close"));
+        }
+        let route = {
+            let table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+            table.routes.get(id).cloned()
+        };
+        if let Some(route) = route {
+            cancel_pending_permissions(&route.pending_permissions);
+        }
+        let params = serialize_params(CloseSessionRequest::new(id.to_string()))?;
+        let result = self
+            .request_with_timeout("session/close", params, self.config.request_timeout)
+            .await;
+        self.unregister_session(id).await;
+        result.map(|_| ())
+    }
+
+    /// Permanently delete a remote ACP session and unregister its local route.
+    ///
+    /// Requires `agentCapabilities.sessionCapabilities.delete`.
+    ///
+    /// # Errors
+    /// Returns capability, lifecycle, serialization, transport, or remote session errors.
+    pub async fn delete_session(&self, id: &str) -> AcpResult<()> {
+        self.ensure_state(
+            &[
+                AcpLifecycle::Initialized,
+                AcpLifecycle::Authenticated,
+                AcpLifecycle::Ready,
+            ],
+            "session/delete",
+        )
+        .await?;
+        let init = self
+            .initialized
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| AcpError::InitializeFailed("missing initialize result".into()))?;
+        if !init.supports_delete_session() {
+            return Err(AcpError::CapabilityUnsupported("session/delete"));
+        }
+        let route = {
+            let table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+            table.routes.get(id).cloned()
+        };
+        if let Some(route) = route {
+            cancel_pending_permissions(&route.pending_permissions);
+        }
+        let params = serialize_params(DeleteSessionRequest::new(id.to_string()))?;
+        let result = self
+            .request_with_timeout("session/delete", params, self.config.request_timeout)
+            .await;
+        self.unregister_session(id).await;
+        result.map(|_| ())
     }
 
     /// Load a previously persisted ACP session without MCP servers.
@@ -495,7 +1083,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .and_then(Value::as_str)
             .unwrap_or(id)
             .to_string();
-        self.set_state(AcpLifecycle::Ready).await;
+        self.set_state_if_active(AcpLifecycle::Ready).await;
         Ok(AcpSession {
             id: session_id,
             cwd,
@@ -555,7 +1143,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .and_then(Value::as_str)
             .unwrap_or(id)
             .to_string();
-        self.set_state(AcpLifecycle::Ready).await;
+        self.set_state_if_active(AcpLifecycle::Ready).await;
         Ok(AcpSession {
             id: session_id,
             cwd,
@@ -576,7 +1164,8 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         use crate::session_config::ConfigRoute;
         self.ensure_state(&[AcpLifecycle::Ready], "set session option")
             .await?;
-        if self.prompt_running.load(Ordering::SeqCst) {
+        let route = self.route_for(&session.id);
+        if route.prompt_running.load(Ordering::SeqCst) {
             return Err(AcpError::PromptAlreadyRunning);
         }
         if !option.accepts(&value) {
@@ -629,6 +1218,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
 
     /// Run one turn whose prompt is a sequence of content blocks.
     ///
+    /// Callers passing a small bounded `events` channel should drain it
+    /// concurrently during the turn so backpressure does not delay event
+    /// forwarding; `Completed` flush uses a bounded wait to avoid deadlocking
+    /// callers that drain after `prompt_blocks` returns.
+    ///
     /// # Errors
     /// Rejects image blocks when the agent did not advertise
     /// `promptCapabilities.image`, as well as lifecycle, transport, and remote errors.
@@ -649,9 +1243,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         {
             return Err(AcpError::CapabilityUnsupported("image prompts"));
         }
-        PromptSlotGuard::try_acquire(&self.prompt_running)?;
+        let route = self.route_for(&session.id);
+        PromptSlotGuard::try_acquire(&route.prompt_running, &self.active_prompts)?;
         let peer = self.peer.clone();
-        let slot = Arc::clone(&self.prompt_running);
+        let slot = Arc::clone(&route.prompt_running);
+        let active_prompts = Arc::clone(&self.active_prompts);
         let params = json!({
             "sessionId": session.id,
             "prompt": blocks.iter().map(crate::PromptBlock::to_json).collect::<Vec<_>>()
@@ -670,10 +1266,12 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                 }
             };
             slot.store(false, Ordering::SeqCst);
+            active_prompts.fetch_sub(1, Ordering::SeqCst);
             let _ = result_tx.send(result);
         });
 
-        let cancel_action = self.prompt_cancel_action(session.id.clone(), sent_rx);
+        let cancel_action =
+            self.prompt_cancel_action(session.id.clone(), Arc::clone(&route), sent_rx);
         let mut cancel_on_drop = CancelOnDrop::new(cancel_action);
         let result = match self.config.prompt_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, result_rx).await {
@@ -691,9 +1289,9 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         };
         let result = result?;
         let completion = prompt_completion_from_result(&result);
-        let _ = self
-            .events
-            .send(AcpEvent::Completed {
+        self.flush_dispatcher().await;
+        route
+            .send_and_flush(AcpEvent::Completed {
                 stop_reason: completion.stop_reason.clone(),
                 detail: completion.detail.clone(),
             })
@@ -712,7 +1310,8 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     /// Returns `Timeout` when the notification cannot be delivered in time, or
     /// `ProcessExited` when the agent's input is already closed.
     pub async fn cancel(&self, session: &AcpSession) -> AcpResult<()> {
-        if !self.prompt_running.load(Ordering::SeqCst) {
+        let route = self.route_for(&session.id);
+        if !route.prompt_running.load(Ordering::SeqCst) {
             return Ok(());
         }
         tokio::time::timeout(CANCEL_DELIVERY_TIMEOUT, async {
@@ -720,8 +1319,8 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                 .peer
                 .notify("session/cancel", json!({ "sessionId": session.id }))
                 .await;
-            cancel_pending_permissions(&self.pending_permissions).await;
-            let _ = self.events.send(AcpEvent::Cancelled).await;
+            cancel_pending_permissions(&route.pending_permissions);
+            route.send_nonblocking(AcpEvent::Cancelled);
             notify_result
         })
         .await
@@ -729,19 +1328,50 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     }
 
     pub async fn shutdown(&mut self) -> AcpResult<()> {
-        let state = self.lifecycle().await;
-        if matches!(state, AcpLifecycle::Exited) {
-            return Ok(());
+        self.shutdown_shared().await
+    }
+
+    /// Shut down an `Arc`-shared client, terminating its external process and container.
+    ///
+    /// A failed process-tree shutdown remains retryable rather than marking `Exited`.
+    pub async fn shutdown_shared(&self) -> AcpResult<()> {
+        {
+            let mut state = self.lifecycle.lock().await;
+            if matches!(*state, AcpLifecycle::Exited) {
+                return Ok(());
+            }
+            *state = AcpLifecycle::ShuttingDown;
         }
-        self.set_state(AcpLifecycle::ShuttingDown).await;
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.alive.store(false, Ordering::SeqCst);
+        let _ = self.exit_tx.send(true);
         self.peer.fail_all(AcpError::Cancelled).await;
-        cancel_pending_permissions(&self.pending_permissions).await;
+        cancel_pending_permissions(&self.default_route.pending_permissions);
+        let drained_routes = {
+            let mut table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+            let mut routes = table
+                .routes
+                .drain()
+                .map(|(_, route)| route)
+                .collect::<Vec<_>>();
+            if let Some(pending) = table.pending.take() {
+                routes.push(pending);
+            }
+            routes
+        };
+        for route in drained_routes {
+            cancel_pending_permissions(&route.pending_permissions);
+        }
         // Closing needs the writer, which a write blocked on a wedged agent
         // holds until the agent dies. Kill instead of waiting for that agent.
         let closed = tokio::time::timeout(self.config.shutdown_timeout, self.peer.close())
             .await
             .is_ok();
-        if let Some(child) = &mut self.child {
+        let mut runtime = self.runtime.lock().await;
+        if self.lifecycle().await == AcpLifecycle::Exited {
+            return Ok(());
+        }
+        if let Some(child) = &mut runtime.child {
             if !closed {
                 terminate_child(child).await;
             } else {
@@ -753,17 +1383,21 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         }
         // The container outlives the primary process, so a graceful agent exit
         // cannot leave its tools writing into the old project after a switch.
-        if let Some(tree) = &mut self.process_tree {
+        if let Some(tree) = &mut runtime.process_tree {
             tree.shutdown()
                 .await
                 .map_err(|error| AcpError::Shutdown(error.to_string()))?;
         }
-        if let Some(t) = self.reader_task.take() {
+        if let Some(t) = runtime.reader_task.take() {
             t.abort();
         }
-        if let Some(t) = self.stderr_task.take() {
+        if let Some(t) = runtime.dispatcher_task.take() {
             t.abort();
         }
+        if let Some(t) = runtime.stderr_task.take() {
+            t.abort();
+        }
+        drop(runtime);
         self.set_state(AcpLifecycle::Exited).await;
         Ok(())
     }
@@ -779,34 +1413,99 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .await
     }
 
-    fn start_dispatcher(&mut self) {
-        let Some(mut inbound) = self.inbound.take() else {
+    async fn flush_dispatcher(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(DISPATCHER_FENCE_TIMEOUT, async {
+            if self
+                .inbound_tx
+                .send(InboundMessage::Fence(tx))
+                .await
+                .is_ok()
+            {
+                let _ = rx.await;
+            }
+        })
+        .await;
+    }
+
+    /// Flush all already-read inbound notifications through the dispatcher and
+    /// the target session's route forwarder (`None` targets the default route).
+    ///
+    /// Callers with bounded event channels should drain their `events` receiver
+    /// concurrently (for example inside `tokio::select!`) while awaiting this
+    /// barrier so the route forwarder cannot stall on a full receiver.
+    pub async fn flush_session_events(&self, session_id: Option<&str>) {
+        self.flush_dispatcher().await;
+        let route = match session_id {
+            Some(id) => {
+                let table = self.route_table.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(route) = table.routes.get(id) {
+                    Some(Arc::clone(route))
+                } else if table.routed_mode {
+                    None
+                } else {
+                    Some(Arc::clone(&self.default_route))
+                }
+            }
+            None => Some(Arc::clone(&self.default_route)),
+        };
+        if let Some(route) = route {
+            route.flush_barrier(DISPATCHER_FENCE_TIMEOUT).await;
+        }
+    }
+
+    async fn start_dispatcher(&self) {
+        let Some(mut inbound) = self.inbound.lock().await.take() else {
             return;
         };
         let peer = self.peer.clone();
-        let events = self.events.clone();
-        let policy = Arc::clone(&self.permission_policy);
-        let host = self.permission_host.clone();
-        let pending_permissions = Arc::clone(&self.pending_permissions);
-        tokio::spawn(async move {
-            while let Some(msg) = inbound.recv().await {
+        let default_route = Arc::clone(&self.default_route);
+        let route_table = Arc::clone(&self.route_table);
+        let alive = Arc::clone(&self.alive);
+        let shutting_down = Arc::clone(&self.shutting_down);
+        let exit_tx = self.exit_tx.clone();
+        let task = tokio::spawn(async move {
+            while let Some(item) = inbound.recv().await {
+                let msg = match item {
+                    InboundMessage::JsonRpc(msg) => msg,
+                    InboundMessage::Fence(ack) => {
+                        let _ = ack.send(());
+                        continue;
+                    }
+                    InboundMessage::Closed => break,
+                };
                 match msg {
                     JsonRpcMessage::Notification { method, params }
                         if method == "session/update" =>
                     {
-                        dispatch_update(&events, params).await;
+                        if let Some(route) =
+                            resolve_dispatch_route(&params, &route_table, &default_route, true)
+                        {
+                            dispatch_update(&route, params);
+                        }
                     }
                     JsonRpcMessage::Notification { method, params }
                         if method.starts_with("cursor/") =>
                     {
-                        let _ = events
-                            .send(AcpEvent::ExtensionNotification { method, params })
-                            .await;
+                        if let Some(route) =
+                            resolve_dispatch_route(&params, &route_table, &default_route, true)
+                        {
+                            route.send_nonblocking(AcpEvent::ExtensionNotification {
+                                method,
+                                params,
+                            });
+                        }
                     }
                     JsonRpcMessage::Notification { .. } => {}
                     JsonRpcMessage::Request { id, method, params }
                         if method == "session/request_permission" =>
                     {
+                        let Some(route) =
+                            resolve_dispatch_route(&params, &route_table, &default_route, false)
+                        else {
+                            let _ = peer.respond(id, cancelled_permission()).await;
+                            continue;
+                        };
                         let options: Vec<PermissionOption> = serde_json::from_value(
                             params
                                 .get("options")
@@ -815,14 +1514,15 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                         )
                         .unwrap_or_default();
                         let peer = peer.clone();
-                        let host = host.clone();
-                        let policy = *policy.lock().await;
-                        let pending = Arc::clone(&pending_permissions);
+                        let host = route.permission_host.clone();
+                        let policy = *route.permission_policy.lock().await;
+                        let pending = Arc::clone(&route.pending_permissions);
                         let (cancel_tx, cancel_rx) = oneshot::channel();
-                        pending.lock().await.insert(id.clone(), cancel_tx);
-                        let _ = events
-                            .send(AcpEvent::PermissionRequest(params.clone()))
-                            .await;
+                        pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(id.clone(), cancel_tx);
+                        route.send_nonblocking(AcpEvent::PermissionRequest(params.clone()));
                         tokio::spawn(async move {
                             let decision = async {
                                 match policy {
@@ -841,7 +1541,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                                 _ = cancel_rx => (Ok(PermissionDecision::Rejected), true),
                                 decision = &mut decision => (decision, false),
                             };
-                            let was_pending = pending.lock().await.remove(&id).is_some();
+                            let was_pending = pending
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&id)
+                                .is_some();
                             if was_cancelled || !was_pending {
                                 let _ = peer.respond(id, cancelled_permission()).await;
                                 return;
@@ -884,13 +1588,126 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                             .await;
                     }
                     JsonRpcMessage::Error { error, .. } => {
-                        let _ = events.send(AcpEvent::Error(error.message)).await;
+                        let (routes, routed_mode) = {
+                            let table = route_table.lock().unwrap_or_else(|e| e.into_inner());
+                            (
+                                table.routes.values().cloned().collect::<Vec<_>>(),
+                                table.routed_mode,
+                            )
+                        };
+                        if routes.is_empty() {
+                            if !routed_mode {
+                                default_route.send_nonblocking(AcpEvent::Error(error.message));
+                            }
+                        } else {
+                            for route in routes {
+                                route.send_nonblocking(AcpEvent::Error(error.message.clone()));
+                            }
+                        }
                     }
                     JsonRpcMessage::Response { .. } => {}
                 }
             }
+            // Drop the receiver before cleanup so any concurrent or future
+            // `flush_dispatcher()` sees a closed channel immediately instead of
+            // waiting for `DISPATCHER_FENCE_TIMEOUT`.
+            drop(inbound);
+            if !shutting_down.load(Ordering::SeqCst) {
+                alive.store(false, Ordering::SeqCst);
+                let _ = exit_tx.send(true);
+                let routes = {
+                    let table = route_table.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut routes = table.routes.values().cloned().collect::<Vec<_>>();
+                    if let Some(pending) = table.pending.clone() {
+                        routes.push(pending);
+                    }
+                    routes
+                };
+                cancel_pending_permissions(&default_route.pending_permissions);
+                for route in routes {
+                    cancel_pending_permissions(&route.pending_permissions);
+                }
+            }
         });
+        self.runtime.lock().await.dispatcher_task = Some(task);
     }
+}
+
+fn resolve_dispatch_route(
+    params: &Value,
+    route_table: &StdMutex<RouteTable>,
+    default_route: &Arc<SessionRoute>,
+    allow_pending: bool,
+) -> Option<Arc<SessionRoute>> {
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(Value::as_str);
+    let table = route_table.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(session_id) = session_id {
+        if let Some(route) = table.routes.get(session_id) {
+            return Some(Arc::clone(route));
+        }
+        if table.unregistered_sessions.contains(session_id) {
+            return None;
+        }
+        if allow_pending && let Some(pending) = &table.pending {
+            return Some(Arc::clone(pending));
+        }
+        if table.routed_mode || !table.routes.is_empty() {
+            return None;
+        }
+        return Some(Arc::clone(default_route));
+    }
+    if allow_pending && let Some(pending) = &table.pending {
+        return Some(Arc::clone(pending));
+    }
+    if table.routed_mode || !table.routes.is_empty() {
+        return None;
+    }
+    Some(Arc::clone(default_route))
+}
+
+fn parse_remote_sessions(response: &Value) -> Vec<RemoteSessionInfo> {
+    response
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let session_id = item
+                        .get("sessionId")
+                        .or_else(|| item.get("session_id"))
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)?
+                        .to_string();
+                    let cwd = item
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                        .unwrap_or_default();
+                    let title = item
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    let updated_at = item
+                        .get("updatedAt")
+                        .or_else(|| item.get("updated_at"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    Some(RemoteSessionInfo {
+                        session_id,
+                        cwd,
+                        title,
+                        updated_at,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn terminate_child(child: &mut Child) {
@@ -919,12 +1736,12 @@ fn cancelled_permission() -> Value {
     json!({ "outcome": { "outcome": "cancelled" } })
 }
 
-async fn cancel_pending_permissions(
-    pending: &Mutex<HashMap<jsonrpc::JsonRpcId, oneshot::Sender<()>>>,
+fn cancel_pending_permissions(
+    pending: &StdMutex<HashMap<jsonrpc::JsonRpcId, oneshot::Sender<()>>>,
 ) {
     let senders = pending
         .lock()
-        .await
+        .unwrap_or_else(|e| e.into_inner())
         .drain()
         .map(|(_, tx)| tx)
         .collect::<Vec<_>>();
@@ -933,7 +1750,7 @@ async fn cancel_pending_permissions(
     }
 }
 
-async fn dispatch_update(events: &mpsc::Sender<AcpEvent>, params: Value) {
+fn dispatch_update(route: &SessionRoute, params: Value) {
     let update = params.get("update").unwrap_or(&params);
     if let Some(text) = update_text(update).or_else(|| {
         params
@@ -942,31 +1759,32 @@ async fn dispatch_update(events: &mpsc::Sender<AcpEvent>, params: Value) {
             .and_then(Value::as_str)
             .map(str::to_string)
     }) {
-        let _ = events.send(AcpEvent::AgentMessageChunk(text)).await;
+        route.send_nonblocking(AcpEvent::AgentMessageChunk(text));
         return;
     }
     if update.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call")
         || params.get("toolCall").is_some()
     {
-        let _ = events.send(AcpEvent::ToolCall(params)).await;
+        route.send_nonblocking(AcpEvent::ToolCall(params));
         return;
     }
     if update.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call_update")
         || params.get("toolCallUpdate").is_some()
     {
-        let _ = events.send(AcpEvent::ToolCallUpdate(params)).await;
+        route.send_nonblocking(AcpEvent::ToolCallUpdate(params));
         return;
     }
-    let _ = events.send(AcpEvent::SessionUpdate(params)).await;
+    route.send_nonblocking(AcpEvent::SessionUpdate(params));
 }
 
 struct PromptSlotGuard;
 
 impl PromptSlotGuard {
-    fn try_acquire(slot: &AtomicBool) -> AcpResult<Self> {
+    fn try_acquire(slot: &AtomicBool, active_prompts: &AtomicUsize) -> AcpResult<Self> {
         if slot.swap(true, Ordering::SeqCst) {
             Err(AcpError::PromptAlreadyRunning)
         } else {
+            active_prompts.fetch_add(1, Ordering::SeqCst);
             Ok(Self)
         }
     }
@@ -976,11 +1794,10 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
     fn prompt_cancel_action(
         &self,
         session_id: String,
+        route: Arc<SessionRoute>,
         mut sent: watch::Receiver<Option<bool>>,
     ) -> impl FnOnce() + Send + 'static {
         let peer = self.peer.clone();
-        let pending = Arc::clone(&self.pending_permissions);
-        let events = self.events.clone();
         move || {
             tokio::spawn(async move {
                 while sent.borrow().is_none() && sent.changed().await.is_ok() {}
@@ -989,8 +1806,8 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                         .notify("session/cancel", json!({ "sessionId": session_id }))
                         .await;
                 }
-                cancel_pending_permissions(&pending).await;
-                let _ = events.send(AcpEvent::Cancelled).await;
+                cancel_pending_permissions(&route.pending_permissions);
+                route.send_nonblocking(AcpEvent::Cancelled);
             });
         }
     }
@@ -1098,13 +1915,19 @@ fn bounded_detail(text: &str) -> Option<String> {
 
 impl<W> Drop for AcpClient<W> {
     fn drop(&mut self) {
-        if let Some(t) = self.reader_task.take() {
+        self.alive.store(false, Ordering::SeqCst);
+        let _ = self.exit_tx.send(true);
+        let runtime = self.runtime.get_mut();
+        if let Some(t) = runtime.reader_task.take() {
             t.abort();
         }
-        if let Some(t) = self.stderr_task.take() {
+        if let Some(t) = runtime.dispatcher_task.take() {
             t.abort();
         }
-        if let Some(child) = &mut self.child {
+        if let Some(t) = runtime.stderr_task.take() {
+            t.abort();
+        }
+        if let Some(child) = &mut runtime.child {
             let _ = child.start_kill();
         }
     }

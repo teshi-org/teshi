@@ -52,6 +52,25 @@ pub struct ToolActivityInfo {
     pub locations: Vec<String>,
 }
 
+/// Slash command advertised dynamically by an external ACP agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpSlashCommand {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_hint: Option<String>,
+}
+
+/// One step in a dynamic execution plan published by an ACP agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpPlanEntry {
+    pub content: String,
+    #[serde(default)]
+    pub priority: String,
+    #[serde(default)]
+    pub status: String,
+}
+
 impl PermissionChoice {
     /// Best available display text for a frontend list.
     pub fn display_label(&self) -> &str {
@@ -96,6 +115,14 @@ pub enum AgentBackendEvent {
         title: String,
         status: Option<String>,
         details: ToolActivityInfo,
+    },
+    /// Dynamic slash commands advertised by the active ACP session.
+    AvailableCommands {
+        commands: Vec<AcpSlashCommand>,
+    },
+    /// Structured task plan snapshot (or cleared plan when empty) from the ACP agent.
+    PlanUpdate {
+        entries: Vec<AcpPlanEntry>,
     },
     /// The external agent published a title for this session, or cleared it
     /// with `None`. An agent-published title owns the conversation label, so

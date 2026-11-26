@@ -126,6 +126,17 @@ impl AgentBackendRuntime {
             Self::Native(_) => Ok(()),
         }
     }
+
+    /// Authenticate an active ACP backend awaiting interactive auth method selection.
+    ///
+    /// # Errors
+    /// Rejects non-ACP backends or workers not awaiting authentication.
+    pub fn authenticate_acp(&mut self, method_id: String) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.authenticate(method_id),
+            Self::Native(_) => anyhow::bail!("No ACP agent selected"),
+        }
+    }
     /// Temporarily releases the backend while AgentHost calls mutate the
     /// application. The replacement has the same selected kind.
     pub fn take_for_host_call(&mut self) -> Self {

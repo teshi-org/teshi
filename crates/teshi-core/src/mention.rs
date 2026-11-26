@@ -69,6 +69,8 @@ pub struct MentionCandidate {
     pub detail: Option<String>,
     /// Extra text included in simple substring matching (e.g. id or relative path).
     pub search_text: String,
+    /// Whether this candidate corresponds to the item the user is currently viewing.
+    pub is_current: bool,
 }
 
 impl MentionCandidate {
@@ -252,12 +254,12 @@ impl MentionPopupState {
 
         // Explicit scope (`@issue:...`, `@tp:...`, `@feature:...`, `@last-fail:...`, or exact `@issue`/`@tp`/`@feature`).
         if let Some(source) = trigger.scoped_source {
-            let matching: Vec<MentionItem> = candidates
+            let mut matching: Vec<MentionCandidate> = candidates
                 .iter()
                 .filter(|c| c.source == source && c.matches_substring(&trigger.filter))
                 .cloned()
-                .map(MentionItem::Candidate)
                 .collect();
+            matching.sort_by_key(|c| !c.is_current);
             if matching.is_empty() && source == MentionSource::LastFail && trigger.filter.is_empty()
             {
                 return vec![MentionItem::Category {
@@ -266,7 +268,7 @@ impl MentionPopupState {
                     preview: None,
                 }];
             }
-            return matching;
+            return matching.into_iter().map(MentionItem::Candidate).collect();
         }
 
         // Empty query (`@`): present the 4 core sources in canonical order.
@@ -292,16 +294,20 @@ impl MentionPopupState {
             }
         }
 
-        // Then append concrete candidates matching the substring across all 4 sources.
+        // Then append concrete candidates matching the substring across all 4 sources,
+        // keeping currently viewed items at the top.
+        let mut matched_candidates = Vec::new();
         for candidate in candidates {
             if included_ids.iter().any(|id| id == &candidate.id) {
                 continue;
             }
             if candidate.matches_substring(&needle) {
                 included_ids.push(candidate.id.clone());
-                items.push(MentionItem::Candidate(candidate.clone()));
+                matched_candidates.push(candidate.clone());
             }
         }
+        matched_candidates.sort_by_key(|c| !c.is_current);
+        items.extend(matched_candidates.into_iter().map(MentionItem::Candidate));
 
         items
     }
@@ -423,18 +429,11 @@ fn category_or_last_fail_item(
             preview: None,
         };
     }
-    let mut count = 0usize;
-    let mut preview = None;
-    for candidate in candidates.iter().filter(|c| c.source == source) {
-        if preview.is_none() {
-            preview = Some(candidate.label.clone());
-        }
-        count += 1;
-    }
+    let count = candidates.iter().filter(|c| c.source == source).count();
     MentionItem::Category {
         source,
         count,
-        preview,
+        preview: None,
     }
 }
 
@@ -511,6 +510,7 @@ mod tests {
                 label: "导出超时".into(),
                 detail: Some("TimeoutError: 30s".into()),
                 search_text: "features/export.feature".into(),
+                is_current: false,
             },
             MentionCandidate {
                 id: "issue:doc-1".into(),
@@ -518,6 +518,7 @@ mod tests {
                 label: "用户登录超时".into(),
                 detail: Some("[BUG]".into()),
                 search_text: "issues/login-timeout.md".into(),
+                is_current: false,
             },
             MentionCandidate {
                 id: "issue:doc-2".into(),
@@ -525,6 +526,7 @@ mod tests {
                 label: "购物车结算".into(),
                 detail: Some("[FEAT]".into()),
                 search_text: "issues/cart.md".into(),
+                is_current: true,
             },
             MentionCandidate {
                 id: "tp:tp-1".into(),
@@ -532,6 +534,7 @@ mod tests {
                 label: "密码错误锁定时长".into(),
                 detail: Some("Auth / Login".into()),
                 search_text: "tp-1".into(),
+                is_current: false,
             },
             MentionCandidate {
                 id: "feature:features/export.feature".into(),
@@ -539,6 +542,7 @@ mod tests {
                 label: "数据导出".into(),
                 detail: Some("features/export.feature".into()),
                 search_text: "features/export.feature".into(),
+                is_current: false,
             },
         ]
     }
@@ -588,27 +592,27 @@ mod tests {
             })
         ));
         assert!(matches!(
-            items[1],
+            &items[1],
             MentionItem::Category {
                 source: MentionSource::Issue,
                 count: 2,
-                ..
+                preview: None,
             }
         ));
         assert!(matches!(
-            items[2],
+            &items[2],
             MentionItem::Category {
                 source: MentionSource::TestPoint,
                 count: 1,
-                ..
+                preview: None,
             }
         ));
         assert!(matches!(
-            items[3],
+            &items[3],
             MentionItem::Category {
                 source: MentionSource::Feature,
                 count: 1,
-                ..
+                preview: None,
             }
         ));
 
@@ -676,13 +680,22 @@ mod tests {
         );
         assert!(state.is_open());
 
-        // Once composition finishes, Enter confirms cleanly.
+        // Once composition finishes, Enter confirms cleanly (the currently viewed issue comes first).
         state.set_ime_composing(false);
         assert!(state.accepts_keyboard());
+        let visible = state.visible_items(&candidates);
+        assert!(matches!(
+            &visible[0],
+            MentionItem::Candidate(c) if c.id == "issue:doc-2" && c.is_current
+        ));
+        assert!(matches!(
+            &visible[1],
+            MentionItem::Candidate(c) if c.id == "issue:doc-1" && !c.is_current
+        ));
         let outcome = state.handle_key(MentionKey::Confirm, &candidates);
         assert!(matches!(
             outcome,
-            MentionOutcome::Selected { candidate, .. } if candidate.id == "issue:doc-1"
+            MentionOutcome::Selected { candidate, .. } if candidate.id == "issue:doc-2"
         ));
     }
 

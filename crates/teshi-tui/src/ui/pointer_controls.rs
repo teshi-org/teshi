@@ -931,7 +931,7 @@ pub(super) fn render_slash_suggestions(
     frame: &mut Frame<'_>,
     app: &mut App,
     area: Rect,
-    commands: &[&(&str, &str)],
+    commands: &[crate::app::SlashCommandSuggestion],
 ) {
     if area.is_empty() {
         return;
@@ -942,9 +942,13 @@ pub(super) fn render_slash_suggestions(
     let rows = area.height.saturating_sub(1) as usize;
     let start = selected.saturating_sub(rows.saturating_sub(1));
     let mut lines = Vec::new();
-    for (index, (name, description)) in commands.iter().enumerate().skip(start).take(rows) {
-        let description = crate::i18n::slash_description(name).unwrap_or(description);
-        let line = Line::from(format!(" /{name}  {description}"));
+    for (index, cmd) in commands.iter().enumerate().skip(start).take(rows) {
+        let desc = match (cmd.description.as_str(), cmd.input_hint.as_deref()) {
+            ("", Some(hint)) => hint.to_string(),
+            (description, Some(hint)) => format!("{description} ({hint})"),
+            (description, None) => description.to_string(),
+        };
+        let line = Line::from(format!(" /{}  {desc}", cmd.name));
         lines.push(if index == selected {
             line.style(theme::selected_row(true))
         } else {
@@ -1032,11 +1036,11 @@ pub(super) fn render_mention_popup(
                 style
             };
 
-            let (prefix, prefix_color, main_text, detail_text) = match item {
+            let (prefix, prefix_color, main_text, detail_text, is_current) = match item {
                 MentionItem::Category {
                     source,
                     count,
-                    preview,
+                    preview: _,
                 } => {
                     let count_str = count.to_string();
                     let label = match source {
@@ -1060,7 +1064,8 @@ pub(super) fn render_mention_popup(
                         source.prefix().to_string(),
                         source_color(*source),
                         label,
-                        preview.clone(),
+                        None,
+                        false,
                     )
                 }
                 MentionItem::Candidate(candidate) => (
@@ -1068,6 +1073,7 @@ pub(super) fn render_mention_popup(
                     source_color(candidate.source),
                     candidate.label.clone(),
                     candidate.detail.clone(),
+                    candidate.is_current,
                 ),
             };
 
@@ -1083,23 +1089,29 @@ pub(super) fn render_mention_popup(
                 ),
             )];
 
+            let current_badge = is_current
+                .then(|| format!("{} ", crate::i18n::t("chat.mention.current")))
+                .filter(|badge| badge.width() + 8 <= remaining);
+            let badge_width = current_badge.as_deref().map_or(0, UnicodeWidthStr::width);
+            let text_remaining = remaining.saturating_sub(badge_width);
+
             let detail_clean = detail_text
                 .as_deref()
                 .map(str::trim)
                 .filter(|d| !d.is_empty());
             let (label_text, right_detail) = if let Some(detail) = detail_clean {
-                let detail_budget = (remaining / 3).clamp(10, 32);
-                let label_budget = remaining.saturating_sub(detail_budget + 2);
+                let detail_budget = (text_remaining / 3).clamp(10, 32);
+                let label_budget = text_remaining.saturating_sub(detail_budget + 2);
                 if label_budget >= 8 {
                     (
                         super::truncate_str(&main_text, label_budget),
                         Some(super::truncate_str(detail, detail_budget)),
                     )
                 } else {
-                    (super::truncate_str(&main_text, remaining), None)
+                    (super::truncate_str(&main_text, text_remaining), None)
                 }
             } else {
-                (super::truncate_str(&main_text, remaining), None)
+                (super::truncate_str(&main_text, text_remaining), None)
             };
 
             let main_fg = if is_selected {
@@ -1116,6 +1128,16 @@ pub(super) fn render_mention_popup(
             } else {
                 theme::FG
             };
+            if let Some(badge) = current_badge {
+                spans.push(Span::styled(
+                    badge,
+                    paint(
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ));
+            }
             spans.push(Span::styled(
                 label_text,
                 paint(Style::default().fg(main_fg)),

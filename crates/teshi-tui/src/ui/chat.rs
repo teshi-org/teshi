@@ -16,7 +16,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::token_usage_label;
 use crate::app::{
     AiChatMessage, AiRole, AiStatus, App, ChangeKind, ChatAnchor, ChatSelection, ClickableRegion,
-    SLASH_COMMANDS,
 };
 use crate::markdown::render_markdown_width;
 use crate::theme;
@@ -713,9 +712,11 @@ pub(super) fn render_chat_panel(
         visual_line_count_for_width(&app.agent().input, input_width).min((inner.height / 3).max(3));
     let input_height = (input_rows + 2).min(inner.height.saturating_sub(dock_height));
     let filter = slash_filter(app, placement);
-    let suggestion_count = filter
+    let filtered_slash = filter
         .as_deref()
-        .map_or(0, |f| filtered_slash_commands(f).len() as u16);
+        .map(|f| app.matching_slash_commands(f))
+        .unwrap_or_default();
+    let suggestion_count = filtered_slash.len() as u16;
     let suggestion_height = if suggestion_count > 0 {
         (suggestion_count + 1).min(inner.height.saturating_sub(dock_height + input_height + 1))
     } else {
@@ -791,14 +792,12 @@ pub(super) fn render_chat_panel(
         );
         dock_y += 1;
     }
-    if let Some(filter) = filter.as_deref()
-        && suggestion_height > 0
-    {
+    if suggestion_height > 0 {
         render_slash_suggestions(
             frame,
             app,
             Rect::new(inner.x, dock_y, inner.width, suggestion_height),
-            filter,
+            &filtered_slash,
         );
         dock_y += suggestion_height;
     } else if let Some(items) = mention_items.as_deref()
@@ -2139,6 +2138,40 @@ struct MessageDisplay {
     completed: bool,
 }
 
+fn push_plan_card(out: &mut Vec<Line<'static>>, content: &str, width: usize) {
+    let available = rail_body_width(width) as usize;
+    let mut body = vec![Line::from(Span::styled(
+        activity_summary("Plan", available),
+        fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
+    ))];
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let styled = if let Some(rest) = trimmed.strip_prefix("[x] ") {
+            Line::from(vec![
+                Span::styled("✓ ", fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
+                Span::styled(rest.to_owned(), muted()),
+            ])
+        } else if let Some(rest) = trimmed.strip_prefix("[~] ") {
+            Line::from(vec![
+                Span::styled("◐ ", fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(rest.to_owned(), fg(theme::FG)),
+            ])
+        } else if let Some(rest) = trimmed.strip_prefix("[ ] ") {
+            Line::from(vec![
+                Span::styled("○ ", muted()),
+                Span::styled(rest.to_owned(), fg(theme::FG)),
+            ])
+        } else {
+            Line::styled(trimmed.to_owned(), fg(theme::FG))
+        };
+        body.push(styled);
+    }
+    push_railed(out, body, RailKind::Guide, width);
+}
+
 fn push_message(
     out: &mut Vec<Line<'static>>,
     app: &App,
@@ -2155,6 +2188,10 @@ fn push_message(
             display.expanded,
             display.live,
         );
+        return Vec::new();
+    }
+    if msg.source.as_deref() == Some("acp_plan") {
+        push_plan_card(out, &msg.content, width);
         return Vec::new();
     }
     if let Some(reasoning) = &msg.reasoning_content
@@ -2726,16 +2763,13 @@ fn slash_filter(app: &App, placement: ChatPlacement) -> Option<String> {
     })
 }
 
-fn filtered_slash_commands(filter: &str) -> Vec<&'static (&'static str, &'static str)> {
-    SLASH_COMMANDS
-        .iter()
-        .filter(|(name, _)| filter.is_empty() || name.starts_with(filter))
-        .collect()
-}
-
-fn render_slash_suggestions(frame: &mut Frame<'_>, app: &mut App, area: Rect, filter: &str) {
-    let filtered = filtered_slash_commands(filter);
-    super::pointer_controls::render_slash_suggestions(frame, app, area, &filtered);
+fn render_slash_suggestions(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    filtered: &[crate::app::SlashCommandSuggestion],
+) {
+    super::pointer_controls::render_slash_suggestions(frame, app, area, filtered);
 }
 
 /// Right-side controls disappear as a unit in very narrow composers.
@@ -5649,6 +5683,96 @@ mod tests {
         assert_eq!(
             terminal.backend().buffer()[(selected_card.x + 1, selected_card.y)].bg,
             theme::TAB_ACTIVE_BG
+        );
+    }
+
+    #[test]
+    fn acp_plan_card_and_dynamic_slash_suggestions_render() {
+        use teshi_agent::backend::{AgentBackendKind, AgentBackendStatus};
+        use teshi_agent_runtime::backend::{AcpBackendConfig, AgentBackendRuntime};
+
+        let (mut app, project, _store) = activity_test_app();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+        let config = AcpBackendConfig::new(teshi_acp::AcpAgentCommand {
+            program: if cfg!(windows) { "python" } else { "python3" }.into(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                "commands_and_plan".into(),
+            ],
+            cwd: project.path().into(),
+            env: Default::default(),
+        });
+        app.agents[0].backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 2);
+        app.agents[0].backend.configure_acp(config).unwrap();
+        app.agents[0].backend.start().unwrap();
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0]
+            .backend
+            .submit_turn(
+                None,
+                vec![teshi_core::llm::ChatMessage::text("user", "plan please")],
+                None,
+            )
+            .unwrap();
+        poll_activity_until(&mut app, |app| {
+            app.agent().backend.status() != AgentBackendStatus::Running
+        });
+        app.poll_llm_events();
+
+        let rows = row_texts(&build_chat_lines(&app, 100, 60, ChatPlacement::Tab));
+        assert!(rows.iter().any(|r| r.contains("Plan")), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("✓") && r.contains("Read feature files")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("◐") && r.contains("Verify scenario steps")),
+            "{rows:?}"
+        );
+
+        app.active_tab = crate::app::MainTab::Ai;
+        app.ai_input_focused = true;
+        app.slash_suggestion_active = true;
+        app.agent_mut().input.set_text("/rev".into());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("/review"), "{screen}");
+        assert!(screen.contains("(path)"), "{screen}");
+
+        app.agents[0].backend.start().unwrap();
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0]
+            .backend
+            .submit_turn(
+                None,
+                vec![teshi_core::llm::ChatMessage::text("user", "done")],
+                None,
+            )
+            .unwrap();
+        poll_activity_until(&mut app, |app| {
+            app.agent().backend.status() != AgentBackendStatus::Running
+        });
+        app.poll_llm_events();
+
+        let rows_after = row_texts(&build_chat_lines(&app, 100, 60, ChatPlacement::Tab));
+        assert!(
+            !rows_after
+                .iter()
+                .any(|r| r.contains("✓") && r.contains("Read feature files")),
+            "plan_removed must clear rendered plan card: {rows_after:?}"
         );
     }
 }
