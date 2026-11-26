@@ -167,16 +167,16 @@ pub struct HistorySearchState {
     /// Index into the filtered list (newest-first).
     pub selection: usize,
     /// Composer draft restored when search is cancelled.
-    pub saved_draft: String,
+    pub saved: crate::chat_state::DraftSnapshot,
 }
 
 impl HistorySearchState {
     /// Opens search while remembering the draft that Up/Down or Esc should restore.
-    pub fn open(saved_draft: String) -> Self {
+    pub fn open(saved: crate::chat_state::DraftSnapshot) -> Self {
         Self {
             query: String::new(),
             selection: 0,
-            saved_draft,
+            saved,
         }
     }
 }
@@ -186,15 +186,30 @@ impl HistorySearchState {
 pub struct ComposerEditorState {
     /// Editable copy of the composer draft.
     pub draft: crate::composer::Composer,
+    /// The folded paste this editor was opened on, if any: saving writes its
+    /// text back behind that label instead of the whole draft.
+    pub paste: Option<usize>,
 }
 
 impl ComposerEditorState {
-    /// Snapshots the live composer into a fullscreen editor buffer.
-    pub fn open(source: &crate::composer::Composer) -> Self {
+    /// Snapshots draft `text` and `cursor` into a fullscreen editor buffer.
+    ///
+    /// The caller hands over the draft as it sends: placeholders already
+    /// expanded, so the editor never shows a label it cannot resolve.
+    pub fn open(text: &str, cursor: usize) -> Self {
+        Self::buffer(text, cursor, None)
+    }
+
+    /// Opens the text behind folded paste `number`, titled by its label.
+    pub fn open_paste(number: usize, text: &str) -> Self {
+        Self::buffer(text, 0, Some(number))
+    }
+
+    fn buffer(text: &str, cursor: usize, paste: Option<usize>) -> Self {
         let mut draft = crate::composer::Composer::default();
-        draft.set_text(source.text().to_string());
-        draft.set_cursor(source.cursor());
-        Self { draft }
+        draft.set_text(text.to_string());
+        draft.set_cursor(cursor);
+        Self { draft, paste }
     }
 }
 

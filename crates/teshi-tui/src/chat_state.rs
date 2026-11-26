@@ -29,13 +29,25 @@ pub(crate) struct ChatState {
     pub recall: Option<Recall>,
 }
 
+/// A composer draft kept aside as the composer showed it, its labels live.
+///
+/// Whatever takes the composer away for a while (Up/Down recall, Ctrl+R
+/// search) hands this back instead of plain text, so a folded paste comes back
+/// folded and its labels still stand for something.
+#[derive(Debug, Clone)]
+pub(crate) struct DraftSnapshot {
+    pub text: String,
+    pub images: crate::chat_images::DraftImages,
+    pub pastes: crate::chat_pastes::DraftPastes,
+}
+
 /// Up/Down position in [`sent_prompts`], plus the draft to return to.
 #[derive(Debug, Clone)]
 pub(crate) struct Recall {
     /// Index into the list returned by [`sent_prompts`].
     pub index: usize,
-    /// The interrupted draft with image placeholders expanded to mentions.
-    pub draft: String,
+    /// The interrupted draft as the composer showed it, labels included.
+    pub draft: DraftSnapshot,
 }
 
 /// Prompts sent in this conversation, oldest first, for composer recall.

@@ -274,6 +274,8 @@ pub struct AgentThread {
     pub input: crate::composer::Composer,
     /// Images behind the `[Image #N]` placeholders in [`Self::input`].
     pub(crate) input_images: crate::chat_images::DraftImages,
+    /// Folded pastes behind the `[Pasted text #N +L lines]` labels in [`Self::input`].
+    pub(crate) input_pastes: crate::chat_pastes::DraftPastes,
     /// Context capsules mounted above the AI composer and prepended on send.
     pub(crate) attached_contexts: Vec<crate::ai_context::ContextCapsule>,
     pub tool_status: Option<String>,
@@ -588,6 +590,7 @@ impl AgentThread {
             status: AiStatus::Idle,
             input: Default::default(),
             input_images: Default::default(),
+            input_pastes: Default::default(),
             attached_contexts: Vec::new(),
             tool_status: None,
             scroll_offset: 0,
@@ -1954,6 +1957,9 @@ pub struct App {
     /// Width in cells of the last rendered composer text area. Zero before the
     /// first frame; vertical caret movement falls back to logical lines then.
     pub composer_text_width: u16,
+    /// Height in rows of the last rendered frame. Zero before the first frame;
+    /// a paste then folds by its line count against a normal terminal height.
+    pub(crate) terminal_rows: u16,
     /// Last focused item captured when leaving `Explore`, `Issues`, or `Test Points`.
     pub last_focused_context: Option<crate::ai_context::ContextCapsule>,
     /// Whether the AI tab hides its conversation sidebar so the chat owns the row.
@@ -2122,6 +2128,89 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(s.len())
+}
+
+/// Expands `[Image #N]` and `[Pasted text #N ...]` placeholders in a single pass
+/// over `source`, preventing expanded paste text or image paths from being
+/// re-scanned for other placeholders, and optionally maps a byte caret offset
+/// to the resulting character cursor position.
+fn expand_draft_placeholders(
+    source: &str,
+    images: &crate::chat_images::DraftImages,
+    pastes: &crate::chat_pastes::DraftPastes,
+    caret_byte: Option<usize>,
+) -> (String, usize) {
+    enum Token<'a> {
+        Image(&'a Path),
+        Paste(&'a str),
+    }
+
+    let mut tokens: Vec<(std::ops::Range<usize>, Token<'_>)> = Vec::new();
+    for (range, number) in crate::chat_images::placeholders(source) {
+        if let Some(path) = images.path(number) {
+            tokens.push((range, Token::Image(path)));
+        }
+    }
+    for (range, number) in crate::chat_pastes::placeholders(source, pastes) {
+        if let Some(text) = pastes.text(number) {
+            tokens.push((range, Token::Paste(text)));
+        }
+    }
+    tokens.sort_by_key(|(range, _)| (range.start, range.end));
+
+    let mut out = String::with_capacity(source.len());
+    let mut last = 0;
+    let mut mapped_cursor = None;
+
+    for (range, token) in tokens {
+        if range.start < last {
+            continue;
+        }
+        if mapped_cursor.is_none()
+            && let Some(caret) = caret_byte
+            && caret <= range.start
+        {
+            mapped_cursor = Some(out.chars().count() + source[last..caret].chars().count());
+        }
+        out.push_str(&source[last..range.start]);
+        match token {
+            Token::Image(path) => {
+                if out
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| !ch.is_whitespace())
+                {
+                    out.push(' ');
+                }
+                out.push_str(&crate::chat_images::format_mention(path));
+                if source[range.end..].chars().next().is_some_and(|ch| {
+                    !ch.is_whitespace() && !crate::chat_images::MENTION_TRAILING.contains(&ch)
+                }) {
+                    out.push(' ');
+                }
+            }
+            Token::Paste(text) => {
+                out.push_str(text);
+            }
+        }
+        if mapped_cursor.is_none()
+            && let Some(caret) = caret_byte
+            && caret <= range.end
+        {
+            mapped_cursor = Some(out.chars().count());
+        }
+        last = range.end;
+    }
+
+    if mapped_cursor.is_none()
+        && let Some(caret) = caret_byte
+    {
+        let clamped = caret.min(source.len());
+        mapped_cursor = Some(out.chars().count() + source[last..clamped].chars().count());
+    }
+    out.push_str(&source[last..]);
+    let cursor = mapped_cursor.unwrap_or_else(|| out.chars().count());
+    (out, cursor)
 }
 
 /// Turns the newest message, the user's turn, into text plus image blocks.
@@ -3520,6 +3609,7 @@ impl App {
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            terminal_rows: 0,
             last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
@@ -3706,6 +3796,7 @@ impl App {
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            terminal_rows: 0,
             last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
@@ -3962,6 +4053,7 @@ impl App {
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            terminal_rows: 0,
             last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
@@ -5727,6 +5819,34 @@ impl App {
         self.sync_mention_popup();
     }
 
+    /// Inserts pasted text, folding a long one into a single `[Pasted text #N]`
+    /// label instead of letting it flood the composer.
+    ///
+    /// Line endings are normalized first, so the label's line count and the
+    /// text sent later both read the same `\n`. Nothing is padded around the
+    /// label: it stands exactly where the paste would have gone, so sending
+    /// puts the original characters back.
+    fn insert_ai_paste(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if crate::chat_pastes::folds(&text, self.paste_fold_rows()) {
+            let label = self.agent_mut().input_pastes.attach(text);
+            self.insert_ai_text(&label);
+            return;
+        }
+        self.insert_ai_text(&text);
+    }
+
+    /// Terminal height a paste's fold is judged against. A paste arriving
+    /// before the first frame is measured against a normal terminal, so a
+    /// short one does not fold merely because nothing has been drawn yet.
+    fn paste_fold_rows(&self) -> u16 {
+        if self.terminal_rows == 0 {
+            40
+        } else {
+            self.terminal_rows
+        }
+    }
+
     /// Attaches `paths` to the draft as `[Image #N]` placeholders at the
     /// cursor, set apart from a neighboring word by spaces.
     fn insert_ai_images(&mut self, paths: Vec<std::path::PathBuf>) {
@@ -5757,14 +5877,28 @@ impl App {
     }
 
     /// Takes the selected agent's draft as message text, with each image
-    /// placeholder expanded to its `@path` mention.
+    /// placeholder expanded to its `@path` mention and each folded paste
+    /// expanded back to the text it stood for in a single pass.
     fn take_ai_draft(&mut self) -> String {
         self.reset_mention_popup();
         let agent = self.agent_mut();
         let text = agent.input.take_text();
         let images = std::mem::take(&mut agent.input_images);
+        let pastes = std::mem::take(&mut agent.input_pastes);
         agent.chat.recall = None;
-        crate::chat_images::expand_placeholders(&text, &images)
+        expand_draft_placeholders(&text, &images, &pastes, None).0
+    }
+
+    /// Clears the selected agent's composer draft along with attached images,
+    /// folded pastes, recall state, and mention popup.
+    fn clear_ai_draft(&mut self) {
+        self.reset_mention_popup();
+        let agent = self.agent_mut();
+        agent.input.set_text(String::new());
+        agent.input_images = Default::default();
+        agent.input_pastes = Default::default();
+        agent.chat.recall = None;
+        self.sync_composer_atoms();
     }
 
     /// Reloads project-scoped prompt history from disk.
@@ -5821,25 +5955,48 @@ impl App {
             match &mut agent.chat.recall {
                 Some(recall) => recall.index = next,
                 None => {
-                    let draft =
-                        crate::chat_images::expand_placeholders(&agent.input, &agent.input_images);
+                    // The draft is kept exactly as the composer shows it, its
+                    // labels live: stepping back must not unfold a paste.
+                    let draft = crate::chat_state::DraftSnapshot {
+                        text: agent.input.text().to_string(),
+                        images: agent.input_images.clone(),
+                        pastes: agent.input_pastes.clone(),
+                    };
                     agent.chat.recall = Some(crate::chat_state::Recall { index: next, draft });
                 }
             }
             self.restore_ai_draft(agent_idx, prompt);
         } else if let Some(recall) = self.agent_mut().chat.recall.take() {
-            self.restore_ai_draft(agent_idx, &recall.draft);
+            let draft = recall.draft;
+            self.write_ai_draft(agent_idx, draft.text, draft.images, draft.pastes);
         }
         true
     }
 
     /// Puts message text back into an agent's composer, showing its image
     /// mentions as placeholders again.
+    ///
+    /// Text that came from outside the composer never carries live pastes: a
+    /// label in it is just characters, because nothing here could say what it
+    /// stood for.
     fn restore_ai_draft(&mut self, agent_idx: usize, text: &str) {
         let (draft, images) = crate::chat_images::collapse_mentions(text, &self.project.root_dir);
+        self.write_ai_draft(agent_idx, draft, images, Default::default());
+    }
+
+    /// Puts a whole draft back into a composer with the references it stood for.
+    fn write_ai_draft(
+        &mut self,
+        agent_idx: usize,
+        draft: String,
+        images: crate::chat_images::DraftImages,
+        mut pastes: crate::chat_pastes::DraftPastes,
+    ) {
+        pastes.clear_edits();
         let agent = &mut self.agents[agent_idx];
         agent.input.set_text(draft);
         agent.input_images = images;
+        agent.input_pastes = pastes;
         self.sync_composer_atoms_for(agent_idx);
         if agent_idx == self.selected_agent {
             self.sync_mention_popup();
@@ -5847,20 +6004,31 @@ impl App {
     }
 
     /// Rebuilds the composer's atomic placeholder ranges from the attached
-    /// images. Called after edits that can move or remove a placeholder.
+    /// images and folded pastes. Called after edits that can move or remove a
+    /// placeholder, and after an undo, whose snapshots hold text and caret
+    /// only: every range is re-derived from the text and the reference tables.
     fn sync_composer_atoms_for(&mut self, agent_idx: usize) {
+        if !self.agents[agent_idx].input.can_redo() {
+            self.agents[agent_idx].input_pastes.discard_redo();
+        }
         let atoms = {
             let agent = &self.agents[agent_idx];
             let text = agent.input.text();
-            crate::chat_images::placeholders(text)
+            let chars = |range: std::ops::Range<usize>| {
+                text[..range.start].chars().count()..text[..range.end].chars().count()
+            };
+            let mut atoms: Vec<std::ops::Range<usize>> = crate::chat_images::placeholders(text)
                 .into_iter()
                 .filter(|(_, number)| agent.input_images.path(*number).is_some())
-                .map(|(range, _)| {
-                    let start = text[..range.start].chars().count();
-                    let end = text[..range.end].chars().count();
-                    start..end
-                })
-                .collect()
+                .map(|(range, _)| chars(range))
+                .collect();
+            atoms.extend(
+                crate::chat_pastes::placeholders(text, &agent.input_pastes)
+                    .into_iter()
+                    .map(|(range, _)| chars(range)),
+            );
+            atoms.sort_by_key(|range| range.start);
+            atoms
         };
         self.agents[agent_idx].input.set_atoms(atoms);
     }
@@ -5899,25 +6067,40 @@ impl App {
             return;
         }
         self.focus_ai_input();
-        let saved_draft = crate::chat_images::expand_placeholders(
-            &self.agent().input,
-            &self.agent().input_images,
-        );
+        let saved = crate::chat_state::DraftSnapshot {
+            text: self.agent().input.text().to_string(),
+            images: self.agent().input_images.clone(),
+            pastes: self.agent().input_pastes.clone(),
+        };
         self.agent_mut().chat.recall = None;
-        self.history_search = Some(crate::prompt_history::HistorySearchState::open(saved_draft));
+        self.history_search = Some(crate::prompt_history::HistorySearchState::open(saved));
         self.slash_suggestion_active = false;
         self.reset_mention_popup();
         self.status = "Prompt history · Enter select · Esc cancel".into();
     }
 
-    /// Opens the fullscreen draft editor with a snapshot of the live composer.
+    /// Opens the fullscreen draft editor on the draft as it would send it.
+    ///
+    /// Placeholders are expanded first: a label means nothing outside the
+    /// composer, so the editor never shows one it cannot resolve.
     fn open_composer_editor(&mut self) {
         if self.composer_editor.is_some() || self.history_search.is_some() {
             return;
         }
         self.focus_ai_input();
+        let (text, cursor) = {
+            let agent = self.agent();
+            let source = agent.input.text();
+            let caret = char_to_byte_idx(source, agent.input.cursor());
+            expand_draft_placeholders(
+                source,
+                &agent.input_images,
+                &agent.input_pastes,
+                Some(caret),
+            )
+        };
         self.composer_editor = Some(crate::prompt_history::ComposerEditorState::open(
-            &self.agent().input,
+            &text, cursor,
         ));
         self.slash_suggestion_active = false;
         self.reset_mention_popup();
@@ -5925,18 +6108,121 @@ impl App {
     }
 
     /// Writes the fullscreen editor draft back into the live composer.
+    ///
+    /// The editor produced plain text: no label comes back, because it stood
+    /// for a paste that is now written out in full.
     fn apply_composer_editor(&mut self) {
         let Some(editor) = self.composer_editor.take() else {
             return;
         };
+        if let Some(number) = editor.paste {
+            let text = editor.draft.text().to_string();
+            self.apply_paste_edit(number, &text);
+            self.focus_ai_input();
+            self.status = "Paste applied".into();
+            return;
+        }
         let agent_idx = self.selected_agent;
         let text = editor.draft.text().to_string();
-        let cursor = editor.draft.cursor();
-        self.restore_ai_draft(agent_idx, &text);
+        let caret = editor.draft.cursor();
+        let caret_byte = char_to_byte_idx(&text, caret);
+        let root = self.project.root_dir.clone();
+        // Collapse mentions in one pass so a caret inside an `@path` lands
+        // directly after its `[Image #N]` placeholder instead of drifting.
+        let mentions = crate::chat_images::image_mentions(&text, &root);
+        let mut images = crate::chat_images::DraftImages::default();
+        let mut draft = String::with_capacity(text.len());
+        let mut last = 0;
+        let mut mapped_cursor = None;
+        for mention in mentions {
+            if mapped_cursor.is_none() && caret_byte <= mention.range.start {
+                mapped_cursor =
+                    Some(draft.chars().count() + text[last..caret_byte].chars().count());
+            }
+            draft.push_str(&text[last..mention.range.start]);
+            draft.push_str(&images.attach(mention.path));
+            if mapped_cursor.is_none() && caret_byte <= mention.range.end {
+                mapped_cursor = Some(draft.chars().count());
+            }
+            last = mention.range.end;
+        }
+        if mapped_cursor.is_none() {
+            mapped_cursor = Some(draft.chars().count() + text[last..caret_byte].chars().count());
+        }
+        draft.push_str(&text[last..]);
+        let cursor = mapped_cursor
+            .unwrap_or_else(|| draft.chars().count())
+            .min(draft.chars().count());
+        self.write_ai_draft(agent_idx, draft, images, Default::default());
         self.agents[agent_idx].input.set_cursor(cursor);
         self.sync_mention_popup();
         self.focus_ai_input();
         self.status = "Draft applied from editor".into();
+    }
+
+    /// Opens the text behind folded paste `number` on its own, titled by its
+    /// label; saving it is one undo step of the draft.
+    fn open_paste_editor(&mut self, number: usize) {
+        if self.composer_editor.is_some() || self.history_search.is_some() {
+            return;
+        }
+        let Some(text) = self.agent().input_pastes.text(number).map(str::to_owned) else {
+            return;
+        };
+        self.focus_ai_input();
+        self.composer_editor = Some(crate::prompt_history::ComposerEditorState::open_paste(
+            number, &text,
+        ));
+        self.slash_suggestion_active = false;
+        self.reset_mention_popup();
+        self.status = "Paste editor · Ctrl+S apply · Esc discard".into();
+    }
+
+    /// Writes edited paste `text` back into the draft as one undo step.
+    ///
+    /// What pasting the same text now would give is what happens: still long,
+    /// the same numbered label with its line count updated; short, the text
+    /// itself; empty, nothing. Every place the label appears changes alike.
+    fn apply_paste_edit(&mut self, number: usize, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let agent_idx = self.selected_agent;
+        let rows = self.paste_fold_rows();
+        let agent = &mut self.agents[agent_idx];
+        let Some(label) = agent.input_pastes.label(number).map(str::to_owned) else {
+            return;
+        };
+        if agent.input_pastes.text(number) == Some(text.as_str()) {
+            return;
+        }
+        let draft = agent.input.text().to_owned();
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut from = 0;
+        while let Some(offset) = draft[from..].find(&label) {
+            let start = from + offset;
+            let end = start + label.len();
+            ranges.push(draft[..start].chars().count()..draft[..end].chars().count());
+            from = end;
+        }
+        if ranges.is_empty() {
+            return;
+        }
+        let stays_folded = !text.trim().is_empty() && crate::chat_pastes::folds(&text, rows);
+        let replacement = if text.trim().is_empty() {
+            String::new()
+        } else if stays_folded {
+            crate::chat_pastes::label(number, &text)
+        } else {
+            text.clone()
+        };
+        agent.input.replace_ranges(&ranges, &replacement);
+        if stays_folded {
+            let revision_after = agent.input.revision();
+            agent
+                .input_pastes
+                .replace_at_revision(number, text, revision_after);
+        }
+        self.sync_composer_atoms();
+        self.sync_mention_popup();
     }
 
     /// Closes the fullscreen editor without changing the live composer.
@@ -13809,6 +14095,16 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiPaste(text) => {
+                if let Some(editor) = self.composer_editor.as_mut() {
+                    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                    if !normalized.is_empty() {
+                        editor
+                            .draft
+                            .insert(&normalized, crate::composer::EditUnit::Atomic);
+                    }
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                }
                 self.focus_ai_input();
                 // Terminals send an empty bracketed paste when the clipboard
                 // holds only a bitmap.
@@ -13821,24 +14117,31 @@ impl App {
                 {
                     self.insert_ai_images(paths);
                 } else {
-                    // Normalize Windows line endings
-                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                    self.insert_ai_text(&text);
+                    self.insert_ai_paste(&text);
                 }
                 self.quit_pending_confirm = false;
             }
             Action::AiRemoveAttachment(index) => {
                 let root = self.project.root_dir.clone();
-                let mut input = self.agent().input.text().to_string();
-                if let Some(start) = crate::chat_images::remove_attachment(
-                    &mut input,
-                    &self.agent().input_images,
-                    &root,
-                    index,
-                ) {
-                    let cursor = input[..start].chars().count();
+                let removal = {
+                    let agent = self.agent();
+                    let text = agent.input.text();
+                    crate::chat_images::attachment_removal_range(
+                        text,
+                        &agent.input_images,
+                        &root,
+                        index,
+                    )
+                    .map(|range| {
+                        let start = text[..range.start].chars().count();
+                        let end = text[..range.end].chars().count();
+                        start..end
+                    })
+                };
+                if let Some(char_range) = removal {
+                    let cursor = char_range.start;
                     let agent = self.agent_mut();
-                    agent.input.set_text(input);
+                    agent.input.remove_chars(char_range);
                     agent.input.set_cursor(cursor);
                     self.sync_composer_atoms();
                     self.sync_mention_popup();
@@ -13856,6 +14159,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::OpenImageViewer(path) => self.open_image_viewer(path),
+            Action::OpenPastedText(number) => self.open_paste_editor(number),
             Action::ImageViewerClose => self.close_screenshot_panel(),
             Action::OpenReplayWebUi => self.open_replay_web_ui(),
             Action::AiNewline => {
@@ -13868,6 +14172,25 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiClipboardPaste => {
+                if let Some(editor) = self.composer_editor.as_mut() {
+                    let text = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.get_text())
+                        .ok()
+                        .filter(|text| !text.is_empty());
+                    if let Some(text) = text {
+                        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                        editor
+                            .draft
+                            .insert(&normalized, crate::composer::EditUnit::Atomic);
+                    } else {
+                        self.status =
+                            crate::i18n::t("status.the_clipboard_holds_no_text_or_image")
+                                .to_string();
+                        self.set_status_message(self.status.clone());
+                    }
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                }
                 self.focus_ai_input();
                 // Office and browsers put a rendered bitmap beside copied
                 // text, so text wins and only a text-less clipboard is
@@ -13881,10 +14204,7 @@ impl App {
                         match crate::chat_images::pasted_image_paths(&text, &self.project.root_dir)
                         {
                             Some(paths) => self.insert_ai_images(paths),
-                            None => {
-                                let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                                self.insert_ai_text(&text);
-                            }
+                            None => self.insert_ai_paste(&text),
                         }
                     }
                     None => {
@@ -13964,7 +14284,8 @@ impl App {
                         self.agent_mut().chat.recall = None;
                         self.status = "Inserted prompt from history".into();
                     } else {
-                        self.restore_ai_draft(agent_idx, &search.saved_draft);
+                        let saved = search.saved;
+                        self.write_ai_draft(agent_idx, saved.text, saved.images, saved.pastes);
                         self.status = "No history match".into();
                     }
                     self.focus_ai_input();
@@ -13974,7 +14295,8 @@ impl App {
             Action::AiHistorySearchDismiss => {
                 if let Some(search) = self.history_search.take() {
                     let agent_idx = self.selected_agent;
-                    self.restore_ai_draft(agent_idx, &search.saved_draft);
+                    let saved = search.saved;
+                    self.write_ai_draft(agent_idx, saved.text, saved.images, saved.pastes);
                     self.focus_ai_input();
                     self.status = "History search cancelled".into();
                 }
@@ -14015,11 +14337,12 @@ impl App {
                 }
                 let paused_queue =
                     !self.agent().chat.queue.is_empty() && !self.agent().chat.queue_ready;
+                let is_slash_command = self.agent().input.starts_with('/');
                 if (matches!(
                     self.agent().status,
                     AiStatus::Waiting | AiStatus::AwaitingApproval
                 ) || paused_queue)
-                    && !self.agent().input.trim().starts_with('/')
+                    && !is_slash_command
                 {
                     let draft = self.take_ai_draft();
                     let capsules = std::mem::take(&mut self.agent_mut().attached_contexts);
@@ -14049,7 +14372,7 @@ impl App {
                 let draft = self.take_ai_draft();
 
                 // Intercept slash commands before sending to LLM (keep mounted capsules intact).
-                if let Some(cmd) = draft.strip_prefix('/') {
+                if is_slash_command && let Some(cmd) = draft.strip_prefix('/') {
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
                     return self.execute_slash_command(cmd);
@@ -14113,6 +14436,8 @@ impl App {
             }
             Action::AiUndo => {
                 if self.active_composer_mut().undo() && self.composer_editor.is_none() {
+                    let revision = self.agent().input.revision();
+                    self.agent_mut().input_pastes.on_undo(revision);
                     self.sync_composer_atoms();
                     self.after_composer_edit();
                 }
@@ -14120,6 +14445,8 @@ impl App {
             }
             Action::AiRedo => {
                 if self.active_composer_mut().redo() && self.composer_editor.is_none() {
+                    let revision = self.agent().input.revision();
+                    self.agent_mut().input_pastes.on_redo(revision);
                     self.sync_composer_atoms();
                     self.after_composer_edit();
                 }
@@ -14354,7 +14681,7 @@ impl App {
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
                     // Clear the input (cmd is about to execute); "copy" will override below
-                    self.agent_mut().input.set_text(String::new());
+                    self.clear_ai_draft();
                     // Execute the command through the same dispatcher as submitted commands.
                     return if *name == "copy" {
                         self.agent_mut().input.set_text("/copy ".to_string());
@@ -14364,12 +14691,15 @@ impl App {
                     };
                 }
                 // No suggestion matched the typed text (an argument-bearing or
-                // unknown command such as `/copy 3`); submit it to the same
-                // dispatcher as a submitted command.
-                if let Some(command) = self.agent().input.strip_prefix('/').map(str::to_owned) {
-                    self.agent_mut().input.set_text(String::new());
+                // unknown command such as `/copy 3`); expand any placeholders
+                // and submit it to the same dispatcher as a submitted command.
+                if self.agent().input.starts_with('/') {
                     self.slash_suggestion_active = false;
-                    return self.execute_slash_command(&command);
+                    self.slash_suggestion_selection = 0;
+                    let expanded = self.take_ai_draft();
+                    if let Some(command) = expanded.strip_prefix('/') {
+                        return self.execute_slash_command(command);
+                    }
                 }
             }
             Action::AiSlashDismiss => {
@@ -14732,12 +15062,11 @@ impl App {
                     } else {
                         self.status = crate::i18n::t("status.input_cleared").to_string();
                     }
-                    self.agent_mut().input.set_text(String::new());
+                    self.clear_ai_draft();
                     self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().status = AiStatus::Idle;
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
-                    self.reset_mention_popup();
                 } else {
                     if self.step_input_active || self.step_keyword_picker.is_some() {
                         self.clear_step_input_state();
@@ -17319,6 +17648,7 @@ impl App {
             || self.has_agent_change_prompt()
             || self.has_acp_permission_prompt()
             || self.history_search.is_some()
+            || self.composer_editor.is_some()
         {
             let pos = ratatui::layout::Position::new(col, row);
             if self.help_guide.active {
@@ -17375,7 +17705,8 @@ impl App {
                 || self.change_summary_visible
                 || self.scenario_dropdown_open
                 || self.step_keyword_picker.is_some()
-                || self.history_search.is_some();
+                || self.history_search.is_some()
+                || self.composer_editor.is_some();
             if !has_blocking_panel
                 && matches!(
                     kind,
@@ -17680,7 +18011,9 @@ impl App {
             && !self.has_external_change_prompt()
             && self.step_keyword_picker.is_none()
             && !self.has_agent_change_prompt()
-            && !self.has_acp_permission_prompt();
+            && !self.has_acp_permission_prompt()
+            && self.composer_editor.is_none()
+            && self.history_search.is_none();
         let in_chat_history = chat_context
             && self
                 .chat_history_rect
@@ -20278,12 +20611,11 @@ impl App {
             // session panel while waiting, and swallow transcript right-clicks.
             if self.agent().session_id() == Some(s.id.as_str()) {
                 self.clear_chat_selection();
-                self.reset_mention_popup();
                 self.ai_input_focused = false;
                 self.session_panel_active = false;
                 self.pending_session_restore = None;
                 self.agent_mut().partial_response_mut().clear();
-                self.agent_mut().input.set_text(String::new());
+                self.clear_ai_draft();
                 self.agent_mut().status = AiStatus::Idle;
                 self.agent_mut().scroll_offset = 0;
                 self.status = crate::i18n::fill(
@@ -20295,9 +20627,8 @@ impl App {
             if !self.restore_session(s, false) {
                 return Ok(());
             }
-            self.reset_mention_popup();
             self.agent_mut().partial_response_mut().clear();
-            self.agent_mut().input.set_text(String::new());
+            self.clear_ai_draft();
             self.agent_mut().status = AiStatus::Idle;
             self.agent_mut().scroll_offset = 0;
             self.status = crate::i18n::fill(
@@ -23747,6 +24078,391 @@ mod tests {
         assert_eq!(app.agent().input.text(), "XYZ");
         app.handle_action(Action::AiUndo).unwrap();
         assert_eq!(app.agent().input.text(), "abcdef");
+    }
+
+    #[test]
+    fn a_multiline_paste_folds_into_one_label_and_sends_the_original() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiSendChar('>')).unwrap();
+        app.handle_action(Action::AiPaste("1\r\n2\r\n3\r\n4\r\n5\r\n6".into()))
+            .unwrap();
+
+        assert_eq!(app.agent().input.text(), ">[Pasted text #1 +5 lines]");
+        assert_eq!(app.agent().input_pastes.text(1), Some("1\n2\n3\n4\n5\n6"));
+        assert_eq!(
+            app.take_ai_draft(),
+            ">1\n2\n3\n4\n5\n6",
+            "sending puts the original text back where the label stood"
+        );
+    }
+
+    #[test]
+    fn a_short_paste_stays_inline_and_a_folded_one_is_one_unit() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiPaste("one line".into()))
+            .unwrap();
+        assert_eq!(app.agent().input.text(), "one line");
+        assert_eq!(app.agent().input_pastes.text(1), None);
+
+        app.agent_mut().input.set_text(String::new());
+        app.handle_action(Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+        let label = app.agent().input.text().to_string();
+        app.agent_mut().input.move_left(false);
+        assert_eq!(app.agent().input.cursor(), 0, "the label moves as one unit");
+        app.agent_mut().input.move_right(false);
+        assert_eq!(app.agent().input.cursor(), label.chars().count());
+        app.agent_mut().input.backspace();
+        assert_eq!(app.agent().input.text(), "");
+    }
+
+    #[test]
+    fn a_deleted_label_does_not_free_its_number() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+        app.handle_action(Action::AiSelectAll).unwrap();
+        app.handle_action(Action::AiBackspace).unwrap();
+        app.handle_action(Action::AiPaste("a\nb\nc\nd\ne\nf".into()))
+            .unwrap();
+
+        assert_eq!(app.agent().input.text(), "[Pasted text #2 +5 lines]");
+        assert_eq!(app.take_ai_draft(), "a\nb\nc\nd\ne\nf");
+    }
+
+    #[test]
+    fn undo_brings_a_folded_paste_back_still_sendable() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+        let label = app.agent().input.text().to_string();
+
+        app.handle_action(Action::AiUndo).unwrap();
+        assert_eq!(app.agent().input.text(), "");
+        app.handle_action(Action::AiRedo).unwrap();
+        assert_eq!(app.agent().input.text(), label);
+        assert_eq!(app.take_ai_draft(), "1\n2\n3\n4\n5\n6");
+    }
+
+    #[test]
+    fn editing_a_folded_paste_keeps_it_folded_while_it_stays_long() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+
+        app.handle_action(Action::OpenPastedText(1)).unwrap();
+        app.composer_editor
+            .as_mut()
+            .expect("the paste editor opens")
+            .draft
+            .set_text("a\nb\nc\nd\ne\nf".into());
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+
+        assert_eq!(app.agent().input.text(), "[Pasted text #1 +5 lines]");
+        assert_eq!(app.agent().input_pastes.text(1), Some("a\nb\nc\nd\ne\nf"));
+
+        // Short enough now: the text takes the label's place.
+        app.handle_action(Action::OpenPastedText(1)).unwrap();
+        app.composer_editor
+            .as_mut()
+            .expect("the paste editor reopens")
+            .draft
+            .set_text("short".into());
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+
+        assert_eq!(app.agent().input.text(), "short");
+        assert_eq!(app.take_ai_draft(), "short");
+    }
+
+    #[test]
+    fn clearing_a_folded_paste_removes_its_label() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiSendChar('>')).unwrap();
+        app.handle_action(Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+
+        app.handle_action(Action::OpenPastedText(1)).unwrap();
+        app.composer_editor
+            .as_mut()
+            .expect("the paste editor opens")
+            .draft
+            .set_text(String::new());
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+
+        assert_eq!(app.agent().input.text(), ">");
+        assert_eq!(app.take_ai_draft(), ">");
+    }
+
+    #[test]
+    fn a_label_shaped_text_without_a_paste_sends_as_written() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut()
+            .input
+            .set_text("[Pasted text #1 +5 lines]".to_string());
+
+        assert_eq!(
+            app.take_ai_draft(),
+            "[Pasted text #1 +5 lines]",
+            "nothing registered that label, so it is just characters"
+        );
+    }
+
+    #[test]
+    fn undoing_and_redoing_edited_folded_paste_restores_text_and_label() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        let original = "1\n2\n3\n4\n5\n6";
+        app.handle_action(Action::AiPaste(original.into())).unwrap();
+
+        // Edit to a different line count (label changes from +5 lines to +6 lines).
+        let longer = "a\nb\nc\nd\ne\nf\ng";
+        app.handle_action(Action::OpenPastedText(1)).unwrap();
+        app.composer_editor
+            .as_mut()
+            .unwrap()
+            .draft
+            .set_text(longer.into());
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+        assert_eq!(app.agent().input.text(), "[Pasted text #1 +6 lines]");
+        assert_eq!(app.agent().input_pastes.text(1), Some(longer));
+
+        // Undo must restore both original label AND original backing text.
+        app.handle_action(Action::AiUndo).unwrap();
+        assert_eq!(app.agent().input.text(), "[Pasted text #1 +5 lines]");
+        assert_eq!(app.agent().input_pastes.text(1), Some(original));
+        assert_eq!(
+            super::expand_draft_placeholders(
+                app.agent().input.text(),
+                &app.agent().input_images,
+                &app.agent().input_pastes,
+                None,
+            )
+            .0,
+            original
+        );
+
+        // Redo restores the edited label and text.
+        app.handle_action(Action::AiRedo).unwrap();
+        assert_eq!(app.agent().input.text(), "[Pasted text #1 +6 lines]");
+        assert_eq!(app.agent().input_pastes.text(1), Some(longer));
+
+        // Edit with the SAME line count (label unchanged, text changed).
+        let same_lines = "z\ny\nx\nw\nv\nu\nt";
+        app.handle_action(Action::OpenPastedText(1)).unwrap();
+        app.composer_editor
+            .as_mut()
+            .unwrap()
+            .draft
+            .set_text(same_lines.into());
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+        assert_eq!(app.agent().input_pastes.text(1), Some(same_lines));
+
+        app.handle_action(Action::AiUndo).unwrap();
+        assert_eq!(app.agent().input_pastes.text(1), Some(longer));
+
+        // Typing after undo must discard the undone paste edit instead of re-applying it.
+        app.handle_action(Action::AiSendChar('!')).unwrap();
+        assert_eq!(app.agent().input_pastes.text(1), Some(longer));
+    }
+
+    #[test]
+    fn editing_deleted_paste_label_does_not_mutate_backing_table() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        let original = "1\n2\n3\n4\n5\n6";
+        app.handle_action(Action::AiPaste(original.into())).unwrap();
+        // Remove the label from the draft text, then invoke apply_paste_edit.
+        app.agent_mut().input.set_text(String::new());
+        app.apply_paste_edit(1, "a\nb\nc\nd\ne\nf\ng");
+        assert_eq!(app.agent().input_pastes.text(1), Some(original));
+    }
+
+    #[test]
+    fn paste_undo_survives_max_undo_edits_and_attachment_removal() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+
+        // Exceed Composer::MAX_UNDO (200) non-coalesced edits before folding/editing a paste.
+        for _ in 0..205 {
+            app.handle_action(Action::AiPaste("x".into())).unwrap();
+        }
+        assert!(app.agent().input.revision() > 200);
+
+        let original = "1\n2\n3\n4\n5\n6";
+        app.handle_action(Action::AiPaste(original.into())).unwrap();
+        let shot = app.project.root_dir.join("shot.png");
+        let placeholder = app.agent_mut().input_images.attach(shot);
+        app.agent_mut().input.insert(
+            &format!(" {placeholder}"),
+            crate::composer::EditUnit::Atomic,
+        );
+        app.sync_composer_atoms();
+
+        let edited = "a\nb\nc\nd\ne\nf\ng";
+        app.handle_action(Action::OpenPastedText(1)).unwrap();
+        app.composer_editor
+            .as_mut()
+            .unwrap()
+            .draft
+            .set_text(edited.into());
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+        assert_eq!(app.agent().input_pastes.text(1), Some(edited));
+
+        // Removing the image attachment must preserve undo history rather than calling set_text.
+        app.handle_action(Action::AiRemoveAttachment(0)).unwrap();
+        assert!(!app.agent().input.text().contains(&placeholder));
+
+        // First undo brings back the image placeholder; second undo reverts the paste edit.
+        app.handle_action(Action::AiUndo).unwrap();
+        assert!(app.agent().input.text().contains(&placeholder));
+        assert_eq!(app.agent().input_pastes.text(1), Some(edited));
+
+        app.handle_action(Action::AiUndo).unwrap();
+        assert!(
+            app.agent()
+                .input
+                .text()
+                .contains("[Pasted text #1 +5 lines]")
+        );
+        assert_eq!(app.agent().input_pastes.text(1), Some(original));
+
+        app.handle_action(Action::AiRedo).unwrap();
+        assert!(
+            app.agent()
+                .input
+                .text()
+                .contains("[Pasted text #1 +6 lines]")
+        );
+        assert_eq!(app.agent().input_pastes.text(1), Some(edited));
+    }
+
+    #[test]
+    fn folded_paste_starting_with_slash_sends_and_queues_as_prompt_text() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+
+        // When busy, a folded paste whose expanded text starts with `/` must queue, not execute as a command.
+        let pasted_path = "/usr/local/bin/tool\narg1\narg2\narg3\narg4\narg5";
+        app.handle_action(Action::AiPaste(pasted_path.into()))
+            .unwrap();
+        app.agent_mut().status = AiStatus::Waiting;
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert_eq!(app.agent().chat.queue.len(), 1);
+        assert_eq!(
+            app.agent().chat.queue.front().map(String::as_str),
+            Some(pasted_path)
+        );
+
+        // When idle, a folded paste starting with `/unknown` must dispatch as user text, not slash command error.
+        app.agent_mut().status = AiStatus::Idle;
+        app.agent_mut().chat.queue.clear();
+        let pasted_text = "/unknown-not-a-cmd\nline2\nline3\nline4\nline5\nline6";
+        app.handle_action(Action::AiPaste(pasted_text.into()))
+            .unwrap();
+        app.handle_action(Action::AiSendMessage).unwrap();
+        assert!(
+            app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.role == crate::app::AiRole::User && m.content == pasted_text),
+            "folded paste starting with `/` should be dispatched as user message: status={}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn paste_inside_composer_editor_inserts_raw_text_without_folding_or_touching_draft() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.agent_mut().input.set_text("before".into());
+
+        app.handle_action(Action::AiComposerEditorOpen).unwrap();
+        assert!(app.composer_editor.is_some());
+
+        app.handle_action(Action::AiPaste("1\r\n2\r\n3\r\n4\r\n5\r\n6".into()))
+            .unwrap();
+
+        assert_eq!(
+            app.composer_editor.as_ref().unwrap().draft.text(),
+            "before1\n2\n3\n4\n5\n6"
+        );
+        assert_eq!(
+            app.agent().input.text(),
+            "before",
+            "hidden draft must remain untouched while composer editor is open"
+        );
+        assert!(
+            app.agent().input_pastes.text(1).is_none(),
+            "pasting into composer editor must not fold into hidden DraftPastes"
+        );
+    }
+
+    #[test]
+    fn slash_select_fallback_expands_folded_paste_and_clear_input_clears_attachments() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiSendChar('/')).unwrap();
+        for ch in "unknown ".chars() {
+            app.handle_action(Action::AiSendChar(ch)).unwrap();
+        }
+        app.handle_action(Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+        app.slash_suggestion_active = true;
+
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        assert!(app.agent().input.is_empty());
+        assert!(app.agent().input_pastes.text(1).is_none());
+
+        // ClearInputState must also wipe input_images, input_pastes, and recall.
+        let shot = app.project.root_dir.join("shot.png");
+        app.agent_mut().input_images.attach(shot);
+        app.handle_action(Action::AiPaste("a\nb\nc\nd\ne\nf".into()))
+            .unwrap();
+        app.handle_action(Action::ClearInputState).unwrap();
+        assert!(app.agent().input.is_empty());
+        assert!(app.agent().input_images.is_empty());
+        assert!(app.agent().input_pastes.text(1).is_none());
+        assert!(app.agent().chat.recall.is_none());
+    }
+
+    #[test]
+    fn apply_composer_editor_maps_caret_inside_image_mention_to_after_placeholder() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        app.ai_input_focused = true;
+        app.handle_action(Action::AiComposerEditorOpen).unwrap();
+        let editor = app.composer_editor.as_mut().unwrap();
+        editor.draft.set_text("see @images/shot.png now".into());
+        // Place caret inside `@images/shot.png` (after `@images/sho`).
+        editor.draft.set_cursor("see @images/sho".chars().count());
+
+        app.handle_action(Action::AiComposerEditorApply).unwrap();
+        assert_eq!(app.agent().input.text(), "see [Image #1] now");
+        assert_eq!(
+            app.agent().input.cursor(),
+            "see [Image #1]".chars().count(),
+            "caret inside mention must land immediately after [Image #1], not drift into trailing text"
+        );
     }
 
     #[test]
@@ -29054,6 +29770,7 @@ mod tests {
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            terminal_rows: 0,
             last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,
@@ -29313,6 +30030,7 @@ Feature: B
             composer_editor: None,
             ai_input_focused: true,
             composer_text_width: 0,
+            terminal_rows: 0,
             last_focused_context: None,
             ai_sidebar_collapsed: false,
             ai_sidebar_focused: false,

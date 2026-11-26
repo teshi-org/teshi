@@ -28,6 +28,7 @@ pub enum EditUnit {
 struct Snapshot {
     text: String,
     cursor: usize,
+    revision: u64,
 }
 
 /// Text, caret, selection and undo state for one composer.
@@ -44,6 +45,10 @@ pub struct Composer {
     redo: Vec<Snapshot>,
     /// The next typing insert joins the newest undo entry.
     coalesce: bool,
+    /// Monotonic revision of the current text state.
+    revision: u64,
+    /// Next fresh revision id allocated on non-coalesced edits or resets.
+    next_revision: u64,
 }
 
 impl Deref for Composer {
@@ -75,13 +80,24 @@ impl Composer {
 
     /// Places the caret and clears the selection.
     pub fn set_cursor(&mut self, position: usize) {
-        self.cursor = position.min(self.char_len());
+        let position = position.min(self.char_len());
+        self.cursor = self.unit_edge(position, position >= self.cursor);
         self.anchor = None;
         self.coalesce = false;
     }
 
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+
+    /// Monotonic revision of the current text state.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Whether a redo step is currently available.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     /// The selected character range, if the caret differs from the anchor.
@@ -111,6 +127,8 @@ impl Composer {
         self.undo.clear();
         self.redo.clear();
         self.coalesce = false;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.revision = self.next_revision;
     }
 
     /// Takes the draft out of the composer and resets the model.
@@ -122,6 +140,8 @@ impl Composer {
         self.undo.clear();
         self.redo.clear();
         self.coalesce = false;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.revision = self.next_revision;
         text
     }
 
@@ -227,6 +247,28 @@ impl Composer {
         self.record(EditUnit::Atomic);
         self.replace_range(start..end, text);
         self.cursor = start + text.chars().count();
+        self.anchor = None;
+    }
+
+    /// Replaces every one of `ranges` with `text` as one atomic undo unit,
+    /// leaving the caret after the first replacement.
+    ///
+    /// Used when one label names several places that must keep changing
+    /// together, such as a folded paste edited from its own editor.
+    pub fn replace_ranges(&mut self, ranges: &[Range<usize>], text: &str) {
+        let mut ranges = ranges.to_vec();
+        ranges.sort_by_key(|range| range.start);
+        ranges.dedup();
+        let Some(first) = ranges.first() else {
+            return;
+        };
+        self.record(EditUnit::Atomic);
+        let caret = first.start + text.chars().count();
+        // Last first, so every earlier range keeps its offsets.
+        for range in ranges.iter().rev() {
+            self.replace_range(range.clone(), text);
+        }
+        self.cursor = caret.min(self.char_len());
         self.anchor = None;
     }
 
@@ -382,6 +424,7 @@ impl Composer {
         Snapshot {
             text: self.text.clone(),
             cursor: self.cursor,
+            revision: self.revision,
         }
     }
 
@@ -390,6 +433,7 @@ impl Composer {
         self.cursor = snapshot.cursor.min(self.char_len());
         self.anchor = None;
         self.coalesce = false;
+        self.revision = snapshot.revision;
     }
 
     fn record(&mut self, unit: EditUnit) {
@@ -398,6 +442,8 @@ impl Composer {
         }
         self.undo.push(self.snapshot());
         self.redo.clear();
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.revision = self.next_revision;
         self.coalesce = unit == EditUnit::Typing;
         while self.undo.len() > MAX_UNDO
             || self
@@ -437,9 +483,30 @@ impl Composer {
         } else if !select {
             self.anchor = None;
         }
-        self.cursor = target.min(self.char_len());
+        let target = target.min(self.char_len());
+        // Vertical movement and a click land on the edge of an attachment or
+        // folded paste, never inside one: a caret there would let one
+        // backspace tear the placeholder apart.
+        self.cursor = self.unit_edge(target, target >= self.cursor);
         self.coalesce = false;
         debug_assert!(self.cursor <= self.char_len());
+    }
+
+    /// `position`, or the edge of an atomic range containing it, in the
+    /// direction of travel.
+    fn unit_edge(&self, position: usize, forward: bool) -> usize {
+        let mut index = position.min(self.char_len());
+        loop {
+            let previous = index;
+            for atom in &self.atoms {
+                if atom.start < index && index < atom.end {
+                    index = if forward { atom.end } else { atom.start };
+                }
+            }
+            if index == previous {
+                return index.min(self.char_len());
+            }
+        }
     }
 
     /// Collapses a selection to its start (left/up) or end (right/down).
@@ -804,6 +871,33 @@ mod tests {
         input.backspace();
         assert_eq!(input.text(), " tail");
         assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn a_caret_never_rests_inside_an_atom() {
+        let text = "[Image #1] tail";
+        let mut input = composer(text);
+        let end = "[Image #1]".chars().count();
+        input.set_atoms(std::iter::once(0..end).collect());
+
+        // Moving into a unit snaps to its far edge in the direction of travel.
+        input.set_cursor(0);
+        input.set_cursor(2);
+        assert_eq!(input.cursor(), end);
+        input.set_cursor(end - 1);
+        assert_eq!(input.cursor(), 0);
+
+        // A vertical move that would land mid-unit goes to its edge too.
+        let mut wrapped = composer("[Paste #1]\nbottom");
+        let unit = "[Paste #1]".chars().count();
+        wrapped.set_atoms(std::iter::once(0..unit).collect());
+        wrapped.move_end(false);
+        wrapped.move_up(true, 12);
+        assert!(
+            wrapped.cursor() == 0 || wrapped.cursor() == unit,
+            "cursor {} must sit on a unit edge",
+            wrapped.cursor()
+        );
     }
 
     #[test]
