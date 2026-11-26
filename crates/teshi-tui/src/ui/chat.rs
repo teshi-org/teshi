@@ -2812,8 +2812,9 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         Rect::new(inner.x, inner.y, 1, 1),
     );
     app.composer_text_width = text_width;
+    let chips = paste_chips(app);
     let agent = app.agent();
-    let (rows, cursor) = input_rows(&agent.input, agent.input.cursor(), text_width);
+    let (rows, cursor) = input_rows_with(&agent.input, agent.input.cursor(), text_width, &chips);
     let scroll = cursor.0.saturating_sub(inner.height - 1);
     // Keep an empty composer blank: no placeholder copy or trigger chips.
     // Focus is still visible via the PRIMARY border and the block caret.
@@ -2836,6 +2837,13 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         app.clickable_regions.push(ClickableRegion::ActionButton {
             rect,
             action: crate::keymap::Action::OpenImageViewer(path),
+            modal: false,
+        });
+    }
+    for (rect, number) in paste_hitboxes(app, text_area, scroll) {
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect,
+            action: crate::keymap::Action::OpenPastedText(number),
             modal: false,
         });
     }
@@ -2950,12 +2958,91 @@ fn visual_line_count_for_width(input: &str, width: u16) -> u16 {
 
 /// Use the same cell wrapping for text and cursor, including trailing empty lines.
 fn input_rows(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (u16, u16)) {
+    input_rows_with(input, cursor, width, &[])
+}
+
+/// [`input_rows`], with `chips` — char ranges and the style to paint them —
+/// rendered as styled spans inside their rows.
+fn input_rows_with(
+    input: &str,
+    cursor: usize,
+    width: u16,
+    chips: &[(std::ops::Range<usize>, Style)],
+) -> (Vec<Line<'static>>, (u16, u16)) {
     let layout = input_layout(input, width);
     let position = layout
         .cells
         .get(cursor)
         .map_or(layout.end, |&(row, column, _)| (row, column));
-    (layout.rows.into_iter().map(Line::raw).collect(), position)
+    if chips.is_empty() {
+        return (layout.rows.into_iter().map(Line::raw).collect(), position);
+    }
+    // Wrapped rows hold no newline, and a wrap break never splits a char, so
+    // the layout's per-char rows rebuild the same rows as styled runs.
+    let mut rows: Vec<Vec<(char, Option<Style>)>> = vec![Vec::new(); layout.rows.len()];
+    for (index, ch) in input.chars().enumerate() {
+        if ch == '\n' {
+            continue;
+        }
+        let (row, _, cells) = layout.cells[index];
+        let style = chips
+            .iter()
+            .find(|(range, _)| range.contains(&index))
+            .map(|(_, style)| *style);
+        let row = usize::from(row).min(rows.len() - 1);
+        if ch == '\t' {
+            for _ in 0..cells {
+                rows[row].push((' ', style));
+            }
+        } else if !ch.is_control() {
+            rows[row].push((ch, style));
+        }
+    }
+    let lines = rows
+        .into_iter()
+        .map(|chars| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut text = String::new();
+            let mut current: Option<Style> = None;
+            for (ch, style) in chars {
+                if !text.is_empty() && style != current {
+                    spans.push(styled_span(std::mem::take(&mut text), current));
+                }
+                current = style;
+                text.push(ch);
+            }
+            if !text.is_empty() {
+                spans.push(styled_span(text, current));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    (lines, position)
+}
+
+fn styled_span(text: String, style: Option<Style>) -> Span<'static> {
+    match style {
+        Some(style) => Span::styled(text, style),
+        None => Span::raw(text),
+    }
+}
+
+/// The draft's live folded pastes, as char ranges and the chip style.
+fn paste_chips(app: &App) -> Vec<(std::ops::Range<usize>, Style)> {
+    let agent = app.agent();
+    let text = agent.input.text();
+    let style = Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD);
+    crate::chat_pastes::placeholders(text, &agent.input_pastes)
+        .into_iter()
+        .map(|(range, _)| {
+            (
+                text[..range.start].chars().count()..text[..range.end].chars().count(),
+                style,
+            )
+        })
+        .collect()
 }
 
 /// Composer text wrapped into display rows.
@@ -3051,6 +3138,48 @@ fn attachment_hitboxes(app: &App, text_area: Rect, scroll: u16) -> Vec<(Rect, st
             .intersection(text_area);
             if !rect.is_empty() {
                 hitboxes.push((rect, mention.path.clone()));
+            }
+        }
+    }
+    hitboxes
+}
+
+/// Cell rectangles of each live folded paste in the visible composer rows.
+///
+/// `scroll` is the first visible row. A label that wraps gets one rectangle
+/// per row it touches, as an image placeholder does.
+fn paste_hitboxes(app: &App, text_area: Rect, scroll: u16) -> Vec<(Rect, usize)> {
+    let agent = app.agent();
+    let text = agent.input.text();
+    let labels = crate::chat_pastes::placeholders(text, &agent.input_pastes);
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    let cells = input_layout(text, text_area.width).cells;
+    let mut hitboxes = Vec::new();
+    for (range, number) in labels {
+        let start = text[..range.start].chars().count();
+        let end = text[..range.end].chars().count();
+        let mut spans: Vec<(u16, u16, u16)> = Vec::new();
+        for &(row, column, width) in cells.get(start..end).unwrap_or_default() {
+            match spans.last_mut() {
+                Some((last_row, _, right)) if *last_row == row => *right = column + width,
+                _ => spans.push((row, column, column + width)),
+            }
+        }
+        for (row, left, right) in spans {
+            if row < scroll || row - scroll >= text_area.height {
+                continue;
+            }
+            let rect = Rect::new(
+                text_area.x + left,
+                text_area.y + row - scroll,
+                right.saturating_sub(left),
+                1,
+            )
+            .intersection(text_area);
+            if !rect.is_empty() {
+                hitboxes.push((rect, number));
             }
         }
     }
@@ -3372,6 +3501,108 @@ mod tests {
             [Rect::new(10, 5, 6, 1)],
             "scrolled-off rows have no hitbox"
         );
+    }
+
+    #[test]
+    fn a_folded_paste_is_one_chip_and_wraps_like_plain_text() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.handle_action(crate::keymap::Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+        let text = format!("abcdefgh{}", app.agent().input.text());
+        app.agent_mut().input.set_text(text.clone());
+
+        let chips = paste_chips(&app);
+        assert_eq!(chips.len(), 1, "one live label, one chip");
+        let (styled, _) = input_rows_with(&text, 0, 12, &chips);
+        let plain = input_rows(&text, 0, 12).0;
+        assert_eq!(styled.len(), plain.len(), "styling never changes the wrap");
+        for (styled, plain) in styled.iter().zip(plain.iter()) {
+            let styled_text: String = styled
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(styled_text, plain.spans[0].content);
+        }
+        assert!(
+            styled
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.style.fg == Some(theme::ACCENT)),
+            "the label is painted as a chip"
+        );
+    }
+
+    #[test]
+    fn a_folded_paste_registers_hitboxes_on_every_row_it_touches() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.handle_action(crate::keymap::Action::AiPaste("1\n2\n3\n4\n5\n6".into()))
+            .unwrap();
+        let text = format!("abcdefgh{}", app.agent().input.text());
+        app.agent_mut().input.set_text(text);
+        let area = Rect::new(10, 5, 12, 3);
+
+        let hitboxes = paste_hitboxes(&app, area, 0);
+        assert_eq!(hitboxes.len(), 3, "the label wraps over three rows");
+        assert!(hitboxes.iter().all(|(_, number)| *number == 1));
+        assert!(
+            hitboxes
+                .iter()
+                .all(|(rect, _)| area.contains((rect.x, rect.y).into())),
+            "every rectangle stays inside the composer"
+        );
+        assert_eq!(
+            paste_hitboxes(&app, area, 1)
+                .into_iter()
+                .map(|(rect, _)| rect)
+                .collect::<Vec<_>>(),
+            [
+                Rect {
+                    y: hitboxes[1].0.y - 1,
+                    ..hitboxes[1].0
+                },
+                Rect {
+                    y: hitboxes[2].0.y - 1,
+                    ..hitboxes[2].0
+                },
+            ],
+            "a scrolled-off row has no hitbox and remaining rows shift up by scroll"
+        );
+    }
+
+    #[test]
+    fn input_rows_with_chips_expands_tabs_and_skips_control_chars_like_layout() {
+        let text = "a\t\u{0007}[Pasted text #1]";
+        let chip_start = "a\t\u{0007}".chars().count();
+        let chip_end = text.chars().count();
+        let (plain_lines, plain_pos) = input_rows(text, chip_end, 40);
+        let (chip_lines, chip_pos) = input_rows_with(
+            text,
+            chip_end,
+            40,
+            &[(chip_start..chip_end, Style::default().fg(theme::ACCENT))],
+        );
+        assert_eq!(plain_pos, chip_pos);
+        let plain_rendered: Vec<String> = plain_lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let chip_rendered: Vec<String> = chip_lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(chip_rendered, plain_rendered);
+        assert_eq!(chip_rendered, vec!["a   [Pasted text #1]"]);
     }
 
     #[test]

@@ -366,6 +366,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // project remains permissive; these diagnostics are only an editor aid
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
+    app.terminal_rows = frame.area().height;
     app.clickable_regions.clear();
     app.vertical_scrollbars.clear();
     app.modal_card_rect = None;
@@ -6591,7 +6592,15 @@ fn render_composer_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect
         popup_h,
     );
     clear_to(frame, area, theme::OVERLAY_BG);
-    let block = theme::popup_block(" Draft editor ");
+    // Editing one folded paste titles the box with the label it stands behind.
+    let title = match editor.paste {
+        Some(number) => app.agent().input_pastes.label(number).map_or_else(
+            || " Draft editor ".to_string(),
+            |label| format!(" {label} "),
+        ),
+        None => " Draft editor ".to_string(),
+    };
+    let block = theme::popup_block(title.as_str());
     let [body, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
     frame.render_widget(block, popup);

@@ -385,7 +385,7 @@ pub struct ImageMention {
 
 /// Sentence punctuation that may follow an unquoted mention without becoming
 /// part of its path.
-const MENTION_TRAILING: [char; 8] = [',', '.', ';', ':', '!', '?', ')', ']'];
+pub(crate) const MENTION_TRAILING: [char; 8] = [',', '.', ';', ':', '!', '?', ')', ']'];
 
 /// CJK characters count as a token boundary before an `@` mention.
 fn is_cjk_wide(ch: char) -> bool {
@@ -551,20 +551,32 @@ fn with_adjoining_space(text: &str, mut range: Range<usize>) -> Range<usize> {
     range
 }
 
+/// Byte range covering the `index`-th draft attachment and one adjoining space,
+/// or `None` when there is no such attachment.
+pub fn attachment_removal_range(
+    text: &str,
+    images: &DraftImages,
+    base: &Path,
+    index: usize,
+) -> Option<Range<usize>> {
+    let attachment = draft_attachments(text, images, base)
+        .into_iter()
+        .nth(index)?;
+    Some(with_adjoining_space(text, attachment.range))
+}
+
 /// Remove the `index`-th draft attachment and one adjoining space from `text`.
 ///
 /// Returns the byte offset where the attachment started, or `None` when there
 /// is no such attachment.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_attachment(
     text: &mut String,
     images: &DraftImages,
     base: &Path,
     index: usize,
 ) -> Option<usize> {
-    let attachment = draft_attachments(text, images, base)
-        .into_iter()
-        .nth(index)?;
-    let range = with_adjoining_space(text, attachment.range);
+    let range = attachment_removal_range(text, images, base, index)?;
     let start = range.start;
     text.replace_range(range, "");
     Some(start)
@@ -573,6 +585,7 @@ pub fn remove_attachment(
 /// The text to send and store for a draft: each known placeholder becomes an
 /// `@path` mention, padded with spaces where it touches a word so it still
 /// parses as a mention.
+#[allow(dead_code)]
 pub fn expand_placeholders(text: &str, images: &DraftImages) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
