@@ -295,10 +295,66 @@ impl<W: AsyncWrite + Unpin + Send + 'static> JsonRpcPeer<W> {
     }
 }
 
+pub(crate) enum InboundMessage {
+    JsonRpc(JsonRpcMessage),
+    Fence(oneshot::Sender<()>),
+    Closed,
+}
+
+enum InboundSender {
+    Raw(mpsc::Sender<JsonRpcMessage>),
+    Internal(mpsc::Sender<InboundMessage>),
+}
+
+impl InboundSender {
+    async fn send(&self, msg: JsonRpcMessage) -> bool {
+        match self {
+            Self::Raw(tx) => tx.send(msg).await.is_ok(),
+            Self::Internal(tx) => tx.send(InboundMessage::JsonRpc(msg)).await.is_ok(),
+        }
+    }
+
+    async fn close(&self) {
+        if let Self::Internal(tx) = self {
+            let _ = tx.send(InboundMessage::Closed).await;
+        }
+    }
+}
+
 pub async fn reader_loop<R, W>(
     reader: R,
     peer: JsonRpcPeer<W>,
     inbound: mpsc::Sender<JsonRpcMessage>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    reader_loop_inner(reader, peer, InboundSender::Raw(inbound), None).await;
+}
+
+pub(crate) async fn reader_loop_with_liveness<R, W>(
+    reader: R,
+    peer: JsonRpcPeer<W>,
+    inbound: mpsc::Sender<InboundMessage>,
+    liveness: Option<(
+        Arc<std::sync::atomic::AtomicBool>,
+        tokio::sync::watch::Sender<bool>,
+    )>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    reader_loop_inner(reader, peer, InboundSender::Internal(inbound), liveness).await;
+}
+
+async fn reader_loop_inner<R, W>(
+    reader: R,
+    peer: JsonRpcPeer<W>,
+    inbound: InboundSender,
+    liveness: Option<(
+        Arc<std::sync::atomic::AtomicBool>,
+        tokio::sync::watch::Sender<bool>,
+    )>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -321,7 +377,7 @@ pub async fn reader_loop<R, W>(
                 let _ = peer.complete_response(&id, Err(response_error)).await;
             }
             Ok(Some(msg)) => {
-                if inbound.send(msg).await.is_err() {
+                if !inbound.send(msg).await {
                     break;
                 }
             }
@@ -335,6 +391,11 @@ pub async fn reader_loop<R, W>(
             }
         }
     }
+    if let Some((alive, exit_tx)) = liveness {
+        alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = exit_tx.send(true);
+    }
+    inbound.close().await;
 }
 
 #[cfg(test)]

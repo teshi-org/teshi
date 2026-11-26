@@ -56,6 +56,12 @@ pub struct AcpBackendConfig {
     /// Absent for brand-new conversations. A failed restore falls back to
     /// `session/new` and the existing transcript re-seed path.
     pub restore_session_id: Option<String>,
+    /// Logical ACP provider identifier (e.g. profile id) for connection pooling.
+    pub provider_id: Option<String>,
+    /// Optional shared ACP connection pool for multi-session connection reuse.
+    pub connection_pool: Option<Arc<teshi_acp::AcpConnectionPool>>,
+    /// Pooling concurrency mode used when `connection_pool` is configured.
+    pub pool_mode: teshi_acp::AcpPoolMode,
 }
 
 impl AcpBackendConfig {
@@ -72,6 +78,9 @@ impl AcpBackendConfig {
             inject_prompt_sections: true,
             turn_retry: TurnRetryPolicy::default(),
             restore_session_id: None,
+            provider_id: None,
+            connection_pool: None,
+            pool_mode: teshi_acp::AcpPoolMode::Shared,
         }
     }
 }
@@ -107,6 +116,10 @@ enum WorkerCommand {
         value: serde_json::Value,
         revision: u64,
     },
+    Authenticate {
+        method_id: String,
+        generation: u64,
+    },
     Policy(PermissionPolicy),
     Cancel,
     Shutdown,
@@ -135,6 +148,40 @@ pub struct AcpControls {
     /// True when this process restored an ACP session via `session/resume` or
     /// `session/load`, so the first prompt must not re-seed local history.
     pub remote_context_restored: bool,
+    /// Agent-advertised authentication methods from `initialize`.
+    pub auth_methods: Vec<teshi_acp::AuthMethodInfo>,
+    /// True when session setup failed with `AuthenticationRequired` and the
+    /// worker is waiting for an interactive `authenticate` command.
+    pub auth_required: bool,
+    /// Whether the connected agent advertises `sessionCapabilities.list`.
+    pub supports_list_sessions: bool,
+    /// Whether the connected agent advertises `sessionCapabilities.delete`.
+    pub supports_delete_session: bool,
+    /// Authentication method confirmed by a successful interactive `authenticate` call.
+    pub confirmed_auth_method: Option<String>,
+}
+
+#[derive(Clone)]
+struct WorkerOutput {
+    tx: mpsc::Sender<(u64, AgentBackendEvent)>,
+    auth_generation: u64,
+}
+
+impl WorkerOutput {
+    fn new(tx: mpsc::Sender<(u64, AgentBackendEvent)>) -> Self {
+        Self {
+            tx,
+            auth_generation: 0,
+        }
+    }
+
+    fn set_auth_generation(&mut self, generation: u64) {
+        self.auth_generation = generation;
+    }
+
+    fn send(&self, event: AgentBackendEvent) -> Result<(), ()> {
+        self.tx.send((self.auth_generation, event)).map_err(|_| ())
+    }
 }
 
 /// Bridges an ACP agent's `session/request_permission` to a synchronous
@@ -257,7 +304,8 @@ pub struct AcpAgentBackend {
     pub partial_response: String,
     config: Option<AcpBackendConfig>,
     commands: Option<async_mpsc::UnboundedSender<WorkerCommand>>,
-    events: Option<mpsc::Receiver<AgentBackendEvent>>,
+    events: Option<mpsc::Receiver<(u64, AgentBackendEvent)>>,
+    auth_generation: u64,
     worker: Option<thread::JoinHandle<()>>,
     state: AgentBackendStatus,
     submitted_prompt: bool,
@@ -286,6 +334,7 @@ impl Default for AcpAgentBackend {
             config: None,
             commands: None,
             events: None,
+            auth_generation: 0,
             worker: None,
             state: AgentBackendStatus::Unavailable,
             submitted_prompt: false,
@@ -299,6 +348,7 @@ impl AcpAgentBackend {
     pub fn configure(&mut self, config: AcpBackendConfig) {
         self.stop();
         self.submitted_prompt = false;
+        self.auth_generation = 0;
         self.controls = Arc::new(Mutex::new(AcpControls {
             policy: Some(config.permission_policy),
             ..Default::default()
@@ -348,16 +398,19 @@ impl AcpAgentBackend {
         let mut config = self.config.clone().ok_or_else(|| {
             anyhow::anyhow!("ACP backend is not configured; supply an AcpAgentCommand")
         })?;
-        if matches!(self.state, AgentBackendStatus::Failed)
-            || self
-                .controls
-                .lock()
-                .is_ok_and(|s| !s.ready && s.error.is_some())
-            || self
+        let should_reset_worker = {
+            let guard = self.controls.lock();
+            let worker_finished = self
                 .worker
                 .as_ref()
-                .is_some_and(thread::JoinHandle::is_finished)
-        {
+                .is_some_and(thread::JoinHandle::is_finished);
+            let auth_required = guard.as_ref().is_ok_and(|s| s.auth_required);
+            worker_finished
+                || (!auth_required
+                    && (matches!(self.state, AgentBackendStatus::Failed)
+                        || guard.as_ref().is_ok_and(|s| !s.ready && s.error.is_some())))
+        };
+        if should_reset_worker {
             // A failed transport may still be unwinding an RPC. Keep its
             // handle until acknowledgement instead of joining on the UI path.
             self.request_shutdown();
@@ -368,15 +421,32 @@ impl AcpAgentBackend {
             );
         }
         if self.worker.is_none() {
+            let prev_controls = self.controls();
             // If an earlier worker in this conversation established a remote
             // session id, carry it forward so an in-place reconnect tries
             // session/resume or session/load before falling back to session/new.
-            if let Some(live_session_id) = self.controls().session_id.filter(|id| !id.is_empty()) {
+            if let Some(live_session_id) =
+                prev_controls.session_id.clone().filter(|id| !id.is_empty())
+            {
                 config.restore_session_id = Some(live_session_id.clone());
                 if let Some(stored) = self.config.as_mut() {
                     stored.restore_session_id = Some(live_session_id);
                 }
             }
+            if config.connection_pool.is_none()
+                && let Some(confirmed) = prev_controls.confirmed_auth_method.clone()
+            {
+                config.auth_method = Some(confirmed.clone());
+                if let Some(stored) = self.config.as_mut() {
+                    stored.auth_method = Some(confirmed);
+                }
+            }
+            // Discard any stale permission requests left over from a prior
+            // worker and restore `permission_host` cleared by `request_shutdown`.
+            if let Some(host) = &config.permission_host {
+                host.discard_requests();
+            }
+            self.permission_host = config.permission_host.clone();
             // A new ACP process starts without remote history unless restore
             // succeeds inside the worker, so allow the next turn to carry a
             // fallback transcript preamble for the worker to decide on.
@@ -391,42 +461,60 @@ impl AcpAgentBackend {
                 .as_ref()
                 .map(|bridge| vec![bridge.server()])
                 .unwrap_or_default();
-            let revision = self.controls().revision.saturating_add(1);
+            let revision = prev_controls.revision.saturating_add(1);
             self.controls = Arc::new(Mutex::new(AcpControls {
                 policy: Some(config.permission_policy),
                 revision,
+                confirmed_auth_method: prev_controls.confirmed_auth_method,
                 ..Default::default()
             }));
             let controls = Arc::clone(&self.controls);
             let (commands_tx, commands_rx) = async_mpsc::unbounded_channel();
             let (events_tx, events_rx) = mpsc::channel();
-            let worker = thread::Builder::new()
-                .name("teshi-acp-backend".into())
-                .spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build();
-                    match runtime {
-                        Ok(runtime) => {
-                            runtime.block_on(run_worker(
-                                config,
-                                commands_rx,
-                                events_tx,
-                                controls,
-                                servers,
-                            ));
-                            // Windows child pipes do I/O on blocking threads. A
-                            // pipe still held by an escaped descendant must not
-                            // keep this worker, and the conversation, stopping.
-                            runtime.shutdown_timeout(SHUTDOWN_RETRY_BUDGET);
+            self.auth_generation = 0;
+            let output = WorkerOutput::new(events_tx);
+            let worker = if let Some(pool) = config.connection_pool.clone() {
+                thread::Builder::new()
+                    .name("teshi-acp-session".into())
+                    .spawn(move || {
+                        pool.block_on(run_pooled_worker(
+                            pool.clone(),
+                            config,
+                            commands_rx,
+                            output,
+                            controls,
+                            servers,
+                        ));
+                    })?
+            } else {
+                thread::Builder::new()
+                    .name("teshi-acp-backend".into())
+                    .spawn(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        match runtime {
+                            Ok(runtime) => {
+                                runtime.block_on(run_standalone_worker(
+                                    config,
+                                    commands_rx,
+                                    output,
+                                    controls,
+                                    servers,
+                                ));
+                                // Windows child pipes do I/O on blocking threads. A
+                                // pipe still held by an escaped descendant must not
+                                // keep this worker, and the conversation, stopping.
+                                runtime.shutdown_timeout(SHUTDOWN_RETRY_BUDGET);
+                            }
+                            Err(error) => {
+                                let _ = output.send(AgentBackendEvent::Failed(format!(
+                                    "ACP runtime initialization failed: {error}"
+                                )));
+                            }
                         }
-                        Err(error) => {
-                            let _ = events_tx.send(AgentBackendEvent::Failed(format!(
-                                "ACP runtime initialization failed: {error}"
-                            )));
-                        }
-                    }
-                })?;
+                    })?
+            };
             self.commands = Some(commands_tx);
             self.events = Some(events_rx);
             self.worker = Some(worker);
@@ -522,6 +610,38 @@ impl AcpAgentBackend {
         } else if let Ok(mut state) = self.controls.lock() {
             state.policy = Some(policy);
         }
+        Ok(())
+    }
+
+    /// Authenticate an active worker waiting on `AuthenticationRequired` and resume session setup.
+    ///
+    /// # Errors
+    /// Returns an error if the worker is unavailable, not awaiting auth, or another change is pending.
+    pub fn authenticate(&mut self, method_id: String) -> anyhow::Result<()> {
+        let mut state = self
+            .controls
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ACP settings lock poisoned"))?;
+        if !state.auth_required {
+            anyhow::bail!("ACP connection does not require authentication");
+        }
+        if state.pending {
+            anyhow::bail!("ACP authentication is already in progress");
+        }
+        let next_generation = self.auth_generation.saturating_add(1);
+        self.commands
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ACP worker unavailable"))?
+            .send(WorkerCommand::Authenticate {
+                method_id,
+                generation: next_generation,
+            })
+            .map_err(|_| anyhow::anyhow!("ACP worker exited"))?;
+        self.auth_generation = next_generation;
+        state.pending = true;
+        state.error = None;
+        drop(state);
+        self.state = AgentBackendStatus::Idle;
         Ok(())
     }
 
@@ -660,17 +780,33 @@ impl AcpAgentBackend {
         let Some(events) = &self.events else {
             return Ok(None);
         };
-        match events.try_recv() {
+        let current_auth_gen = self.auth_generation;
+        let received = loop {
+            match events.try_recv() {
+                Ok((auth_gen, event)) => {
+                    if matches!(&event, AgentBackendEvent::Failed(_)) && auth_gen < current_auth_gen
+                    {
+                        continue;
+                    }
+                    break Ok(event);
+                }
+                other => break other.map(|(_, event)| event),
+            }
+        };
+        match received {
             Ok(event) => {
                 // Seal preceding text before activity so the transcript follows
                 // event order. Only text remaining at turn completion is final;
                 // a retry's output starts a new record after the interrupted one.
-                if matches!(
+                if (matches!(
                     &event,
                     AgentBackendEvent::ReasoningChunk { .. }
                         | AgentBackendEvent::ExternalToolActivity { .. }
                         | AgentBackendEvent::Retrying { .. }
-                ) && !self.partial_response.is_empty()
+                ) || matches!(
+                    &event,
+                    AgentBackendEvent::PlanUpdate { entries } if !entries.is_empty()
+                )) && !self.partial_response.is_empty()
                 {
                     self.messages.push(AiChatMessage {
                         role: AiRole::Assistant,
@@ -745,6 +881,41 @@ impl AcpAgentBackend {
                                 source: Some("acp_activity".into()),
                                 activity: Some(details.clone()),
                             });
+                        }
+                    }
+                    AgentBackendEvent::PlanUpdate { entries } => {
+                        let turn_start = self
+                            .messages
+                            .iter()
+                            .rposition(|m| m.role == AiRole::User)
+                            .map_or(0, |idx| idx + 1);
+                        if entries.is_empty() {
+                            let mut idx = 0;
+                            self.messages.retain(|m| {
+                                let keep =
+                                    idx < turn_start || m.source.as_deref() != Some("acp_plan");
+                                idx += 1;
+                                keep
+                            });
+                        } else {
+                            let formatted = format_plan_entries(entries);
+                            if let Some(existing) = self.messages[turn_start..]
+                                .iter_mut()
+                                .rev()
+                                .find(|m| m.source.as_deref() == Some("acp_plan"))
+                            {
+                                existing.content = formatted;
+                            } else {
+                                self.messages.push(AiChatMessage {
+                                    role: AiRole::Assistant,
+                                    content: formatted,
+                                    reasoning_content: None,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    source: Some("acp_plan".into()),
+                                    activity: None,
+                                });
+                            }
                         }
                     }
                     AgentBackendEvent::Completed { finish_reason, .. } => {
@@ -826,7 +997,11 @@ impl AcpAgentBackend {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("ACP backend is not configured"))?;
         config.tool_bridge = Some(tools);
+        config.restore_session_id = None;
         self.stop();
+        if let Ok(mut state) = self.controls.lock() {
+            state.session_id = None;
+        }
         // A fresh remote session needs the saved transcript on its first turn.
         self.submitted_prompt = false;
         self.state = AgentBackendStatus::Idle;
@@ -1048,20 +1223,24 @@ async fn open_or_restore_session<W>(
     servers: Vec<teshi_acp::McpServer>,
     restore_session_id: Option<&str>,
     updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+    output: &WorkerOutput,
 ) -> Result<(teshi_acp::AcpSession, bool), teshi_acp::AcpError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     if let Some(id) = restore_session_id.filter(|id| !id.is_empty()) {
         if initialized.supports_resume_session() {
+            let mut replay = RestoreReplayAccumulator::default();
             match await_while_draining_updates(
                 client.resume_session_with_mcp(id, cwd.clone(), servers.clone()),
                 updates_rx,
+                &mut replay,
             )
             .await
             {
-                Ok(session) => {
-                    drain_restore_replay(updates_rx).await;
+                Ok(mut session) => {
+                    drain_restore_replay(client, None, updates_rx, &mut replay).await;
+                    replay.apply_to_session(&mut session, output);
                     tracing::info!(
                         session_id = %session.id,
                         "ACP session restored via session/resume"
@@ -1069,7 +1248,7 @@ where
                     return Ok((session, true));
                 }
                 Err(error) => {
-                    drain_restore_replay(updates_rx).await;
+                    drain_restore_replay(client, None, updates_rx, &mut replay).await;
                     tracing::warn!(
                         session_id = id,
                         error = %error,
@@ -1083,14 +1262,17 @@ where
             // returning its RPC response. Drain updates concurrently while the
             // request is in flight so bounded channels cannot backpressure and
             // deadlock the JSON-RPC reader waiting for the response.
+            let mut replay = RestoreReplayAccumulator::default();
             match await_while_draining_updates(
                 client.load_session_with_mcp(id, cwd.clone(), servers.clone()),
                 updates_rx,
+                &mut replay,
             )
             .await
             {
-                Ok(session) => {
-                    drain_restore_replay(updates_rx).await;
+                Ok(mut session) => {
+                    drain_restore_replay(client, None, updates_rx, &mut replay).await;
+                    replay.apply_to_session(&mut session, output);
                     tracing::info!(
                         session_id = %session.id,
                         "ACP session restored via session/load"
@@ -1098,7 +1280,7 @@ where
                     return Ok((session, true));
                 }
                 Err(error) => {
-                    drain_restore_replay(updates_rx).await;
+                    drain_restore_replay(client, None, updates_rx, &mut replay).await;
                     tracing::warn!(
                         session_id = id,
                         error = %error,
@@ -1117,11 +1299,175 @@ where
     Ok((session, false))
 }
 
-/// Await a restore RPC while continuously discarding incoming `session/update`
+#[allow(clippy::too_many_arguments)]
+async fn open_or_restore_session_pooled<W>(
+    client: &AcpClient<W>,
+    initialized: &teshi_acp::InitializeResult,
+    cwd: PathBuf,
+    servers: Vec<teshi_acp::McpServer>,
+    restore_session_id: Option<&str>,
+    updates_tx: &async_mpsc::Sender<AcpEvent>,
+    updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+    permission_policy: PermissionPolicy,
+    permission_host: Option<Arc<dyn PermissionHost>>,
+    output: &WorkerOutput,
+) -> Result<(teshi_acp::AcpSession, bool), teshi_acp::AcpError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    if let Some(id) = restore_session_id.filter(|id| !id.is_empty()) {
+        if initialized.supports_resume_session() || initialized.supports_load_session() {
+            client
+                .register_session(
+                    id,
+                    updates_tx.clone(),
+                    permission_policy,
+                    permission_host.clone(),
+                )
+                .await;
+            if initialized.supports_resume_session() {
+                let mut replay = RestoreReplayAccumulator::default();
+                match await_while_draining_updates(
+                    client.resume_session_with_mcp(id, cwd.clone(), servers.clone()),
+                    updates_rx,
+                    &mut replay,
+                )
+                .await
+                {
+                    Ok(mut session) => {
+                        drain_restore_replay(client, Some(id), updates_rx, &mut replay).await;
+                        if session.id != id {
+                            client
+                                .register_session(
+                                    &session.id,
+                                    updates_tx.clone(),
+                                    permission_policy,
+                                    permission_host.clone(),
+                                )
+                                .await;
+                            client.unregister_session(id).await;
+                        }
+                        replay.apply_to_session(&mut session, output);
+                        tracing::info!(
+                            session_id = %session.id,
+                            "ACP pooled session restored via session/resume"
+                        );
+                        return Ok((session, true));
+                    }
+                    Err(error) => {
+                        drain_restore_replay(client, Some(id), updates_rx, &mut replay).await;
+                        tracing::warn!(
+                            session_id = id,
+                            error = %error,
+                            "ACP session/resume failed"
+                        );
+                    }
+                }
+            }
+            if initialized.supports_load_session() {
+                let mut replay = RestoreReplayAccumulator::default();
+                match await_while_draining_updates(
+                    client.load_session_with_mcp(id, cwd.clone(), servers.clone()),
+                    updates_rx,
+                    &mut replay,
+                )
+                .await
+                {
+                    Ok(mut session) => {
+                        drain_restore_replay(client, Some(id), updates_rx, &mut replay).await;
+                        if session.id != id {
+                            client
+                                .register_session(
+                                    &session.id,
+                                    updates_tx.clone(),
+                                    permission_policy,
+                                    permission_host.clone(),
+                                )
+                                .await;
+                            client.unregister_session(id).await;
+                        }
+                        replay.apply_to_session(&mut session, output);
+                        tracing::info!(
+                            session_id = %session.id,
+                            "ACP pooled session restored via session/load"
+                        );
+                        return Ok((session, true));
+                    }
+                    Err(error) => {
+                        drain_restore_replay(client, Some(id), updates_rx, &mut replay).await;
+                        tracing::warn!(
+                            session_id = id,
+                            error = %error,
+                            "ACP session/load failed; falling back to session/new"
+                        );
+                    }
+                }
+            }
+            client.unregister_session(id).await;
+        } else {
+            tracing::info!(
+                session_id = id,
+                "ACP agent does not advertise session/resume or session/load; falling back to session/new"
+            );
+        }
+    }
+    let session = client
+        .new_session_with_mcp_routed(
+            cwd,
+            servers,
+            updates_tx.clone(),
+            permission_policy,
+            permission_host,
+        )
+        .await?;
+    Ok((session, false))
+}
+
+/// Captures non-transcript control/command updates emitted during restore replay
+/// so they are applied after `session/resume` or `session/load` finishes.
+#[derive(Default)]
+struct RestoreReplayAccumulator {
+    control_updates: Vec<serde_json::Value>,
+    available_commands: Option<Vec<teshi_agent::backend::AcpSlashCommand>>,
+}
+
+impl RestoreReplayAccumulator {
+    fn observe(&mut self, event: AcpEvent) {
+        if let AcpEvent::SessionUpdate(params) = event {
+            let update_kind = params
+                .get("update")
+                .and_then(|u| u.get("sessionUpdate"))
+                .and_then(serde_json::Value::as_str);
+            match update_kind {
+                Some("config_option_update" | "current_mode_update") => {
+                    self.control_updates.push(params);
+                }
+                Some("available_commands_update") => {
+                    if let Some(update) = params.get("update") {
+                        self.available_commands = Some(parse_available_commands(update));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_to_session(self, session: &mut teshi_acp::AcpSession, output: &WorkerOutput) {
+        for params in &self.control_updates {
+            session.config.apply_update(&session.id, params);
+        }
+        if let Some(commands) = self.available_commands {
+            let _ = output.send(AgentBackendEvent::AvailableCommands { commands });
+        }
+    }
+}
+
+/// Await a restore RPC while continuously draining incoming `session/update`
 /// replay frames so bounded event/inbound queues never stall the reader loop.
 async fn await_while_draining_updates<F, T>(
     future: F,
     updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+    replay: &mut RestoreReplayAccumulator,
 ) -> T
 where
     F: std::future::Future<Output = T>,
@@ -1131,22 +1477,84 @@ where
         tokio::select! {
             biased;
             result = &mut future => return result,
-            update = updates_rx.recv() => {
-                if update.is_none() {
-                    return future.await;
-                }
+            update = updates_rx.recv() => match update {
+                Some(event) => replay.observe(event),
+                None => return future.await,
             }
         }
     }
 }
 
-/// Drop history-replay updates that arrived while `session/load` was in flight.
-async fn drain_restore_replay(updates_rx: &mut async_mpsc::Receiver<AcpEvent>) {
-    // The agent must finish replay before answering session/load, but the
-    // reader task may still be delivering the last few frames.
-    for _ in 0..3 {
-        while updates_rx.try_recv().is_ok() {}
-        tokio::task::yield_now().await;
+/// Drain history-replay updates that arrived while `session/load` or
+/// `session/resume` was in flight, retaining control/command updates in `replay`.
+///
+/// Flushes a barrier through both `AcpClient`'s dispatcher and the session route
+/// forwarder while continuously draining `updates_rx`, guaranteeing all already-read
+/// replay frames are consumed regardless of history size or thread scheduling.
+async fn drain_restore_replay<W>(
+    client: &AcpClient<W>,
+    session_id: Option<&str>,
+    updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+    replay: &mut RestoreReplayAccumulator,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let flush = client.flush_session_events(session_id);
+    tokio::pin!(flush);
+    loop {
+        tokio::select! {
+            biased;
+            update = updates_rx.recv() => match update {
+                Some(event) => replay.observe(event),
+                None => break,
+            },
+            () = &mut flush => {
+                while let Ok(event) = updates_rx.try_recv() {
+                    replay.observe(event);
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Wraps the worker command receiver so startup steps can watch for `Shutdown`
+/// without dropping earlier commands (`Policy`, `Prompt`, etc.).
+struct CommandQueue {
+    rx: async_mpsc::UnboundedReceiver<WorkerCommand>,
+    buffered: std::collections::VecDeque<WorkerCommand>,
+}
+
+impl CommandQueue {
+    fn new(rx: async_mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
+        Self {
+            rx,
+            buffered: std::collections::VecDeque::new(),
+        }
+    }
+
+    async fn recv(&mut self) -> Option<WorkerCommand> {
+        if let Some(cmd) = self.buffered.pop_front() {
+            return Some(cmd);
+        }
+        self.rx.recv().await
+    }
+
+    async fn wait_for_shutdown(&mut self) {
+        if self
+            .buffered
+            .iter()
+            .any(|cmd| matches!(cmd, WorkerCommand::Shutdown))
+        {
+            return;
+        }
+        while let Some(cmd) = self.rx.recv().await {
+            let is_shutdown = matches!(cmd, WorkerCommand::Shutdown);
+            self.buffered.push_back(cmd);
+            if is_shutdown {
+                return;
+            }
+        }
     }
 }
 
@@ -1172,29 +1580,25 @@ fn materialize_prompt(
     blocks
 }
 
-async fn run_worker(
+async fn run_standalone_worker(
     config: AcpBackendConfig,
-    mut commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
-    output: mpsc::Sender<AgentBackendEvent>,
+    commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
+    output: WorkerOutput,
     controls: Arc<Mutex<AcpControls>>,
     servers: Vec<teshi_acp::McpServer>,
 ) {
-    let (updates_tx, mut updates_rx) = async_mpsc::channel(128);
-    let cwd: PathBuf = config.command.cwd.clone();
-    let model_preference_path = config.model_preference_path.clone();
-    let option_preferences_path = config.option_preferences_path.clone();
-    let turn_retry = config.turn_retry.clone();
-    let auth_method = config.auth_method.clone();
+    let mut commands = CommandQueue::new(commands);
+    let (updates_tx, updates_rx) = async_mpsc::channel(128);
     let permission_host: Option<Arc<dyn PermissionHost>> = config
         .permission_host
         .clone()
         .map(|host| host as Arc<dyn PermissionHost>);
     let mut client = match AcpClient::spawn(
-        config.command,
-        config.client,
+        config.command.clone(),
+        config.client.clone(),
         updates_tx,
         config.permission_policy,
-        permission_host,
+        permission_host.clone(),
     )
     .await
     {
@@ -1209,53 +1613,349 @@ async fn run_worker(
             return;
         }
     };
-    let restore_session_id = config.restore_session_id.clone();
-    let result = async {
-        let initialized = client
-            .initialize()
-            .await
-            .map_err(|e| format!("ACP initialize failed: {e}"))?;
-        if let Some(method) = auth_method {
-            client
-                .authenticate(&method)
-                .await
-                .map_err(|e| format!("ACP authentication failed: {e}"))?;
+    let initialized = match tokio::select! {
+        biased;
+        () = commands.wait_for_shutdown() => {
+            let _ = client.shutdown().await;
+            return;
         }
-        let model = initialized
-            .agent_info
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("ACP agent")
-            .to_string();
-        let (session, remote_context_restored) = open_or_restore_session(
-            &client,
-            &initialized,
-            cwd,
-            servers,
-            restore_session_id.as_deref(),
-            &mut updates_rx,
-        )
-        .await
-        .map_err(|e| format!("ACP session creation failed: {e}"))?;
-        Ok::<_, String>((
-            session,
-            model,
-            initialized.accepts_images(),
-            remote_context_restored,
-        ))
-    }
-    .await;
-    let (mut session, model, image_prompts, remote_context_restored) = match result {
-        Ok(value) => value,
+        res = client.initialize() => res,
+    } {
+        Ok(initialized) => initialized,
         Err(error) => {
+            let msg = format!("ACP initialize failed: {error}");
             if let Ok(mut state) = controls.lock() {
-                state.error = Some(error.clone());
+                state.error = Some(msg.clone());
             }
-            let _ = output.send(AgentBackendEvent::Failed(error));
+            let _ = output.send(AgentBackendEvent::Failed(msg));
             let _ = client.shutdown().await;
             return;
         }
     };
+    if let Some(method) = config.auth_method.as_deref() {
+        let auth_result = tokio::select! {
+            biased;
+            () = commands.wait_for_shutdown() => {
+                let _ = client.shutdown().await;
+                return;
+            }
+            res = client.authenticate(method) => res,
+        };
+        if let Err(error) = auth_result {
+            let msg = format!("ACP authentication failed: {error}");
+            if let Ok(mut state) = controls.lock() {
+                state.error = Some(msg.clone());
+            }
+            let _ = output.send(AgentBackendEvent::Failed(msg));
+            let _ = client.shutdown().await;
+            return;
+        }
+    }
+    let client = Arc::new(client);
+    run_session_body(
+        client,
+        initialized,
+        None,
+        updates_rx,
+        None,
+        config,
+        commands,
+        output,
+        controls,
+        servers,
+    )
+    .await;
+}
+
+async fn run_pooled_worker(
+    pool: Arc<teshi_acp::AcpConnectionPool>,
+    config: AcpBackendConfig,
+    commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
+    output: WorkerOutput,
+    controls: Arc<Mutex<AcpControls>>,
+    servers: Vec<teshi_acp::McpServer>,
+) {
+    let mut commands = CommandQueue::new(commands);
+    let provider_id = config
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| config.command.program.display().to_string());
+    let key = teshi_acp::AcpConnectionKey::from_command(
+        provider_id,
+        &config.command,
+        config.auth_method.as_deref(),
+    );
+    // Do not pass this session's `permission_host` into the pool's shared
+    // default route; each pooled session registers its own routed host below.
+    let lease = match tokio::select! {
+        biased;
+        () = commands.wait_for_shutdown() => return,
+        res = pool.acquire_with_mode(
+            key,
+            config.command.clone(),
+            config.client.clone(),
+            config.permission_policy,
+            None,
+            config.pool_mode,
+        ) => res,
+    } {
+        Ok(lease) => lease,
+        Err(error) => {
+            let msg = match &error {
+                teshi_acp::AcpError::SpawnFailed { .. }
+                | teshi_acp::AcpError::ExecutableNotFound { .. }
+                | teshi_acp::AcpError::ConfiguredExecutableMissing { .. } => {
+                    format!("ACP process launch failed: {error}")
+                }
+                teshi_acp::AcpError::AuthenticationFailed(_) => {
+                    format!("ACP authentication failed: {error}")
+                }
+                _ => format!("ACP initialize failed: {error}"),
+            };
+            if let Ok(mut state) = controls.lock() {
+                state.error = Some(msg.clone());
+            }
+            let _ = output.send(AgentBackendEvent::Failed(msg));
+            return;
+        }
+    };
+    let client = Arc::clone(lease.client());
+    let initialized = lease.initialized().clone();
+    let (updates_tx, updates_rx) = async_mpsc::channel(128);
+    run_session_body(
+        client,
+        initialized,
+        Some(lease),
+        updates_rx,
+        Some(updates_tx),
+        config,
+        commands,
+        output,
+        controls,
+        servers,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_body(
+    client: Arc<AcpClient<tokio::process::ChildStdin>>,
+    initialized: teshi_acp::InitializeResult,
+    lease: Option<teshi_acp::PooledAcpConnection>,
+    mut updates_rx: async_mpsc::Receiver<AcpEvent>,
+    pooled_route_tx: Option<async_mpsc::Sender<AcpEvent>>,
+    config: AcpBackendConfig,
+    mut commands: CommandQueue,
+    mut output: WorkerOutput,
+    controls: Arc<Mutex<AcpControls>>,
+    servers: Vec<teshi_acp::McpServer>,
+) {
+    let cwd: PathBuf = config.command.cwd.clone();
+    let model_preference_path = config.model_preference_path.clone();
+    let option_preferences_path = config.option_preferences_path.clone();
+    let turn_retry = config.turn_retry.clone();
+    let restore_session_id = config.restore_session_id.clone();
+    let mut permission_policy = config.permission_policy;
+    let permission_host: Option<Arc<dyn PermissionHost>> = config
+        .permission_host
+        .clone()
+        .map(|host| host as Arc<dyn PermissionHost>);
+    if let Ok(mut state) = controls.lock() {
+        state.auth_methods = initialized.auth_method_details.clone();
+        state.supports_list_sessions = initialized.supports_list_sessions();
+        state.supports_delete_session = initialized.supports_delete_session();
+    }
+    let model = initialized
+        .agent_info
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("ACP agent")
+        .to_string();
+    let image_prompts = initialized.accepts_images();
+    let mut invalidate_lease = false;
+
+    let session_outcome = loop {
+        let attempt = tokio::select! {
+            biased;
+            () = commands.wait_for_shutdown() => {
+                invalidate_lease = true;
+                break None;
+            }
+            res = async {
+                if let Some(route_tx) = &pooled_route_tx {
+                    open_or_restore_session_pooled(
+                        &client,
+                        &initialized,
+                        cwd.clone(),
+                        servers.clone(),
+                        restore_session_id.as_deref(),
+                        route_tx,
+                        &mut updates_rx,
+                        permission_policy,
+                        permission_host.clone(),
+                        &output,
+                    )
+                    .await
+                } else {
+                    open_or_restore_session(
+                        &client,
+                        &initialized,
+                        cwd.clone(),
+                        servers.clone(),
+                        restore_session_id.as_deref(),
+                        &mut updates_rx,
+                        &output,
+                    )
+                    .await
+                }
+            } => res,
+        };
+        match attempt {
+            Ok(ok) => break Some(ok),
+            Err(teshi_acp::AcpError::AuthenticationRequired)
+                if !initialized.auth_method_details.is_empty() =>
+            {
+                if let Ok(mut state) = controls.lock() {
+                    state.auth_required = true;
+                    state.pending = false;
+                    state.error = Some(teshi_acp::AcpError::AuthenticationRequired.to_string());
+                    state.revision += 1;
+                }
+                let _ = output.send(AgentBackendEvent::Failed(format!(
+                    "ACP session creation failed: {}",
+                    teshi_acp::AcpError::AuthenticationRequired
+                )));
+                let mut authed = false;
+                let mut exit_rx = client.subscribe_exit();
+                loop {
+                    if *exit_rx.borrow() && !client.is_alive() {
+                        break;
+                    }
+                    tokio::select! {
+                        cmd = commands.recv() => match cmd {
+                            Some(WorkerCommand::Authenticate { method_id, generation }) => {
+                                output.set_auth_generation(generation);
+                                let auth_result = tokio::select! {
+                                    biased;
+                                    () = commands.wait_for_shutdown() => {
+                                        invalidate_lease = true;
+                                        break;
+                                    }
+                                    res = client.authenticate(&method_id) => res,
+                                };
+                                match auth_result {
+                                    Ok(()) => {
+                                        if let Ok(mut state) = controls.lock() {
+                                            state.auth_required = false;
+                                            state.pending = false;
+                                            state.error = None;
+                                            state.confirmed_auth_method = Some(method_id);
+                                            state.revision += 1;
+                                        }
+                                        authed = true;
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        if matches!(
+                                            err,
+                                            teshi_acp::AcpError::Timeout(_)
+                                                | teshi_acp::AcpError::ProcessExited
+                                                | teshi_acp::AcpError::ProtocolViolation(_)
+                                        ) || !client.is_alive()
+                                        {
+                                            invalidate_lease = true;
+                                        }
+                                        if let Ok(mut state) = controls.lock() {
+                                            state.pending = false;
+                                            state.error = Some(format!("ACP authentication failed: {err}"));
+                                            state.revision += 1;
+                                        }
+                                        let _ = output.send(AgentBackendEvent::Failed(format!(
+                                            "ACP authentication failed: {err}"
+                                        )));
+                                    }
+                                }
+                            }
+                            Some(WorkerCommand::Policy(policy)) => {
+                                permission_policy = policy;
+                                if pooled_route_tx.is_none() {
+                                    client.set_permission_policy(policy).await;
+                                }
+                                if let Ok(mut state) = controls.lock() {
+                                    state.policy = Some(policy);
+                                }
+                            }
+                            Some(WorkerCommand::Configure { .. }) => {
+                                if let Ok(mut state) = controls.lock() {
+                                    state.pending = false;
+                                    state.error = Some(
+                                        "Authenticate the ACP connection before changing settings"
+                                            .into(),
+                                    );
+                                    state.revision += 1;
+                                }
+                            }
+                            Some(WorkerCommand::Prompt(_)) => {
+                                let _ = output.send(AgentBackendEvent::Failed(
+                                    "ACP connection requires authentication before sending prompts"
+                                        .into(),
+                                ));
+                            }
+                            Some(WorkerCommand::Cancel) => {}
+                            Some(WorkerCommand::Shutdown) | None => break,
+                        },
+                        _ = exit_rx.changed(), if !*exit_rx.borrow() => {
+                            if !client.is_alive() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !authed {
+                    let exited = !client.is_alive();
+                    if let Ok(mut state) = controls.lock() {
+                        state.auth_required = false;
+                        state.pending = false;
+                        if exited {
+                            state.error =
+                                Some("ACP process exited before authentication completed".into());
+                        }
+                        state.revision += 1;
+                    }
+                    if exited {
+                        invalidate_lease = true;
+                        let _ = output.send(AgentBackendEvent::Failed(
+                            "ACP process exited before authentication completed".into(),
+                        ));
+                    }
+                    break None;
+                }
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    teshi_acp::AcpError::Timeout(_)
+                        | teshi_acp::AcpError::ProcessExited
+                        | teshi_acp::AcpError::ProtocolViolation(_)
+                ) || !client.is_alive()
+                {
+                    invalidate_lease = true;
+                }
+                let msg = format!("ACP session creation failed: {error}");
+                if let Ok(mut state) = controls.lock() {
+                    state.error = Some(msg.clone());
+                }
+                let _ = output.send(AgentBackendEvent::Failed(msg));
+                break None;
+            }
+        }
+    };
+
+    let Some((mut session, remote_context_restored)) = session_outcome else {
+        teardown_worker_client(&client, &initialized, lease, None, invalidate_lease).await;
+        return;
+    };
+
     let mut preference_error = None;
     if let Some(path) = &model_preference_path {
         let restored = async {
@@ -1295,7 +1995,7 @@ async fn run_worker(
                 if let Ok(mut state) = controls.lock() {
                     state.error = preference_error;
                 }
-                let _ = client.shutdown().await;
+                teardown_worker_client(&client, &initialized, lease, Some(&session.id), true).await;
                 return;
             }
         }
@@ -1323,7 +2023,8 @@ async fn run_worker(
                     if let Ok(mut state) = controls.lock() {
                         state.error = preference_error;
                     }
-                    let _ = client.shutdown().await;
+                    teardown_worker_client(&client, &initialized, lease, Some(&session.id), true)
+                        .await;
                     return;
                 }
             }
@@ -1340,20 +2041,42 @@ async fn run_worker(
     }
     let mut shutdown = false;
     let mut worker_submitted_prompt = false;
+    let mut exit_rx = client.subscribe_exit();
     loop {
+        if *exit_rx.borrow() && !client.is_alive() {
+            invalidate_lease = true;
+            break;
+        }
         let command = tokio::select! {
             command = commands.recv() => match command { Some(command) => command, None => break },
             Some(update) = updates_rx.recv() => {
                 apply_control_update(&update, &session.id, &controls);
-                if forward_update(update, &output, false) { break; }
+                if forward_update(update, &output, false) {
+                    invalidate_lease = true;
+                    break;
+                }
+                continue;
+            }
+            _ = exit_rx.changed(), if !*exit_rx.borrow() => {
+                if !client.is_alive() {
+                    invalidate_lease = true;
+                    break;
+                }
                 continue;
             }
         };
         match command {
             WorkerCommand::Policy(policy) => {
-                client.set_permission_policy(policy).await;
+                client
+                    .set_session_permission_policy(&session.id, policy)
+                    .await;
                 if let Ok(mut state) = controls.lock() {
                     state.policy = Some(policy);
+                }
+            }
+            WorkerCommand::Authenticate { .. } => {
+                if let Ok(mut state) = controls.lock() {
+                    state.pending = false;
                 }
             }
             WorkerCommand::Configure {
@@ -1420,6 +2143,7 @@ async fn run_worker(
                     }
                 }
                 if uncertain {
+                    invalidate_lease = true;
                     break;
                 }
             }
@@ -1473,6 +2197,16 @@ async fn run_worker(
                                             }); }
                                             (None, Err(error)) => {
                                                 turn_failed = true;
+                                                shutdown = true;
+                                                if matches!(
+                                                    error,
+                                                    teshi_acp::AcpError::ProcessExited
+                                                        | teshi_acp::AcpError::Timeout(_)
+                                                        | teshi_acp::AcpError::ProtocolViolation(_)
+                                                ) || !client.is_alive()
+                                                {
+                                                    invalidate_lease = true;
+                                                }
                                                 let _ = output.send(AgentBackendEvent::Failed(format!("ACP prompt failed: {error}")));
                                             }
                                         }
@@ -1485,8 +2219,11 @@ async fn run_worker(
                                 }
                                 Some(command) = commands.recv() => match command {
                                     WorkerCommand::Policy(policy) => {
-                                        client.set_permission_policy(policy).await;
+                                        client.set_session_permission_policy(&session.id, policy).await;
                                         if let Ok(mut state) = controls.lock() { state.policy = Some(policy); }
+                                    }
+                                    WorkerCommand::Authenticate { .. } => {
+                                        if let Ok(mut state) = controls.lock() { state.pending = false; }
                                     }
                                     WorkerCommand::Configure { .. } => {
                                         if let Ok(mut state) = controls.lock() { state.pending = false; state.error = Some("Wait for the current turn to finish".into()); }
@@ -1503,6 +2240,7 @@ async fn run_worker(
                                     }
                                     WorkerCommand::Shutdown => {
                                         shutdown = true;
+                                        invalidate_lease = true;
                                         drop(turn);
                                         let _ = client.cancel(&session).await;
                                         break;
@@ -1517,6 +2255,8 @@ async fn run_worker(
                                 },
                                 _ = tokio::time::sleep_until(cancel_deadline), if cancelled => {
                                     turn_failed = true;
+                                    shutdown = true;
+                                    invalidate_lease = true;
                                     let _ = output.send(AgentBackendEvent::Failed(
                                         "ACP agent did not acknowledge the cancellation; reconnect required".into(),
                                     ));
@@ -1524,6 +2264,10 @@ async fn run_worker(
                                     break;
                                 }
                             }
+                        }
+                        if protocol_failed {
+                            shutdown = true;
+                            invalidate_lease = true;
                         }
                         progressed |= attempt.progressed;
                         (
@@ -1537,6 +2281,7 @@ async fn run_worker(
                     }
                     if let Some(reason) = retry_reason {
                         let Some(delay) = turn_retry.delay(retries) else {
+                            shutdown = true;
                             let _ = output.send(AgentBackendEvent::Failed(
                                 exhausted_retry_message(retries, &reason),
                             ));
@@ -1553,6 +2298,7 @@ async fn run_worker(
                             delay,
                             &mut commands,
                             &mut updates_rx,
+                            &mut exit_rx,
                             &client,
                             &session.id,
                             &controls,
@@ -1569,6 +2315,19 @@ async fn run_worker(
                                 continue;
                             }
                             RetryWait::Stopped => break,
+                            RetryWait::ProtocolError => {
+                                shutdown = true;
+                                invalidate_lease = true;
+                                break;
+                            }
+                            RetryWait::ProcessExited => {
+                                shutdown = true;
+                                invalidate_lease = true;
+                                let _ = output.send(AgentBackendEvent::Failed(
+                                    "ACP process exited while waiting to retry".into(),
+                                ));
+                                break;
+                            }
                             RetryWait::Shutdown => {
                                 shutdown = true;
                                 break;
@@ -1601,10 +2360,62 @@ async fn run_worker(
         state.ready = false;
         state.pending = false;
     }
+    teardown_worker_client(
+        &client,
+        &initialized,
+        lease,
+        Some(&session.id),
+        invalidate_lease,
+    )
+    .await;
+}
+
+async fn teardown_worker_client(
+    client: &AcpClient<tokio::process::ChildStdin>,
+    initialized: &teshi_acp::InitializeResult,
+    lease: Option<teshi_acp::PooledAcpConnection>,
+    session_id: Option<&str>,
+    mut invalidate_lease: bool,
+) {
+    if let Some(lease) = lease {
+        if let Some(session_id) = session_id {
+            if !invalidate_lease && client.is_alive() && initialized.supports_close_session() {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.close_session(session_id),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            session_id,
+                            error = %error,
+                            "ACP session/close failed; retiring pooled lease"
+                        );
+                        invalidate_lease = true;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session_id,
+                            "ACP session/close timed out; retiring pooled lease"
+                        );
+                        invalidate_lease = true;
+                    }
+                }
+            }
+            client.unregister_session(session_id).await;
+        }
+        if invalidate_lease || !client.is_alive() {
+            lease.invalidate();
+        }
+        drop(lease);
+        return;
+    }
     // Keep the worker owned until the process container has actually stopped.
     // The frontend's bounded switch wait can time out without losing this handle.
     let deadline = tokio::time::Instant::now() + SHUTDOWN_RETRY_BUDGET;
-    while let Err(error) = client.shutdown().await {
+    while let Err(error) = client.shutdown_shared().await {
         tracing::error!(error = %error, "ACP shutdown has not completed");
         if tokio::time::Instant::now() >= deadline {
             tracing::error!(
@@ -1625,7 +2436,116 @@ fn apply_control_update(update: &AcpEvent, session: &str, controls: &Mutex<AcpCo
     }
 }
 
-fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>, muted: bool) -> bool {
+fn format_plan_entries(entries: &[teshi_agent::backend::AcpPlanEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| {
+            let icon = match entry.status.as_str() {
+                "completed" => "[x]",
+                "in_progress" => "[~]",
+                _ => "[ ]",
+            };
+            if entry.priority.is_empty() {
+                format!("{icon} {}", entry.content)
+            } else {
+                format!("{icon} ({}) {}", entry.priority, entry.content)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_available_commands(
+    update: &serde_json::Value,
+) -> Vec<teshi_agent::backend::AcpSlashCommand> {
+    update
+        .get("availableCommands")
+        .or_else(|| update.get("commands"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)?
+                        .trim()
+                        .trim_start_matches('/');
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let description = item
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let input_hint = item
+                        .pointer("/input/hint")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Some(teshi_agent::backend::AcpSlashCommand {
+                        name: name.to_string(),
+                        description,
+                        input_hint,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_plan_entries(update: &serde_json::Value) -> Vec<teshi_agent::backend::AcpPlanEntry> {
+    let entries_val = update
+        .get("entries")
+        .or_else(|| update.pointer("/plan/entries"));
+    if let Some(items) = entries_val.and_then(serde_json::Value::as_array) {
+        return items
+            .iter()
+            .filter_map(|item| {
+                let content = item
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)?
+                    .trim();
+                if content.is_empty() {
+                    return None;
+                }
+                let priority = item
+                    .get("priority")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("medium")
+                    .to_string();
+                let status = item
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("pending")
+                    .to_string();
+                Some(teshi_agent::backend::AcpPlanEntry {
+                    content: content.to_string(),
+                    priority,
+                    status,
+                })
+            })
+            .collect();
+    }
+    if let Some(text) = update
+        .pointer("/plan/text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return vec![teshi_agent::backend::AcpPlanEntry {
+            content: text.to_string(),
+            priority: "medium".to_string(),
+            status: "in_progress".to_string(),
+        }];
+    }
+    Vec::new()
+}
+
+fn forward_update(update: AcpEvent, output: &WorkerOutput, muted: bool) -> bool {
     let failed = matches!(&update, AcpEvent::Error(_));
     if muted && !failed {
         // A cancelled turn keeps polling so the agent can acknowledge the
@@ -1670,45 +2590,44 @@ fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>, mu
                 },
             })
         }
-        AcpEvent::SessionUpdate(value)
-            if value
-                .get("update")
-                .unwrap_or(&value)
-                .get("sessionUpdate")
-                .and_then(serde_json::Value::as_str)
-                == Some("agent_thought_chunk") =>
-        {
-            value
-                .get("update")
-                .unwrap_or(&value)
-                .get("content")
-                .and_then(|v| v.get("text"))
-                .and_then(serde_json::Value::as_str)
-                .map(|content| AgentBackendEvent::ReasoningChunk {
-                    content: content.into(),
-                })
-        }
-        AcpEvent::SessionUpdate(value)
-            if value
-                .get("update")
-                .unwrap_or(&value)
-                .get("sessionUpdate")
-                .and_then(serde_json::Value::as_str)
-                == Some("session_info_update") =>
-        {
-            // Only a present `title` speaks about the label: an update that
-            // merely refreshes `updatedAt` must leave it alone. A null title
-            // clears the agent label so the client's own title can return.
+        AcpEvent::SessionUpdate(value) => {
             let update = value.get("update").unwrap_or(&value);
-            match update.get("title") {
-                Some(serde_json::Value::String(title)) => {
-                    let title = title.trim();
-                    (!title.is_empty()).then(|| AgentBackendEvent::SessionTitle {
-                        title: Some(title.to_string()),
-                    })
-                }
-                Some(serde_json::Value::Null) => {
-                    Some(AgentBackendEvent::SessionTitle { title: None })
+            match update
+                .get("sessionUpdate")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("agent_thought_chunk") => update
+                    .get("content")
+                    .and_then(|v| v.get("text"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|content| AgentBackendEvent::ReasoningChunk {
+                        content: content.into(),
+                    }),
+                Some("available_commands_update") => Some(AgentBackendEvent::AvailableCommands {
+                    commands: parse_available_commands(update),
+                }),
+                Some("plan" | "plan_update") => Some(AgentBackendEvent::PlanUpdate {
+                    entries: parse_plan_entries(update),
+                }),
+                Some("plan_removed") => Some(AgentBackendEvent::PlanUpdate {
+                    entries: Vec::new(),
+                }),
+                Some("session_info_update") => {
+                    // Only a present `title` speaks about the label: an update that
+                    // merely refreshes `updatedAt` must leave it alone. A null title
+                    // clears the agent label so the client's own title can return.
+                    match update.get("title") {
+                        Some(serde_json::Value::String(title)) => {
+                            let title = title.trim();
+                            (!title.is_empty()).then(|| AgentBackendEvent::SessionTitle {
+                                title: Some(title.to_string()),
+                            })
+                        }
+                        Some(serde_json::Value::Null) => {
+                            Some(AgentBackendEvent::SessionTitle { title: None })
+                        }
+                        _ => None,
+                    }
                 }
                 _ => None,
             }
@@ -1737,12 +2656,7 @@ struct TurnAttempt {
 impl TurnAttempt {
     /// Forwards `update` like [`forward_update`], except that a
     /// transient-failure notice waits for the turn's outcome.
-    fn route(
-        &mut self,
-        update: AcpEvent,
-        output: &mpsc::Sender<AgentBackendEvent>,
-        muted: bool,
-    ) -> bool {
+    fn route(&mut self, update: AcpEvent, output: &WorkerOutput, muted: bool) -> bool {
         if !muted {
             match &update {
                 AcpEvent::AgentMessageChunk(content)
@@ -1763,7 +2677,7 @@ impl TurnAttempt {
 
     /// Work after a notice means the agent recovered by itself: the notice
     /// did not end the turn, so it is shown in its original position.
-    fn record_progress(&mut self, output: &mpsc::Sender<AgentBackendEvent>) {
+    fn record_progress(&mut self, output: &WorkerOutput) {
         self.progressed = true;
         if let Some(content) = self.notice.take() {
             let _ = output.send(AgentBackendEvent::MessageChunk { content });
@@ -1774,40 +2688,57 @@ impl TurnAttempt {
 /// How the pause before an automatic retry ended.
 enum RetryWait {
     Elapsed,
-    /// The user cancelled the turn, or the session failed during the pause.
+    /// The user cancelled the turn during the pause.
     Stopped,
+    ProtocolError,
+    ProcessExited,
     Shutdown,
 }
 
 /// Waits out a retry backoff without parking the worker: settings and policy
-/// commands keep working, and a cancel or shutdown ends the turn at once.
+/// commands keep working, and a cancel, process exit, or shutdown ends the turn at once.
+#[allow(clippy::too_many_arguments)]
 async fn wait_before_retry<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
     delay: std::time::Duration,
-    commands: &mut async_mpsc::UnboundedReceiver<WorkerCommand>,
+    commands: &mut CommandQueue,
     updates_rx: &mut async_mpsc::Receiver<AcpEvent>,
+    exit_rx: &mut tokio::sync::watch::Receiver<bool>,
     client: &AcpClient<W>,
     session_id: &str,
     controls: &Mutex<AcpControls>,
-    output: &mpsc::Sender<AgentBackendEvent>,
+    output: &WorkerOutput,
 ) -> RetryWait {
     let sleep = tokio::time::sleep(delay);
     tokio::pin!(sleep);
     loop {
+        if *exit_rx.borrow() && !client.is_alive() {
+            return RetryWait::ProcessExited;
+        }
         tokio::select! {
             () = &mut sleep => return RetryWait::Elapsed,
+            _ = exit_rx.changed(), if !*exit_rx.borrow() => {
+                if !client.is_alive() {
+                    return RetryWait::ProcessExited;
+                }
+            }
             Some(update) = updates_rx.recv() => {
                 apply_control_update(&update, session_id, controls);
                 // The failed attempt is over, so its stragglers stay muted;
                 // a protocol error still surfaces and ends the turn.
                 if forward_update(update, output, true) {
-                    return RetryWait::Stopped;
+                    return RetryWait::ProtocolError;
                 }
             }
             command = commands.recv() => match command {
                 Some(WorkerCommand::Policy(policy)) => {
-                    client.set_permission_policy(policy).await;
+                    client.set_session_permission_policy(session_id, policy).await;
                     if let Ok(mut state) = controls.lock() {
                         state.policy = Some(policy);
+                    }
+                }
+                Some(WorkerCommand::Authenticate { .. }) => {
+                    if let Ok(mut state) = controls.lock() {
+                        state.pending = false;
                     }
                 }
                 Some(WorkerCommand::Configure { .. }) => {
@@ -1870,5 +2801,123 @@ mod tests {
         assert!(!backend.inject_prompt_sections());
         backend.set_inject_prompt_sections(true);
         assert!(backend.inject_prompt_sections());
+    }
+
+    #[test]
+    fn parse_available_commands_ignores_slash_only_names() {
+        let update = serde_json::json!({
+            "availableCommands": [
+                { "name": "/", "description": "empty after slash" },
+                { "name": "///", "description": "multiple slashes" },
+                { "name": "  /plan  ", "description": "Create a plan" }
+            ]
+        });
+        let commands = parse_available_commands(&update);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "plan");
+        assert_eq!(commands[0].description, "Create a plan");
+    }
+
+    #[test]
+    fn plan_updates_seal_intro_text_and_stay_scoped_to_current_turn() {
+        let mut backend = AcpAgentBackend::default();
+        let (raw_tx, rx) = mpsc::channel();
+        let tx = WorkerOutput::new(raw_tx);
+        backend.events = Some(rx);
+        backend.state = AgentBackendStatus::Running;
+        backend.messages.push(AiChatMessage {
+            role: AiRole::User,
+            content: "Turn 1".into(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            source: None,
+            activity: None,
+        });
+
+        let entry = |text: &str| teshi_agent::backend::AcpPlanEntry {
+            content: text.into(),
+            priority: String::new(),
+            status: "pending".into(),
+        };
+        tx.send(AgentBackendEvent::MessageChunk {
+            content: "Let me plan turn 1.".into(),
+        })
+        .unwrap();
+        tx.send(AgentBackendEvent::PlanUpdate {
+            entries: vec![entry("Step 1A")],
+        })
+        .unwrap();
+        tx.send(AgentBackendEvent::PlanUpdate {
+            entries: vec![entry("Step 1B")],
+        })
+        .unwrap();
+        while let Ok(Some(_)) = backend.try_next_event() {}
+
+        // Intro text was sealed before the plan, and second PlanUpdate updated Turn 1's plan in place.
+        assert_eq!(backend.messages.len(), 3);
+        assert_eq!(
+            backend.messages[1].source.as_deref(),
+            Some("agent_progress")
+        );
+        assert_eq!(backend.messages[1].content, "Let me plan turn 1.");
+        assert_eq!(backend.messages[2].source.as_deref(), Some("acp_plan"));
+        assert_eq!(backend.messages[2].content, "[ ] Step 1B");
+
+        // Now start Turn 2: a new PlanUpdate must append a fresh plan card after Turn 2's user message.
+        backend.messages.push(AiChatMessage {
+            role: AiRole::User,
+            content: "Turn 2".into(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            source: None,
+            activity: None,
+        });
+        tx.send(AgentBackendEvent::PlanUpdate {
+            entries: vec![entry("Step 2A")],
+        })
+        .unwrap();
+        while let Ok(Some(_)) = backend.try_next_event() {}
+
+        assert_eq!(backend.messages.len(), 5);
+        assert_eq!(backend.messages[2].content, "[ ] Step 1B");
+        assert_eq!(backend.messages[4].source.as_deref(), Some("acp_plan"));
+        assert_eq!(backend.messages[4].content, "[ ] Step 2A");
+    }
+
+    #[test]
+    fn stale_auth_failed_event_from_prior_generation_is_filtered_after_retry() {
+        let mut backend = AcpAgentBackend::default();
+        let (raw_tx, rx) = mpsc::channel();
+        let mut output = WorkerOutput::new(raw_tx);
+        backend.events = Some(rx);
+        backend.state = AgentBackendStatus::Idle;
+
+        // Worker is still finishing attempt 1 while backend has already moved to attempt 2.
+        output.set_auth_generation(1);
+        backend.auth_generation = 2;
+        output
+            .send(AgentBackendEvent::Failed("method A rejected".into()))
+            .unwrap();
+
+        assert!(
+            matches!(backend.try_next_event(), Err(mpsc::TryRecvError::Empty)),
+            "stale Failed from generation 1 must be ignored after generation advanced to 2"
+        );
+        assert_eq!(backend.status(), AgentBackendStatus::Idle);
+
+        // Once the worker dequeues attempt 2 and updates its local generation, a generation-2
+        // failure must surface normally.
+        output.set_auth_generation(2);
+        output
+            .send(AgentBackendEvent::Failed("method B rejected".into()))
+            .unwrap();
+        let event = backend.try_next_event().unwrap();
+        assert!(
+            matches!(event, Some(AgentBackendEvent::Failed(ref msg)) if msg == "method B rejected"),
+            "current generation failure must surface: {event:?}"
+        );
+        assert_eq!(backend.status(), AgentBackendStatus::Failed);
     }
 }

@@ -206,6 +206,13 @@ fn pump_turn(backend: &mut AgentBackendRuntime, started: Instant, deadline: Inst
                         Some(title) => println!("  [{ms}ms] TITLE : {title}"),
                         None => println!("  [{ms}ms] TITLE : cleared"),
                     },
+                    AgentBackendEvent::AvailableCommands { commands } => {
+                        let names: Vec<_> = commands.iter().map(|c| c.name.as_str()).collect();
+                        println!("  [{ms}ms] CMDS  : {names:?}");
+                    }
+                    AgentBackendEvent::PlanUpdate { entries } => {
+                        println!("  [{ms}ms] PLAN  : {} entries", entries.len());
+                    }
                     AgentBackendEvent::Ignored => {}
                 }
             }

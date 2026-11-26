@@ -18,6 +18,7 @@ pub mod command;
 pub mod error;
 pub mod jsonrpc;
 pub mod permission;
+pub mod pool;
 mod process_tree;
 pub mod profile;
 pub mod prompt;
@@ -28,10 +29,12 @@ pub mod session_config;
 pub use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
 
 pub use client::{
-    AcpClient, AcpEvent, AcpLifecycle, AcpSession, ClientInfo, InitializeResult, PromptCompletion,
+    AcpClient, AcpEvent, AcpLifecycle, AcpSession, AuthMethodInfo, ClientInfo, InitializeResult,
+    PromptCompletion, RemoteSessionInfo,
 };
 pub use command::{AcpAgentCommand, CursorAcpConfig, EnvironmentRedaction, resolve_executable};
 pub use error::{AcpError, AcpResult};
 pub use permission::{PermissionDecision, PermissionHost, PermissionOption, PermissionPolicy};
+pub use pool::{AcpConnectionKey, AcpConnectionPool, AcpPoolMode, PooledAcpConnection};
 pub use profile::AcpAgentProfile;
 pub use prompt::PromptBlock;
