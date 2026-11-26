@@ -1613,14 +1613,7 @@ async fn run_standalone_worker(
             return;
         }
     };
-    let initialized = match tokio::select! {
-        biased;
-        () = commands.wait_for_shutdown() => {
-            let _ = client.shutdown().await;
-            return;
-        }
-        res = client.initialize() => res,
-    } {
+    let initialized = match client.initialize().await {
         Ok(initialized) => initialized,
         Err(error) => {
             let msg = format!("ACP initialize failed: {error}");
@@ -1775,40 +1768,37 @@ async fn run_session_body(
     let mut invalidate_lease = false;
 
     let session_outcome = loop {
-        let attempt = tokio::select! {
-            biased;
-            () = commands.wait_for_shutdown() => {
-                invalidate_lease = true;
-                break None;
-            }
-            res = async {
-                if let Some(route_tx) = &pooled_route_tx {
-                    open_or_restore_session_pooled(
-                        &client,
-                        &initialized,
-                        cwd.clone(),
-                        servers.clone(),
-                        restore_session_id.as_deref(),
-                        route_tx,
-                        &mut updates_rx,
-                        permission_policy,
-                        permission_host.clone(),
-                        &output,
-                    )
-                    .await
-                } else {
-                    open_or_restore_session(
-                        &client,
-                        &initialized,
-                        cwd.clone(),
-                        servers.clone(),
-                        restore_session_id.as_deref(),
-                        &mut updates_rx,
-                        &output,
-                    )
-                    .await
+        let attempt = if let Some(route_tx) = &pooled_route_tx {
+            tokio::select! {
+                biased;
+                () = commands.wait_for_shutdown() => {
+                    invalidate_lease = true;
+                    break None;
                 }
-            } => res,
+                res = open_or_restore_session_pooled(
+                    &client,
+                    &initialized,
+                    cwd.clone(),
+                    servers.clone(),
+                    restore_session_id.as_deref(),
+                    route_tx,
+                    &mut updates_rx,
+                    permission_policy,
+                    permission_host.clone(),
+                    &output,
+                ) => res,
+            }
+        } else {
+            open_or_restore_session(
+                &client,
+                &initialized,
+                cwd.clone(),
+                servers.clone(),
+                restore_session_id.as_deref(),
+                &mut updates_rx,
+                &output,
+            )
+            .await
         };
         match attempt {
             Ok(ok) => break Some(ok),

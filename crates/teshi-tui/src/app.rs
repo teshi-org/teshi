@@ -1614,16 +1614,19 @@ fn agent_busy(agent: &AgentThread) -> bool {
 ///
 /// Only providers verified to isolate concurrent `session/prompt` turns across
 /// sessions within a single process opt into [`teshi_acp::AcpPoolMode::Shared`].
-/// Other installed profiles (including `codebuddy-code`, which tracks a single
-/// active session per process and stalls concurrent prompts) get exclusive
-/// per-session connections with idle reuse and a background warm standby.
-/// Raw `TESHI_ACP_PROGRAM` overrides (`None`) use exclusive idle reuse without
-/// unsolicited background pre-warming.
-pub(crate) fn acp_pool_mode_for_provider(provider_id: Option<&str>) -> teshi_acp::AcpPoolMode {
+/// Providers known to stall concurrent prompts on one process while benefiting
+/// from a warm standby (`codebuddy-code`, `codex-acp`) get exclusive per-session
+/// connections with idle reuse and a background warm standby. Other installed
+/// profiles and raw `TESHI_ACP_PROGRAM` overrides run standalone (`None`) so
+/// `/new` and `/resume` preserve a fresh per-session process lifecycle without
+/// unsolicited background pre-warming or idle reuse.
+pub(crate) fn acp_pool_mode_for_provider(
+    provider_id: Option<&str>,
+) -> Option<teshi_acp::AcpPoolMode> {
     match provider_id {
-        Some("antigravity-acp") => teshi_acp::AcpPoolMode::Shared,
-        Some(_) => teshi_acp::AcpPoolMode::exclusive_warm(),
-        None => teshi_acp::AcpPoolMode::exclusive_no_prewarm(),
+        Some("antigravity-acp") => Some(teshi_acp::AcpPoolMode::Shared),
+        Some("codebuddy-code" | "codex-acp") => Some(teshi_acp::AcpPoolMode::exclusive_warm()),
+        Some(_) | None => None,
     }
 }
 
@@ -4782,9 +4785,11 @@ impl App {
             });
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
-                config.connection_pool = Some(std::sync::Arc::clone(&self.acp_pool));
                 config.provider_id = self.agents[agent_idx].selected_acp_id.clone();
-                config.pool_mode = acp_pool_mode_for_provider(config.provider_id.as_deref());
+                if let Some(pool_mode) = acp_pool_mode_for_provider(config.provider_id.as_deref()) {
+                    config.connection_pool = Some(std::sync::Arc::clone(&self.acp_pool));
+                    config.pool_mode = pool_mode;
+                }
                 config.inject_prompt_sections = self.inject_prompt_sections;
                 config.tool_bridge = Some(teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
                     executable: std::env::current_exe()?,
@@ -32208,20 +32213,18 @@ Feature: B
     fn acp_pool_mode_isolates_codebuddy_and_shares_antigravity() {
         assert_eq!(
             super::acp_pool_mode_for_provider(Some("antigravity-acp")),
-            teshi_acp::AcpPoolMode::Shared
+            Some(teshi_acp::AcpPoolMode::Shared)
         );
         assert_eq!(
             super::acp_pool_mode_for_provider(Some("codebuddy-code")),
-            teshi_acp::AcpPoolMode::exclusive_warm()
+            Some(teshi_acp::AcpPoolMode::exclusive_warm())
         );
         assert_eq!(
             super::acp_pool_mode_for_provider(Some("codex-acp")),
-            teshi_acp::AcpPoolMode::exclusive_warm()
+            Some(teshi_acp::AcpPoolMode::exclusive_warm())
         );
-        assert_eq!(
-            super::acp_pool_mode_for_provider(None),
-            teshi_acp::AcpPoolMode::exclusive_no_prewarm()
-        );
+        assert_eq!(super::acp_pool_mode_for_provider(Some("fixture")), None);
+        assert_eq!(super::acp_pool_mode_for_provider(None), None);
     }
 
     #[test]

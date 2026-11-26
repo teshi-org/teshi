@@ -292,7 +292,8 @@ impl Resolver {
 
         self.errors.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
 
-        let agents: Vec<AgentDefinition> = self.resolved.values().cloned().collect();
+        let mut agents: Vec<AgentDefinition> = self.resolved.values().cloned().collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
         (agents, std::mem::take(&mut self.errors))
     }
 
@@ -647,6 +648,21 @@ compaction:
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].id, "custom");
         assert_eq!(agents[0].system_prompt, "custom prompt");
+    }
+
+    #[test]
+    fn load_all_returns_deterministic_id_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_agents = dir.path().join(".teshi").join("agents");
+        write_agent(&project_agents.join("beta"), "beta", Some("beta prompt"));
+        write_agent(&project_agents.join("alpha"), "alpha", Some("alpha prompt"));
+
+        for _ in 0..8 {
+            let (agents, errors) = AgentLoader::new(Some(dir.path())).load_all();
+            assert!(errors.is_empty());
+            let ids: Vec<&str> = agents.iter().map(|agent| agent.id.as_str()).collect();
+            assert_eq!(ids, vec!["alpha", "beta"]);
+        }
     }
 
     #[test]
