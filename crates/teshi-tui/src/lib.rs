@@ -8,6 +8,7 @@ mod auth;
 mod authoring_tab;
 mod bdd_nav;
 mod chat_images;
+mod chat_pastes;
 mod chat_state;
 mod chat_title;
 mod cli;
@@ -659,6 +660,14 @@ pub fn run() -> Result<()> {
                             app.handle_action(Action::Insert(ch))?;
                         }
                     }
+                }
+                Event::Paste(text) if app.history_search.is_some() => {
+                    for ch in text.chars().filter(|ch| !ch.is_control()) {
+                        app.handle_action(Action::AiHistorySearchInsert(ch))?;
+                    }
+                }
+                Event::Paste(text) if app.composer_editor.is_some() => {
+                    app.handle_action(Action::AiPaste(text))?;
                 }
                 Event::Paste(text)
                     if app.ai_input_focused

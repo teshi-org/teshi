@@ -459,6 +459,9 @@ pub enum Action {
     /// Open an image from the chat, the composer, or a requirement in the
     /// full-screen viewer.
     OpenImageViewer(std::path::PathBuf),
+    /// Open the folded paste behind the n-th `[Pasted text #n ...]` label in
+    /// the AI input for viewing and editing.
+    OpenPastedText(usize),
     /// Close the full-screen image viewer.
     ImageViewerClose,
     /// Open the hosted Web UI to review the current replay in a browser.
@@ -788,6 +791,14 @@ impl Action {
                 }
                 (KeyCode::Char('x'), KeyModifiers::CONTROL) | (KeyCode::Char('\u{18}'), _) => {
                     Some(Self::AiCut)
+                }
+                (KeyCode::Char('v'), KeyModifiers::CONTROL)
+                | (KeyCode::Char('\u{16}'), _)
+                | (KeyCode::Insert, KeyModifiers::SHIFT) => Some(Self::AiClipboardPaste),
+                (KeyCode::Char('v' | 'V'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiClipboardPaste)
                 }
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                 (KeyCode::Delete, _) => Some(Self::AiDelete),
