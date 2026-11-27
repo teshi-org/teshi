@@ -359,6 +359,7 @@ pub struct AgentThread {
     /// Last active wall-clock timestamp used for Active/Settled ordering and relative age.
     pub last_activity_at: SystemTime,
     saved_session: Option<crate::session::Session>,
+    pub(crate) pending_acp_session_id: Option<String>,
     last_session_snapshot: String,
     last_session_save: Option<std::time::Instant>,
 }
@@ -639,6 +640,7 @@ impl AgentThread {
             settled: false,
             last_activity_at: SystemTime::now(),
             saved_session: None,
+            pending_acp_session_id: None,
             last_session_snapshot: String::new(),
             last_session_save: None,
         }
@@ -678,6 +680,20 @@ impl AgentThread {
 }
 
 impl AgentThread {
+    /// Current remote ACP `sessionId` from the live backend, saved session, or
+    /// uncommitted workspace state.
+    pub(crate) fn current_acp_session_id(&self) -> Option<String> {
+        self.backend
+            .acp_controls()
+            .and_then(|controls| controls.session_id)
+            .or_else(|| {
+                self.saved_session
+                    .as_ref()
+                    .and_then(|session| session.acp_session_id.clone())
+            })
+            .or_else(|| self.pending_acp_session_id.clone())
+    }
+
     /// Checkpoint visible history, including an unfinished streamed reply.
     fn save_session_to(
         &mut self,
@@ -685,7 +701,12 @@ impl AgentThread {
         project: &Path,
         model: Option<String>,
     ) -> Result<()> {
-        if self.messages().is_empty() {
+        // Live ACP session identity must participate in the snapshot: a process
+        // can become ready without changing the transcript, and resume depends
+        // on the id surviving the next restart.
+        let acp_session_id = self.current_acp_session_id();
+        let persist_empty_remote = self.saved_session.is_some() && acp_session_id.is_some();
+        if self.messages().is_empty() && !persist_empty_remote {
             return Ok(());
         }
         if let Some(owner) = self
@@ -712,18 +733,6 @@ impl AgentThread {
                 activity: None,
             });
         }
-        // Live ACP session identity must participate in the snapshot: a process
-        // can become ready without changing the transcript, and resume depends
-        // on the id surviving the next restart.
-        let acp_session_id = self
-            .backend
-            .acp_controls()
-            .and_then(|controls| controls.session_id)
-            .or_else(|| {
-                self.saved_session
-                    .as_ref()
-                    .and_then(|session| session.acp_session_id.clone())
-            });
         let snapshot = serde_json::to_string(&(
             &messages,
             &self.chat.queue,
@@ -774,6 +783,7 @@ impl AgentThread {
             .to_string();
         teshi_engine::write_atomic(&root.join(format!("{}.json", session.id)), &session)?;
         self.saved_session = Some(session);
+        self.pending_acp_session_id = None;
         self.last_session_snapshot = snapshot;
         Ok(())
     }
@@ -1615,21 +1625,21 @@ fn agent_busy(agent: &AgentThread) -> bool {
 
 /// Choose the ACP connection pooling strategy for a given provider profile id.
 ///
-/// Only providers verified to isolate concurrent `session/prompt` turns across
-/// sessions within a single process opt into [`teshi_acp::AcpPoolMode::Shared`].
-/// Providers known to stall concurrent prompts on one process while benefiting
-/// from a warm standby (`codebuddy-code`, `codex-acp`) get exclusive per-session
-/// connections with idle reuse and a background warm standby. Other installed
-/// profiles and raw `TESHI_ACP_PROGRAM` overrides run standalone (`None`) so
-/// `/new` and `/resume` preserve a fresh per-session process lifecycle without
+/// Installed ACP providers default to [`teshi_acp::AcpPoolMode::Shared`],
+/// reusing one initialized process across sessions with matching working
+/// directory, command, and environment. Providers known to stall concurrent
+/// prompts or enforce single-session limits per process (`codebuddy-code`) are
+/// blacklisted into [`teshi_acp::AcpPoolMode::exclusive_warm()`] for exclusive
+/// per-session connections with idle reuse and a background warm standby. Raw
+/// `TESHI_ACP_PROGRAM` overrides (`None`) stay standalone (`None`) without
 /// unsolicited background pre-warming or idle reuse.
 pub(crate) fn acp_pool_mode_for_provider(
     provider_id: Option<&str>,
 ) -> Option<teshi_acp::AcpPoolMode> {
     match provider_id {
-        Some("antigravity-acp") => Some(teshi_acp::AcpPoolMode::Shared),
-        Some("codebuddy-code" | "codex-acp") => Some(teshi_acp::AcpPoolMode::exclusive_warm()),
-        Some(_) | None => None,
+        Some("codebuddy-code") => Some(teshi_acp::AcpPoolMode::exclusive_warm()),
+        Some(_) => Some(teshi_acp::AcpPoolMode::Shared),
+        None => None,
     }
 }
 
@@ -2028,6 +2038,13 @@ pub struct App {
     pub ai_sidebar_working_rect: Option<ratatui::layout::Rect>,
     /// Screen rectangle of the bottom-docked Settled card list from the last render frame.
     pub ai_sidebar_settled_rect: Option<ratatui::layout::Rect>,
+    /// Transient pointer hover state for active AI sidebar session cards.
+    pub ai_sidebar_hover: SessionHoverState,
+    /// Suppresses pointer-derived sidebar hover after keyboard navigation until
+    /// the next real pointer movement.
+    pub ai_sidebar_hover_suppressed: bool,
+    /// Per-frame hit geometry for visible AI sidebar session cards.
+    pub ai_sidebar_hit_cache: SessionListHitCache,
     /// Keep the selected conversation card scrolled into view until the user wheels the list.
     pub(crate) ai_sidebar_follow_selection: bool,
     /// Whether the Working shelf is expanded (default true).
@@ -2387,6 +2404,32 @@ fn completed_assistant_responses(messages: &[AiChatMessage], limit: usize) -> Ve
         .collect();
     responses.reverse();
     responses
+}
+
+/// Transient hover state for the AI sidebar's active session list.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SessionHoverState {
+    /// Stable card key of the hovered session card, if any.
+    pub hovered_card_key: Option<String>,
+    /// Whether the pointer is precisely inside the inline settle button rect.
+    pub hovering_archive_btn: bool,
+}
+
+/// Per-frame hit geometry for one visible session card in the AI sidebar.
+#[derive(Debug, Clone)]
+pub struct SessionHitArea {
+    pub card_key: String,
+    /// Stable `AgentState::id` when this card is an active settleable session.
+    pub settle_agent_id: Option<usize>,
+    pub row_rect: ratatui::layout::Rect,
+    /// Inline settle button rect on row 1 (present only for active cards when wide enough).
+    pub archive_btn_rect: Option<ratatui::layout::Rect>,
+}
+
+/// Per-frame layout cache rebuilt while rendering AI sidebar card lists.
+#[derive(Debug, Default, Clone)]
+pub struct SessionListHitCache {
+    pub items: Vec<SessionHitArea>,
 }
 
 /// A clickable region registered during rendering for mouse hit-testing.
@@ -3679,6 +3722,9 @@ impl App {
             ai_sidebar_rect: None,
             ai_sidebar_working_rect: None,
             ai_sidebar_settled_rect: None,
+            ai_sidebar_hover: Default::default(),
+            ai_sidebar_hover_suppressed: false,
+            ai_sidebar_hit_cache: Default::default(),
             ai_sidebar_follow_selection: true,
             ai_sidebar_working_expanded: true,
             ai_sidebar_settled_expanded: false,
@@ -3869,6 +3915,9 @@ impl App {
             ai_sidebar_rect: None,
             ai_sidebar_working_rect: None,
             ai_sidebar_settled_rect: None,
+            ai_sidebar_hover: Default::default(),
+            ai_sidebar_hover_suppressed: false,
+            ai_sidebar_hit_cache: Default::default(),
             ai_sidebar_follow_selection: true,
             ai_sidebar_working_expanded: true,
             ai_sidebar_settled_expanded: false,
@@ -4129,6 +4178,9 @@ impl App {
             ai_sidebar_rect: None,
             ai_sidebar_working_rect: None,
             ai_sidebar_settled_rect: None,
+            ai_sidebar_hover: Default::default(),
+            ai_sidebar_hover_suppressed: false,
+            ai_sidebar_hit_cache: Default::default(),
             ai_sidebar_follow_selection: true,
             ai_sidebar_working_expanded: true,
             ai_sidebar_settled_expanded: false,
@@ -4888,13 +4940,11 @@ impl App {
                     tools: self.agent_tools(agent_idx),
                 });
                 let thread = &self.agents[agent_idx];
-                // Resume the ACP agent's own session when this conversation was
-                // checkpointed with a remote id. Absent or unsupported agents
-                // fall back to session/new inside the worker.
-                config.restore_session_id = thread
-                    .saved_session
-                    .as_ref()
-                    .and_then(|session| session.acp_session_id.clone());
+                // Resume the ACP agent's own session when this conversation has a
+                // persisted remote id (checkpointed or workspace-pending).
+                // Absent or unsupported agents fall back to session/new inside
+                // the worker.
+                config.restore_session_id = thread.current_acp_session_id();
                 config.model_preference_path = thread.acp_preference_path("model-preferences")?;
                 config.option_preferences_path = thread.acp_preference_path("session-options")?;
                 let approval_path = thread.acp_preference_path("approval-preferences")?;
@@ -5223,6 +5273,9 @@ impl App {
     /// Points one agent at `member` (or the project root) and restarts a
     /// connected backend, which was spawned in the previous directory.
     fn bind_agent_member(&mut self, idx: usize, member: Option<PathBuf>) {
+        if self.agents[idx].member_dir != member {
+            self.agents[idx].pending_acp_session_id = None;
+        }
         self.agents[idx].member_dir = member;
         if self.agents[idx].backend.is_connected() {
             let kind = self.agents[idx].backend.kind();
@@ -5585,16 +5638,45 @@ impl App {
     fn current_sidebar_workspace_state(&self) -> crate::session::SidebarWorkspaceState {
         let mut seen = HashSet::new();
         let mut open_session_ids = Vec::new();
+        let mut pending_acp_tabs = Vec::new();
+        let selected_idx = self.selected_agent;
+        let mut active_session_id = None;
+        let mut active_pending_acp_index = None;
         for &idx in &self.agent_sidebar_visual_order() {
-            if let Some(id) = self.agents.get(idx).and_then(AgentThread::session_id)
-                && seen.insert(id.to_string())
+            let Some(agent) = self.agents.get(idx) else {
+                continue;
+            };
+            if let Some(id) = agent.session_id() {
+                if seen.insert(id.to_string()) {
+                    open_session_ids.push(id.to_string());
+                }
+                if idx == selected_idx {
+                    active_session_id = Some(id.to_string());
+                    active_pending_acp_index = None;
+                }
+            } else if agent.backend_kind() == teshi_agent::backend::AgentBackendKind::Acp
+                && let Some(acp_session_id) = agent.current_acp_session_id()
             {
-                open_session_ids.push(id.to_string());
+                let pending_idx = pending_acp_tabs.len();
+                pending_acp_tabs.push(crate::session::PendingAcpWorkspaceTab {
+                    acp_agent_id: agent.selected_acp_id.clone(),
+                    acp_session_id,
+                    member_dir: agent.member_dir.clone(),
+                    agent_title: agent.agent_title.clone(),
+                    custom_title: agent.custom_title.clone(),
+                    settled: agent.settled,
+                });
+                if idx == selected_idx {
+                    active_session_id = None;
+                    active_pending_acp_index = Some(pending_idx);
+                }
             }
         }
         crate::session::SidebarWorkspaceState {
             open_session_ids,
-            active_session_id: self.agent().session_id().map(str::to_owned),
+            active_session_id,
+            pending_acp_tabs,
+            active_pending_acp_index,
             sidebar_collapsed: self.ai_sidebar_collapsed,
             settled_expanded: self.ai_sidebar_settled_expanded,
             explore_details_collapsed: self.explore_details_collapsed,
@@ -5644,7 +5726,7 @@ impl App {
 
         let mut restored = Vec::new();
         let mut seen = HashSet::new();
-        for (id, session_id) in state.open_session_ids.iter().enumerate() {
+        for session_id in &state.open_session_ids {
             if !seen.insert(session_id.clone()) {
                 continue;
             }
@@ -5661,6 +5743,7 @@ impl App {
             if !owned {
                 continue;
             }
+            let id = restored.len();
             restored.push(AgentThread::from_saved_session(
                 id,
                 session,
@@ -5668,16 +5751,41 @@ impl App {
             ));
         }
 
+        let mut restored_pending_indices = Vec::new();
+        for pending in &state.pending_acp_tabs {
+            let id = restored.len();
+            let mut thread = AgentThread::new_with_backend(
+                id,
+                &format!("Agent {}", id + 1),
+                teshi_agent::backend::AgentBackendKind::Acp,
+            );
+            thread.selection_root = selection_root.clone();
+            thread.selected_acp_id = pending.acp_agent_id.clone();
+            thread.pending_acp_session_id = Some(pending.acp_session_id.clone());
+            thread.member_dir = pending.member_dir.clone().filter(|dir| dir.is_dir());
+            thread.backend_selected = true;
+            thread.agent_title = pending.agent_title.clone();
+            thread.custom_title = pending.custom_title.clone();
+            thread.settled = pending.settled;
+            if thread.agent_title.is_some() || thread.custom_title.is_some() {
+                thread.refresh_display_title();
+            }
+            restored_pending_indices.push(restored.len());
+            restored.push(thread);
+        }
+
         if !restored.is_empty() {
             self.next_agent_id = restored.len();
             self.agents = restored;
             let selected = state
-                .active_session_id
-                .as_deref()
-                .and_then(|active_id| {
-                    self.agents
-                        .iter()
-                        .position(|agent| agent.session_id() == Some(active_id))
+                .active_pending_acp_index
+                .and_then(|pending_idx| restored_pending_indices.get(pending_idx).copied())
+                .or_else(|| {
+                    state.active_session_id.as_deref().and_then(|active_id| {
+                        self.agents
+                            .iter()
+                            .position(|agent| agent.session_id() == Some(active_id))
+                    })
                 })
                 .or_else(|| self.agent_sidebar_visible_order().into_iter().next())
                 .unwrap_or(0);
@@ -12249,6 +12357,18 @@ impl App {
                 _ => {}
             }
         }
+        if matches!(
+            action,
+            Action::MoveUp
+                | Action::MoveDown
+                | Action::PageUp
+                | Action::PageDown
+                | Action::NextTab
+                | Action::PrevTab
+                | Action::AiSidebarStartSearch
+        ) {
+            self.clear_ai_sidebar_hover();
+        }
         if !matches!(action, Action::PendingChar(_)) {
             self.pending_char = None;
         }
@@ -12721,6 +12841,18 @@ impl App {
 
         // Modal list navigation returns above; do not let a pending dd survive
         // another command or a cancelled modal.
+        if matches!(
+            action,
+            Action::MoveUp
+                | Action::MoveDown
+                | Action::PageUp
+                | Action::PageDown
+                | Action::NextTab
+                | Action::PrevTab
+                | Action::AiSidebarStartSearch
+        ) {
+            self.clear_ai_sidebar_hover();
+        }
         if !matches!(action, Action::PendingChar(_)) {
             self.pending_char = None;
         }
@@ -15156,41 +15288,13 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AgentToggleSettle => {
+                self.clear_ai_sidebar_hover();
                 let idx = self.selected_agent;
-                if self.agents[idx].is_working() {
-                    self.status = crate::i18n::t("status.cannot_settle_working").to_string();
-                    self.set_status_message(self.status.clone());
-                } else {
-                    let prev_visible = self.agent_sidebar_visible_order();
-                    let prev_pos = prev_visible.iter().position(|&i| i == idx).unwrap_or(0);
-                    let next_settled = !self.agents[idx].settled;
-                    self.agents[idx].settled = next_settled;
-                    if next_settled && !self.ai_sidebar_settled_expanded {
-                        let next_visible = self.agent_sidebar_visible_order();
-                        if next_visible.is_empty() {
-                            self.ai_sidebar_settled_expanded = true;
-                        } else {
-                            let target_pos = prev_pos.min(next_visible.len() - 1);
-                            self.selected_agent = next_visible[target_pos];
-                            self.reset_mention_popup();
-                        }
-                    }
-                    self.ai_sidebar_follow_selection = true;
-                    let name = self.agents[idx].title.clone();
-                    self.status = crate::i18n::fill(
-                        crate::i18n::t(if next_settled {
-                            "status.agent_settled"
-                        } else {
-                            "status.agent_reopened"
-                        }),
-                        &[("name", &crate::i18n::arg(&name))],
-                    );
-                    self.set_status_message(self.status.clone());
-                    self.save_sidebar_workspace(true);
-                }
+                self.toggle_settle_agent_at(idx, true);
                 self.quit_pending_confirm = false;
             }
             Action::AgentNext => {
+                self.clear_ai_sidebar_hover();
                 self.clear_chat_selection();
                 self.reset_mention_popup();
                 let order = self.agent_sidebar_visible_order();
@@ -15214,6 +15318,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AgentPrev => {
+                self.clear_ai_sidebar_hover();
                 self.clear_chat_selection();
                 self.reset_mention_popup();
                 let order = self.agent_sidebar_visible_order();
@@ -17874,13 +17979,18 @@ impl App {
         if matches!(kind, MouseEventKind::Moved) {
             self.mouse_position = Some((col, row));
         }
+        // Any modal or non-AI context clears transient AI sidebar card hover.
+        if self.active_tab != MainTab::Ai {
+            self.clear_ai_sidebar_hover();
+        }
         // A left click closes the `:` prompt and then lands on whatever control
         // is under the pointer.
         if self.command_line.is_some() && matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
             self.command_line = None;
         }
-        // The image viewer covers the whole terminal: only its own controls
-        // and the wheel respond, so nothing beneath it is clicked or selected.
+        // The image viewer covers the whole terminal: its own controls and wheel
+        // respond, and clicking blank space outside the rendered image closes it
+        // without leaking the click to controls beneath.
         if self.screenshot.visible {
             let pos = ratatui::layout::Position::new(col, row);
             match kind {
@@ -17889,6 +17999,12 @@ impl App {
                         self.hit_test(&pos).cloned()
                     {
                         self.handle_region_click(&region, &pos)?;
+                    } else if !self
+                        .screenshot
+                        .content_rect
+                        .is_some_and(|rect| rect.contains(pos))
+                    {
+                        self.close_screenshot_panel();
                     }
                 }
                 MouseEventKind::ScrollUp => self
@@ -17908,15 +18024,15 @@ impl App {
             let pos = ratatui::layout::Position::new(col, row);
             if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(region) = self.hit_test(&pos).cloned()
-                    && matches!(
-                        self.project_switch.overlay,
-                        crate::project_context::SwitchOverlay::Picker { .. }
-                    )
-                    && matches!(
-                        region,
-                        ClickableRegion::ProjectRecent { .. }
-                            | ClickableRegion::ProjectOpenPath { .. }
-                    )
+                    && (matches!(region, ClickableRegion::ActionButton { modal: true, .. })
+                        || (matches!(
+                            self.project_switch.overlay,
+                            crate::project_context::SwitchOverlay::Picker { .. }
+                        ) && matches!(
+                            region,
+                            ClickableRegion::ProjectRecent { .. }
+                                | ClickableRegion::ProjectOpenPath { .. }
+                        )))
                 {
                     self.handle_region_click(&region, &pos)?;
                 } else if matches!(
@@ -17961,6 +18077,7 @@ impl App {
             || self.help_guide.active
             || self.agent_profile_panel_active
             || self.quit_pending_confirm
+            || self.ai_interrupt_confirm
             || self.change_summary_visible
             || self.generation_scope_prompt.is_some()
             || self.scenario_dropdown_open
@@ -18454,6 +18571,12 @@ impl App {
         match kind {
             MouseEventKind::Moved => {
                 self.mouse_position = Some((col, row));
+                if self.active_tab == MainTab::Ai {
+                    self.ai_sidebar_hover_suppressed = false;
+                    self.update_ai_sidebar_hover(pos);
+                } else {
+                    self.clear_ai_sidebar_hover();
+                }
                 if self.active_tab == MainTab::TestPoints {
                     self.test_points_ui.hovered_node_id = self
                         .test_points_canvas_rect
@@ -18475,6 +18598,11 @@ impl App {
                 return Ok(());
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // Inline hover-revealed settle button on active AI sidebar cards
+                // consumes the click without switching the active conversation.
+                if self.active_tab == MainTab::Ai && self.try_click_ai_sidebar_archive_button(pos) {
+                    return Ok(());
+                }
                 // 1. Try clickable UI regions (tabs, tree, explore columns, etc.)
                 if let Some(region) = self.hit_test(&pos).cloned() {
                     return self.handle_region_click(&region, &pos);
@@ -18602,6 +18730,7 @@ impl App {
                     if self.ai_sidebar_rect.is_some_and(|rect| rect.contains(pos)) {
                         self.ai_sidebar_scroll = self.ai_sidebar_scroll.saturating_sub(2);
                         self.ai_sidebar_follow_selection = false;
+                        self.ai_sidebar_hover = SessionHoverState::default();
                         return Ok(());
                     }
                 }
@@ -18667,6 +18796,7 @@ impl App {
                     if self.ai_sidebar_rect.is_some_and(|rect| rect.contains(pos)) {
                         self.ai_sidebar_scroll = self.ai_sidebar_scroll.saturating_add(2);
                         self.ai_sidebar_follow_selection = false;
+                        self.ai_sidebar_hover = SessionHoverState::default();
                         return Ok(());
                     }
                 }
@@ -18691,18 +18821,173 @@ impl App {
         Ok(())
     }
 
+    /// Clears transient hover state on the AI sidebar session list and
+    /// suppresses re-deriving hover from the stale pointer position until the
+    /// pointer moves again.
+    pub fn clear_ai_sidebar_hover(&mut self) {
+        self.ai_sidebar_hover = SessionHoverState::default();
+        self.ai_sidebar_hover_suppressed = true;
+    }
+
+    /// Updates AI sidebar hover state from the latest frame's hit cache.
+    /// Returns `true` only when the hovered card or button state changed.
+    pub fn update_ai_sidebar_hover(&mut self, pos: ratatui::layout::Position) -> bool {
+        let next = if let Some(hit) = self
+            .ai_sidebar_hit_cache
+            .items
+            .iter()
+            .find(|item| item.row_rect.contains(pos))
+        {
+            let on_btn = hit.archive_btn_rect.is_some_and(|btn| btn.contains(pos));
+            SessionHoverState {
+                hovered_card_key: Some(hit.card_key.clone()),
+                hovering_archive_btn: on_btn,
+            }
+        } else {
+            SessionHoverState::default()
+        };
+        if self.ai_sidebar_hover != next {
+            self.ai_sidebar_hover = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Settles or reopens the agent at `idx`.
+    ///
+    /// When `idx` is the currently selected agent, settling advances selection
+    /// to an adjacent visible agent (or expands the Settled drawer if none
+    /// remain). When `idx` is an inactive agent, settling leaves the current
+    /// conversation and composer focus untouched.
+    fn toggle_settle_agent_at(&mut self, idx: usize, allow_reopen: bool) -> bool {
+        let Some(agent) = self.agents.get(idx) else {
+            return false;
+        };
+        if agent.is_working() {
+            self.status = crate::i18n::t("status.cannot_settle_working").to_string();
+            self.set_status_message(self.status.clone());
+            return false;
+        }
+        if agent.settled && !allow_reopen {
+            return false;
+        }
+        let is_selected = idx == self.selected_agent;
+        let prev_visible = if is_selected {
+            self.agent_sidebar_visible_order()
+        } else {
+            Vec::new()
+        };
+        let prev_pos = prev_visible.iter().position(|&i| i == idx).unwrap_or(0);
+        let next_settled = !self.agents[idx].settled;
+        self.agents[idx].settled = next_settled;
+        if is_selected {
+            if next_settled && !self.ai_sidebar_settled_expanded {
+                let next_visible = self.agent_sidebar_visible_order();
+                if next_visible.is_empty() {
+                    self.ai_sidebar_settled_expanded = true;
+                } else {
+                    let target_pos = prev_pos.min(next_visible.len() - 1);
+                    self.selected_agent = next_visible[target_pos];
+                    self.reset_mention_popup();
+                }
+            }
+            self.ai_sidebar_follow_selection = true;
+        }
+        let name = self.agents[idx].title.clone();
+        self.status = crate::i18n::fill(
+            crate::i18n::t(if next_settled {
+                "status.agent_settled"
+            } else {
+                "status.agent_reopened"
+            }),
+            &[("name", &crate::i18n::arg(&name))],
+        );
+        self.set_status_message(self.status.clone());
+        self.save_sidebar_workspace(true);
+        true
+    }
+
+    /// Settles an active agent by its stable `AgentState::id` without switching
+    /// away from a different currently viewed conversation.
+    pub fn settle_agent_by_id(&mut self, agent_id: usize) -> bool {
+        let Some(idx) = self.agents.iter().position(|agent| agent.id == agent_id) else {
+            return false;
+        };
+        // Clear the settled card's stale key without suppressing hover so the
+        // next frame immediately highlights whichever active card slides under
+        // the pointer.
+        self.ai_sidebar_hover = SessionHoverState::default();
+        self.toggle_settle_agent_at(idx, false)
+    }
+
+    /// Handles a left click on a hover-revealed inline settle button.
+    fn try_click_ai_sidebar_archive_button(&mut self, pos: ratatui::layout::Position) -> bool {
+        let hovered_key = match self.ai_sidebar_hover.hovered_card_key.as_deref() {
+            Some(key) => key,
+            None => return false,
+        };
+        let target_agent_id = self.ai_sidebar_hit_cache.items.iter().find_map(|item| {
+            (item.card_key == hovered_key
+                && item.archive_btn_rect.is_some_and(|btn| btn.contains(pos)))
+            .then_some(item.settle_agent_id)
+            .flatten()
+        });
+        let Some(agent_id) = target_agent_id else {
+            return false;
+        };
+        self.settle_agent_by_id(agent_id);
+        self.quit_pending_confirm = false;
+        true
+    }
+
     /// Find the first clickable region that contains `pos`.
     fn hit_test(&self, pos: &ratatui::layout::Position) -> Option<&ClickableRegion> {
         let _ = &self.dirty;
-        // Specific controls overlay broad pane regions. Reverse render order
-        // gives modal controls priority over the content beneath them.
+        // 1. Modal controls always take precedence over any underlying pane or
+        //    non-modal button, searched in reverse render order.
         if let Some(region) = self
             .clickable_regions
             .iter()
             .rev()
             .find(|region| match region {
-                ClickableRegion::ActionButton { rect, .. }
+                ClickableRegion::ActionButton {
+                    rect, modal: true, ..
+                }
+                | ClickableRegion::QuitConfirmYes { rect }
+                | ClickableRegion::QuitConfirmNo { rect }
+                | ClickableRegion::AiInterruptConfirm { rect }
+                | ClickableRegion::AiInterruptContinue { rect }
                 | ClickableRegion::RequirementFilterOption { rect, .. }
+                | ClickableRegion::ModelProfileRow { rect, .. }
+                | ClickableRegion::ModelFormField { rect, .. }
+                | ClickableRegion::AgentProfileRow { rect, .. }
+                | ClickableRegion::ChangeSummaryRow { rect, .. }
+                | ClickableRegion::StepKeywordRow { rect, .. }
+                | ClickableRegion::SessionRow { rect, .. }
+                | ClickableRegion::MindMapLocation { rect, .. }
+                | ClickableRegion::ProjectRecent { rect, .. }
+                | ClickableRegion::ProjectOpenPath { rect } => rect.contains(*pos),
+                ClickableRegion::ApprovalOption {
+                    row_y,
+                    col_x,
+                    col_right,
+                    ..
+                } => *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right,
+                _ => false,
+            })
+        {
+            return Some(region);
+        }
+        // 2. Specific non-modal controls overlay broad pane regions.
+        if let Some(region) = self
+            .clickable_regions
+            .iter()
+            .rev()
+            .find(|region| match region {
+                ClickableRegion::ActionButton {
+                    rect, modal: false, ..
+                }
                 | ClickableRegion::TestPointCanvasNode { rect, .. }
                 | ClickableRegion::TestPointField { rect, .. }
                 | ClickableRegion::TestPointExcerpt { rect, .. }
@@ -18719,14 +19004,7 @@ impl App {
                 | ClickableRegion::ExploreDetailPane { rect }
                 | ClickableRegion::ExploreDetailTab { rect, .. }
                 | ClickableRegion::ExploreDetailItem { rect, .. }
-                | ClickableRegion::ExploreRunRow { rect, .. } => rect.contains(*pos),
-                ClickableRegion::ModelProfileRow { rect, .. }
-                | ClickableRegion::ModelFormField { rect, .. }
-                | ClickableRegion::AgentProfileRow { rect, .. }
-                | ClickableRegion::ChangeSummaryRow { rect, .. }
-                | ClickableRegion::StepKeywordRow { rect, .. }
-                | ClickableRegion::SessionRow { rect, .. }
-                | ClickableRegion::MindMapLocation { rect, .. }
+                | ClickableRegion::ExploreRunRow { rect, .. }
                 | ClickableRegion::ChatInput { rect } => rect.contains(*pos),
                 _ => false,
             })
@@ -20456,6 +20734,7 @@ impl App {
         *thread.messages_mut() = messages;
         thread.selected_acp_id = selected_id;
         // A different agent (or Native) cannot resume the previous ACP session.
+        thread.pending_acp_session_id = None;
         if let Some(session) = thread.saved_session.as_mut() {
             session.acp_session_id = None;
             session.acp_agent_id = thread.selected_acp_id.clone();
@@ -21326,7 +21605,8 @@ impl App {
             self.set_status_message(self.status.clone());
             return false;
         }
-        if session.id.starts_with("remote-acp:") {
+        let was_remote_acp = session.id.starts_with("remote-acp:");
+        if was_remote_acp {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
@@ -21354,7 +21634,11 @@ impl App {
         }
         self.ai_input_focused = false;
         self.session_panel_active = false;
-        self.save_sidebar_workspace(true);
+        if was_remote_acp && self.persist_sidebar_state {
+            let _ = self.save_sessions(true);
+        } else {
+            self.save_sidebar_workspace(true);
+        }
         self.status = if legacy {
             crate::i18n::t("status.loaded_legacy_session_history_remains_unassigned").into()
         } else {
@@ -25931,15 +26215,74 @@ mod tests {
         assert_eq!(close.y, 2, "the close button sits on the top border");
         assert!(text.contains("Close [Esc]"), "{text}");
 
-        // Neither the composer below nor typed keys react while it is open.
-        let (x, y) = (placeholder.x, placeholder.y);
-        app.handle_mouse_event(left, x, y, KeyModifiers::NONE)
+        // Clicking inside the viewer's rendered text block keeps it open and
+        // does not leak input to controls beneath.
+        let content = app
+            .screenshot
+            .content_rect
+            .expect("fallback text records a content rectangle");
+        app.handle_mouse_event(left, content.x, content.y, KeyModifiers::NONE)
             .unwrap();
         assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
         assert!(app.screenshot.visible);
         assert_eq!(app.agent().input.text(), draft);
         assert_eq!(app.active_tab, MainTab::Ai);
 
+        // Clicking blank space inside the overlay (below the fallback text, over
+        // the hidden composer) closes the viewer without activating the composer.
+        let (x, y) = (placeholder.x, placeholder.y);
+        assert!(!content.contains(ratatui::layout::Position::new(x, y)));
+        app.handle_mouse_event(left, x, y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            !app.screenshot.visible,
+            "clicking blank area inside the viewer closes it"
+        );
+        assert_eq!(app.agent().input.text(), draft);
+        assert_eq!(app.active_tab, MainTab::Ai);
+
+        // Reopen with a rendered pixel image: clicking pixels keeps it open,
+        // clicking blank letterbox space inside the box closes it, and clicking
+        // the outer gutter closes it too.
+        app.handle_action(Action::OpenImageViewer(path.clone()))
+            .unwrap();
+        app.screenshot.rendered = Some(crate::image_view::test_rendered(
+            image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 40, 40, 255])),
+            ratatui::layout::Size::new(20, 10),
+            (10, 20),
+        ));
+        draw(&mut app);
+        let img_rect = app
+            .screenshot
+            .content_rect
+            .expect("rendered image records exact placement rectangle");
+        assert!(img_rect.width > 0 && img_rect.height > 0);
+        // Click inside the rendered image pixels -> stays open.
+        app.handle_mouse_event(left, img_rect.x, img_rect.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            app.screenshot.visible,
+            "clicking the rendered image itself keeps the viewer open"
+        );
+        // Click blank margin inside the popup beside the image -> closes.
+        let blank_in_popup = (4u16, img_rect.y);
+        assert!(!img_rect.contains(ratatui::layout::Position::new(
+            blank_in_popup.0,
+            blank_in_popup.1
+        )));
+        app.handle_mouse_event(left, blank_in_popup.0, blank_in_popup.1, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            !app.screenshot.visible,
+            "clicking blank space beside the rendered image closes the viewer"
+        );
+
+        // Reopen and verify the Close button still works.
+        app.handle_action(Action::OpenImageViewer(path.clone()))
+            .unwrap();
+        draw(&mut app);
+        let close = action_rect(&app, &|action| *action == Action::ImageViewerClose)
+            .expect("the close button is registered");
         app.handle_mouse_event(left, close.x, close.y, KeyModifiers::NONE)
             .unwrap();
         assert!(
@@ -30297,6 +30640,9 @@ mod tests {
             ai_sidebar_rect: None,
             ai_sidebar_working_rect: None,
             ai_sidebar_settled_rect: None,
+            ai_sidebar_hover: Default::default(),
+            ai_sidebar_hover_suppressed: false,
+            ai_sidebar_hit_cache: Default::default(),
             ai_sidebar_follow_selection: true,
             ai_sidebar_working_expanded: true,
             ai_sidebar_settled_expanded: false,
@@ -30560,6 +30906,9 @@ Feature: B
             ai_sidebar_rect: None,
             ai_sidebar_working_rect: None,
             ai_sidebar_settled_rect: None,
+            ai_sidebar_hover: Default::default(),
+            ai_sidebar_hover_suppressed: false,
+            ai_sidebar_hit_cache: Default::default(),
             ai_sidebar_follow_selection: true,
             ai_sidebar_working_expanded: true,
             ai_sidebar_settled_expanded: false,
@@ -32925,20 +33274,23 @@ Feature: B
     }
 
     #[test]
-    fn acp_pool_mode_isolates_codebuddy_and_shares_antigravity() {
-        assert_eq!(
-            super::acp_pool_mode_for_provider(Some("antigravity-acp")),
-            Some(teshi_acp::AcpPoolMode::Shared)
-        );
+    fn acp_pool_mode_blacklists_codebuddy_and_shares_other_providers() {
         assert_eq!(
             super::acp_pool_mode_for_provider(Some("codebuddy-code")),
             Some(teshi_acp::AcpPoolMode::exclusive_warm())
         );
         assert_eq!(
-            super::acp_pool_mode_for_provider(Some("codex-acp")),
-            Some(teshi_acp::AcpPoolMode::exclusive_warm())
+            super::acp_pool_mode_for_provider(Some("antigravity-acp")),
+            Some(teshi_acp::AcpPoolMode::Shared)
         );
-        assert_eq!(super::acp_pool_mode_for_provider(Some("fixture")), None);
+        assert_eq!(
+            super::acp_pool_mode_for_provider(Some("codex-acp")),
+            Some(teshi_acp::AcpPoolMode::Shared)
+        );
+        assert_eq!(
+            super::acp_pool_mode_for_provider(Some("fixture")),
+            Some(teshi_acp::AcpPoolMode::Shared)
+        );
         assert_eq!(super::acp_pool_mode_for_provider(None), None);
     }
 
@@ -33170,5 +33522,365 @@ Feature: B
             app.session_list.iter().all(|s| s.id != "remote-acp:s2"),
             "succeeded remote delete must stay removed"
         );
+    }
+
+    #[test]
+    fn modal_buttons_respond_to_mouse_clicks_over_underlying_controls() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.active_tab = MainTab::Ai;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        let left = MouseEventKind::Down(MouseButton::Left);
+
+        // 1. Quit confirmation buttons remain clickable even when positioned over
+        //    non-modal ActionButtons or ChatInput.
+        app.quit_pending_confirm = true;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let no_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::QuitConfirmNo { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("QuitConfirmNo registered");
+        // Insert an overlapping underlying non-modal button to simulate covered controls.
+        app.clickable_regions.insert(
+            0,
+            ClickableRegion::ActionButton {
+                rect: no_rect,
+                action: Action::AgentNew,
+                modal: false,
+            },
+        );
+        app.handle_mouse_event(left, no_rect.x + 1, no_rect.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            !app.quit_pending_confirm,
+            "clicking QuitConfirmNo must dismiss the quit modal"
+        );
+
+        // 2. AI interrupt confirmation modal buttons respond to mouse clicks.
+        app.ai_interrupt_confirm = true;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let keep_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::AiInterruptContinue { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("AiInterruptContinue registered");
+        app.handle_mouse_event(left, keep_rect.x + 1, keep_rect.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            !app.ai_interrupt_confirm,
+            "clicking AiInterruptContinue must dismiss the interrupt modal"
+        );
+
+        // 3. Approval mode picker options respond even when overlapping underlying controls.
+        app.approval_panel_active = true;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let (opt_x, opt_y) = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ApprovalOption {
+                    option_idx: 1,
+                    row_y,
+                    col_x,
+                    ..
+                } => Some((*col_x + 1, *row_y)),
+                _ => None,
+            })
+            .expect("ApprovalOption 1 registered");
+        app.clickable_regions.insert(
+            0,
+            ClickableRegion::ChatInput {
+                rect: ratatui::layout::Rect::new(opt_x, opt_y, 20, 1),
+            },
+        );
+        app.handle_mouse_event(left, opt_x, opt_y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            !app.approval_panel_active,
+            "clicking ApprovalOption must apply and close the approval modal"
+        );
+
+        // 4. History search modal footer buttons respond to mouse clicks.
+        app.open_history_search();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let dismiss_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: Action::AiHistorySearchDismiss,
+                    modal: true,
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("history search cancel button registered");
+        app.handle_mouse_event(left, dismiss_rect.x, dismiss_rect.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            app.history_search.is_none(),
+            "clicking Esc cancel in history search must close it"
+        );
+
+        // 5. Composer editor modal footer buttons respond to mouse clicks.
+        app.open_composer_editor();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let discard_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|r| match r {
+                ClickableRegion::ActionButton {
+                    rect,
+                    action: Action::AiComposerEditorDismiss,
+                    modal: true,
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("composer editor discard button registered");
+        app.handle_mouse_event(left, discard_rect.x, discard_rect.y, KeyModifiers::NONE)
+            .unwrap();
+        assert!(
+            app.composer_editor.is_none(),
+            "clicking Esc discard in composer editor must close it"
+        );
+    }
+
+    #[test]
+    fn remote_acp_restore_persists_empty_session_acp_id_across_restart() {
+        use teshi_agent::backend::AgentBackendKind;
+
+        crate::session::with_temp_session_dir(|_| {
+            let (mut app, project, _store) = slash_test_app();
+            app.persist_sidebar_state = true;
+            stop_fixture_agents(&mut app);
+
+            let mut remote = crate::session::Session::from_messages(Vec::new(), None);
+            remote.id = "remote-acp:remote-sid-99".into();
+            remote.backend_kind = Some(AgentBackendKind::Acp);
+            remote.acp_agent_id = Some("fake-acp".into());
+            remote.acp_session_id = Some("remote-sid-99".into());
+            remote.project_root = Some(project.path().to_path_buf());
+            remote.agent_title = Some("Remote thread".into());
+
+            assert!(app.restore_session(remote, false));
+            let saved = app.project_sessions();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].acp_session_id.as_deref(), Some("remote-sid-99"));
+            assert!(saved[0].messages.is_empty());
+
+            let (mut reopened, _reopened_project, _reopened_store) = slash_test_app();
+            reopened.project.root_dir = project.path().to_path_buf();
+            reopened.persist_sidebar_state = true;
+            reopened.restore_sidebar_workspace();
+            assert_eq!(
+                reopened.agent().current_acp_session_id().as_deref(),
+                Some("remote-sid-99")
+            );
+            assert_eq!(
+                reopened.agent().selected_acp_id.as_deref(),
+                Some("fake-acp")
+            );
+            assert_eq!(
+                reopened.agent().agent_title.as_deref(),
+                Some("Remote thread")
+            );
+        });
+    }
+
+    #[test]
+    fn connected_empty_acp_tab_persists_session_id_in_workspace_across_restart() {
+        use teshi_agent::backend::AgentBackendKind;
+
+        crate::session::with_temp_session_dir(|_| {
+            let (mut app, project, _store) = slash_test_app();
+            app.persist_sidebar_state = true;
+            configure_acp_fixture(&mut app, "pooled_reuse");
+            app.agent_mut().selected_acp_id = Some("fake-alpha".into());
+            app.agent_mut().backend_selected = true;
+            app.agent_mut().backend.connect_acp().unwrap();
+
+            wait_mcp_fixture(&mut app, |app| {
+                app.agent()
+                    .backend
+                    .acp_controls()
+                    .is_some_and(|controls| controls.ready && controls.session_id.is_some())
+            });
+            let sid = app
+                .agent()
+                .backend
+                .acp_controls()
+                .unwrap()
+                .session_id
+                .unwrap();
+
+            app.save_sessions(false).unwrap();
+            assert!(
+                app.project_sessions().is_empty(),
+                "uncommitted 0-message ACP tab must not create a Session file before first prompt"
+            );
+            let workspace =
+                crate::session::SidebarWorkspaceState::load_for_project(project.path()).unwrap();
+            assert_eq!(workspace.pending_acp_tabs.len(), 1);
+            assert_eq!(workspace.pending_acp_tabs[0].acp_session_id, sid);
+            assert_eq!(
+                workspace.pending_acp_tabs[0].acp_agent_id.as_deref(),
+                Some("fake-alpha")
+            );
+
+            let (mut reopened, _reopened_project, _reopened_store) = slash_test_app();
+            reopened.project.root_dir = project.path().to_path_buf();
+            reopened.persist_sidebar_state = true;
+            reopened.restore_sidebar_workspace();
+            assert_eq!(reopened.agent().backend_kind(), AgentBackendKind::Acp);
+            assert_eq!(
+                reopened.agent().selected_acp_id.as_deref(),
+                Some("fake-alpha")
+            );
+            assert_eq!(
+                reopened.agent().current_acp_session_id().as_deref(),
+                Some(sid.as_str())
+            );
+
+            // Once the first message is checkpointed, it moves from pending_acp_tabs to sessions/*.json.
+            reopened.agent_mut().messages_mut().push(AiChatMessage {
+                role: AiRole::User,
+                content: "first prompt".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+                activity: None,
+            });
+            reopened.save_sessions(true).unwrap();
+            let saved = app.project_sessions();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].acp_session_id.as_deref(), Some(sid.as_str()));
+            let updated_workspace =
+                crate::session::SidebarWorkspaceState::load_for_project(project.path()).unwrap();
+            assert!(updated_workspace.pending_acp_tabs.is_empty());
+
+            app.request_agent_shutdown();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.agent_shutdown_pending() {
+                assert!(Instant::now() < deadline);
+                app.poll_agent_shutdown();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
+
+    #[test]
+    fn shared_acp_pool_reuses_connection_after_new_and_resume() {
+        crate::session::with_temp_session_dir(|_| {
+            let (mut app, _project, store) = slash_test_app();
+            let trace = store.path().join("trace.jsonl");
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../teshi-tui-runner/tests/fixtures/lazy_start_acp.py")
+                .canonicalize()
+                .unwrap();
+            let profile = teshi_acp::profile::AcpAgentProfile {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+                args: vec![
+                    script.to_string_lossy().into_owned(),
+                    trace.to_string_lossy().into_owned(),
+                    "ok".into(),
+                ],
+                env: std::collections::HashMap::new(),
+                env_from: std::collections::HashMap::new(),
+            };
+            teshi_acp::profile::upsert(store.path(), profile).unwrap();
+            crate::agent_selection::save(
+                store.path(),
+                &crate::agent_selection::Selection::Acp {
+                    agent_id: "fixture".into(),
+                },
+            )
+            .unwrap();
+            app.agents[0] =
+                AgentThread::new_with_selection(0, "Agent 1", Some(store.path().to_path_buf()));
+
+            app.active_tab = MainTab::Ai;
+            app.focus_ai_input();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agent()
+                    .backend
+                    .acp_controls()
+                    .is_some_and(|c| c.ready && c.session_id.is_some())
+            });
+            assert_eq!(app.acp_pool.active_connection_count(), 1);
+
+            app.agent_mut().input.set_text("hello".into());
+            app.handle_action(Action::AiSendMessage).unwrap();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agent().status == AiStatus::Idle
+                    && app
+                        .agent()
+                        .messages()
+                        .iter()
+                        .any(|m| m.content.contains("LAZY_REPLY_1"))
+            });
+
+            app.execute_slash_command("new").unwrap();
+            app.focus_ai_input();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agent()
+                    .backend
+                    .acp_controls()
+                    .is_some_and(|c| c.ready && c.session_id.is_some())
+            });
+
+            app.execute_slash_command("resume").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.pending_session_restore.is_some() {
+                assert!(Instant::now() < deadline);
+                app.poll_llm_events();
+                app.poll_project_switch();
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            app.focus_ai_input();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agent()
+                    .backend
+                    .acp_controls()
+                    .is_some_and(|c| c.ready && c.session_id.is_some())
+            });
+            let trace_str = fs::read_to_string(&trace).unwrap_or_default();
+            let spawn_count = trace_str
+                .lines()
+                .filter(|l| l.contains(r#""method": "spawn""#))
+                .count();
+            assert_eq!(
+                spawn_count, 1,
+                "must reuse shared process across /new and /resume"
+            );
+
+            app.request_agent_shutdown();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.agent_shutdown_pending() {
+                assert!(Instant::now() < deadline);
+                app.poll_agent_shutdown();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
     }
 }

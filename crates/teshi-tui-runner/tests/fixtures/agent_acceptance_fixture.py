@@ -43,14 +43,13 @@ def send(value):
 if sys.argv[1] == "acp":
     name = sys.argv[3]
     controlled = len(sys.argv) > 4 and sys.argv[4] == "controlled"
-    session = str(uuid.uuid4())
-    model = "a"
+    sessions = {}
 
     def behavior():
         path = root / (name + "-behavior.json")
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
-    def settings():
+    def settings(model):
         options = [{"value": "a", "name": "Alpha"}]
         if not behavior().get("removed"):
             options.append({"value": "b", "name": "Beta"})
@@ -62,28 +61,36 @@ if sys.argv[1] == "acp":
         if method == "initialize":
             result = {"protocolVersion": 1, "agentInfo": {"name": name}}
         elif method == "session/new":
-            trace({"kind": "session", "session": session, "agent": name,
+            sid = str(uuid.uuid4())
+            sessions[sid] = "a"
+            trace({"kind": "session", "session": sid, "agent": name,
                    "synthetic_credential_received": os.environ.get("TESHI_ACCEPTANCE_CREDENTIAL") == "P7-SYNTHETIC-CREDENTIAL"})
-            result = {"sessionId": session}
+            result = {"sessionId": sid}
             if (root / "model-settings").exists():
-                result["configOptions"] = settings()
+                result["configOptions"] = settings(sessions[sid])
         elif method == "session/set_config_option":
-            value = message["params"]["value"]
+            params = message["params"]
+            sid = params.get("sessionId")
+            value = params["value"]
             rules = behavior()
-            trace({"kind": "configure", "session": session, "agent": name, "value": value})
+            trace({"kind": "configure", "session": sid, "agent": name, "value": value})
             if rules.get("timeout"):
                 continue
             if rules.get("reject") == value:
                 send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "setting rejected"}})
                 continue
-            model = value
-            result = {"configOptions": settings()}
+            if sid is not None:
+                sessions[sid] = value
+            result = {"configOptions": settings(sessions.get(sid, value))}
         elif method == "session/prompt":
+            params = message["params"]
+            sid = params.get("sessionId")
+            model = sessions.get(sid, "a")
             turn = str(uuid.uuid4())
-            trace({"kind": "prompt", "turn": turn, "session": session, "agent": name, "model": model, "params": message["params"]})
+            trace({"kind": "prompt", "turn": turn, "session": sid, "agent": name, "model": model, "params": params})
 
             def update(value):
-                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": value}})
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": value}})
 
             if not controlled:
                 update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": behavior().get("reply", name + " response")}})

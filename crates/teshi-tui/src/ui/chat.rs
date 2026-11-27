@@ -837,7 +837,7 @@ pub(super) fn render_chat_panel(
 
 /// Renders the single airy strip directly above the composer border:
 /// context capsules (or status when no capsules are active) on the left,
-/// and quiet runtime/context metrics right-aligned.
+/// and quiet context/throughput metrics right-aligned.
 fn render_composer_meta_strip(
     frame: &mut Frame<'_>,
     app: &mut App,
@@ -1134,11 +1134,6 @@ fn needs_chat_status(app: &App) -> bool {
 /// Pick complete metric fields rather than clipping context counts or a warning marker.
 fn chat_metrics(app: &App, width: usize) -> String {
     let agent = app.agent();
-    let seconds = agent
-        .task_started
-        .map_or(agent.task_elapsed, |start| start.elapsed())
-        .as_secs();
-    let runtime = format!("{}m{:02}s", seconds / 60, seconds % 60);
     let limit = app.active_context_window();
     let (context, compact) = match agent.last_input_tokens {
         Some(tokens) => {
@@ -1168,21 +1163,13 @@ fn chat_metrics(app: &App, width: usize) -> String {
     let usage = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);
     let mut candidates = Vec::new();
     if agent.total_input_tokens > 0 || agent.total_output_tokens > 0 {
-        candidates.push(format!("{prefix}{runtime} · {context} · {usage}"));
+        candidates.push(format!("{prefix}{context} · {usage}"));
     }
-    candidates.extend([
-        format!("{prefix}{runtime} · {context}"),
-        format!("{prefix}{runtime} · {compact}"),
-    ]);
-    if let Some(speed) = speed {
-        candidates.push(format!("{speed} · {compact}"));
+    candidates.extend([format!("{prefix}{context}"), format!("{prefix}{compact}")]);
+    if !prefix.is_empty() {
+        candidates.push(context);
     }
-    candidates.extend([
-        format!("{runtime} · {context}"),
-        format!("{runtime} · {compact}"),
-        compact,
-        runtime,
-    ]);
+    candidates.push(compact);
     candidates
         .into_iter()
         .find(|text| text.width() <= width)
@@ -3995,7 +3982,10 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect();
-            assert!(screen.contains("2m05s"), "{screen}");
+            assert!(
+                !screen.contains("2m05s"),
+                "metrics strip must omit duplicate elapsed runtime: {screen}"
+            );
             assert!(screen.contains("ctx unknown"), "{screen}");
             assert!(!screen.contains("Enter send"), "{screen}");
         }
@@ -4138,8 +4128,8 @@ mod tests {
         let working_top = row_text(working.y, working);
         assert!(working_top.contains("3s"));
         assert!(
-            (working.x..working.right()).any(|x| buffer[(x, working.y)].fg == theme::INFO),
-            "working spinner and elapsed seconds use cyan accent: {working_top}"
+            (working.x..working.right()).any(|x| buffer[(x, working.y)].fg == theme::WARNING),
+            "working spinner and elapsed seconds use yellow accent: {working_top}"
         );
 
         let sidebar_text: String = (0..30)
@@ -4710,10 +4700,23 @@ mod tests {
                 "context warning survives compact layouts: {label}"
             );
             assert!(
+                !label.contains("0m"),
+                "metrics strip omits duplicate elapsed runtime: {label}"
+            );
+            assert!(
                 !label.contains('…'),
                 "metric fields never get clipped mid-number"
             );
         }
+        // Unknown context stays concise and never falls back to an elapsed timer.
+        app.agents[0].last_input_tokens = None;
+        app.agents[0].status = AiStatus::Idle;
+        app.agents[0].task_elapsed = std::time::Duration::from_secs(65);
+        assert_eq!(chat_metrics(&app, 40), "ctx unknown");
+        assert_eq!(chat_metrics(&app, 8), "ctx ?");
+        assert_eq!(chat_metrics(&app, 4), "");
+        app.agents[0].last_input_tokens = Some(app.active_context_window());
+        app.agents[0].status = AiStatus::Waiting;
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal
             .draw(|frame| {
@@ -5773,6 +5776,155 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("✓") && r.contains("Read feature files")),
             "plan_removed must clear rendered plan card: {rows_after:?}"
+        );
+    }
+
+    #[test]
+    fn ai_sidebar_hover_inline_settle_button_tracks_next_card_after_settle() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.agents[0].title = "Session A".into();
+        app.handle_action(crate::keymap::Action::AgentNew).unwrap();
+        app.agents[1].title = "Session B".into();
+        app.handle_action(crate::keymap::Action::AgentNew).unwrap();
+        app.agents[2].title = "Session C".into();
+        app.selected_agent = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let draw_frame = |terminal: &mut Terminal<TestBackend>, app: &mut App| {
+            terminal
+                .draw(|frame| crate::ui::render(frame, app))
+                .unwrap();
+        };
+
+        draw_frame(&mut terminal, &mut app);
+        let id_b = app.agents[1].id;
+        let id_c = app.agents[2].id;
+        // Active list orders newest-first: C (top), B (middle), A (bottom).
+        let hit_c = app
+            .ai_sidebar_hit_cache
+            .items
+            .iter()
+            .find(|item| item.settle_agent_id == Some(id_c))
+            .cloned()
+            .expect("active session C has a hit area");
+        let btn_c = hit_c
+            .archive_btn_rect
+            .expect("wide sidebar allocates inline settle button");
+        assert_eq!(hit_c.row_rect.height, 2);
+
+        // Default state without pointer motion: no inline settle button drawn.
+        let default_row: String = (hit_c.row_rect.x..hit_c.row_rect.right())
+            .map(|x| terminal.backend().buffer()[(x, hit_c.row_rect.y)].symbol())
+            .collect();
+        assert!(!default_row.contains('✓'), "{default_row}");
+
+        // 1. Row hover (outside button): reveals secondary-styled inline settle pill.
+        app.handle_mouse_event(
+            MouseEventKind::Moved,
+            hit_c.row_rect.x + 1,
+            hit_c.row_rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.ai_sidebar_hover.hovered_card_key.as_deref(),
+            Some(hit_c.card_key.as_str())
+        );
+        assert!(!app.ai_sidebar_hover.hovering_archive_btn);
+        draw_frame(&mut terminal, &mut app);
+        let row_hovered: String = (hit_c.row_rect.x..hit_c.row_rect.right())
+            .map(|x| terminal.backend().buffer()[(x, hit_c.row_rect.y)].symbol())
+            .collect();
+        assert!(row_hovered.contains('✓'), "{row_hovered}");
+        assert_eq!(
+            terminal.backend().buffer()[(btn_c.x + 1, btn_c.y)].bg,
+            theme::ACTION_CHIP_PRIMARY_BG
+        );
+
+        // 2. Button hover: highlights pill in primary purple with white text.
+        app.handle_mouse_event(
+            MouseEventKind::Moved,
+            btn_c.x + 1,
+            btn_c.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.ai_sidebar_hover.hovering_archive_btn);
+        draw_frame(&mut terminal, &mut app);
+        assert_eq!(
+            terminal.backend().buffer()[(btn_c.x + 1, btn_c.y)].bg,
+            theme::PRIMARY
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(btn_c.x + 1, btn_c.y)].fg,
+            theme::FG
+        );
+
+        // 3. Clicking the inline button settles C without switching away from A.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            btn_c.x + 1,
+            btn_c.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.agents[2].settled, "session C is settled");
+        assert_eq!(
+            app.selected_agent, 0,
+            "settling inactive session C must keep session A active"
+        );
+
+        // 4. On the very next redraw, session B slides up under the stationary
+        //    cursor and immediately gets the highlighted hover settle button
+        //    without requiring extra mouse movement.
+        draw_frame(&mut terminal, &mut app);
+        let expected_b_key = format!("agent:{id_b}");
+        assert_eq!(
+            app.ai_sidebar_hover.hovered_card_key.as_deref(),
+            Some(expected_b_key.as_str()),
+            "card sliding under the stationary cursor immediately inherits hover"
+        );
+        assert!(app.ai_sidebar_hover.hovering_archive_btn);
+        assert_eq!(
+            terminal.backend().buffer()[(btn_c.x + 1, btn_c.y)].bg,
+            theme::PRIMARY
+        );
+        // Clicking again at the same spot settles session B seamlessly.
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            btn_c.x + 1,
+            btn_c.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.agents[1].settled, "session B is settled on next click");
+        assert_eq!(app.selected_agent, 0);
+
+        // 5. Keyboard navigation suppresses residual hover until pointer moves again.
+        let hit_a = app
+            .ai_sidebar_hit_cache
+            .items
+            .iter()
+            .find(|item| item.settle_agent_id == Some(app.agents[0].id))
+            .cloned()
+            .expect("session A hit area");
+        app.handle_mouse_event(
+            MouseEventKind::Moved,
+            hit_a.row_rect.x + 1,
+            hit_a.row_rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.ai_sidebar_hover.hovered_card_key.is_some());
+        app.handle_action(crate::keymap::Action::AgentNext).unwrap();
+        draw_frame(&mut terminal, &mut app);
+        assert!(
+            app.ai_sidebar_hover.hovered_card_key.is_none(),
+            "keyboard navigation suppresses hover even on redraw until pointer moves"
         );
     }
 }

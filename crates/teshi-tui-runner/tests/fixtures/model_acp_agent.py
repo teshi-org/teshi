@@ -7,8 +7,7 @@ import uuid
 
 root = Path(sys.argv[2])
 name = sys.argv[3]
-session = str(uuid.uuid4())
-model = "a"
+sessions = {}
 
 
 def trace(value):
@@ -25,7 +24,7 @@ def behavior():
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def settings():
+def settings(model):
     choices = [{"value": "a", "name": "Alpha"}]
     if not behavior().get("removed"):
         choices.append({"value": "b", "name": "Beta"})
@@ -40,22 +39,30 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"protocolVersion": 1, "agentInfo": {"name": name}}
     elif method == "session/new":
-        trace({"kind": "session", "session": session, "agent": name})
-        result = {"sessionId": session, "configOptions": settings()}
+        sid = str(uuid.uuid4())
+        sessions[sid] = "a"
+        trace({"kind": "session", "session": sid, "agent": name})
+        result = {"sessionId": sid, "configOptions": settings(sessions[sid])}
     elif method == "session/set_config_option":
-        value = message["params"]["value"]
+        params = message["params"]
+        sid = params.get("sessionId")
+        value = params["value"]
         rules = behavior()
-        trace({"kind": "configure", "session": session, "agent": name, "value": value})
+        trace({"kind": "configure", "session": sid, "agent": name, "value": value})
         if rules.get("timeout"):
             continue
         if rules.get("reject") == value:
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "setting rejected"}})
             continue
-        model = value
-        result = {"configOptions": settings()}
+        if sid is not None:
+            sessions[sid] = value
+        result = {"configOptions": settings(sessions.get(sid, value))}
     elif method == "session/prompt":
-        trace({"kind": "prompt", "session": session, "agent": name, "model": model, "params": message["params"]})
-        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": {
+        params = message["params"]
+        sid = params.get("sessionId")
+        model = sessions.get(sid, "a")
+        trace({"kind": "prompt", "session": sid, "agent": name, "model": model, "params": params})
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": {
             "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": name + " response"}}}})
         result = {"stopReason": "end_turn"}
     elif method == "session/cancel":
