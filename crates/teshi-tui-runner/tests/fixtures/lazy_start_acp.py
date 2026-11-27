@@ -9,8 +9,9 @@ import time
 
 trace = Path(sys.argv[1])
 mode = sys.argv[2]
-model = "a"
-turn = 0
+session_seq = 0
+session_models = {}
+session_turns = {}
 
 
 def record(method):
@@ -22,7 +23,7 @@ def send(message):
     print(json.dumps(message), flush=True)
 
 
-def options():
+def options(model):
     return [{"id": "model", "name": "Model", "category": "model",
              "type": "select", "currentValue": model,
              "options": [{"value": "a", "name": "Alpha"},
@@ -43,14 +44,24 @@ for line in sys.stdin:
         result = {"protocolVersion": 1, "agentInfo": {"name": "lazy-start"}}
     elif method == "session/new":
         time.sleep(1)
-        result = {"sessionId": f"lazy-{os.getpid()}", "configOptions": options()}
+        session_seq += 1
+        sid = f"lazy-{os.getpid()}-{session_seq}"
+        session_models[sid] = "a"
+        session_turns[sid] = 0
+        result = {"sessionId": sid, "configOptions": options(session_models[sid])}
     elif method == "session/set_config_option":
-        model = message["params"]["value"]
-        result = {"configOptions": options()}
+        params = message["params"]
+        sid = params.get("sessionId")
+        value = params["value"]
+        if sid is not None:
+            session_models[sid] = value
+        result = {"configOptions": options(session_models.get(sid, value))}
     elif method == "session/prompt":
-        turn += 1
+        sid = message.get("params", {}).get("sessionId", f"lazy-{os.getpid()}")
+        turn = session_turns.get(sid, 0) + 1
+        session_turns[sid] = turn
         send({"jsonrpc": "2.0", "method": "session/update", "params": {
-            "sessionId": f"lazy-{os.getpid()}", "update": {
+            "sessionId": sid, "update": {
                 "sessionUpdate": "agent_message_chunk", "content": {
                     "type": "text", "text": f"LAZY_REPLY_{turn}"}}}})
         result = {"stopReason": "end_turn"}

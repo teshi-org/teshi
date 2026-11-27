@@ -70,8 +70,10 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         })
         .unwrap();
         // With metrics moved above the composer, even a 40-column toolbar has 37
-        // cells (>= 32), so the connected Settings chip stays visible.
-        let settings = "Settings";
+        // cells (>= 32), so the connected Settings chip stays visible. Use the
+        // dropdown glyph so it matches the connected ACP chip rather than the
+        // always-present footer `Settings [F10]` label while still Loading.
+        let settings = "Settings ▾";
         terminal.expect_text("sample", true, 10000).unwrap();
         terminal.key("3").unwrap();
         terminal.expect_text("Not connected", true, 5000).unwrap();
@@ -140,18 +142,21 @@ fn restored_agent_stays_disconnected_until_explicit_startup() {
         terminal.key("Tab").unwrap();
         terminal.expect_text("LAZY_REPLY_1", false, 10000).unwrap();
         terminal.expect_text(settings, true, 10000).unwrap();
+        wait_for_method(&trace, "spawn", 1, 5000);
+        wait_for_method(&trace, "session/new", 2, 5000);
         terminal.write("/resume").unwrap();
         terminal.key("Enter").unwrap();
         terminal.expect_text("LAZY_REPLY_1", true, 10000).unwrap();
         terminal.expect_text("Not connected", true, 5000).unwrap();
         std::thread::sleep(Duration::from_millis(400));
-        // History restore stays passive; the spawn may land just after the
-        // restored transcript and "Not connected" chip are painted.
-        wait_for_method(&trace, "spawn", 2, 5000);
+        // History restore stays passive; the shared pooled process remains at
+        // spawn count 1 and session/new count 2 until Enter reconnects it.
+        wait_for_method(&trace, "spawn", 1, 5000);
+        wait_for_method(&trace, "session/new", 2, 5000);
         fs::write(output.join("restored.txt"), terminal.screen().unwrap()).unwrap();
         terminal.key("Enter").unwrap();
         terminal.expect_text(settings, true, 10000).unwrap();
-        wait_for_method(&trace, "spawn", 3, 5000);
+        wait_for_method(&trace, "spawn", 1, 5000);
         wait_for_method(&trace, "session/new", 3, 5000);
         wait_for_method(&trace, "session/prompt", 1, 1000);
         fs::copy(&trace, output.join("acp-trace.jsonl")).unwrap();
@@ -182,8 +187,9 @@ fn wait_for_method(path: &Path, method: &str, expected: usize, timeout_ms: u64) 
         }
         assert!(
             Instant::now() < deadline,
-            "timed out after {timeout_ms}ms waiting for {method} count {expected} (last {count}) in {}",
-            path.display()
+            "timed out after {timeout_ms}ms waiting for {method} count {expected} (last {count}) in {}:\n{}",
+            path.display(),
+            fs::read_to_string(path).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(20));
     }

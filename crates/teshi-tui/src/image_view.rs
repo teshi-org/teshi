@@ -369,6 +369,9 @@ pub struct ScreenshotPanel {
     pub loading: bool,
     /// Magnification and source-pixel center of the selected capture.
     pub view: ViewState,
+    /// Terminal cell rectangle occupied by the rendered image (or fallback text)
+    /// on the latest frame. Clicks outside this rectangle dismiss the viewer.
+    pub content_rect: Option<Rect>,
     worker: Option<Worker>,
     source: Option<(PathBuf, ScreenshotRef)>,
     requested: Option<(Viewport, ViewState)>,
@@ -402,6 +405,7 @@ impl ScreenshotPanel {
     /// Closes the viewer promptly, leaving pixel cleanup to the next frame.
     pub fn close(&mut self) {
         self.visible = false;
+        self.content_rect = None;
         self.cancel();
         self.source = None;
     }
@@ -1033,11 +1037,12 @@ pub(crate) fn open_path_externally(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Draw a capture inside `area`, keeping its aspect ratio.
-pub fn render(frame: &mut Frame<'_>, area: Rect, rendered: &mut Rendered) {
+/// Draw a capture inside `area`, keeping its aspect ratio, and return the
+/// cell rectangle actually covered by the rendered image.
+pub fn render(frame: &mut Frame<'_>, area: Rect, rendered: &mut Rendered) -> Option<Rect> {
     let cells = rendered.prepared.cells;
     if cells.width > area.width || cells.height > area.height {
-        return;
+        return None;
     }
     let placement = Rect::new(
         area.x + (area.width - cells.width) / 2,
@@ -1054,6 +1059,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, rendered: &mut Rendered) {
             frame.render_widget(ratatui_image::Image::new(protocol), placement)
         }
     }
+    Some(placement)
+}
+
+#[cfg(test)]
+pub(crate) fn test_rendered(
+    image: image::RgbaImage,
+    viewport_cells: Size,
+    font_size: (u16, u16),
+) -> Rendered {
+    let mut picker = Picker::from_fontsize(font_size);
+    picker.set_protocol_type(ProtocolType::Sixel);
+    let prepared = pipeline::prepare_image(
+        &image::DynamicImage::ImageRgba8(image),
+        &picker,
+        ViewState::default(),
+        Viewport::new(viewport_cells, picker.font_size()),
+        &|| false,
+    )
+    .unwrap();
+    Rendered::new(prepared)
 }
 
 #[cfg(test)]
@@ -1281,7 +1306,9 @@ mod tests {
         let mut total = 0;
         for expected in [1, 2, 3, 3] {
             terminal
-                .draw(|frame| super::render(frame, Rect::new(0, 0, 8, 3), &mut rendered))
+                .draw(|frame| {
+                    super::render(frame, Rect::new(0, 0, 8, 3), &mut rendered);
+                })
                 .unwrap();
             let mut output = Vec::new();
             let written = rendered.write_pixels(&mut output).unwrap();

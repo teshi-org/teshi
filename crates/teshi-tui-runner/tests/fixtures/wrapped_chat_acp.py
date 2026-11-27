@@ -2,7 +2,8 @@ import json
 import sys
 
 
-turn = 0
+session_seq = 0
+session_turns = {}
 
 
 def send(message):
@@ -20,19 +21,24 @@ for line in sys.stdin:
             "result": {"protocolVersion": 1, "agentInfo": {"name": "wrapped-chat-fixture"}},
         })
     elif method == "session/new":
+        session_seq += 1
+        sid = f"wrapped-chat-session-{session_seq}"
+        session_turns[sid] = 0
         send({
             "jsonrpc": "2.0",
             "id": message["id"],
-            "result": {"sessionId": "wrapped-chat-session"},
+            "result": {"sessionId": sid},
         })
     elif method == "session/prompt":
-        turn += 1
+        sid = message.get("params", {}).get("sessionId", "wrapped-chat-session")
+        turn = session_turns.get(sid, 0) + 1
+        session_turns[sid] = turn
         marker = f"WRAPPED_REPLY_{turn:02d}"
         send({
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
-                "sessionId": "wrapped-chat-session",
+                "sessionId": sid,
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": marker[:9]},
@@ -43,7 +49,7 @@ for line in sys.stdin:
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
-                "sessionId": "wrapped-chat-session",
+                "sessionId": sid,
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": marker[9:]},

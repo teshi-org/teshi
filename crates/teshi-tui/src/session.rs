@@ -206,6 +206,24 @@ impl Session {
     }
 }
 
+/// Uncommitted ACP conversation tab (zero local messages) persisted inside
+/// [`SidebarWorkspaceState`] so its remote `acp_session_id` survives restart
+/// without creating an empty `Session` file in `sessions/*.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingAcpWorkspaceTab {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent_id: Option<String>,
+    pub acp_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    #[serde(default)]
+    pub settled: bool,
+}
+
 /// Per-project persisted AI sidebar workspace state (open cards, active card, drawer flags).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SidebarWorkspaceState {
@@ -213,6 +231,10 @@ pub struct SidebarWorkspaceState {
     pub open_session_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_acp_tabs: Vec<PendingAcpWorkspaceTab>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_pending_acp_index: Option<usize>,
     #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default)]
@@ -284,6 +306,15 @@ mod tests {
             let state_a = super::SidebarWorkspaceState {
                 open_session_ids: vec!["s1".into(), "s2".into()],
                 active_session_id: Some("s2".into()),
+                pending_acp_tabs: vec![super::PendingAcpWorkspaceTab {
+                    acp_agent_id: Some("antigravity-acp".into()),
+                    acp_session_id: "remote-1".into(),
+                    member_dir: None,
+                    agent_title: Some("Draft".into()),
+                    custom_title: None,
+                    settled: false,
+                }],
+                active_pending_acp_index: Some(0),
                 sidebar_collapsed: false,
                 settled_expanded: true,
                 explore_details_collapsed: true,
@@ -295,6 +326,15 @@ mod tests {
                 Some(state_a)
             );
             assert!(super::SidebarWorkspaceState::load_for_project(proj_b.path()).is_none());
+
+            let legacy: super::SidebarWorkspaceState = serde_json::from_value(serde_json::json!({
+                "open_session_ids": ["s1"],
+                "active_session_id": "s1",
+                "sidebar_collapsed": true
+            }))
+            .unwrap();
+            assert!(legacy.pending_acp_tabs.is_empty());
+            assert_eq!(legacy.active_pending_acp_index, None);
         });
     }
 

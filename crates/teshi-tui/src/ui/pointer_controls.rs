@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::app::{
-    AiStatus, App, ChangeKind, ClickableRegion, SidebarSearchHit, VerticalScrollTarget,
+    AiStatus, App, ChangeKind, ClickableRegion, SessionHitArea, SidebarSearchHit,
+    VerticalScrollTarget,
 };
 use crate::keymap::Action;
 use crate::theme;
@@ -65,12 +66,64 @@ impl CardTarget {
         }
     }
 
+    /// Stable identity across list reordering and search filtering.
+    fn stable_card_key(&self, app: &App) -> String {
+        match self {
+            Self::OpenAgent(idx) => app
+                .agents
+                .get(*idx)
+                .map_or_else(|| format!("agent-idx:{idx}"), |a| format!("agent:{}", a.id)),
+            Self::GlobalSession(session) => format!("session:{}", session.id),
+        }
+    }
+
+    /// Returns the agent's stable `id` when this card is an active (non-working,
+    /// non-settled) open conversation that supports inline hover settling.
+    fn settleable_agent_id(&self, app: &App, settled: bool) -> Option<usize> {
+        if settled {
+            return None;
+        }
+        match self {
+            Self::OpenAgent(idx) => app
+                .agents
+                .get(*idx)
+                .filter(|agent| !agent.settled && !agent.is_working())
+                .map(|agent| agent.id),
+            Self::GlobalSession(_) => None,
+        }
+    }
+
     fn click_action(&self) -> Action {
         match self {
             Self::OpenAgent(idx) => Action::AgentSelect(*idx),
             Self::GlobalSession(session) => Action::AiSidebarOpenGlobalSession(session.id.clone()),
         }
     }
+}
+
+/// Minimum title column budget preserved before showing an inline settle button.
+const MIN_INLINE_SETTLE_TITLE_COLS: usize = 6;
+
+/// Shared right-anchored geometry for the hover-revealed inline settle button on
+/// a session card's first row. Both rendering and hit-testing call this helper so
+/// CJK titles and narrow sidebars stay column-exact.
+fn inline_settle_button_layout(line1_rect: Rect) -> Option<(String, Rect)> {
+    let content_w = line1_rect.width.saturating_sub(2) as usize;
+    let std_label = format!(" ✓ {} ", crate::i18n::t("chat.settle").trim());
+    let std_w = std_label.width();
+    let compact_label = " ✓ ";
+    let compact_w = compact_label.width();
+
+    let (label, btn_w) = if content_w >= std_w + 1 + MIN_INLINE_SETTLE_TITLE_COLS {
+        (std_label, std_w)
+    } else if content_w >= compact_w + 1 + MIN_INLINE_SETTLE_TITLE_COLS {
+        (compact_label.to_string(), compact_w)
+    } else {
+        return None;
+    };
+    let btn_w_u16 = btn_w as u16;
+    let btn_x = line1_rect.right().saturating_sub(1 + btn_w_u16);
+    Some((label, Rect::new(btn_x, line1_rect.y, btn_w_u16, 1)))
 }
 
 impl SidebarRow {
@@ -238,16 +291,19 @@ fn shelf_header_line(
     ])
 }
 
-fn sidebar_card_bg(app: &App, selected: bool) -> Style {
-    if !selected {
-        return Style::default();
+fn sidebar_card_bg(app: &App, selected: bool, hovered: bool) -> Style {
+    if selected {
+        let bg = if app.ai_sidebar_focused {
+            theme::TAB_ACTIVE_BG
+        } else {
+            theme::BLOCK_BG
+        };
+        return Style::default().bg(bg);
     }
-    let bg = if app.ai_sidebar_focused {
-        theme::TAB_ACTIVE_BG
-    } else {
-        theme::BLOCK_BG
-    };
-    Style::default().bg(bg)
+    if hovered {
+        return Style::default().bg(theme::BLOCK_BG);
+    }
+    Style::default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,16 +355,36 @@ fn sidebar_card_top_line(
     target: &CardTarget,
     selected: bool,
     settled: bool,
-    width: u16,
+    line1_rect: Rect,
 ) -> Line<'static> {
-    let row_bg = sidebar_card_bg(app, selected);
+    let width = line1_rect.width;
+    let card_key = target.stable_card_key(app);
+    let settleable = target.settleable_agent_id(app, settled).is_some();
+    let row_hovered =
+        settleable && app.ai_sidebar_hover.hovered_card_key.as_deref() == Some(card_key.as_str());
+    let btn_hovered = row_hovered && app.ai_sidebar_hover.hovering_archive_btn;
+    let row_bg = sidebar_card_bg(app, selected, row_hovered);
     let sidebar_focused = app.ai_sidebar_focused;
     match target {
         CardTarget::OpenAgent(agent_idx) => {
             let Some(agent) = app.agents.get(*agent_idx) else {
                 return Line::raw("").style(row_bg);
             };
-            let (badge, badge_style) = if agent.is_working() {
+            let (badge, badge_style) = if row_hovered
+                && let Some((label, _)) = inline_settle_button_layout(line1_rect)
+            {
+                let style = if btn_hovered {
+                    Style::default()
+                        .fg(theme::FG)
+                        .bg(theme::PRIMARY)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(theme::PRIMARY)
+                        .bg(theme::ACTION_CHIP_PRIMARY_BG)
+                };
+                (label, style)
+            } else if agent.is_working() {
                 const WORKING_FRAMES: [&str; 10] =
                     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let spinner = WORKING_FRAMES[super::chat::frame_index(100, WORKING_FRAMES.len())];
@@ -330,7 +406,10 @@ fn sidebar_card_top_line(
                 } else {
                     format!("{spinner} {elapsed}")
                 };
-                (label, row_bg.fg(theme::INFO).add_modifier(Modifier::BOLD))
+                (
+                    label,
+                    row_bg.fg(theme::WARNING).add_modifier(Modifier::BOLD),
+                )
             } else if agent.unseen_completion {
                 (
                     crate::i18n::t("chat.sidebar.done").to_string(),
@@ -421,7 +500,10 @@ fn sidebar_card_bottom_line(
     settled: bool,
     width: u16,
 ) -> Line<'static> {
-    let row_bg = sidebar_card_bg(app, selected);
+    let card_key = target.stable_card_key(app);
+    let row_hovered = target.settleable_agent_id(app, settled).is_some()
+        && app.ai_sidebar_hover.hovered_card_key.as_deref() == Some(card_key.as_str());
+    let row_bg = sidebar_card_bg(app, selected, row_hovered);
     let content_w = width.saturating_sub(2) as usize;
     if content_w == 0 {
         return Line::raw("").style(row_bg);
@@ -614,26 +696,11 @@ fn render_card_list_region(
 
     let visible_end = (scroll + view_h).min(rows.len());
     let visible_rows = &rows[scroll..visible_end];
-    let mut lines = Vec::with_capacity(visible_rows.len());
-    for row in visible_rows {
-        let line = match row {
-            SidebarRow::Spacer => Line::raw(""),
-            SidebarRow::CardTop {
-                target,
-                selected,
-                settled,
-            } => sidebar_card_top_line(app, target, *selected, *settled, list_area.width),
-            SidebarRow::CardBottom {
-                target,
-                selected,
-                settled,
-            } => sidebar_card_bottom_line(app, target, *selected, *settled, list_area.width),
-            SidebarRow::EmptyNotice(msg) => Line::styled(format!(" {msg}"), theme::muted()),
-        };
-        lines.push(line);
-    }
-    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
 
+    // Build hit geometry before rendering lines so pointer hover immediately
+    // tracks whichever card now sits under the stationary cursor (e.g. right
+    // after settling the previous card or scrolling the list).
+    let cache_start = app.ai_sidebar_hit_cache.items.len();
     let mut idx = 0usize;
     while idx < visible_rows.len() {
         if let Some(target) = visible_rows[idx].card_target() {
@@ -646,13 +713,32 @@ fn render_card_list_region(
             {
                 height += 1;
             }
+            let row_rect = Rect::new(
+                list_area.x,
+                list_area.y + idx as u16,
+                list_area.width,
+                height,
+            );
+            let card_key = target.stable_card_key(app);
+            let (settle_agent_id, archive_btn_rect) = match &visible_rows[idx] {
+                SidebarRow::CardTop { settled, .. } => {
+                    let agent_id = target.settleable_agent_id(app, *settled);
+                    let btn_rect = agent_id.and_then(|_| {
+                        let line1 = Rect::new(row_rect.x, row_rect.y, row_rect.width, 1);
+                        inline_settle_button_layout(line1).map(|(_, rect)| rect)
+                    });
+                    (agent_id, btn_rect)
+                }
+                _ => (None, None),
+            };
+            app.ai_sidebar_hit_cache.items.push(SessionHitArea {
+                card_key,
+                settle_agent_id,
+                row_rect,
+                archive_btn_rect,
+            });
             app.clickable_regions.push(ClickableRegion::ActionButton {
-                rect: Rect::new(
-                    list_area.x,
-                    list_area.y + idx as u16,
-                    list_area.width,
-                    height,
-                ),
+                rect: row_rect,
                 action: target.click_action(),
                 modal: false,
             });
@@ -661,6 +747,47 @@ fn render_card_list_region(
             idx += 1;
         }
     }
+
+    if !app.ai_sidebar_hover_suppressed
+        && let Some((mx, my)) = app.mouse_position
+    {
+        let pos = ratatui::layout::Position::new(mx, my);
+        if let Some(hit) = app.ai_sidebar_hit_cache.items[cache_start..]
+            .iter()
+            .find(|item| item.row_rect.contains(pos))
+        {
+            app.ai_sidebar_hover = crate::app::SessionHoverState {
+                hovered_card_key: Some(hit.card_key.clone()),
+                hovering_archive_btn: hit.archive_btn_rect.is_some_and(|btn| btn.contains(pos)),
+            };
+        }
+    }
+
+    let mut lines = Vec::with_capacity(visible_rows.len());
+    for (row_idx, row) in visible_rows.iter().enumerate() {
+        let line1_rect = Rect::new(
+            list_area.x,
+            list_area.y + row_idx as u16,
+            list_area.width,
+            1,
+        );
+        let line = match row {
+            SidebarRow::Spacer => Line::raw(""),
+            SidebarRow::CardTop {
+                target,
+                selected,
+                settled,
+            } => sidebar_card_top_line(app, target, *selected, *settled, line1_rect),
+            SidebarRow::CardBottom {
+                target,
+                selected,
+                settled,
+            } => sidebar_card_bottom_line(app, target, *selected, *settled, list_area.width),
+            SidebarRow::EmptyNotice(msg) => Line::styled(format!(" {msg}"), theme::muted()),
+        };
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
 
     if let Some(bar_rect) = bar_area {
         super::render_vertical_scrollbar(frame, app, scroll_target, bar_rect, rows.len(), scroll);
@@ -693,6 +820,9 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     frame.render_widget(block, area);
     if inner.height == 0 {
         return;
+    }
+    if !app.ai_sidebar_hover_suppressed {
+        app.ai_sidebar_hover = crate::app::SessionHoverState::default();
     }
 
     let (main_area, action_area) = super::split_pane_action_row(inner);

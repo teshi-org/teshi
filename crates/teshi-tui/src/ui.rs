@@ -19,7 +19,7 @@ use crate::highlight::{
     step_keyword_gutter_pad, step_keyword_gutter_styled_span,
 };
 use crate::keymap::Action;
-use teshi_core::gherkin::{BddScenario, ScenarioKind};
+use teshi_core::gherkin::{BddFeature, BddScenario, ScenarioKind};
 use teshi_core::gherkin_lang::{
     GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType,
 };
@@ -378,6 +378,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.ai_sidebar_rect = None;
     app.ai_sidebar_working_rect = None;
     app.ai_sidebar_settled_rect = None;
+    app.ai_sidebar_hit_cache.items.clear();
 
     let [tabs_row, content_row, footer_row] = Layout::default()
         .direction(Direction::Vertical)
@@ -943,6 +944,19 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
     let Some((x, y)) = app.mouse_position else {
         return;
     };
+    let pointer = ratatui::layout::Position::new(x, y);
+    // Active AI sidebar cards render their own row/inline-button hover styles;
+    // avoid overpainting their primary pill with a generic hover tint.
+    if app.active_tab == MainTab::Ai
+        && app.ai_sidebar_hover.hovered_card_key.is_some()
+        && app.ai_sidebar_hit_cache.items.iter().any(|item| {
+            item.archive_btn_rect.is_some()
+                && item.row_rect.contains(pointer)
+                && app.ai_sidebar_hover.hovered_card_key.as_deref() == Some(item.card_key.as_str())
+        })
+    {
+        return;
+    }
     // Only registered, currently visible targets get feedback. Modal rendering
     // already removes covered targets, so hover cannot imply a blocked action.
     for region in app.clickable_regions.iter().rev() {
@@ -2648,6 +2662,118 @@ fn render_git_diff_lines(
     }
 }
 
+fn feature_background_heading(feature: Option<&BddFeature>) -> String {
+    feature
+        .map(|f| {
+            let lang = GherkinLanguages::global().get(&f.language);
+            format!(" {}", lang.primary_structural(StructuralType::Background))
+        })
+        .unwrap_or_else(|| crate::i18n::t("explore.background_label").to_string())
+}
+
+/// Renders the feature's `Background:` steps in soft browse-mode style followed
+/// by a blank separator line. Returns the number of rows appended.
+fn push_background_context_lines(
+    lines: &mut Vec<Line<'static>>,
+    feature: &BddFeature,
+    inner: Rect,
+) -> usize {
+    let Some(background) = feature.background.as_ref() else {
+        return 0;
+    };
+    if background.steps.is_empty() {
+        return 0;
+    }
+    let start = lines.len();
+    lines.push(Line::styled(
+        feature_background_heading(Some(feature)),
+        Style::default()
+            .fg(theme::MUTED)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let mut last_major: Option<Color> = None;
+    let mut unused_regions = Vec::new();
+    for step in &background.steps {
+        let kw_color = match step.keyword_type {
+            StepKeywordType::Given => {
+                last_major = Some(theme::PRIMARY);
+                theme::PRIMARY
+            }
+            StepKeywordType::When => {
+                last_major = Some(theme::WARNING);
+                theme::WARNING
+            }
+            StepKeywordType::Then => {
+                last_major = Some(theme::SUCCESS);
+                theme::SUCCESS
+            }
+            StepKeywordType::And | StepKeywordType::But => {
+                last_major.unwrap_or(theme::TAB_INACTIVE)
+            }
+        };
+        let (kw_span, keyword_pad) =
+            step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
+        let body_span = Span::styled(format!(" {}", step.text), Style::default().fg(theme::MUTED));
+        let line = pad_line_to_width(
+            Line::from(vec![kw_span, body_span]),
+            inner.width,
+            Style::default(),
+        );
+        lines.push(line);
+        if let Some(rows) = step.data_table.as_deref() {
+            let style = Style::default().fg(theme::MUTED);
+            push_step_table_rows(
+                lines,
+                &mut unused_regions,
+                rows,
+                step_table_indent(keyword_pad, &step.keyword),
+                inner,
+                None,
+                style,
+            );
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.len() - start
+}
+
+fn has_explore_background(
+    feature: Option<&BddFeature>,
+    view: Option<&teshi_core::git::FeatureGitView>,
+) -> bool {
+    view.and_then(|v| v.background.as_ref())
+        .is_some_and(|bg| bg.status != teshi_core::git::DiffStatus::Unchanged)
+        || feature
+            .and_then(|f| f.background.as_ref())
+            .is_some_and(|bg| !bg.steps.is_empty())
+}
+
+fn push_git_background_lines(
+    lines: &mut Vec<Line<'static>>,
+    feature: Option<&BddFeature>,
+    view: Option<&teshi_core::git::FeatureGitView>,
+    highlight: &mut StepHighlightState,
+    lang: &'static GherkinLanguage,
+    inner: Rect,
+) {
+    if let Some(background) = view.and_then(|v| v.background.as_ref())
+        && background.status != teshi_core::git::DiffStatus::Unchanged
+    {
+        lines.push(Line::styled(
+            feature_background_heading(feature),
+            Style::default()
+                .fg(theme::WARNING)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for diff_line in &background.diff_lines {
+            lines.push(render_git_diff_line(diff_line, highlight, lang));
+        }
+        lines.push(Line::raw(""));
+    } else if let Some(feature) = feature {
+        push_background_context_lines(lines, feature, inner);
+    }
+}
+
 fn render_git_steps(
     frame: &mut Frame<'_>,
     app: &mut App,
@@ -2689,20 +2815,8 @@ fn render_git_steps(
         render_git_diff_lines(&view.feature_diff_lines, &mut highlight, lang, &mut lines);
         lines.push(Line::raw(""));
     }
-    if let Some(background) = &view.background
-        && background.status != teshi_core::git::DiffStatus::Unchanged
-    {
-        lines.push(Line::styled(
-            crate::i18n::t("explore.background"),
-            Style::default()
-                .fg(theme::WARNING)
-                .add_modifier(Modifier::BOLD),
-        ));
-        for diff_line in &background.diff_lines {
-            lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
-        }
-        lines.push(Line::raw(""));
-    }
+    let feature = app.project.features.get(app.explore_selected_feature);
+    push_git_background_lines(&mut lines, feature, Some(view), &mut highlight, lang, inner);
 
     lines.push(Line::styled(
         format!(
@@ -2846,12 +2960,21 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .explore_selected_deleted_feature
             .and_then(|index| app.git_status.deleted.get(index))
             .or_else(|| app.git_status.current_at(app.explore_selected_feature));
+        let feature = app
+            .explore_selected_deleted_feature
+            .is_none()
+            .then(|| app.project.features.get(app.explore_selected_feature))
+            .flatten();
         let mut lines = Vec::new();
         let lang = explore_gherkin_language(app);
+        let mut highlight = StepHighlightState::default();
         if let Some(view) = view {
-            let mut highlight = StepHighlightState::default();
             render_git_diff_lines(&view.feature_diff_lines, &mut highlight, lang, &mut lines);
         }
+        if !lines.is_empty() && has_explore_background(feature, view) {
+            lines.push(Line::raw(""));
+        }
+        push_git_background_lines(&mut lines, feature, view, &mut highlight, lang, inner);
         let prefix_rows = lines.len();
         lines.extend(changes.iter().enumerate().map(|(index, change)| {
             let mut line =
@@ -2936,6 +3059,41 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::raw(""));
+
+        // Preserve the feature's Background context above pending scenario diff lines.
+        if let Some(feat) = feature
+            && let Some(bg) = feat.background.as_ref()
+            && !bg.steps.is_empty()
+        {
+            let bg_first = bg.line_number;
+            let bg_last = bg
+                .steps
+                .last()
+                .map(|s| s.line_number)
+                .unwrap_or(bg_first)
+                .max(bg_first);
+            let bg_relevant: Vec<&crate::app::DiffLine> = diff_lines
+                .iter()
+                .filter(|dl| dl.line_number_1based >= bg_first && dl.line_number_1based <= bg_last)
+                .collect();
+            if bg_relevant.is_empty() {
+                push_background_context_lines(&mut lines, feat, inner);
+            } else {
+                lines.push(Line::styled(
+                    feature_background_heading(Some(feat)),
+                    Style::default()
+                        .fg(theme::WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                let lang = explore_gherkin_language(app);
+                for dl in bg_relevant {
+                    let mut state = StepHighlightState::default();
+                    let spans = gherkin_syntax_spans(&dl.text, &mut state, lang, None);
+                    lines.push(decorate_diff_row(spans, change_status(dl.kind)));
+                }
+                lines.push(Line::raw(""));
+            }
+        }
 
         // Filter diff lines to those relevant to the current scenario
         let relevant: Vec<&crate::app::DiffLine> = diff_lines
@@ -3045,60 +3203,8 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         line_idx += 1;
     } else {
         let mut last_major: Option<Color> = None;
-        if !background_steps.is_empty() {
-            let background_label = feature
-                .map(|f| {
-                    let lang = GherkinLanguages::global().get(&f.language);
-                    format!(" {}", lang.primary_structural(StructuralType::Background))
-                })
-                .unwrap_or_else(|| crate::i18n::t("explore.background_label").to_string());
-            lines.push(Line::styled(
-                background_label,
-                Style::default()
-                    .fg(theme::MUTED)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            line_idx += 1;
-            for step in background_steps {
-                let kw_color = match step.keyword_type {
-                    StepKeywordType::Given => {
-                        last_major = Some(theme::PRIMARY);
-                        theme::PRIMARY
-                    }
-                    StepKeywordType::When => {
-                        last_major = Some(theme::WARNING);
-                        theme::WARNING
-                    }
-                    StepKeywordType::Then => {
-                        last_major = Some(theme::SUCCESS);
-                        theme::SUCCESS
-                    }
-                    StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
-                    StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
-                };
-                let (kw_span, keyword_pad) =
-                    step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
-                let body_span =
-                    Span::styled(format!(" {}", step.text), Style::default().fg(theme::MUTED));
-                let mut line = Line::from(vec![kw_span, body_span]);
-                line = pad_line_to_width(line, inner.width, Style::default());
-                lines.push(line);
-                line_idx += 1;
-                if let Some(rows) = step.data_table.as_deref() {
-                    let style = Style::default().fg(theme::MUTED);
-                    line_idx += push_step_table_rows(
-                        &mut lines,
-                        &mut app.clickable_regions,
-                        rows,
-                        step_table_indent(keyword_pad, &step.keyword),
-                        inner,
-                        None,
-                        style,
-                    );
-                }
-            }
-            lines.push(Line::raw(""));
-            line_idx += 1;
+        if let Some(feat) = feature {
+            line_idx += push_background_context_lines(&mut lines, feat, inner) as u16;
         }
 
         if let Some(scenario) = scenario
@@ -3876,11 +3982,12 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         });
     }
     if body.width == 0 || body.height == 0 {
+        app.screenshot.content_rect = None;
         return;
     }
     app.screenshot.request_viewport(body);
     if let Some(rendered) = app.screenshot.rendered.as_mut() {
-        crate::image_view::render(frame, body, rendered);
+        app.screenshot.content_rect = crate::image_view::render(frame, body, rendered);
     } else {
         let mut lines: Vec<Line<'static>> = Vec::new();
         if let Some(error) = app.screenshot.error.as_ref() {
@@ -3952,6 +4059,15 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 ));
             }
         }
+        let text_rows = (lines.len() as u16).min(body.height);
+        let text_cols = lines
+            .iter()
+            .map(|line| line.width() as u16)
+            .max()
+            .unwrap_or(0)
+            .min(body.width);
+        app.screenshot.content_rect = (text_rows > 0 && text_cols > 0)
+            .then(|| Rect::new(body.x, body.y, text_cols, text_rows));
         frame.render_widget(Paragraph::new(lines), body);
     }
     let mut footer_lines = Vec::new();
@@ -6557,24 +6673,16 @@ fn render_history_search_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         Paragraph::new(Text::from(theme::popup_rows(lines, list.width))),
         list,
     );
-    frame.render_widget(
-        Paragraph::new(theme::footer_line([
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(theme::PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" select  ", theme::muted()),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(theme::PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" cancel", theme::muted()),
-        ])),
+    render_action_bar(
+        frame,
+        &mut app.clickable_regions,
         footer,
+        "",
+        &[
+            ("Enter select  ", Action::AiHistorySearchSelect),
+            ("Esc cancel", Action::AiHistorySearchDismiss),
+        ],
+        true,
     );
 }
 
@@ -6626,24 +6734,16 @@ fn render_composer_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect
         paint_overlay_block_cursor(frame, body, position, under);
         frame.set_cursor_position(position);
     }
-    frame.render_widget(
-        Paragraph::new(theme::footer_line([
-            Span::styled(
-                "Ctrl+S",
-                Style::default()
-                    .fg(theme::PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" apply  ", theme::muted()),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(theme::PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" discard", theme::muted()),
-        ])),
+    render_action_bar(
+        frame,
+        &mut app.clickable_regions,
         footer,
+        "",
+        &[
+            ("Ctrl+S apply  ", Action::AiComposerEditorApply),
+            ("Esc discard", Action::AiComposerEditorDismiss),
+        ],
+        true,
     );
 }
 
@@ -9400,56 +9500,91 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
         return;
     }
     dialog::dim_backdrop(frame, area);
-    let (title, lines, max_width) = match overlay {
-        SwitchOverlay::None => return,
-        SwitchOverlay::Picker { selection } => {
-            render_project_picker(frame, app, area, selection);
-            return;
-        }
-        SwitchOverlay::OpenPath { input } => (
-            crate::i18n::t("project.open_path"),
-            vec![
-                Line::raw(crate::i18n::t("project.open_path.prompt")),
-                Line::styled(format!("> {input}"), Style::default().fg(theme::FG)),
-                Line::raw(""),
-                theme::action_line(crate::i18n::t("project.open_path.hint")),
-            ],
-            100,
-        ),
-        SwitchOverlay::Dirty { target } => {
-            let mut rows = vec![
-                Line::raw(crate::i18n::fill(
-                    crate::i18n::t("project.switch.to"),
-                    &[("path", &target.root().display().to_string())],
-                )),
-                Line::raw(crate::i18n::t("project.dirty.body")),
-            ];
-            if let Some(request) = &app.project_switch.pending {
-                rows.extend(request.dirty.iter().map(|item| {
-                    Line::styled(
-                        format!("  • {}", item.label()),
-                        Style::default().fg(theme::WARNING),
-                    )
-                }));
+    let (title, lines, actions, max_width): (&str, Vec<Line<'static>>, Vec<(String, Action)>, u16) =
+        match overlay {
+            SwitchOverlay::None => return,
+            SwitchOverlay::Picker { selection } => {
+                render_project_picker(frame, app, area, selection);
+                return;
             }
-            rows.push(Line::raw(""));
-            rows.push(theme::action_line(crate::i18n::t("project.dirty.hint")));
-            (crate::i18n::t("project.dirty.title"), rows, 86)
-        }
-        SwitchOverlay::Busy { target } => (
-            crate::i18n::t("project.busy.title"),
-            vec![
-                Line::raw(crate::i18n::fill(
-                    crate::i18n::t("project.switch.to"),
-                    &[("path", &target.root().display().to_string())],
-                )),
-                Line::raw(crate::i18n::t("project.busy.body")),
-                Line::raw(crate::i18n::t("project.busy.hint")),
-                Line::raw(crate::i18n::t("project.busy.wait")),
-            ],
-            86,
-        ),
-    };
+            SwitchOverlay::OpenPath { input } => {
+                let parts: Vec<&str> = crate::i18n::t("project.open_path.hint")
+                    .split(" · ")
+                    .collect();
+                let open_label = parts.first().copied().unwrap_or("Enter open");
+                let cancel_label = parts.last().copied().unwrap_or("Esc cancel");
+                (
+                    crate::i18n::t("project.open_path"),
+                    vec![
+                        Line::raw(crate::i18n::t("project.open_path.prompt")),
+                        Line::styled(format!("> {input}"), Style::default().fg(theme::FG)),
+                        Line::raw(""),
+                    ],
+                    vec![
+                        (format!("{open_label}   "), Action::OverlayConfirm),
+                        (cancel_label.to_string(), Action::OverlayCancel),
+                    ],
+                    100,
+                )
+            }
+            SwitchOverlay::Dirty { target } => {
+                let mut rows = vec![
+                    Line::raw(crate::i18n::fill(
+                        crate::i18n::t("project.switch.to"),
+                        &[("path", &target.root().display().to_string())],
+                    )),
+                    Line::raw(crate::i18n::t("project.dirty.body")),
+                ];
+                if let Some(request) = &app.project_switch.pending {
+                    rows.extend(request.dirty.iter().map(|item| {
+                        Line::styled(
+                            format!("  • {}", item.label()),
+                            Style::default().fg(theme::WARNING),
+                        )
+                    }));
+                }
+                rows.push(Line::raw(""));
+                let parts: Vec<&str> = crate::i18n::t("project.dirty.hint").split("   ").collect();
+                let save_label = parts.first().copied().unwrap_or("[S] Save and switch");
+                let discard_label = parts.get(1).copied().unwrap_or("[D] Discard and switch");
+                let cancel_label = parts.get(2).copied().unwrap_or("[Esc] Cancel");
+                (
+                    crate::i18n::t("project.dirty.title"),
+                    rows,
+                    vec![
+                        (format!("{save_label}   "), Action::Save),
+                        (format!("{discard_label}   "), Action::OverlayInsert('d')),
+                        (cancel_label.to_string(), Action::OverlayCancel),
+                    ],
+                    86,
+                )
+            }
+            SwitchOverlay::Busy { target } => {
+                let parts: Vec<&str> = crate::i18n::t("project.busy.hint").split("   ").collect();
+                let stop_label = parts
+                    .first()
+                    .copied()
+                    .unwrap_or("[S] Stop tasks and switch");
+                let cancel_label = parts.get(1).copied().unwrap_or("[Esc] Cancel");
+                (
+                    crate::i18n::t("project.busy.title"),
+                    vec![
+                        Line::raw(crate::i18n::fill(
+                            crate::i18n::t("project.switch.to"),
+                            &[("path", &target.root().display().to_string())],
+                        )),
+                        Line::raw(crate::i18n::t("project.busy.body")),
+                        Line::raw(crate::i18n::t("project.busy.wait")),
+                        Line::raw(""),
+                    ],
+                    vec![
+                        (format!("{stop_label}   "), Action::Save),
+                        (cancel_label.to_string(), Action::OverlayCancel),
+                    ],
+                    86,
+                )
+            }
+        };
     // Keep a backdrop margin on narrow terminals and size the card from the
     // wrapped lines instead of a fixed guess.
     let width_axis = overlay::Axis::cells(max_width, 20, overlay::DEFAULT_SHARE);
@@ -9462,15 +9597,29 @@ fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rec
         .sum();
     let spec = overlay::OverlaySpec {
         width: width_axis,
-        height: overlay::Axis::content(4, 20, overlay::DEFAULT_SHARE),
+        height: overlay::Axis::content(5, 20, overlay::DEFAULT_SHARE),
     };
-    let panel = spec.rect(area, (0, body_rows.min(20) as u16 + 2));
+    let panel = spec.rect(area, (0, body_rows.min(19) as u16 + 3));
     frame.render_widget(Clear, panel);
+    let block = theme::popup_block(title);
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+    let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(theme::popup_block(title)),
-        panel,
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        body,
+    );
+    let controls: Vec<(&str, Action)> = actions
+        .iter()
+        .map(|(label, action)| (label.as_str(), action.clone()))
+        .collect();
+    render_action_bar(
+        frame,
+        &mut app.clickable_regions,
+        footer,
+        "",
+        &controls,
+        true,
     );
 }
 
@@ -13208,6 +13357,146 @@ Feature: Rule only
             }
         }
         assert!(selected_visible);
+    }
+
+    #[test]
+    fn explore_git_diff_preserves_unchanged_background_and_keeps_step_hit_rows_aligned() {
+        let old = "\
+Feature: Checkout
+  Background:
+    Given the user is signed in
+    And the cart has one item
+
+  Scenario: Pay
+    Given old card
+    When the user submits
+";
+        let new = "\
+Feature: Checkout
+  Background:
+    Given the user is signed in
+    And the cart has one item
+
+  Scenario: Pay
+    Given saved card
+    When the user submits
+";
+        let path = PathBuf::from("checkout.feature");
+        let mut app = App::from_args().unwrap();
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        app.explore_selected_step = 1;
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let viewport = &app.explore_viewports[crate::app::ColumnFocus::Step.index()];
+        let pane_lines: Vec<String> = (viewport.rect.y..viewport.rect.bottom())
+            .map(|y| {
+                (viewport.rect.x..viewport.rect.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let pane_text = pane_lines.join("\n");
+        assert!(pane_text.contains("Background"), "{pane_text}");
+        assert!(pane_text.contains("the user is signed in"), "{pane_text}");
+        assert!(pane_text.contains("the cart has one item"), "{pane_text}");
+        assert!(pane_text.contains("old card"), "{pane_text}");
+        assert!(pane_text.contains("saved card"), "{pane_text}");
+        // Blank separator between Background block and scenario diff steps.
+        let bg_step2_row = pane_lines
+            .iter()
+            .position(|line| line.contains("the cart has one item"))
+            .unwrap();
+        assert!(pane_lines[bg_step2_row + 1].trim().is_empty());
+
+        // Pointer hit targets for diff steps must point at the exact rendered diff rows.
+        let changes = app.explore_changed_steps();
+        let mut matched = 0usize;
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ExploreStep {
+                step_idx, row_y, ..
+            } = region
+            {
+                let row: String = (viewport.rect.x..viewport.rect.right())
+                    .map(|x| buffer[(x, *row_y)].symbol())
+                    .collect();
+                assert!(
+                    row.contains(changes[*step_idx].text.trim()),
+                    "row {row_y} expected '{}', got '{row}'",
+                    changes[*step_idx].text.trim()
+                );
+                matched += 1;
+            }
+        }
+        assert_eq!(matched, changes.len());
+    }
+
+    #[test]
+    fn explore_git_diff_renders_modified_background_diff_lines() {
+        let old = "\
+Feature: Checkout
+  Background:
+    Given guest session
+
+  Scenario: Pay
+    Given old payment method
+";
+        let new = "\
+Feature: Checkout
+  Background:
+    Given authenticated session
+
+  Scenario: Pay
+    Given new payment method
+";
+        let path = PathBuf::from("checkout_bg_mod.feature");
+        let mut app = App::from_args().unwrap();
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Background"), "{screen}");
+        assert!(screen.contains("-     Given guest session"), "{screen}");
+        assert!(
+            screen.contains("+     Given authenticated session"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("-     Given old payment method"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("+     Given new payment method"),
+            "{screen}"
+        );
     }
 
     #[test]
